@@ -1,0 +1,467 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    # Manual trigger — used to run the Fly deploy job on demand (rollback path).
+    # See the `deploy` job's `if:` below.
+
+# Reusable Postgres service block + shared bootstrap (checkout, uv sync,
+# alembic upgrade) are duplicated across pytest-* jobs by necessity —
+# GitHub Actions doesn't support YAML anchors. The org enforces a ~6min
+# per-job budget that our combined test suite can't fit, so we split
+# pytest across parallel jobs (each gets its own 6min).
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+
+      - name: ruff
+        run: uv run ruff check . && uv run ruff format --check .
+
+      - name: pyright
+        run: uv run pyright
+
+      - name: import-linter
+        run: uv run lint-imports
+
+      - name: lint discord modals
+        run: uv run python scripts/lint_discord_modals.py
+
+      - name: lint test anti-patterns
+        run: bash scripts/lint_anti_patterns.sh
+
+      - name: env example check
+        run: uv run python scripts/generate_env_example.py --check
+
+  pytest-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - name: Create daimon_test database
+        env:
+          PGPASSWORD: daimon
+        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
+      - name: alembic upgrade (test DB)
+        env:
+          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
+        run: uv run alembic upgrade head
+      - name: pytest (core + cli + scheduler + testing + integration)
+        run: uv run pytest packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/ -n auto
+
+  pytest-mcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - name: Create daimon_test database
+        env:
+          PGPASSWORD: daimon
+        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
+      - name: alembic upgrade (test DB)
+        env:
+          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
+        run: uv run alembic upgrade head
+      - name: pytest (mcp)
+        run: uv run pytest packages/adapters/mcp -n auto
+
+  pytest-discord:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - name: Create daimon_test database
+        env:
+          PGPASSWORD: daimon
+        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
+      - name: alembic upgrade (test DB)
+        env:
+          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
+        run: uv run alembic upgrade head
+      - name: pytest (discord)
+        run: uv run pytest packages/adapters/discord -n auto
+
+  pytest-slack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - name: Create daimon_test database
+        env:
+          PGPASSWORD: daimon
+        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
+      - name: alembic upgrade (test DB)
+        env:
+          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
+        run: uv run alembic upgrade head
+      - name: pytest (slack)
+        run: uv run pytest packages/adapters/slack -n auto
+
+  pytest-notebook-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - name: pytest (notebook-host)
+        run: uv run pytest apps/notebook-host -n auto
+
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker build
+        run: docker build -t daimon-cma:ci .
+
+  deploy:
+    name: Deploy to Fly (production) [manual rollback only]
+    # Production is on GCP as of the 2026-07-14 Fly→GCP cutover. This job no
+    # longer runs on push to main (that would revive Fly and double-send
+    # alongside GCP). It is retained as a MANUAL rollback path: trigger it via
+    # the Actions "Run workflow" button (workflow_dispatch). Fly machines are
+    # kept stopped, not destroyed, during the rollback window.
+    needs: [lint, pytest-core, pytest-mcp, pytest-discord, pytest-slack, pytest-notebook-host, docker-build]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Sync billing markup to Fly
+        # GitHub repo variable is the durable source of truth for the billing
+        # markup so a destroyed/recreated app restores it. Fly secrets already
+        # survive deploys + restarts; this only matters if the secret is wiped.
+        # --stage avoids a separate restart — the flyctl deploy below applies it.
+        if: vars.DAIMON_BILLING__MARKUP != ''
+        run: flyctl secrets set DAIMON_BILLING__MARKUP="${{ vars.DAIMON_BILLING__MARKUP }}" --stage -a production-daimon
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Sync Slack OAuth credentials to Fly
+        # GitHub secrets are the durable source of truth for the Slack app creds so
+        # a destroyed/recreated app restores them. Fly secrets survive deploys +
+        # restarts; this only re-applies if they were wiped. --stage defers the
+        # restart to the flyctl deploy below. Skipped cleanly until the secrets exist.
+        if: env.DAIMON_SLACK__SIGNING_SECRET != ''
+        run: |
+          flyctl secrets set \
+            DAIMON_SLACK__SIGNING_SECRET="$DAIMON_SLACK__SIGNING_SECRET" \
+            DAIMON_SLACK__APP_TOKEN="$DAIMON_SLACK__APP_TOKEN" \
+            DAIMON_SLACK__CLIENT_ID="$DAIMON_SLACK__CLIENT_ID" \
+            DAIMON_SLACK__CLIENT_SECRET="$DAIMON_SLACK__CLIENT_SECRET" \
+            --stage -a production-daimon
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          DAIMON_SLACK__SIGNING_SECRET: ${{ secrets.DAIMON_SLACK__SIGNING_SECRET }}
+          DAIMON_SLACK__APP_TOKEN: ${{ secrets.DAIMON_SLACK__APP_TOKEN }}
+          DAIMON_SLACK__CLIENT_ID: ${{ secrets.DAIMON_SLACK__CLIENT_ID }}
+          DAIMON_SLACK__CLIENT_SECRET: ${{ secrets.DAIMON_SLACK__CLIENT_SECRET }}
+
+      - name: flyctl deploy
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Start scheduler + slack machines
+        # flyctl deploy re-images every machine but never starts an
+        # already-stopped one, so scheduler/slack would otherwise stay parked on
+        # the new image. Start them explicitly so the health gate below can gate
+        # all four groups. `|| true` keeps an already-started machine (or a
+        # transient start hiccup) from failing here — the gate is the real check.
+        # Assumes one machine per group (no standbys on this app); revisit if a
+        # standby is ever added, since this would start it too.
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          ids=$(flyctl machines list --json -a production-daimon \
+            | jq -r '.[] | select(.config.metadata.fly_process_group=="scheduler"
+                                  or .config.metadata.fly_process_group=="slack") | .id')
+          for id in $ids; do
+            echo "starting machine $id"
+            flyctl machine start "$id" -a production-daimon || true
+          done
+
+      - name: Smoke /healthz (V-36-03)
+        # Promotes V-36-03 from manual observation to CI-enforced gate.
+        # Fly's release_command + health-check grace period typically settle
+        # within ~30s of `flyctl deploy` returning; --retry handles the tail.
+        run: |
+          curl --fail --silent --show-error \
+            --retry 5 --retry-delay 10 --retry-connrefused \
+            --max-time 30 \
+            https://production-daimon.fly.dev/healthz
+
+      - name: Post-deploy health gate (TC-3 / D-01,D-02,D-03)
+        # Polls flyctl machines list --json to verify all four process groups
+        # (discord, mcp, scheduler, slack) each have >=1 started machine and zero
+        # non-passing checks. scheduler + slack are now gated too — the "Start
+        # scheduler + slack machines" step above guarantees they're started, so
+        # a crash-loop or boot failure in either fails the deploy instead of
+        # silently sitting dead. The count guard (Pitfall 6) ensures an empty-set
+        # does not falsely pass an all(.status=="passing") vacuous truth.
+        # FLY_API_TOKEN is read from secrets — never echoed.
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          groups="discord mcp scheduler slack"
+          # 120s (was 90s): scheduler + slack are cold-started above and each
+          # carries a 30s liveness grace period before checks can pass.
+          deadline=$(( $(date +%s) + 120 ))
+          while :; do
+            # Tolerate a transient flyctl failure / invalid JSON within the
+            # bounded retry instead of aborting under set -e (WR-01). The `if !`
+            # context suppresses set -e for the substitution + jq validation.
+            if ! json="$(flyctl machines list --json -a production-daimon 2>/dev/null)" \
+               || ! echo "$json" | jq empty 2>/dev/null; then
+              echo "flyctl machines list failed or returned invalid JSON — will retry"
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "health gate timed out after 120s (flyctl unreachable)"
+                exit 1
+              fi
+              sleep 10
+              continue
+            fi
+            ok=true
+            for g in $groups; do
+              # Count started machines in this group (>=1 required — Pitfall 6)
+              n=$(echo "$json" | jq --arg g "$g" \
+                '[.[] | select(.config.metadata.fly_process_group==$g and .state=="started")] | length')
+              # Count non-passing checks across STARTED machines in this group.
+              # Standby machines are stopped by design and report a "warning"
+              # check, so they must be excluded — otherwise the gate can never
+              # pass for a group that has a standby (discord, scheduler).
+              bad=$(echo "$json" | jq --arg g "$g" \
+                '[.[] | select(.config.metadata.fly_process_group==$g and .state=="started")
+                      | .checks[]? | select(.status!="passing")] | length')
+              if [ "$n" -lt 1 ] || [ "$bad" -ne 0 ]; then
+                echo "group=$g: started=$n non_passing=$bad — NOT OK"
+                ok=false
+              else
+                echo "group=$g: started=$n non_passing=$bad — ok"
+              fi
+            done
+            if $ok; then echo "all four process groups healthy"; exit 0; fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "health gate timed out after 120s; final status:"
+              echo "$json" | jq -r '.[] | .config.metadata.fly_process_group + " state=" + .state'
+              exit 1
+            fi
+            sleep 10
+          done
+
+  deploy-gcp:
+    name: Deploy to GCP (production)
+    needs: [lint, pytest-core, pytest-mcp, pytest-discord, pytest-slack, pytest-notebook-host, docker-build]
+    # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
+    # don't propagate to forks/clones, so a repo with no GCP config skips this
+    # job cleanly (green CI) instead of failing at the auth step. Operators
+    # enable push-to-main deploys by setting GCP_WIF_PROVIDER, GCP_DEPLOY_SA,
+    # and GCP_PROJECT_ID in repo settings — no workflow edit needed. Partial
+    # config (provider set, SA/project missing) fails loudly by design.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.GCP_WIF_PROVIDER != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: deploy-gcp-production
+      cancel-in-progress: false
+    env:
+      REGION: us-east4
+      AR_HOST: us-east4-docker.pkg.dev
+      REPO: production-daimon
+      ZONE: us-east4-c
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.AR_HOST }} --quiet
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          BASE=${{ env.AR_HOST }}/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO }}
+          echo "daimon=$BASE/daimon:$SHA" >> "$GITHUB_OUTPUT"
+          echo "notebook=$BASE/notebook-host:$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Build + push daimon image
+        run: |
+          docker build -t "${{ steps.tags.outputs.daimon }}" -f Dockerfile .
+          docker push "${{ steps.tags.outputs.daimon }}"
+
+      - name: Build + push notebook-host image
+        run: |
+          docker build -t "${{ steps.tags.outputs.notebook }}" -f apps/notebook-host/Dockerfile .
+          docker push "${{ steps.tags.outputs.notebook }}"
+
+      - name: Run migrations (blocking gate)
+        run: |
+          gcloud run jobs update production-daimon-migrate --region "$REGION" \
+            --image "${{ steps.tags.outputs.daimon }}"
+          gcloud run jobs execute production-daimon-migrate --region "$REGION" --wait
+
+      - name: Deploy mcp revision
+        run: |
+          gcloud run services update production-daimon-mcp --region "$REGION" \
+            --image "${{ steps.tags.outputs.daimon }}"
+
+      - name: Refresh worker VM containers (recreate in place)
+        run: |
+          # Workers VM is intentionally stopped while Fly remains the live
+          # production (avoids double-handling Discord events). Skip the
+          # refresh until the Fly→GCP cutover starts the VM again.
+          STATUS=$(gcloud compute instances describe production-daimon-workers \
+            --zone "$ZONE" --format='value(status)')
+          if [ "$STATUS" != "RUNNING" ]; then
+            echo "workers VM is $STATUS — skipping container refresh"
+            exit 0
+          fi
+          gcloud compute ssh production-daimon-workers --zone "$ZONE" \
+            --tunnel-through-iap --command '
+              export DAIMON_IMAGE="${{ steps.tags.outputs.daimon }}"
+              # sudo -E keeps the SSH user HOME, so docker would look for
+              # Artifact Registry credentials in ~/.docker (none there). Point
+              # at root docker config, where the boot startup script ran
+              # `gcloud auth configure-docker`.
+              export DOCKER_CONFIG=/root/.docker
+              cd /etc/daimon
+              sudo -E docker compose -f compose.worker.yml pull
+              sudo -E docker compose -f compose.worker.yml up -d --remove-orphans
+            '
+
+      - name: Refresh notebook-host VM container (recreate in place)
+        run: |
+          gcloud compute ssh production-daimon-notebook --zone "$ZONE" \
+            --tunnel-through-iap --command '
+              export NOTEBOOK_IMAGE="${{ steps.tags.outputs.notebook }}"
+              export NOTEBOOK_PUBLIC_IP=$(curl -s -H "Metadata-Flavor: Google" \
+                "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip")
+              # Same DOCKER_CONFIG redirect as the workers refresh: use root
+              # docker config (has the Artifact Registry credential helper).
+              export DOCKER_CONFIG=/root/.docker
+              cd /etc/daimon
+              sudo -E docker compose -f compose.notebook.yml pull
+              sudo -E docker compose -f compose.notebook.yml up -d --remove-orphans
+            '
+
+      - name: Health gate
+        run: |
+          URL=$(gcloud run services describe production-daimon-mcp --region "$REGION" \
+            --format='value(status.url)')
+          # /healthz is intercepted by Google Front End on run.app domains (404s
+          # before reaching the container); /readyz passes through and also
+          # verifies DB connectivity.
+          for i in $(seq 1 10); do
+            if curl -sfI "$URL/readyz" >/dev/null; then echo "healthy"; exit 0; fi
+            sleep 6
+          done
+          echo "mcp did not become healthy" >&2; exit 1

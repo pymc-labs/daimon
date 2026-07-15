@@ -1,0 +1,52 @@
+[project]
+name = "notebook-host"
+version = "0.1.0"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "PyMC Labs" }]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "websockets>=13",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "marimo>=0.23,<0.30",
+]
+
+[project.optional-dependencies]
+# Generic data-science stack that the marimo_notebooks skill assumes is
+# present on the host. Operators who want the default skill's promises
+# ("pandas, numpy, scikit-learn, matplotlib available") to hold must install
+# the [ds] extra into the same venv marimo subprocesses use.
+ds = [
+    "pandas>=2",
+    "numpy>=2",
+    "scikit-learn>=1.5",
+    "matplotlib>=3.8",
+    "scipy>=1.13",
+]
+
+# PyMC + ArviZ Bayesian stack. Pinned to the stable line (PyMC 5.x + ArviZ
+# 0.x) for now. PyMC 6 and ArviZ 1.x are the in-flight major releases — top-
+# level helpers like `az.plot_posterior` are being reorganised across the
+# `arviz`, `arviz-base`, and `arviz-plots` packages, and most of the
+# pymc-examples corpus still targets the 0.x surface. The pin keeps
+# published notebooks aligned with what current tutorials assume.
+# Lift to the new line once the migration is complete and the example
+# notebooks we ship + the agent's notebook skill have been updated to the
+# new ArviZ entry points.
+pymc = [
+    "pymc>=5.20,<6",
+    "arviz>=0.20,<1",
+]
+
+[project.urls]
+Repository = "https://github.com/pymc-labs/daimon"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/notebook_host"]

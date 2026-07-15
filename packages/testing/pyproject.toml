@@ -1,0 +1,26 @@
+[project]
+name = "daimon-testing"
+version = "0.1.0"
+description = "Shared test infrastructure for Daimon CMA"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "PyMC Labs" }]
+dependencies = [
+    "daimon-core",
+    "anthropic>=0.96",
+    "httpx>=0.27",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[project.urls]
+Repository = "https://github.com/pymc-labs/daimon"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["daimon"]

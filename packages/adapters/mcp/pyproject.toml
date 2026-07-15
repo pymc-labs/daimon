@@ -1,0 +1,41 @@
+[project]
+name = "daimon-adapter-mcp"
+version = "0.1.0"
+description = "Daimon MCP server — agent-to-agent orchestration adapter"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "PyMC Labs" }]
+dependencies = [
+    "daimon-core",
+    "fastmcp>=3.2.4,<4",
+    "uvicorn[standard]>=0.30",
+    "anthropic>=0.96",
+    "httpx>=0.27",
+    "sqlalchemy[asyncio]>=2",
+    "asyncpg>=0.29",
+    "pydantic>=2.7",
+    "sentry-sdk>=2.61",
+    "discord.py>=2.7,<3",
+    "aiohttp>=3.10",
+    "google-genai>=2.5,<3",
+    "pydub>=0.25.1",
+    "imageio-ffmpeg>=0.6",
+    "slack-sdk>=3.42,<4",
+]
+
+[project.optional-dependencies]
+# Stripe is optional — the MCP server boots without it (Phase 89 lazy
+# imports). Install `daimon-adapters-mcp[billing]` to enable Stripe top-ups.
+billing = [
+    "stripe>=9,<14",
+]
+
+[project.urls]
+Repository = "https://github.com/pymc-labs/daimon"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["daimon"]

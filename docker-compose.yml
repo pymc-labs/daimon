@@ -1,0 +1,92 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-daimon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-daimon}
+      POSTGRES_DB: ${POSTGRES_DB:-daimon}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./scripts/db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-daimon}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  init:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:-daimon}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required for `daimon defaults apply`}
+    volumes:
+      - ./defaults:/app/defaults:ro
+    entrypoint: ["sh", "-c"]
+    command: ["uv run alembic upgrade head && daimon defaults apply"]
+    restart: "no"
+
+  mcp:
+    build: .
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:-daimon}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_MCP__JWT_SECRET: ${DAIMON_MCP__JWT_SECRET:?DAIMON_MCP__JWT_SECRET is required}
+      DAIMON_MCP__PUBLIC_URL: ${DAIMON_MCP__PUBLIC_URL:?DAIMON_MCP__PUBLIC_URL is required}
+      DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
+    ports:
+      - "8765:8765"
+    entrypoint: ["uvicorn"]
+    command: ["daimon.adapters.mcp.server:create_mcp_app", "--factory", "--host", "0.0.0.0", "--port", "8765"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8765/healthz')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  discord:
+    build: .
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:-daimon}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
+    entrypoint: ["python", "-m", "daimon.adapters.discord"]
+    restart: unless-stopped
+
+  scheduler:
+    build: .
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:-daimon}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
+      DAIMON_MCP__JWT_SECRET: ${DAIMON_MCP__JWT_SECRET:?DAIMON_MCP__JWT_SECRET is required}
+      DAIMON_MCP__PUBLIC_URL: ${DAIMON_MCP__PUBLIC_URL:?DAIMON_MCP__PUBLIC_URL is required}
+    entrypoint: ["python", "-m", "daimon.adapters.scheduler"]
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

@@ -1,0 +1,21 @@
+# Production compose for the worker VM (discord/slack/scheduler). Image is
+# supplied by the VM startup script as an env var. Secrets come from
+# /etc/daimon/daimon.env.
+services:
+  discord:
+    image: ${DAIMON_IMAGE}
+    command: ["python", "-m", "daimon.adapters.discord"]
+    env_file: [/etc/daimon/daimon.env]
+    restart: unless-stopped
+
+  slack:
+    image: ${DAIMON_IMAGE}
+    command: ["python", "-m", "daimon.adapters.slack"]
+    env_file: [/etc/daimon/daimon.env]
+    restart: unless-stopped
+
+  scheduler:
+    image: ${DAIMON_IMAGE}
+    command: ["daimon-scheduler"]
+    env_file: [/etc/daimon/daimon.env]
+    restart: unless-stopped

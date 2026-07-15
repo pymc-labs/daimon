@@ -1,0 +1,30 @@
+[project]
+name = "daimon-adapter-scheduler"
+version = "0.1.0"
+description = "Daimon CMA scheduler — polls due routines and dispatches headless turns"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "PyMC Labs" }]
+dependencies = [
+    "daimon-core",
+    "anthropic>=0.96",
+    "sqlalchemy[asyncio]>=2",
+    "asyncpg>=0.29",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "sentry-sdk>=2.61",
+    "structlog>=24",
+]
+
+[project.scripts]
+daimon-scheduler = "daimon.adapters.scheduler.main:run_sync"
+
+[project.urls]
+Repository = "https://github.com/pymc-labs/daimon"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["daimon"]

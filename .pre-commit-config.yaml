@@ -1,0 +1,69 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      # Run ruff from the uv environment so the hook always matches the
+      # project-pinned version. A remote ruff-pre-commit pin drifts: at
+      # v0.7.4 vs project ruff 0.15.x it enforced since-removed rules
+      # (UP038) and its --fix rewrote hundreds of files CI considers clean.
+      # --force-exclude keeps pyproject extend-exclude effective for the
+      # explicit paths pre-commit passes.
+      - id: ruff
+        name: ruff
+        entry: uv run ruff check --fix --force-exclude
+        language: system
+        types: [python]
+
+      - id: ruff-format
+        name: ruff-format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types: [python]
+
+      # pass_filenames must stay false: passing paths overrides the
+      # [tool.pyright] include scope and drags tests/ + scripts/probes/
+      # (~1200 ungated errors) into the commit gate. With no args this is
+      # exactly the CI invocation.
+      - id: pyright
+        name: pyright
+        entry: uv run pyright
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: import-linter
+        name: import-linter
+        entry: uv run lint-imports
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: lint-discord-modals
+        name: lint discord modals
+        entry: uv run python scripts/lint_discord_modals.py
+        language: system
+        pass_filenames: false
+        files: ^packages/adapters/discord/.*\.py$
+
+      - id: lint-anti-patterns
+        name: lint test anti-patterns
+        entry: bash scripts/lint_anti_patterns.sh
+        language: system
+        pass_filenames: false
+        files: ^packages/.*/tests/.*\.py$
+
+      - id: env-example-check
+        name: env example up to date
+        entry: uv run python scripts/generate_env_example.py --check
+        language: system
+        pass_filenames: false
+        files: ^(packages/core/daimon/core/config\.py|packages/adapters/scheduler/daimon/adapters/scheduler/settings\.py|packages/core/daimon/core/billing\.py|\.env\.example|scripts/generate_env_example\.py)$

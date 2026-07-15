@@ -1,0 +1,150 @@
+[project]
+name = "daimon-cma-open-source"
+version = "0.1.0"
+description = "Self-hostable Daimon CMA — workspace root"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "PyMC Labs" }]
+dependencies = [
+    "daimon-core",
+    "daimon-adapter-cli",
+    "daimon-adapter-mcp",
+    "daimon-adapter-discord",
+    "daimon-adapter-scheduler",
+    "daimon-adapter-slack",
+]
+
+[project.optional-dependencies]
+# Operator deployments that offer Stripe top-ups install this extra so the
+# image carries `stripe`; self-hosters without billing skip it and stay lean.
+billing = ["daimon-adapter-mcp[billing]"]
+
+[project.urls]
+Repository = "https://github.com/pymc-labs/daimon"
+
+[tool.uv.workspace]
+members = ["packages/core", "packages/adapters/*", "packages/testing", "apps/notebook-host"]
+
+[tool.uv.sources]
+daimon-core = { workspace = true }
+daimon-adapter-cli = { workspace = true }
+daimon-adapter-mcp = { workspace = true }
+daimon-adapter-discord = { workspace = true }
+daimon-adapter-scheduler = { workspace = true }
+daimon-adapter-slack = { workspace = true }
+daimon-testing = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [
+    "scripts/probes",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests favour long, descriptive assert messages over a hard column cap.
+"**/tests/**" = ["E501"]
+
+[tool.pyright]
+include = ["packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "apps/notebook-host/src/notebook_host"]
+stubPath = "typings"
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingImports = "error"
+
+[tool.importlinter]
+root_packages = ["daimon", "notebook_host"]
+
+[[tool.importlinter.contracts]]
+name = "Core must not import adapters"
+type = "forbidden"
+source_modules = ["daimon.core"]
+forbidden_modules = ["daimon.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "Adapters must not import each other"
+type = "independence"
+modules = ["daimon.adapters.cli", "daimon.adapters.mcp", "daimon.adapters.discord", "daimon.adapters.scheduler", "daimon.adapters.slack"]
+
+[[tool.importlinter.contracts]]
+name = "ORM module is private to stores and defaults"
+type = "forbidden"
+source_modules = [
+    "daimon.adapters",
+    "daimon.core.broker",
+    "daimon.core.config",
+    "daimon.core.constants",
+    "daimon.core.db",
+    "daimon.core.errors",
+    "daimon.core.headless_runner",
+    "daimon.core.health",
+    "daimon.core.ids",
+    "daimon.core.ma",
+    "daimon.core.observability",
+    "daimon.core.privacy",
+    "daimon.core.purge",
+    "daimon.core.scope",
+    "daimon.core.skill_sync",
+    "daimon.core.skill_zip",
+    "daimon.core.skills",
+    "daimon.core.specs",
+    "daimon.core.turn",
+]
+forbidden_modules = ["daimon.core._models"]
+# Stores are the sanctioned abstraction layer between adapters and the ORM.
+# Adapters import stores (allowed); stores import _models (allowed at that layer).
+# Suppress the transitive chain so only direct adapter->_models imports are caught.
+ignore_imports = [
+    "daimon.core.stores.** -> daimon.core._models",
+    "daimon.core.defaults.** -> daimon.core._models",
+]
+
+[[tool.importlinter.contracts]]
+name = "Core must not import testing"
+type = "forbidden"
+source_modules = ["daimon.core"]
+forbidden_modules = ["daimon.testing"]
+
+[[tool.importlinter.contracts]]
+name = "CLI admin commands and run must not import each other"
+type = "independence"
+modules = [
+    "daimon.adapters.cli.commands",
+    "daimon.adapters.cli.run",
+]
+
+[[tool.importlinter.contracts]]
+name = "notebook-host must not import daimon"
+type = "forbidden"
+source_modules = ["notebook_host"]
+forbidden_modules = ["daimon"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/testing/tests", "tests/integration", "apps/notebook-host/tests"]
+addopts = "--import-mode=importlib -m 'not contract and not slow'"
+markers = [
+    "contract: live MA API tests -- opt-in only, never gate CI",
+    "slow: spawns real marimo subprocesses (port 8100-8199) — opt-in",
+    "no_cli_local_seed: CLI test manages its own tenant lifecycle -- skip the autouse cli:local seed",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.390",
+    "ruff>=0.7.0",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.6",
+    "import-linter>=2.0",
+    "pre-commit>=4.0",
+    "fastmcp>=3.2.4",
+    "pyjwt>=2.12.1",
+    "daimon-testing",
+    "aioresponses>=0.7.9",
+]

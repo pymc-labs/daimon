@@ -1,0 +1,51 @@
+# Example Fly config for the notebook host. Copy to a per-deployment file
+# (e.g. fly.notebook.toml) and substitute the placeholders below before
+# `fly deploy`. Do NOT commit your edited copy — gitignore it locally or
+# keep it in a private overlay.
+#
+# Required substitutions:
+#   <your-app-name>          Fly app name (e.g. acme-daimon-notebook-host)
+#   <your-app-name>.fly.dev  Public hostname the bot returns in URLs
+#
+# Naming convention: prefix the environment, don't suffix it
+# (e.g. production-daimon-notebook-host, production-daimon-notebook-host).
+
+app = "<your-app-name>"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DAIMON_NOTEBOOK__HOST_PORT = "8001"
+  DAIMON_NOTEBOOK__DATA_DIR = "/data/notebooks"
+  # PUBLIC_HOST is the hostname embedded in URLs the bot returns to users.
+  # Leaving the placeholder here will produce broken URLs in chat —
+  # substitute before deploying.
+  DAIMON_NOTEBOOK__PUBLIC_HOST = "<your-app-name>.fly.dev"
+  # DAIMON_NOTEBOOK__ADMIN_SECRET must be set via:
+  #   fly secrets set DAIMON_NOTEBOOK__ADMIN_SECRET=<secret> --app <your-app-name>
+  # Never commit the secret value here.
+
+[[services]]
+  internal_port = 8001
+  protocol = "tcp"
+  auto_start_machines = true
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+[[mounts]]
+  source = "notebook_data"
+  destination = "/data"
+
+[[vm]]
+  memory_mb = 4096
+  cpu_kind = "shared"
+  cpus = 2
