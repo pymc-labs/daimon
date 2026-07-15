@@ -24,7 +24,7 @@ Dependency rule (enforced by `import-linter` in CI):
 ## Dev setup
 
 ```bash
-uv sync
+uv sync --all-extras --all-packages
 docker compose up -d postgres
 DAIMON_DATABASE_URL=postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test \
   uv run alembic upgrade head
