@@ -15,27 +15,28 @@ build/
 htmlcov/
 node_modules/
 .worktrees/
-graphify-out/cache/
-graphify-out/.graphify_*
-graphify-out/manifest.json
-graphify-out/cost.json
 .env.fly
-.claude/worktrees/
+
+# Assistant/tooling working dirs — local only, never commit.
+.planning/
+.learning/
+.claude/
+graphify-out/
+
+# Local symlink to the private infra repo.
+/infra
 
 # Per-deployment Fly configs derived from *.example.toml templates.
 apps/notebook-host/fly.notebook.toml
 apps/notebook-host/fly.notebook.*.toml
 !apps/notebook-host/fly.notebook.example.toml
 
-# Client engagement material and local working files — never commit (see 4344fda9).
+# Local working files — never commit.
 clients/
 scratchpad/
 err.txt
 agents_err.txt
 download.html
-.planning/spikes/*/answers*.jsonl
-.planning/spikes/*/grades*.jsonl
-.planning/spikes/*/results*.json
 
 # Regenerated probe output — never track results, only the probe scripts.
 scripts/probes/**/*results*.json
