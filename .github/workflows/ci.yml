@@ -303,7 +303,7 @@ jobs:
               export NOTEBOOK_IMAGE="${{ steps.tags.outputs.notebook }}"
               # Caddy fronts notebook-host with TLS on this domain; the compose
               # file interpolates NOTEBOOK_DOMAIN + NOTEBOOK_PUBLIC_URL_BASE
-              # (the compose file and Caddyfile live in the operator's private infra repo).
+              # (the compose file and Caddyfile live in the operator private infra repo).
               export NOTEBOOK_DOMAIN="${{ env.NOTEBOOK_DOMAIN }}"
               export NOTEBOOK_PUBLIC_URL_BASE="https://${{ env.NOTEBOOK_DOMAIN }}"
               # Same DOCKER_CONFIG redirect as the workers refresh: use root
