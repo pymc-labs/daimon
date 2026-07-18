@@ -3,8 +3,11 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, master]
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 # Reusable Postgres service block + shared bootstrap (checkout, uv sync,
 # alembic upgrade) are duplicated across pytest-* jobs by necessity —
@@ -223,11 +226,11 @@ jobs:
       group: deploy-gcp-production
       cancel-in-progress: false
     env:
-      REGION: us-east4
-      AR_HOST: us-east4-docker.pkg.dev
-      REPO: production-daimon
-      ZONE: us-east4-c
-      NOTEBOOK_DOMAIN: daimon-notebook.decision.ai
+      REGION: ${{ vars.GCP_REGION }}
+      AR_HOST: ${{ vars.GCP_REGION }}-docker.pkg.dev
+      REPO: ${{ vars.GCP_AR_REPO }}
+      ZONE: ${{ vars.GCP_ZONE }}
+      NOTEBOOK_DOMAIN: ${{ vars.NOTEBOOK_DOMAIN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -262,27 +265,25 @@ jobs:
 
       - name: Run migrations (blocking gate)
         run: |
-          gcloud run jobs update production-daimon-migrate --region "$REGION" \
+          gcloud run jobs update ${{ vars.GCP_AR_REPO }}-migrate --region "$REGION" \
             --image "${{ steps.tags.outputs.daimon }}"
-          gcloud run jobs execute production-daimon-migrate --region "$REGION" --wait
+          gcloud run jobs execute ${{ vars.GCP_AR_REPO }}-migrate --region "$REGION" --wait
 
       - name: Deploy mcp revision
         run: |
-          gcloud run services update production-daimon-mcp --region "$REGION" \
+          gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
             --image "${{ steps.tags.outputs.daimon }}"
 
       - name: Refresh worker VM containers (recreate in place)
         run: |
-          # Workers VM is intentionally stopped while Fly remains the live
-          # production (avoids double-handling Discord events). Skip the
-          # refresh until the Fly→GCP cutover starts the VM again.
-          STATUS=$(gcloud compute instances describe production-daimon-workers \
+          # Skip the refresh when the workers VM is stopped (nothing to recreate).
+          STATUS=$(gcloud compute instances describe ${{ vars.GCP_AR_REPO }}-workers \
             --zone "$ZONE" --format='value(status)')
           if [ "$STATUS" != "RUNNING" ]; then
             echo "workers VM is $STATUS — skipping container refresh"
             exit 0
           fi
-          gcloud compute ssh production-daimon-workers --zone "$ZONE" \
+          gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
             --tunnel-through-iap --command '
               export DAIMON_IMAGE="${{ steps.tags.outputs.daimon }}"
               # sudo -E keeps the SSH user HOME, so docker would look for
@@ -297,13 +298,12 @@ jobs:
 
       - name: Refresh notebook-host VM container (recreate in place)
         run: |
-          gcloud compute ssh production-daimon-notebook --zone "$ZONE" \
+          gcloud compute ssh ${{ vars.GCP_AR_REPO }}-notebook --zone "$ZONE" \
             --tunnel-through-iap --command '
               export NOTEBOOK_IMAGE="${{ steps.tags.outputs.notebook }}"
               # Caddy fronts notebook-host with TLS on this domain; the compose
               # file interpolates NOTEBOOK_DOMAIN + NOTEBOOK_PUBLIC_URL_BASE
-              # (the raw-IP NOTEBOOK_PUBLIC_IP era ended with the Caddy cutover;
-              # canonical compose/Caddyfile live in pymc-labs/daimon-infra).
+              # (the compose file and Caddyfile live in the operator's private infra repo).
               export NOTEBOOK_DOMAIN="${{ env.NOTEBOOK_DOMAIN }}"
               export NOTEBOOK_PUBLIC_URL_BASE="https://${{ env.NOTEBOOK_DOMAIN }}"
               # Same DOCKER_CONFIG redirect as the workers refresh: use root
@@ -316,7 +316,7 @@ jobs:
 
       - name: Health gate
         run: |
-          URL=$(gcloud run services describe production-daimon-mcp --region "$REGION" \
+          URL=$(gcloud run services describe ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
             --format='value(status.url)')
           # /healthz is intercepted by Google Front End on run.app domains (404s
           # before reaching the container); /readyz passes through and also
