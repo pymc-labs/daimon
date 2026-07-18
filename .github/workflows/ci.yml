@@ -371,6 +371,7 @@ jobs:
       AR_HOST: us-east4-docker.pkg.dev
       REPO: production-daimon
       ZONE: us-east4-c
+      NOTEBOOK_DOMAIN: daimon-notebook.decision.ai
     steps:
       - uses: actions/checkout@v4
 
@@ -443,8 +444,12 @@ jobs:
           gcloud compute ssh production-daimon-notebook --zone "$ZONE" \
             --tunnel-through-iap --command '
               export NOTEBOOK_IMAGE="${{ steps.tags.outputs.notebook }}"
-              export NOTEBOOK_PUBLIC_IP=$(curl -s -H "Metadata-Flavor: Google" \
-                "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip")
+              # Caddy fronts notebook-host with TLS on this domain; the compose
+              # file interpolates NOTEBOOK_DOMAIN + NOTEBOOK_PUBLIC_URL_BASE
+              # (the raw-IP NOTEBOOK_PUBLIC_IP era ended with the Caddy cutover;
+              # canonical compose/Caddyfile live in pymc-labs/daimon-infra).
+              export NOTEBOOK_DOMAIN="${{ env.NOTEBOOK_DOMAIN }}"
+              export NOTEBOOK_PUBLIC_URL_BASE="https://${{ env.NOTEBOOK_DOMAIN }}"
               # Same DOCKER_CONFIG redirect as the workers refresh: use root
               # docker config (has the Artifact Registry credential helper).
               export DOCKER_CONFIG=/root/.docker
