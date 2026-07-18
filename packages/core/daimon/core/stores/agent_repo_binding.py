@@ -1,4 +1,4 @@
-"""Per-agent git repo binding store. Phase 15 (INFRA-03)."""
+"""Per-agent git repo binding store."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ async def set_binding(
     default_branch: str,
     ma_secret_ref: str,
 ) -> AgentRepoBindingRow:
-    """Upsert the per-agent repo binding (1:1, D-03). Returns the post-write row.
+    """Upsert the per-agent repo binding (1:1). Returns the post-write row.
 
     Normalizes repo_url via _normalize_owner_repo before storing so the webhook
     reverse lookup (get_bindings_for_repo) always matches canonical 'owner/repo'.
@@ -112,7 +112,7 @@ async def get_bindings_for_repo(
 ) -> list[AgentRepoBindingRow]:
     """Return all bindings whose repo_url matches the canonical form of repo_url.
 
-    Install-agnostic (D-22): returns ALL tenants' bindings for the repo.
+    Install-agnostic: returns ALL tenants' bindings for the repo.
     Normalizes the lookup key the same way set_binding normalizes the write key,
     so a webhook's 'owner/repo' always matches stored rows (Pitfall 2 fix).
     """

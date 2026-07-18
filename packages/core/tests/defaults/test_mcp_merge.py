@@ -178,7 +178,7 @@ def test_merge_default_mcp_server_running_twice_does_not_grow_output() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Self-heal + predicate tests (D-06)
+# Self-heal + predicate tests
 # ---------------------------------------------------------------------------
 
 

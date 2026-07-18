@@ -31,29 +31,29 @@ async def run_skill_sync(
 ) -> list[ResourceOutcome]:
     """Fetch a GitHub repo, discover SKILL.md files, and sync them to MA.
 
-    The full pipeline: ``fetch_repo`` -> path scoping + validation ->
-    ``discover_skills`` -> ``sync_skills``. Temp directory is cleaned up
-    in a ``finally`` block even on error.
+        The full pipeline: ``fetch_repo`` -> path scoping + validation ->
+        ``discover_skills`` -> ``sync_skills``. Temp directory is cleaned up
+        in a ``finally`` block even on error.
 
-    Skills are created/updated under tenant-prefixed display_titles
-    (``{t8}-{name}``), so two tenants syncing the same-named skill get
-    distinct MA resources.
+        Skills are created/updated under tenant-prefixed display_titles
+        (``{t8}-{name}``), so two tenants syncing the same-named skill get
+        distinct MA resources.
 
-    Args:
-        client: Anthropic SDK client for MA API calls.
-        http_client: httpx client for GitHub tarball download (injected per D-03).
-        url: GitHub repo URL.
-        branch: Git branch to fetch (default ``"main"``).
-        path: Optional subdirectory to scope discovery to. Empty string means
-              discover from repo root.
-        tenant_id: Owning tenant — determines the canonical title prefix.
-        max_tarball_bytes: Raw tarball size cap passed through to ``fetch_repo``
-            (RATE-03, D-13). Defaults to the safe 50 MiB constant.
-        max_tarball_decompressed_bytes: Decompressed size cap passed through to
-            ``fetch_repo``. Defaults to the safe 200 MiB constant.
+        Args:
+            client: Anthropic SDK client for MA API calls.
+            http_client: httpx client for GitHub tarball download (injected).
+            url: GitHub repo URL.
+            branch: Git branch to fetch (default ``"main"``).
+            path: Optional subdirectory to scope discovery to. Empty string means
+                  discover from repo root.
+            tenant_id: Owning tenant — determines the canonical title prefix.
+            max_tarball_bytes: Raw tarball size cap passed through to ``fetch_repo``
+    . Defaults to the safe 50 MiB constant.
+            max_tarball_decompressed_bytes: Decompressed size cap passed through to
+                ``fetch_repo``. Defaults to the safe 200 MiB constant.
 
-    Raises:
-        DaimonError: If ``path`` escapes the repo root or does not exist.
+        Raises:
+            DaimonError: If ``path`` escapes the repo root or does not exist.
     """
     result = await fetch_repo(
         http_client,

@@ -1,7 +1,7 @@
 """Orchestrator: reconcile `defaults/` -> (MA, DB) for the cli:local tenant.
 
 Execution order:
-  1. `provision_tenant` for cli:local (idempotent, no ledger row — D-16).
+  1. `provision_tenant` for cli:local (idempotent, no ledger row).
   2-7. Delegated to `_reconcile_core` (shared with `reconcile_tenant_defaults`):
     load-tree → validate-refs → preflight → skill/env/agent passes → sweep.
 
@@ -31,7 +31,7 @@ async def apply_defaults(
     public_url: str | None = None,
     run_preflight: bool = True,
 ) -> ApplyReport:
-    # 1. Provision cli:local deterministically (idempotent; signup_credit=0 → no ledger row — D-16).
+    # 1. Provision cli:local deterministically (idempotent; signup_credit=0 → no ledger row).
     # Inline import breaks the apply ↔ provisioning circular dependency.
     from daimon.core.defaults.provisioning import provision_tenant  # noqa: PLC0415
 

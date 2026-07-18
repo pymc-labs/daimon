@@ -3,8 +3,7 @@
 One vault per agent, named `daimon-mcp:<account_uuid>:<agent_uuid>`. Cold path
 creates vault + single static_bearer credential pointing at `public_url`.
 Warm path returns the oldest existing vault with the matching display name
-(MA enforces no uniqueness — probe
-`scripts/probes/managed_agents/mcp_vault_concurrent_create.py`).
+(MA enforces no uniqueness — verified against the live MA API).
 
 Shell function; injects `AsyncAnthropic` and `now`. No global state, no
 adapter imports. Called from `daimon.core.sessions.create_session`
@@ -67,8 +66,7 @@ async def ensure_agent_mcp_vault(
         # (e.g. cloudflare-tunnel → fly URL migration), leaves MA unable to find
         # a credential for the agent's current mcp_server URL.
         # MA blocks PATCH (405) and POST-duplicate (409), so the only way to
-        # update a credential is delete + recreate.
-        # Probe: scripts/probes/managed_agents/mcp_vault_credential_update.py
+        # update a credential is delete + recreate (verified against the live MA API).
         has_matching_url = False
         async for cred in client.beta.vaults.credentials.list(vault_id=oldest.id):
             if cred.auth.type != "static_bearer":
@@ -123,8 +121,8 @@ async def add_github_copilot_credential(
     This is the second credential in the per-agent vault — the first is the
     daimon-mcp JWT placed by `ensure_agent_mcp_vault`.
 
-    Per D-01 / D-03: caller (Plan 05's OAuth callback) runs this best-effort.
-    If it raises, the local Fernet blob is already the source of truth (D-02);
+    The caller (OAuth callback) runs this best-effort.
+    If it raises, the local Fernet blob is already the source of truth;
     the operator can retry by re-OAuthing.
 
     Idempotent on retry: list existing credentials, delete any pointed at the
@@ -171,10 +169,10 @@ async def add_external_mcp_credential(
     new one. Mirrors ``add_github_copilot_credential`` but accepts the URL as
     a parameter (per-user MCP servers each have distinct URLs).
 
-    ``session_context`` is accepted but ignored (deprecated since Phase 88-03).
+    ``session_context`` is accepted but ignored (deprecated).
     The ``ensure_agent_mcp_vault`` bootstrap no longer accepts it — the vault
     credential is identity-stable and requires no per-call re-stamp.
-    Call-site removal (``modals_mcp.py``) is deferred to Phase 88-04.
+    Call-site removal is deferred.
     """
     del session_context  # accepted-but-ignored; see docstring
     display_name = f"daimon-mcp:{account_id}:{agent_id}"

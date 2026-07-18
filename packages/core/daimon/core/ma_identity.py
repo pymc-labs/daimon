@@ -57,6 +57,6 @@ def derive_tenant_uuid(*, platform: Platform, workspace_id: str) -> uuid.UUID:
     Frozen under _DAIMON_TENANT_NS, separate from _DAIMON_AGENT_NS so the two
     identity domains re-key independently.
 
-    NOTE (D-05): defined here, NOT wired into the live bootstrap path in Phase 47.
+    NOTE: defined here, NOT wired into the live bootstrap path.
     """
     return uuid.uuid5(_DAIMON_TENANT_NS, f"{platform}:{workspace_id}")

@@ -19,4 +19,4 @@ PHASE_1_TABLES = {
 def test_metadata_contains_all_phase_1_tables_when_imported() -> None:
     actual = set(Base.metadata.tables.keys())
     missing = PHASE_1_TABLES - actual
-    assert not missing, f"Base.metadata is missing phase-1 tables: {missing}"
+    assert not missing, f"Base.metadata is missing base tables: {missing}"

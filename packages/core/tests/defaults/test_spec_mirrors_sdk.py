@@ -31,7 +31,7 @@ def test_agent_spec_mirrors_sdk() -> None:
     exempt = {"metadata", "betas"}
     # The spec's `skills` and `skill_repos` are sibling authoring fields not
     # sent to the SDK (skills resolved at upload; skill_repos consumed by
-    # the Phase 33 sync subsystem). Excluded from the mirror comparison.
+    # the sync subsystem). Excluded from the mirror comparison.
     sibling = {"skills", "skill_repos"}
     assert spec_fields - sibling == sdk_fields - exempt - sibling, (
         "AgentSpec drifted from the SDK. "

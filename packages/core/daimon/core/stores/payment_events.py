@@ -1,12 +1,12 @@
-"""Stripe webhook dedup store. BILL-01.
+"""Stripe webhook dedup store.
 
-NOT a ledger — D-18. Holds (stripe event_id, amount, credited_at, source,
+NOT a ledger. Holds (stripe event_id, amount, credited_at, source,
 tenant_id). The PK is the Stripe event id (text), not a surrogate UUID, so
 the compare-and-set in `try_claim_credit` reads naturally.
 
-The credit step is a no-op in v1.1 (D-20); the hooks ship for future use.
+The credit step is reserved for future use; no current callers.
 
-Per `guideline:architecture` (D-25): this module does NOT swallow exceptions.
+Per `guideline:architecture`: this module does NOT swallow exceptions.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ async def try_claim_credit(session: AsyncSession, event_id: str) -> bool:
 
 
 async def unclaim_credit(session: AsyncSession, event_id: str) -> None:
-    """Reset credited_at to NULL. Dead code in v1.1; ships for future use (D-20)."""
+    """Reset credited_at to NULL. Reserved for future use; no current callers."""
     await session.execute(
         update(PaymentEvent).where(PaymentEvent.id == event_id).values(credited_at=None)
     )

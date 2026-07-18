@@ -79,7 +79,7 @@ class UsageTotals:
 @dataclass(frozen=True, slots=True)
 class Task:
     """Placeholder for subagent-task tracking. Managed Agents emits no
-    `agent.task_*` events in phase 1; this type exists so `TurnState.tasks`
+    `agent.task_*` events currently; this type exists so `TurnState.tasks`
     is typed and forward-compatible."""
 
 

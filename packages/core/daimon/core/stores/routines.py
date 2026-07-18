@@ -1,10 +1,10 @@
 """Routines store — CRUD plus concurrency-safe `claim_due_fireable` and
 `advance_stale` helpers.
 
-`claim_due_fireable` is a 2-phase null-out: phase 1 atomically claims a
+`claim_due_fireable` is a 2-step null-out: step 1 atomically claims a
 batch of due rows by `UPDATE ... WHERE id IN (SELECT id ... FOR UPDATE
 SKIP LOCKED LIMIT N)` and zeroes their `next_fire_at` (Postgres has no
-direct `UPDATE ... LIMIT`, hence the subquery). Phase 2 walks the
+direct `UPDATE ... LIMIT`, hence the subquery). Step 2 walks the
 returned rows and recomputes `next_fire_at` per row from cron. A crash
 between the two phases leaves an orphan (`next_fire_at IS NULL`); the
 companion `advance_stale` call recovers those plus any rows whose
@@ -73,7 +73,7 @@ async def list_routines_missing_agent_name(
     """Return all routines where `agent_name IS NULL`.
 
     Used by the one-shot `daimon routines backfill-agent-names` CLI command
-    (PHASE-38-D5). Inherently idempotent: re-running after backfill returns
+    Inherently idempotent: re-running after backfill returns
     an empty list. No pagination — the row count is bounded by tenant
     routine cardinality, which is small.
     """
@@ -145,7 +145,7 @@ async def update_routine_agent_id(
     new_agent_id: str,
 ) -> bool:
     """Update only ``routines.agent_id``. Used by the scheduler resolver path
-    (Phase 38-04) when the resolver heals a stale id. Does NOT touch
+    when the resolver heals a stale id. Does NOT touch
     ``next_fire_at``, ``cron_expr``, ``agent_name``, etc.
 
     Returns True if a row was updated, False otherwise.
@@ -302,9 +302,9 @@ async def claim_due_fireable(
     max_age: timedelta = timedelta(minutes=15),
     limit: int = 20,
 ) -> list[RoutineRow]:
-    """Phase 1: atomically claim due rows. Phase 2: recompute next_fire_at.
+    """Step 1: atomically claim due rows. Step 2: recompute next_fire_at.
 
-    Returned rows reflect the row state BEFORE phase-2 recompute (matches
+    Returned rows reflect the row state BEFORE step-2 recompute (matches
     predecessor): callers see `next_fire_at=None` and `last_fired_at=now`
     on each claimed row, while the table itself has the freshly-computed
     next slot stamped per row.
@@ -337,7 +337,7 @@ async def claim_due_fireable(
     claimed_orm = (await session.execute(claim_stmt)).scalars().all()
     claimed_rows = [RoutineRow.model_validate(r) for r in claimed_orm]
 
-    # Phase 2: per-row recompute. One bad routine must not block the others —
+    # Step 2: per-row recompute. One bad routine must not block the others —
     # this is the documented predecessor pattern (named boundary catch).
     for row in claimed_rows:
         try:
@@ -346,7 +346,7 @@ async def claim_due_fireable(
                 update(Routine).where(Routine.id == row.id).values(next_fire_at=nxt)
             )
         except Exception:
-            log.exception("claim_due_fireable phase-2 recompute failed", routine_id=str(row.id))
+            log.exception("claim_due_fireable step-2 recompute failed", routine_id=str(row.id))
 
     await session.flush()
     return claimed_rows

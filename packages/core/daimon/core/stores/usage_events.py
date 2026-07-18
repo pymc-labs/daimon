@@ -1,10 +1,10 @@
 """Per-turn usage events store. BILL-01.
 
 Cost is computed at read time against MODEL_PRICING — repricing is a query
-change, no backfill needed (D-08). Writes are idempotent on
-(managed_session_id, event_id) so SSE replay is a no-op (D-13).
+change, no backfill needed. Writes are idempotent on
+(managed_session_id, event_id) so SSE replay is a no-op.
 
-Per `guideline:architecture` Error Propagation (D-25): this module does NOT
+Per `guideline:architecture` Error Propagation: this module does NOT
 swallow exceptions — the cma predecessor's `try/except: log; return` pattern
 is dropped.
 """
@@ -38,7 +38,7 @@ async def record(
     model_usage: BetaManagedAgentsSpanModelUsage,
     event_id: str,
 ) -> None:
-    """Insert one usage row idempotently on (managed_session_id, event_id). D-13."""
+    """Insert one usage row idempotently on (managed_session_id, event_id)."""
     stmt = (
         pg_insert(UsageEvent)
         .values(
@@ -77,7 +77,7 @@ async def _select_rows(
 
 
 def _sum_cost(rows: Sequence[UsageEventRow]) -> float:
-    """Reprice each row at query time against current MODEL_PRICING. D-08."""
+    """Reprice each row at query time against current MODEL_PRICING."""
     total = 0.0
     for row in rows:
         rates = MODEL_PRICING.get(row.model)
@@ -277,7 +277,7 @@ async def delete_all_for_user(
     tenant_id: uuid.UUID,
     platform_user_id: str,
 ) -> int:
-    """Phase 17 GDPR purge. Returns rowcount; never raises on 0.
+    """GDPR purge. Returns rowcount; never raises on 0.
 
     `tenant_id` is required: `platform_user_id` is NOT globally unique — Slack
     user ids are workspace-scoped, so `U123` in two workspaces are two different

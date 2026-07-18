@@ -1,4 +1,4 @@
-"""Per-agent file store. Phase 15 (INFRA-02)."""
+"""Per-agent file store."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ async def put_agent_file(
     key: str,
     content: str,
 ) -> AgentFileRow:
-    """Upsert text content for (tenant_id, agent_id, key). Last-write-wins (D-02).
+    """Upsert text content for (tenant_id, agent_id, key). Last-write-wins.
 
     Returns the post-write row. Uses `.returning(...)` + `scalar_one()` so the
     cursor — not the identity map — is the source of truth, mirroring

@@ -1,10 +1,10 @@
 """Async store for slack_bot_tokens.
 
-UPSERT on team_id (SCORE-01): installing a workspace bot re-OAuth replaces
+UPSERT on team_id: installing a workspace bot re-OAuth replaces
 the row with a fresh encrypted_token and bumps updated_at. No try/except —
-DB exceptions propagate to the adapter boundary (Phase 79/80).
+DB exceptions propagate to the adapter boundary.
 
-The store is pure ciphertext-bytes in/out; it never sees the Fernet key (D-04).
+The store is pure ciphertext-bytes in/out; it never sees the Fernet key.
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 
 These tests import DeploymentDefault, TenantConfigRow, ChannelConfigRow, _pick_agent,
 _pick_environment, and merge from daimon.core.scope using the new 3-tier signature
-(channel, tenant, default). They are RED until Phase 58.3 Plan 03 rewrites scope.py.
+(channel, tenant, default). They are RED until the scope rewrite lands.
 """
 
 from __future__ import annotations

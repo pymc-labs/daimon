@@ -2,7 +2,7 @@
 
 The overlay maps a per-agent UUID to a principal_id whose github_credentials
 row holds the token. `get_pat(agent_id=X)` resolves tier-1 by reading this
-table; if no row exists it returns None (D-25: no principal-default bleed on
+table; if no row exists it returns None (no principal-default bleed on
 the agent path).
 
 `set_agent_github_binding` is the write path — UPSERT on agent_id PK.
@@ -40,7 +40,7 @@ async def set_agent_github_binding(
     """UPSERT the per-agent GitHub credential overlay.
 
     After this call, get_pat(agent_id=agent_id) resolves to the credential
-    stored under principal_id. Per the D-25 per-agent model, callers set
+    stored under principal_id. Per the per-agent model, callers set
     principal_id=agent_id so each agent has its own isolated credential row.
     """
     stmt = (

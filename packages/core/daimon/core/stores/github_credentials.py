@@ -1,6 +1,6 @@
 """Async store for github_credentials.
 
-UPSERT on principal_id (D-11): re-OAuth replaces the row with fresh
+UPSERT on principal_id: re-OAuth replaces the row with fresh
 github_login + encrypted_token + scopes and bumps updated_at. No
 try/except — DB exceptions propagate to the route boundary in Plan 05.
 """
@@ -87,7 +87,7 @@ async def delete_credential_for_principal(
 
     Returns rowcount; never raises on 0. Used by the GDPR purge orchestrator.
 
-    Keyed by principal_id alone (D-06) — the table has no tenant_id column.
+    Keyed by principal_id alone — the table has no tenant_id column.
     principal_id is the PK so rowcount is 0 or 1; the purge registry consumes
     ints uniformly.
     """

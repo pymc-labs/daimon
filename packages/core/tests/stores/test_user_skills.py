@@ -328,7 +328,7 @@ async def test_delete_user_skills_for_principal_removes_rows_and_returns_rowcoun
 async def test_delete_user_skills_for_principal_is_tenant_agnostic(
     db_session: AsyncSession,
 ) -> None:
-    """Rows under different tenant_ids for the same principal must both be deleted (D-06)."""
+    """Rows under different tenant_ids for the same principal must both be deleted."""
     tenant_a = await make_tenant(db_session, workspace_id="guild-a")
     tenant_b = await make_tenant(db_session, workspace_id="guild-b")
     principal_id = uuid.uuid4()

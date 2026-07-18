@@ -86,7 +86,7 @@ async def test_resolve_skill_names_raises_with_available_names_when_name_missing
 
 
 async def test_resolve_skill_names_raises_when_given_another_tenants_full_canonical_title() -> None:
-    """A string that IS another tenant's canonical title gets re-prefixed and misses (D-05/D-09)."""
+    """A string that IS another tenant's canonical title gets re-prefixed and misses."""
     # Tenant B's canonical title for "brainstorming"
     tenant_b_canonical = tenant_scoped_display_title(tenant_id=_TENANT_B, name="brainstorming")
     # MA has tenant B's skill only
@@ -110,7 +110,7 @@ async def test_resolve_skill_names_raises_when_given_another_tenants_full_canoni
 
 
 async def test_resolve_skill_names_raises_on_raw_custom_skill_id_dict() -> None:
-    """Dict entry with type==custom (raw MA id) is rejected per D-09."""
+    """Dict entry with type==custom (raw MA id) is rejected."""
     client = _make_client([])
     raw_id_dict: BetaManagedAgentsSkillParams = {"type": "custom", "skill_id": "skill_01XXX"}
     with pytest.raises(DefaultsError, match="raw skill ids") as exc_info:

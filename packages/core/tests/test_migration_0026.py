@@ -1,4 +1,4 @@
-"""Schema-shape test for migration 0026 (Phase 78.1).
+"""Schema-shape test for migration 0026.
 
 The db_session fixture guarantees Base.metadata.create_all has been applied,
 which includes the SlackBotToken ORM model. Asserts: slack_bot_tokens table

@@ -44,11 +44,11 @@ class DefaultsError(DaimonError):
 class SkillsListTruncatedError(DefaultsError):
     """Raised when ``skills.list`` returns a full page of results.
 
-    MA never populates ``next_page`` for skills at any page boundary (live probe
-    2026-06-10, ``scripts/probes/managed_agents/list_pagination.py``), so a full
-    page means the org skill view is truncated. Any create/delete decision made on
+    MA never populates ``next_page`` for skills at any page boundary (verified
+    live, 2026-06-10), so a full page means the org skill view is truncated.
+    Any create/delete decision made on
     a truncated view is unsafe — callers in write contexts must treat this as a
-    hard failure rather than silently proceeding (D-13).
+    hard failure rather than silently proceeding.
     """
 
 
@@ -96,6 +96,6 @@ class SlackOAuthError(DaimonError):
 
 class OAuthCallbackPrincipalUnconfigured(DaimonError):
     """Raised by the OAuth callback when no `account_id_for_state` resolver
-    was injected. Phase 18 ships the OAuth contract; Phase 19 (CLI) / Phase 25
+    was injected. The OAuth contract is shipped; the CLI and Discord adapters
     (Discord) wire the real (platform, platform_user_id) → principal_id mapping.
     """

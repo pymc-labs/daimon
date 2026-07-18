@@ -1,4 +1,4 @@
-"""Schema-shape test for migration 0019 (Phase 58.3).
+"""Schema-shape test for migration 0019.
 
 The db_session fixture guarantees alembic upgrade head has been applied and
 the schema-per-test isolation is in place. Asserts: tenant_config exists with

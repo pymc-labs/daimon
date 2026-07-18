@@ -54,12 +54,12 @@ async def create_session(
     ``ensure_agent_mcp_vault()`` runs first (idempotent — warm path is a single
     ``vaults.list()`` call) and the per-agent vault id is attached to the session.
     Both ``account_id`` and ``agent_uuid`` are required in that case — no fallback
-    to an account-scoped vault (D-25 parity).
+    to an account-scoped vault.
 
     ``session_context`` is accepted but no longer threaded into
-    ``ensure_agent_mcp_vault`` (deprecated since Phase 88-03 — the vault
+    ``ensure_agent_mcp_vault`` (deprecated — the vault
     credential is identity-stable and requires no per-turn re-stamp).
-    Call-site removal in ``bot.py`` is deferred to Phase 88-04.
+    Call-site removal in ``bot.py`` is deferred.
 
     When ``tenant_id``, ``agent_uuid``, and ``session_factory`` are all
     provided, the agent's tenant-scoped secrets are assembled into a ``.env``
@@ -69,7 +69,7 @@ async def create_session(
     alongside ``vault_ids`` — it never replaces the vault branch.
 
     When the agent has a repo binding, the clone credential is resolved via
-    ``daimon.core.github_repo_auth.resolve_clone_token`` (D-01/D-02/D-05/D-08):
+    ``daimon.core.github_repo_auth.resolve_clone_token``:
     per-agent PAT wins, else the GitHub App installation token (``github_app_id``
     + ``github_app_private_key``), else the operator ``github_fallback_pat`` for
     a verified-public binding, else the resolver raises ``DaimonError`` — a
@@ -118,7 +118,7 @@ async def create_session(
 
     # Copilot: mirror the resolved PAT into a static_bearer credential at the
     # GitHub Copilot MCP URL on the agent's vault, so the agent can author PRs
-    # via the github MCP toolset (verified live in spike 034). Rides the same
+    # via the github MCP toolset. Rides the same
     # vault already attached to the session via vault_ids. Bound to the REAL
     # per-agent identity only — the operator fallback PAT is never mirrored here.
     if vault_id is not None and per_agent_pat is not None:

@@ -146,7 +146,7 @@ async def collect_purge_preview(
         exists = await accounts_store.account_exists(session, account_id=account_id)
         account = PurgePreviewRow(count=1 if exists else 0, example=None)
 
-        # 6. user_skills — both CLI and platform principals own rows (D-07).
+        # 6. user_skills — both CLI and platform principals own rows.
         user_skills_total = 0
         user_skills_example: str | None = None
         for p in (*cli_list, *pp_list):
@@ -160,7 +160,7 @@ async def collect_purge_preview(
                     user_skills_example = first_skill.name
         user_skills = PurgePreviewRow(count=user_skills_total, example=user_skills_example)
 
-        # 7. github_credentials — both principal kinds (D-07). PK lookup:
+        # 7. github_credentials — both principal kinds. PK lookup:
         # count is 0 or 1 per principal; login string is the display example.
         github_credentials_total = 0
         github_credentials_example: str | None = None

@@ -291,7 +291,7 @@ async def test_sync_creates_distinct_skills_when_two_tenants_sync_same_named_ski
 async def test_sync_records_failed_outcome_when_list_is_truncated(tmp_path: Path) -> None:
     """Full 100-row page on lookup → SkillsListTruncatedError → FAILED outcome for that skill.
 
-    A full-page response is treated as a truncated view (D-13). In a create
+    A full-page response is treated as a truncated view. In a create
     context (on_truncation="raise"), this must NOT silently create a duplicate
     or miss the existing skill — it surfaces as a FAILED outcome.
     """
@@ -318,6 +318,6 @@ async def test_sync_records_failed_outcome_when_list_is_truncated(tmp_path: Path
 
     assert len(outcomes) == 1, "should return one outcome"
     assert outcomes[0].action is Action.FAILED, (
-        "truncated list on lookup should produce FAILED outcome (D-13)"
+        "truncated list on lookup should produce FAILED outcome"
     )
     assert outcomes[0].error is not None, "FAILED outcome should carry error text"

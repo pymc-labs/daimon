@@ -36,7 +36,7 @@ ENV_DEPENDENT_PLACEHOLDERS: dict[str, str] = {
 }
 
 # Vars that are always required to boot the app at all — uncommented at the
-# top of the file (D-16).
+# top of the file.
 ALWAYS_REQUIRED = {
     "DAIMON_ANTHROPIC__API_KEY",
     "DAIMON_DATABASE__URL",

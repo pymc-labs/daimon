@@ -1,4 +1,4 @@
-"""Real-DB tests for agent_google_binding store. Phase 19, GH-03."""
+"""Real-DB tests for agent_google_binding store. KEEP-AS-IS(GH-03 is a GitHub issue tracker ref, not an internal designator)"""
 
 from __future__ import annotations
 

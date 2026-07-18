@@ -847,7 +847,7 @@ async def test_reconcile_agent_injects_credential_guidance_into_system_on_create
 
 
 async def test_reconcile_agent_dedup_skips_archive_when_duplicate_account_differs() -> None:
-    """D-72-01 defense in depth: when canonical and duplicate carry different daimon_account
+    """Defense in depth: when canonical and duplicate carry different daimon_account
     values, the duplicate must NOT be archived — only a warning is emitted. Cross-account
     archive would be cross-owner data loss.
     """
@@ -959,7 +959,7 @@ async def test_reconcile_agent_dedup_archives_duplicate_when_account_matches() -
 
 
 async def test_reconcile_agent_bypasses_skipped_and_repairs_corrupted_daimon_mcp() -> None:
-    """D-06: when MA carries a daimon-mcp entry with a foreign URL, reconcile must
+    """When MA carries a daimon-mcp entry with a foreign URL, reconcile must
     proceed to Action.UPDATED even when daimon_spec_hash matches — the L13 short-
     circuit must be bypassed. The update body must contain exactly one daimon-mcp
     entry whose url equals public_url (the canonical entry).
@@ -1044,7 +1044,7 @@ async def test_reconcile_agent_bypasses_skipped_and_repairs_corrupted_daimon_mcp
 
 
 async def test_reconcile_agent_stays_skipped_when_hash_matches_and_mcp_healthy() -> None:
-    """D-06 no-churn companion: when MA carries the matching spec hash AND healthy
+    """No-churn companion: when MA carries the matching spec hash AND healthy
     mcp_servers (no corrupted daimon-mcp), reconcile must return Action.SKIPPED
     and make zero update calls.
     """

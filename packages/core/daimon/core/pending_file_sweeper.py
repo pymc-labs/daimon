@@ -1,4 +1,4 @@
-"""Drain the ephemeral Files-API TTL queue. Phase 51 (SC5, D-07).
+"""Drain the ephemeral Files-API TTL queue.
 
 Files-API objects are uploaded as the transport for an agent's assembled
 `.env`; the durable copy lives in the `agent_files` DB row. Once mounted, the

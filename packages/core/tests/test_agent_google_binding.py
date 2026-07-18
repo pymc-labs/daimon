@@ -1,4 +1,4 @@
-"""Tests for AgentGoogleBinding ORM, Row, and CredentialsSettings (Phase 19)."""
+"""Tests for AgentGoogleBinding ORM, Row, and CredentialsSettings."""
 
 from __future__ import annotations
 

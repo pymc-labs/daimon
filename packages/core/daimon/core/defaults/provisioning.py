@@ -81,7 +81,7 @@ async def provision_tenant(
     ON CONFLICT DO NOTHING + re-SELECT per resource. Does NOT call apply_defaults / MA
     reconcile — that I/O is the on_guild_join wiring.
 
-    `signup_credit` (D-25): if > 0, seeds one 'trial' ledger row atomically in the same
+    `signup_credit`: if > 0, seeds one 'trial' ledger row atomically in the same
     transaction. Idempotent on (trial:{tenant_id}) — re-provisioning never double-credits.
     signup_credit=0 (the default) inserts no ledger row.
 
@@ -114,7 +114,7 @@ async def provision_tenant(
             await s.execute(select(Tenant.id).where(Tenant.id == tenant_id))
         ).scalar_one()
 
-        # Step 3 (D-25): seed trial credit. Idempotent — key on the tenant so re-runs no-op.
+        # Step 3: seed trial credit. Idempotent — key on the tenant so re-runs no-op.
         if signup_credit > 0:
             await tenant_ledger.insert_entry(
                 s,
@@ -148,7 +148,7 @@ async def reconcile_tenant_defaults(
     `dry_run=False`.
 
     The provision_status flip (pending -> ready/failed) is the Discord adapter's
-    responsibility (D-07) — this function does NOT flip it.
+    responsibility — this function does NOT flip it.
     """
     return await _reconcile_core(
         client,
@@ -170,7 +170,7 @@ async def archive_tenant(
     """Soft-archive a tenant by setting Tenant.archived_at = now.
 
     Idempotent and no-op-safe: if the tenant row does not exist, the UPDATE
-    matches 0 rows and returns without raising (D-13).
+    matches 0 rows and returns without raising.
 
     Takes `now` as an explicit parameter — no datetime.now() inside logic
     (architecture guideline: pure-logic functions take clocks as parameters).
@@ -185,14 +185,14 @@ async def teardown_slack_install(
     team_id: str,
     now: datetime,
 ) -> None:
-    """Soft-archive the Slack tenant and delete its bot-token row (D-13, D-14).
+    """Soft-archive the Slack tenant and delete its bot-token row.
 
     1. Derives the tenant_id deterministically from (platform="slack", team_id).
     2. Calls archive_tenant to set Tenant.archived_at = now (no-op if absent).
     3. Deletes the slack_bot_tokens row via delete_slack_bot_token (idempotent —
        returns 0 rowcount when row is already absent, never raises).
 
-    Token-existence is the liveness signal (D-14): after teardown, any Phase-80
+    Token-existence is the liveness signal: after teardown, any
     event handler that reads the token row will see None and drop the event.
     """
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)

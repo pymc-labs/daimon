@@ -1,6 +1,6 @@
 """Skill SkillRef -> SDK skill-param resolution.
 
-THIS MODULE IS THE D-02 CHOKEPOINT. It is the ONLY place where bare authoring
+THIS MODULE IS THE CENTRAL CHOKEPOINT. It is the ONLY place where bare authoring
 names (``SkillRef.skill_id``, chat skill strings) become canonical
 tenant-scoped display_titles. Callers MUST pass bare authoring names; they
 MUST NOT pre-prefix. One rule: every custom-skill lookup goes through here.
@@ -37,7 +37,7 @@ async def resolve_refs(
 
     Custom skills are resolved via MA lookup using the canonical
     tenant-scoped display_title (built here from the bare ``ref.skill_id``
-    authoring name). No bare-title fallback exists (D-05) -- strict
+    authoring name). No bare-title fallback exists -- strict
     prefixed-only lookup from day one.
     """
     resolved: list[BetaManagedAgentsSkillParams] = []
@@ -75,7 +75,7 @@ async def resolve_skill_names(
     ``{"type": "custom", "skill_id": "skill_01XXX"}``) is rejected with a
     ``DefaultsError`` -- raw MA ids and non-anthropic skill params cannot be
     attached via this path; skills must be referenced by bare name within the
-    caller's own namespace (D-09, closes RESEARCH Pitfall 6).
+    caller's own namespace.
 
     Misses are aggregated into a single ``DefaultsError`` that names every
     unresolved skill and lists the CALLER'S OWN available bare names (no

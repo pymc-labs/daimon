@@ -239,7 +239,7 @@ async def test_routine_persists_across_session_reopen(
     Per the plan's note: schema-per-test fixture binds the session to a single
     connection; we simulate a "new session" by closing this one and opening a
     fresh AsyncSession bound to the same connection. Proves persistence past
-    session lifecycle (D-13).
+    session lifecycle.
     """
     row = await create_routine(
         db_session,
@@ -283,10 +283,10 @@ async def test_claim_due_fireable_picks_routine_in_window(
     assert len(claimed) == 1, "routine due within window must be claimed"
     assert claimed[0].id == row.id, "claimed routine id must match"
 
-    # After claim, phase 2 must have recomputed next_fire_at to a future slot.
+    # After claim, step 2 must have recomputed next_fire_at to a future slot.
     after_claim = await get_routine(db_session, row.id)
     assert after_claim is not None
-    assert after_claim.next_fire_at is not None, "phase 2 recompute must repopulate next_fire_at"
+    assert after_claim.next_fire_at is not None, "step 2 recompute must repopulate next_fire_at"
     assert after_claim.next_fire_at > now, "recomputed next_fire_at must be in the future"
     assert after_claim.last_fired_at == now, "claim must stamp last_fired_at"
 

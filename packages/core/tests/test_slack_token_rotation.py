@@ -1,4 +1,4 @@
-"""Tests for slack_bot_tokens store rotation fields (Phase 79, SINST-04).
+"""Tests for slack_bot_tokens store rotation fields.
 
 Verifies that migration 0027's new nullable columns (expires_at, refresh_token)
 round-trip through upsert_slack_bot_token + get_slack_bot_token, and that a

@@ -1,15 +1,15 @@
 """Non-interactive turn execution.
 
 Open a fresh MA session, send a single trigger message, drain the SSE stream
-through Phase 4 reducers until a terminal `session.status_idle` event, then
+through the reducers until a terminal `session.status_idle` event, then
 return the truncated final-message tail.
 
-Used by `daimon.adapters.scheduler` for routine fires (Phase 16) and by any
+Used by `daimon.adapters.scheduler` for routine fires and by any
 future caller that needs an "agent runs once, returns text" loop without a
 human-facing render lifecycle.
 
 Session assembly is delegated to `create_session` in `daimon.core.sessions`
-(the same collapse Phase 94-01 did for the MCP `start_turn` path) — this is the
+(the same collapse that unified the MCP `start_turn` path) — this is the
 single source of truth for vault/PAT/env-mount/repo-resource assembly AND
 the `daimon_tenant`/`daimon_account` metadata stamp that
 `daimon.core.usage_sweep.sweep_headless_usage` requires to bill a session.
@@ -88,17 +88,17 @@ async def run_turn(
        ``ensure_agent_mcp_vault`` runs first and the per-agent vault id is
        attached. Both ``account_id`` and ``agent_uuid`` are required in that
        case; missing either raises ``ValueError`` (no fallback to an
-       account-scoped vault, D-25 parity). ``create_session`` also stamps the
+       account-scoped vault). ``create_session`` also stamps the
        session's ``metadata`` with ``daimon_tenant``/``daimon_account`` when
        given, which is what makes the session visible to
-       ``usage_sweep.sweep_headless_usage`` (CLB-07). The repo binding is
+       ``usage_sweep.sweep_headless_usage``. The repo binding is
        fetched unconditionally inside ``create_session`` — the operator
        ``github_fallback_pat`` clones ``anon:`` (verified-public) bindings
        even without a per-agent PAT.
     3. ``beta.sessions.events.send(session_id, events=[user.message])`` posts
        the trigger.
     4. ``async for event in await beta.sessions.events.stream(session_id=...)``
-       drains the stream. Each event is folded into a Phase 4 ``TurnState``
+       drains the stream. Each event is folded into a ``TurnState``
        via ``apply``. The loop terminates on the first ``session.status_idle``
        whose ``stop_reason.type`` is **not** ``requires_action`` — Pitfall 1
        (SSE stays open after idle) is handled by the explicit ``break``.

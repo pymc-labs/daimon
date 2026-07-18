@@ -1,4 +1,4 @@
-"""Real-DB behavior tests for the agent_repo_binding store. Phase 15 (INFRA-03)."""
+"""Real-DB behavior tests for the agent_repo_binding store."""
 
 from __future__ import annotations
 
@@ -39,9 +39,7 @@ async def test_set_binding_inserts_new_row(db_session: AsyncSession) -> None:
 
     assert isinstance(row, AgentRepoBindingRow), "set_binding must return Pydantic, not ORM"
     assert not isinstance(row, AgentRepoBinding), "ORM must not leak past the store boundary"
-    assert row.repo_url == "example/repo", (
-        "set_binding normalizes repo_url to 'owner/repo' form (Phase 56 Pitfall-2 fix)"
-    )
+    assert row.repo_url == "example/repo", "set_binding normalizes repo_url to 'owner/repo' form"
     assert row.default_branch == "main", "default_branch should round-trip"
     assert row.ma_secret_ref == "secret-ref-1", "ma_secret_ref should round-trip"
     assert row.created_at is not None, "created_at should be set by server_default"
@@ -226,7 +224,7 @@ async def test_cross_tenant_isolation(db_session: AsyncSession) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 56 (GHAPP-01): normalization unification + reverse lookup + last_sync
+# Normalization unification + reverse lookup + last_sync
 # ---------------------------------------------------------------------------
 
 
@@ -281,7 +279,7 @@ async def test_get_bindings_for_repo_normalizes(db_session: AsyncSession) -> Non
 
 @pytest.mark.asyncio
 async def test_get_bindings_for_repo_returns_all_tenants(db_session: AsyncSession) -> None:
-    """RB-11: get_bindings_for_repo returns bindings from all tenants (install-agnostic, D-22)."""
+    """Get_bindings_for_repo returns bindings from all tenants (install-agnostic)."""
     t1 = await make_tenant(db_session)
     t2 = await make_tenant(db_session)
     agent_id_1 = uuid.uuid4()
@@ -412,7 +410,7 @@ async def test_update_last_sync_raises_when_no_binding(db_session: AsyncSession)
 
 
 # ---------------------------------------------------------------------------
-# Phase 94 (PAT-CLOBBER): update_repo_and_branch_keep_secret
+# update_repo_and_branch_keep_secret
 # ---------------------------------------------------------------------------
 
 

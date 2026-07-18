@@ -75,7 +75,8 @@ def merge_default_mcp_server(
 ) -> list[BetaManagedAgentsURLMCPServerParams] | None:
     """Return `existing` with a default daimon-mcp entry appended iff missing.
 
-    - `public_url is None` -> returns `existing` unchanged (no-op for Phase-1-only deployments).
+    - `public_url is None` -> returns `existing` unchanged (no-op when no public
+      MCP URL is configured).
     - Corrupted entries (name==daimon-mcp but url != public_url) are replaced
       with the canonical entry and a warning is emitted. Degenerate inputs
       containing multiple daimon-mcp-named entries collapse to exactly one.

@@ -351,7 +351,7 @@ async def test_fire_exception_is_captured_to_sentry_and_still_swallowed(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """OB-4 (D-09): a raising fire is captured via capture_exception_with_scope
+    """A raising fire is captured via capture_exception_with_scope
     AND swallowed — gather never raises and last_error is still recorded.
     """
     now = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
@@ -395,7 +395,7 @@ async def test_timed_out_fire_is_captured_to_sentry_and_still_swallowed(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """OB-4 (D-09): a timed-out fire captures the TimeoutError to Sentry and still
+    """A timed-out fire captures the TimeoutError to Sentry and still
     swallows — the row records the 'timeout:' error.
     """
     now = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
@@ -437,7 +437,7 @@ async def test_fire_binds_rid_and_tenant_id_into_log_context(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """D-05: while a fire runs, structlog contextvars carry a fresh non-empty rid
+    """While a fire runs, structlog contextvars carry a fresh non-empty rid
     and the row's tenant_id, so every log line _fire_guarded wraps is correlated.
     We snapshot get_contextvars() from inside the fire (capture_logs strips the
     merge_contextvars processor, so the bound ids show up there, not in the line).
@@ -473,7 +473,7 @@ async def test_concurrent_fires_get_isolated_rids(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Pitfall 2 (D-05): two fires that interleave at await points must each see
+    """Pitfall 2: two fires that interleave at await points must each see
     their OWN rid in contextvars — no cross-contamination. Only true if each fire
     runs in its own copied contextvars context (the create_task fix); bare-coroutine
     gather members share one context and rids leak across.

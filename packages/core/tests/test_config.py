@@ -68,7 +68,7 @@ def test_load_settings_accepts_explicit_overrides_when_passed() -> None:
 
 
 def test_mcp_settings_both_unset_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Phase-1-only deployments keep working with MCP subtree fully unset."""
+    """Minimal deployments keep working with MCP subtree fully unset."""
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     settings = load_settings(_env_file=None)
@@ -110,7 +110,7 @@ def test_mcp_app_root_url_none_when_public_url_unset() -> None:
 
 
 def test_gemini_settings_unset_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Phase 29: GeminiSettings.api_key is None when env unset."""
+    """GeminiSettings.api_key is None when env unset."""
     monkeypatch.delenv("DAIMON_GEMINI__API_KEY", raising=False)
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
@@ -119,7 +119,7 @@ def test_gemini_settings_unset_by_default(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_gemini_settings_parsed_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Phase 29: DAIMON_GEMINI__API_KEY populates settings.gemini.api_key."""
+    """DAIMON_GEMINI__API_KEY populates settings.gemini.api_key."""
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     monkeypatch.setenv("DAIMON_GEMINI__API_KEY", "gem-test-key")
@@ -129,7 +129,7 @@ def test_gemini_settings_parsed_from_env(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_mcp_file_store_dir_overrides_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Phase 29: DAIMON_MCP__FILE_STORE_DIR overrides the default tempdir path."""
+    """DAIMON_MCP__FILE_STORE_DIR overrides the default tempdir path."""
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     monkeypatch.setenv("DAIMON_MCP__FILE_STORE_DIR", "/var/lib/daimon/mcp-files")
@@ -140,7 +140,7 @@ def test_mcp_file_store_dir_overrides_from_env(monkeypatch: pytest.MonkeyPatch) 
 def test_defaults_root_default_is_relative_defaults_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 38-04: single source of truth for defaults/ path lives on Settings."""
+    """Single source of truth for defaults/ path lives on Settings."""
     monkeypatch.delenv("DAIMON_DEFAULTS_ROOT", raising=False)
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
@@ -153,7 +153,7 @@ def test_defaults_root_default_is_relative_defaults_dir(
 def test_notebook_settings_max_attachment_bytes_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 43: NotebookSettings.max_attachment_bytes defaults to 10 MiB."""
+    """NotebookSettings.max_attachment_bytes defaults to 10 MiB."""
     monkeypatch.delenv("DAIMON_NOTEBOOK__MAX_ATTACHMENT_BYTES", raising=False)
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
@@ -166,7 +166,7 @@ def test_notebook_settings_max_attachment_bytes_default(
 def test_load_settings_max_attachment_bytes_env_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 43: DAIMON_NOTEBOOK__MAX_ATTACHMENT_BYTES overrides the default."""
+    """DAIMON_NOTEBOOK__MAX_ATTACHMENT_BYTES overrides the default."""
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     monkeypatch.setenv("DAIMON_NOTEBOOK__MAX_ATTACHMENT_BYTES", "1234")
@@ -185,7 +185,7 @@ def test_defaults_root_overrides_from_env(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
 
-# --- BillingSettings tests (Phase 53, TOPUP-01) ---
+# --- BillingSettings tests (TOPUP-01) ---
 
 
 def test_billing_defaults_when_no_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,11 +196,11 @@ def test_billing_defaults_when_no_env_set(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.delenv("DAIMON_BILLING__SIGNUP_CREDIT", raising=False)
     settings = load_settings(_env_file=None)
     assert settings.billing.markup == Decimal("1.0"), (
-        "default markup must be Decimal('1.0') (pass-through, D-15)"
+        "default markup must be Decimal('1.0') (pass-through)"
     )
     assert settings.billing.signup_credit == Decimal("5.00"), (
         "default signup_credit must be >0 (Decimal('5.00')) so one-click works on trial "
-        "credit before payment (D-25); operators set 0 for pay-first"
+        "credit before payment; operators set 0 for pay-first"
     )
 
 
@@ -244,13 +244,13 @@ def test_notebook_settings_max_source_bytes_defaults_to_one_mib() -> None:
 
 
 def test_discord_health_port_defaults_to_8081(monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-07: discord liveness port defaults to 8081 (distinct from mcp 8080 / scheduler 8082)."""
+    """Discord liveness port defaults to 8081 (distinct from mcp 8080 / scheduler 8082)."""
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     monkeypatch.setenv("DAIMON_DISCORD__BOT_TOKEN", "discord-token")
     settings = load_settings(_env_file=None)
     assert settings.discord is not None, "discord subtree present when bot_token is set"
-    assert settings.discord.health_port == 8081, "health_port defaults to 8081 (D-07)"
+    assert settings.discord.health_port == 8081, "health_port defaults to 8081"
 
 
 def test_discord_per_caller_thread_sessions_defaults_to_true(
@@ -297,7 +297,7 @@ def test_discord_health_port_parsed_from_nested_env(monkeypatch: pytest.MonkeyPa
     )
 
 
-# --- GithubSettings tarball size caps (RATE-03) ---
+# --- GithubSettings tarball size caps ---
 
 
 def test_github_settings_max_tarball_bytes_defaults_to_50_mib() -> None:
@@ -370,7 +370,7 @@ def test_github_app_private_key_none_stays_none() -> None:
     assert settings.app_private_key is None, "unset private key must remain None"
 
 
-# --- SlackSettings tests (Phase 78, SCORE-03) ---
+# --- SlackSettings tests ---
 
 
 def test_slack_settings_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:

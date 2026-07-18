@@ -1,6 +1,6 @@
 """Integration tests for mcp_tokens store — real Postgres.
 
-Covers the four store behaviors for PHASE-77-TOKEN-01:
+Covers the four store behaviors:
 1. create_mcp_token_row inserts a row readable by get_mcp_token.
 2. get_mcp_token returns an McpTokenRow (Pydantic, never ORM).
 3. revoke_mcp_token flips revoked_at from None to the injected now.

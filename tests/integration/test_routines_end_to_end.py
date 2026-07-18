@@ -1,6 +1,6 @@
 """End-to-end routines runtime: scheduler tick -> fake MA -> record_result.
 
-This is the canonical proof that Phase 16 closes:
+This is the canonical proof that the routines integration coverage closes:
 
 1. ``last_result_tail`` is populated on success.
 2. ``last_error`` is populated on failure (``session.error`` event).
@@ -127,7 +127,7 @@ async def schema_engine() -> AsyncIterator[
     sm = build_session_factory(engine)
 
     # Seed a Tenant — the routine row's tenant_id FK points at it.
-    # Seed a positive balance so the Phase-53 admission gate (is_over_balance, D-14)
+    # Seed a positive balance so the admission gate (is_over_balance)
     # does not block scheduled fires — these e2e tests exercise the fire path, not the gate.
     async with sm() as s, s.begin():
         tenant = await make_tenant(s, platform="discord", workspace_id="e2e-guild-a")
@@ -179,7 +179,7 @@ def _build_fake_anthropic_factory(
     Also wires up resolver-facing surface: ``beta.agents.retrieve`` returns a
     live agent matching ``agent_id`` (cached_id liveness path), and
     ``beta.environments.list`` yields one daimon-tagged ``default`` env so
-    ``resolve_environment`` resolves on the tag-lookup branch (Phase 38-04).
+    ``resolve_environment`` resolves on the tag-lookup branch.
     """
     now_dt = dt.datetime.now(dt.UTC)
     now_iso = now_dt.isoformat()
@@ -485,7 +485,7 @@ def _build_archived_agent_factory(
     """Like ``_build_fake_anthropic_factory``, but ``agents.retrieve(stale_id)``
     returns a row with ``archived_at`` populated, forcing the resolver into the
     tag-lookup branch where ``agents.list`` yields the fresh agent. Used by
-    ``test_fire_heals_archived_agent_id`` (Phase 38-04 success criterion).
+    ``test_fire_heals_archived_agent_id`` (success criterion).
     """
     now_dt = dt.datetime.now(dt.UTC)
     now_iso = now_dt.isoformat()
@@ -673,7 +673,7 @@ async def test_fire_heals_archived_agent_id(
     schema_engine: tuple[AsyncEngine, async_sessionmaker[AsyncSession], uuid.UUID],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 38-04 acceptance test: routine has an archived ``agent_id``;
+    """Acceptance test: routine has an archived ``agent_id``;
     fire resolves a fresh id via tag lookup, persists the heal, and completes
     the turn successfully.
     """
@@ -979,7 +979,7 @@ async def test_end_to_end_tick_fires_each_routine_under_own_tenant(
     async with sm() as s, s.begin():
         tenant_b_row = await make_tenant(s, platform="discord", workspace_id="e2e-guild-b")
         tenant_id_b = tenant_b_row.id
-        # Positive balance so the admission gate (D-14) does not block tenant B's fire.
+        # Positive balance so the admission gate (is_over_balance) does not block tenant B's fire.
         await tenant_ledger.insert_entry(
             s,
             tenant_id=tenant_id_b,

@@ -1,4 +1,4 @@
-"""TokenProvider Protocol (Phase 19, GH-03)."""
+"""TokenProvider Protocol."""
 
 from __future__ import annotations
 

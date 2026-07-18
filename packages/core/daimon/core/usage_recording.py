@@ -9,7 +9,7 @@ Per RESEARCH §"SDK Event Shape": the typed SDK event does NOT carry model_id.
 The caller resolves it once from `session.agent.model.id` and binds via
 `functools.partial`. This module reads tokens from `event.model_usage`.
 
-Per `guideline:architecture` Error Propagation + D-25: exceptions are not
+Per `guideline:architecture` Error Propagation: exceptions are not
 swallowed. A DB failure here IS a turn failure.
 """
 
@@ -98,7 +98,7 @@ async def record_media_usage(
     Sibling to `record_turn_usage`, but takes plain ints instead of an SDK
     event — callers (the MCP media tools) resolve token counts from a
     `google-genai` response before calling this; `daimon.core` never imports
-    `google-genai` (D-05).
+    `google-genai`.
 
     `managed_session_id`/`event_id` default to fresh synthetic ids
     (`gemini:{uuid4()}` / `uuid4()`) when not supplied, so each call is its

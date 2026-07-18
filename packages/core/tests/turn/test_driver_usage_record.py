@@ -127,7 +127,7 @@ async def test_driver_with_usage_record_none_skips_invocation() -> None:
 
 
 async def test_driver_propagates_usage_record_exception() -> None:
-    """D-25 fail-closed: usage_record raise propagates uncaught."""
+    """Fail-closed: usage_record raise propagates uncaught."""
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [
         [

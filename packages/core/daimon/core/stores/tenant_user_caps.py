@@ -8,7 +8,7 @@ than inserting a duplicate.
 
 `get_effective_cap` returns override > default > None, in that priority.
 
-Per `guideline:architecture` (D-25): this module does NOT swallow exceptions.
+Per `guideline:architecture`: this module does NOT swallow exceptions.
 """
 
 from __future__ import annotations
@@ -149,7 +149,7 @@ async def delete_all_for_user(
     tenant_id: uuid.UUID,
     platform_user_id: str,
 ) -> int:
-    """Phase 17 GDPR. Deletes ONLY this user's override rows within one tenant.
+    """GDPR deletion. Deletes ONLY this user's override rows within one tenant.
 
     The default rows (platform_user_id IS NULL) belong to the tenant, not to
     any user, and are never touched. Postgres `NULL = '<value>'` is NULL (not

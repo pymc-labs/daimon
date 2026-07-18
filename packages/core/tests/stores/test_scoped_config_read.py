@@ -388,7 +388,7 @@ async def test_list_propagations_for_tenant_returns_mode(
 
 
 # ---------------------------------------------------------------------------
-# Phase 58.3 invariant tests
+# Invariant tests
 # ---------------------------------------------------------------------------
 
 

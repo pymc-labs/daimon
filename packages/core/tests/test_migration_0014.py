@@ -1,4 +1,4 @@
-"""Schema-shape + per-row-derived-tenant tests for migration 0014 (THREAD-02, D-02/D-03).
+"""Schema-shape + per-row-derived-tenant tests for migration 0014.
 
 The schema-per-test `db_session` fixture builds the schema via
 `Base.metadata.create_all` (not alembic), so the ORM models declared for 0014

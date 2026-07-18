@@ -1,9 +1,9 @@
 """Pure builder for the MA `github_repository` session resource (dev-agent port).
 
-This is the runtime consumer of `agent_repo_binding` that was never shipped: it
+This is the runtime consumer of `agent_repo_binding`: it
 turns a persisted binding + a resolved PAT into the `github_repository` resource
 that `create_session` mounts, so a bound repo actually clones into the agent's
-workspace (verified live in spike 033).
+workspace.
 
 Pure and I/O-free by design — `create_session` does the `get_binding` /
 `get_pat` reads and feeds the results here.

@@ -1,4 +1,4 @@
-"""Skill sync orchestrator (Phase 33).
+"""Skill sync orchestrator.
 
 NAMED ERROR BOUNDARY: per the architecture rule, this is the ONLY module in the
 skill_sync package allowed to catch per-repo and per-skill exceptions. Fetcher,
@@ -9,20 +9,19 @@ Concurrency: bounded by _UPLOAD_CONCURRENCY (=6). Per-skill timeout is
 _PER_SKILL_TIMEOUT_S (=60.0). Both are module-level constants.
 
 Display titles: produced exclusively by `tenant_scoped_display_title` from
-`daimon.core.defaults.metadata` (D-01/D-03). Titles are tenant-prefixed
+`daimon.core.defaults.metadata`. Titles are tenant-prefixed
 `{t8}-{agent_name}/{name}` so skills from two guilds syncing the same-named
 skill produce two distinct MA skills with no cross-tenant collision.
 
 Pagination: MA's skills.list never populates `next_page` at any page boundary
-(live probe 2026-06-10, scripts/probes/managed_agents/list_pagination.py).
-Full page = truncated org view. The recovery branch uses
+(verified live, 2026-06-10). Full page = truncated org view. The recovery branch uses
 `find_skill_by_display_title(on_truncation="raise")` from `daimon.core.defaults.
 ma_index` — truncation raises `SkillsListTruncatedError`, which the `_upload_all`
-boundary records in `report.failed_uploads` (D-13).
+boundary records in `report.failed_uploads`.
 
 Recovery namespace check: before pushing a version onto a recovered skill, we
-verify the recovered skill's display_title carries this tenant's prefix (D-07,
-#138). If it does not, the push is refused with a `DefaultsError`.
+verify the recovered skill's display_title carries this tenant's prefix
+(see #138). If it does not, the push is refused with a `DefaultsError`.
 
 Final step attaches uploaded skills (and any pre-existing user_skills rows)
 onto the MA agent via `client.beta.agents.update(agent_id, skills=...)`.
@@ -173,7 +172,7 @@ def sync_report_failures(report: SyncReport) -> list[SyncRepoFailure]:
 def _looks_like_duplicate_title(err: anthropic.APIStatusError) -> bool:
     """Heuristic: is this APIStatusError MA's duplicate-display_title rejection?
 
-    Probed shape (scripts/probes/managed_agents/dup_display_title.py, 2026-05-09):
+    Probed shape (verified live, 2026-05-09):
       - status_code: 400
       - message: "Skill cannot reuse an existing display_title: <title>"
       - body['error']['type']: 'invalid_request_error'
@@ -182,7 +181,7 @@ def _looks_like_duplicate_title(err: anthropic.APIStatusError) -> bool:
     matched false positives — e.g. `display_title must be at most 64
     characters long` — and steered length-rejection errors into the recovery
     branch where find_skill_by_display_title returned None (verified live
-    2026-05-09, scripts/probes/managed_agents/sync_agent_skills_live.py).
+    2026-05-09).
     """
     if getattr(err, "status_code", None) != 400:
         return False
@@ -288,15 +287,15 @@ async def _process_one(
             # skill by display_title and push a new version onto it.
             # on_truncation="raise" ensures a truncated view raises
             # SkillsListTruncatedError rather than silently hiding the duplicate
-            # (D-13). The _upload_all except-Exception boundary records it in
+            # The _upload_all except-Exception boundary records it in
             # report.failed_uploads.
             recovered = await find_skill_by_display_title(
                 anthropic_client, display_title, on_truncation="raise"
             )
             if recovered is None:
                 raise
-            # D-07 / #138: Namespace check — refuse to push a version onto a
-            # skill that doesn't belong to this tenant. Post-D-01 titles can't
+            # Namespace check — refuse to push a version onto a
+            # skill that doesn't belong to this tenant. Post-provision titles can't
             # collide cross-tenant, so this is defense in depth. A None
             # display_title (unprefixed MA skill) also fails the check.
             recovered_title: str = recovered.display_title or ""
@@ -399,24 +398,25 @@ async def sync_agent_skills(
 ) -> SyncReport:
     """Sync all skill_repos for one agent. Named error boundary.
 
-    WR-01: ``credential_override`` lets a caller (the webhook resync) pass a
-    pre-selected GitHub credential (App installation token > per-agent PAT > anon,
-    per D-21) so this function does NOT independently re-resolve a per-agent PAT.
-    When provided, it is the single authority for the fetch ``Authorization`` header
-    and the internal ``get_pat`` resolution is skipped — this is what makes the
-    App-installation-token tier actually win when both an installation and a
-    per-agent PAT exist. When None (panel / CLI / MCP paths), the per-agent PAT is
-    resolved here as before.
+        ``credential_override`` lets a caller (the webhook resync) pass a
+        pre-selected GitHub credential (App installation token > per-agent PAT > anon,
+        per the credential-selection priority) so this function does NOT
+        independently re-resolve a per-agent PAT.
+        When provided, it is the single authority for the fetch ``Authorization`` header
+        and the internal ``get_pat`` resolution is skipped — this is what makes the
+        App-installation-token tier actually win when both an installation and a
+        per-agent PAT exist. When None (panel / CLI / MCP paths), the per-agent PAT is
+        resolved here as before.
 
-    ``max_tarball_bytes`` bounds the per-repo tarball download (RATE-03,
-    D-13/D-11). Defaults to the safe 50 MiB constant so all pre-existing callers
-    stay guarded without threading settings explicitly; the webhook resync edge
-    passes ``github_settings.max_tarball_bytes`` so operator overrides take effect.
+        ``max_tarball_bytes`` bounds the per-repo tarball download
+    . Defaults to the safe 50 MiB constant so all pre-existing callers
+        stay guarded without threading settings explicitly; the webhook resync edge
+        passes ``github_settings.max_tarball_bytes`` so operator overrides take effect.
     """
     report = SyncReport()
     report_lock = asyncio.Lock()
 
-    # 1. Resolve PAT per-agent (D-25: no principal-default bleed on the agent path).
+    # 1. Resolve PAT per-agent (never fall back to principal credential on the agent path).
     # Find the MA agent to derive its per-agent UUID, then call get_pat with that
     # agent_id. If the agent is not found on MA (shouldn't happen for a sync target),
     # fall back to agent_id=None so public repos still work — but only as an explicit

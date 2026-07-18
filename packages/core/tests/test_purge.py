@@ -716,7 +716,7 @@ async def test_purge_account_deletes_sessions_across_all_principal_tenants(
 
 
 # ---------------------------------------------------------------------------
-# New-table behavioral tests (Phase 76 — user_skills, github_credentials,
+# New-table behavioral tests (user_skills, github_credentials,
 # github_oauth_states)
 # ---------------------------------------------------------------------------
 
@@ -813,7 +813,7 @@ async def test_purge_principal_ghost_row_deleted_across_tenant_ids(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Ghost rows under a stale tenant_id are still purged (D-06, Pitfall 3)."""
+    """Ghost rows under a stale tenant_id are still purged (Pitfall 3)."""
     tenant_a = await make_tenant(db_session, workspace_id="ghost-guild-a")
     tenant_b = await make_tenant(db_session, workspace_id="ghost-guild-b")
     account = await make_account(db_session, tenant=tenant_a)
@@ -843,7 +843,7 @@ async def test_purge_principal_ghost_row_deleted_across_tenant_ids(
     report = await purge_principal(sm=db_session_factory, principal_id=pp.id, kind="platform")
 
     assert report.user_skills == 1, (
-        "ghost row under stale tenant_id must be deleted — tenant-agnostic predicate (D-06)"
+        "ghost row under stale tenant_id must be deleted — tenant-agnostic predicate"
     )
 
 
@@ -851,7 +851,7 @@ async def test_purge_principal_cli_deletes_all_three_new_tables(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """CLI principal purge removes user_skills, github_credentials, and ("cli", os_user) oauth-state rows (Pitfall 6 / D-07)."""
+    """CLI principal purge removes user_skills, github_credentials, and ("cli", os_user) oauth-state rows (Pitfall 6)."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     cli = await make_cli_principal(
@@ -993,7 +993,7 @@ async def test_purge_account_rolls_back_new_table_rows_on_failure(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """New-table rows survive a mid-purge rollback — single transaction holds (D-07)."""
+    """New-table rows survive a mid-purge rollback — single transaction holds."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     cli = await make_cli_principal(db_session, os_user="rb-new", tenant=tenant, account=account)

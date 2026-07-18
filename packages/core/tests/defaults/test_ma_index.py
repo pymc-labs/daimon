@@ -124,7 +124,7 @@ async def test_find_agent_multi_match_returns_most_recent_and_warns() -> None:
 
 
 async def test_find_agent_resolver_ambiguous_name_emits_account_aware_warning() -> None:
-    """D-09: when two agents share the same daimon_name but differ in daimon_account,
+    """When two agents share the same daimon_name but differ in daimon_account,
     find_agent_by_daimon_tag adopts the newest and emits one resolver_ambiguous_name
     warning with account fields for cross-account collision diagnosis."""
     tenant_id = uuid.UUID("70121a77-33ce-566b-a2ee-47d93bc422ae")

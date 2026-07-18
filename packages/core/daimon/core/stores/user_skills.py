@@ -215,7 +215,7 @@ async def delete_user_skills_for_principal(
 
     Returns rowcount; never raises on 0. Used by the GDPR purge orchestrator.
 
-    WHERE is principal_id ONLY — deliberately NO tenant_id filter (D-06). Ghost
+    WHERE is principal_id ONLY — deliberately NO tenant_id filter. Ghost
     rows stranded under stale tenant_ids by the 71-12 re-key must still be
     deleted; erasure must not depend on tenant bookkeeping being correct.
     """

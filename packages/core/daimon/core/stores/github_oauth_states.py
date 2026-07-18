@@ -1,4 +1,4 @@
-"""OAuth state GDPR helpers — Phase 97 (D-03/C-01) removed the OAuth flow
+"""OAuth state GDPR helpers — the OAuth flow
 
 itself (create/peek/get_by_state/consume), but legacy `github_oauth_states`
 rows may still exist from before the removal and must stay purgeable. These

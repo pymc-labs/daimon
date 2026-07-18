@@ -1,4 +1,4 @@
-"""GDPR purge orchestrator (Phase 17).
+"""GDPR purge orchestrator.
 
 Single core entry point that deletes every row referencing a principal (or all
 principals under an account) across stores, in FK-safe order, inside a single
@@ -12,7 +12,7 @@ github_oauth_states (both kinds where the table permits) -> routines (platform
 only) -> principal_links -> principal row. Account-level deletes (mcp_tokens,
 user_configs, accounts) run in `purge_account` after all principal rows are
 gone; mcp_tokens is keyed by account_id and is deleted before delete_account so
-its NO-ACTION/CASCADE FK to accounts.id is satisfied (Phase 87).
+its NO-ACTION/CASCADE FK to accounts.id is satisfied.
 
 Divergent helper signatures: identity-store `delete_for_principal` is keyed by
 UUID; routines `delete_for_principal` is keyed by `(platform, external_id)`
@@ -20,16 +20,16 @@ because routines reference platform users by their external id, not the
 principal UUID. The orchestrator dispatches manually rather than via a unified
 Protocol — see RESEARCH.md A2.
 
-Deliberate carve-outs (D-02):
+Deliberate carve-outs:
 - `usage_events` and `tenant_user_caps` rows are retained for billing integrity.
   Their `delete_all_for_user` helpers exist and are deliberately uncalled here.
 - Uploaded MA skill files (user_skills rows) are our DB ledger: the DB row is
   deleted as part of purge, but the uploaded file content inside Anthropic's
   Managed Agents is retained — guild-shared agents may still reference the
-  underlying skill and the MA workspace is not under our delete authority (D-04).
+  underlying skill and the MA workspace is not under our delete authority.
 - The user's GitHub-side OAuth grant is not revoked. No GitHub API client enters
   the purge path — we delete only our encrypted credential and oauth-state rows
-  from our own DB (D-05).
+  from our own DB.
 """
 
 from __future__ import annotations
@@ -122,7 +122,7 @@ async def _purge_principal_in_session(
         # platforms — Slack user ids are workspace-scoped, so `U123` in two
         # workspaces are two different humans. A tenant-agnostic delete would
         # erase another tenant's in-flight (10-min-TTL) handshake rows. The
-        # narrow D-06 "ghost rows under a stale tenant_id" completeness gap
+        # narrow "ghost rows under a stale tenant_id" completeness gap
         # (re-key drift) is accepted — those rows expire unused.
         oauth_states_count = await github_oauth_states_store.delete_states_for_platform_user(
             session,
@@ -134,9 +134,9 @@ async def _purge_principal_in_session(
         routines_count = 0
         kind = "cli"
         # The CLI auth flow writes oauth-state rows with platform="cli",
-        # platform_user_id=<os_user> (adapters/cli/commands/auth.py). D-07 covers
+        # platform_user_id=<os_user> (adapters/cli/commands/auth.py). Both
         # both principal kinds where the table permits — CLI principals are included.
-        # tenant_id scoping is a deliberate D-06 carve-out: os_user is NOT
+        # tenant_id scoping is a deliberate carve-out: os_user is NOT
         # globally unique (two unrelated people can both be `ubuntu`), so a
         # tenant-agnostic delete would erase another account's handshake rows.
         # Trade-off accepted: cli handshake ghost rows stranded under a stale
@@ -150,7 +150,7 @@ async def _purge_principal_in_session(
         )
 
     # user_skills and github_credentials are keyed by principal_id alone — both
-    # principal kinds own rows in these tables (D-07).
+    # principal kinds own rows in these tables.
     user_skills_count = await user_skills_store.delete_user_skills_for_principal(
         session, principal_id=principal.id
     )
@@ -210,7 +210,7 @@ async def purge_account(
     are NOT touched.
 
     When `anthropic` is provided, attempts upstream hard-deletion of all MA
-    sessions tagged for `account_id` AFTER the DB transaction commits (D-07:
+    sessions tagged for `account_id` AFTER the DB transaction commits (
     DB purge is never rolled back by an upstream failure). Sessions are
     enumerated per tenant, across EVERY tenant any linked principal belongs
     to — `principal_links` permits an account to span tenants.
@@ -249,7 +249,7 @@ async def purge_account(
             )
         )
 
-    # DB transaction committed. Upstream deletion is best-effort (D-07),
+    # DB transaction committed. Upstream deletion is best-effort,
     # looped over every tenant the account's principals belonged to.
     # Deliberate boundary catch: the DB purge has already committed, so an
     # upstream APIError must NOT propagate — the caller would misreport a

@@ -63,7 +63,7 @@ def _make_binding(*, repo_url: str, ma_secret_ref: str) -> AgentRepoBindingRow:
 @pytest.mark.parametrize(
     ("has_per_agent_pat", "app_installed", "binding_is_public", "has_fallback_pat", "expected"),
     [
-        # PAT always wins (D-05), regardless of the other inputs.
+        # PAT always wins, regardless of the other inputs.
         (True, False, False, False, "pat"),
         (True, True, True, True, "pat"),
         (True, False, True, True, "pat"),
@@ -86,7 +86,7 @@ def test_select_clone_auth_table(
     has_fallback_pat: bool,
     expected: str,
 ) -> None:
-    """select_clone_auth follows the D-02 precedence table: pat -> app -> public -> none."""
+    """select_clone_auth follows the precedence table: pat -> app -> public -> none."""
     mode = select_clone_auth(
         has_per_agent_pat=has_per_agent_pat,
         app_installed=app_installed,
@@ -109,7 +109,7 @@ def test_select_clone_auth_table(
 @pytest.mark.asyncio
 async def test_resolve_clone_token_pat_short_circuits_with_zero_github_calls() -> None:
     """When a per-agent PAT is present, resolve_clone_token returns it and issues
-    ZERO GitHub HTTP requests — no JWT mint, no installation lookup (D-05, Pitfall 2)."""
+    ZERO GitHub HTTP requests — no JWT mint, no installation lookup."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         pytest.fail(f"GitHub transport must not be called on the PAT path; got {request.url}")
@@ -128,7 +128,7 @@ async def test_resolve_clone_token_pat_short_circuits_with_zero_github_calls() -
         now=1_000_000,
     )
 
-    assert token == "ghp_per_agent_token", "PAT must win over App/public per D-05"
+    assert token == "ghp_per_agent_token", "PAT must win over App/public"
 
 
 @pytest.mark.asyncio
@@ -250,7 +250,7 @@ async def test_resolve_clone_token_empty_string_pat_is_treated_as_no_token() -> 
 
 @pytest.mark.asyncio
 async def test_resolve_clone_token_raises_when_no_credential_resolves() -> None:
-    """Private binding, no PAT, no App configured, no fallback -> raises (D-02 step 4);
+    """Private binding, no PAT, no App configured, no fallback -> raises (step 4);
     never returns an empty authorization_token."""
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(404)))
     binding = _make_binding(repo_url="acme/private-repo", ma_secret_ref="inline-pat:agent-1")

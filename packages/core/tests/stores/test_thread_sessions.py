@@ -2,7 +2,7 @@
 
 Covers create + get_live, newest-row-wins ordering, dead-row exclusion,
 watermark update, restart-resume (SC-1 store half + SC-3), account_id
-filtering (Phase 88 SCOPING §4/§6 security guard), and NULL-never-matches
+filtering (SCOPING §4/§6 security guard), and NULL-never-matches
 proof against real Postgres.
 Each test inlines its `create_thread_session(...)` call per guideline:testing.
 """

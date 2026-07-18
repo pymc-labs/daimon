@@ -1,4 +1,4 @@
-"""Unit tests for daimon.core.ma_resolver (Phase 38).
+"""Unit tests for daimon.core.ma_resolver.
 
 Covers the five-step resolve chain (cached liveness -> TTL cache hit ->
 daimon-tag lookup -> apply_callable + retry -> raise) for both agents

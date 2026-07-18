@@ -1,4 +1,4 @@
-"""Factories for Phase 18 GitHub-OAuth-related fixtures."""
+"""Factories for GitHub-OAuth-related fixtures."""
 
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ async def make_oauth_state(
     platform_user_id: str = "u-1",
     scopes: tuple[str, ...] = ("repo", "read:user"),
     age_minutes: int = 0,  # set >0 to synthesize an old/expired-looking row
-    consumed: bool = False,  # Phase 97: OAuth flow removed; seed pre-consumed rows directly
+    consumed: bool = False,  # OAuth flow removed; seed pre-consumed rows directly
 ) -> GitHubOauthStateRow:
     """Insert a `github_oauth_states` row.
 
     `age_minutes` lets tests back-date `created_at` without sleeping. The
-    OAuth-flow write path (`create`/`consume`) was removed in Phase 97 (D-03);
+    OAuth-flow write path (`create`/`consume`) was removed;
     this factory inserts the ORM row directly for the GDPR-purge tests that
     still need legacy-shaped rows. `consumed` sets `consumed_at` at insert
     time — there is no longer a store-level `consume()` to call.

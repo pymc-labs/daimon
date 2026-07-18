@@ -1,4 +1,4 @@
-"""Real-DB behavior tests for the github_app_installations store. Phase 56 (GHAPP-01)."""
+"""Real-DB behavior tests for the github_app_installations store."""
 
 from __future__ import annotations
 

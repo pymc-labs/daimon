@@ -1,6 +1,6 @@
 """Integration tests for github_oauth_states GDPR helpers — real Postgres.
 
-Phase 97 (D-03/C-01) removed the OAuth-flow write path (`create`/`peek`/
+The OAuth-flow write path (`create`/`peek`/
 `get_by_state`/`consume`) — the store now retains only the erasure helpers
 `delete_states_for_platform_user` / `count_states_for_platform_user`, used by
 `daimon.core.privacy` / `daimon.core.purge` to purge legacy PII rows. Rows are

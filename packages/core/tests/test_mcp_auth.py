@@ -4,7 +4,7 @@ The verifier side is covered in the MCP adapter test suite (DaimonJWTVerifier
 integration); here we assert the pure shape: sub=account_uuid, iat injected,
 no other claims, HS256 signature round-trips with PyJWT.
 
-Phase 77 (PHASE-77-TOKEN-01): extends with mint_agent_mcp_token round-trip,
+Extends with mint_agent_mcp_token round-trip,
 A1 exact-claim-set assertion, and store-row-readable verification.
 """
 
@@ -33,7 +33,7 @@ def test_mint_jwt_shape() -> None:
 
 
 def test_mint_jwt_omits_agent_id_claim_when_not_passed() -> None:
-    """Phase 19: backward compat — no agent_id kwarg → no agent_id claim."""
+    """Backward compat — no agent_id kwarg → no agent_id claim."""
     account_id = uuid.uuid4()
     secret = b"a" * 32
     now = dt.datetime(2026, 4, 24, 12, 0, 0, tzinfo=dt.UTC)
@@ -45,7 +45,7 @@ def test_mint_jwt_omits_agent_id_claim_when_not_passed() -> None:
 
 
 def test_mint_jwt_includes_agent_id_claim_when_passed() -> None:
-    """Phase 19 (D-10/D-27): mint_jwt encodes the optional agent_id claim."""
+    """mint_jwt encodes the optional agent_id claim."""
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     secret = b"a" * 32
@@ -97,7 +97,7 @@ def test_mint_jwt_agent_id_does_not_introduce_platform_or_guild_id_claims() -> N
     assert "guild_id" not in decoded, "minted token must carry no guild_id wire claim"
 
 
-# ---- Phase 50: is_admin claim (Wave 0 RED stubs) ----
+# ---- is_admin claim ----
 
 
 def test_mint_jwt_emits_is_admin_claim_when_true() -> None:
@@ -147,7 +147,7 @@ def test_mint_internal_mcp_token_emits_is_admin_true() -> None:
     assert decoded["is_admin"] is True, "headless/routine token is admin per D-50b"
 
 
-# ---- Phase 88-03: internal discriminator on mint_internal_mcp_token; admin_ttl_seconds REMOVED ----
+# ---- internal discriminator on mint_internal_mcp_token ----
 
 
 def test_mint_jwt_default_omits_exp() -> None:
@@ -170,8 +170,8 @@ def test_mint_jwt_default_omits_exp() -> None:
 def test_mint_internal_mcp_token_has_no_exp() -> None:
     """Regression: mint_internal_mcp_token must NOT gain an exp claim.
 
-    Phase 88 touches mint_jwt but must not touch mint_internal_mcp_token
-    (D-02/D-50b). Headless/routine tokens are trusted-context, per-invocation,
+    Changes to mint_jwt must not touch mint_internal_mcp_token
+    Headless/routine tokens are trusted-context, per-invocation,
     and long-lived by design — no exp.
     """
     account_id = uuid.uuid4()
@@ -184,9 +184,7 @@ def test_mint_internal_mcp_token_has_no_exp() -> None:
     assert decoded["is_admin"] is True, (
         "mint_internal_mcp_token must still emit is_admin=True (D-50b regression)"
     )
-    assert "exp" not in decoded, (
-        "mint_internal_mcp_token must NOT carry exp — it is unchanged by Phase 88 (D-02)"
-    )
+    assert "exp" not in decoded, "mint_internal_mcp_token must NOT carry exp — it is unchanged"
 
 
 def test_mint_internal_mcp_token_emits_internal_claim() -> None:
@@ -233,7 +231,7 @@ def test_mint_jwt_never_emits_internal_claim() -> None:
         )
 
 
-# ---- Phase 77: mint_agent_mcp_token (A1 claim shape + store round-trip) ----
+# ---- mint_agent_mcp_token (A1 claim shape + store round-trip) ----
 
 
 async def _seed_tenant_and_account(session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:

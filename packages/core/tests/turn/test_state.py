@@ -87,9 +87,7 @@ def test_turn_state_accepts_turn_error_on_error_field_when_upstream_fails() -> N
 
 def test_task_is_empty_placeholder_kept_for_forward_compat_when_referenced() -> None:
     task = Task()
-    assert isinstance(task, Task), (
-        "Task is a placeholder; Managed Agents emits no task events in phase 1"
-    )
+    assert isinstance(task, Task), "Task is a placeholder; Managed Agents emits no task events yet"
 
 
 class TestExtractFinalResponse:

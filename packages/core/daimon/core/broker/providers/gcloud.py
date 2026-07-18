@@ -1,4 +1,4 @@
-"""GWS provider — service-account impersonation via google-auth (Phase 19 D-15..D-18).
+"""GWS provider — service-account impersonation via google-auth.
 
 google-auth's ``Credentials.refresh()`` is synchronous (urllib under the
 hood, ~0.4s round trip to oauth2.googleapis.com). We wrap it in

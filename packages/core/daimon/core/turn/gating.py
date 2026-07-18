@@ -1,4 +1,4 @@
-"""Shared turn-admission gate -- pure, platform-agnostic (SCORE-04)."""
+"""Shared turn-admission gate -- pure, platform-agnostic."""
 
 from __future__ import annotations
 

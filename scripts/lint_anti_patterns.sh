@@ -20,10 +20,10 @@
 #       Allowlisted files apply one of the two; a new create site must do the
 #       same before being added here.
 #   T6  get_earliest_tenant anywhere — banned (oldest-tenant path retired)
-#       (oldest-tenant path is retired; Phase 60 / MT-1c).
+#       (oldest-tenant path is retired).
 #   T7  client.beta.skills.list in production source — banned outside ma_index.py
 #       (the chokepoint). All skills listing must go through list_skills_strict or
-#       list_skills_lenient which enforce D-13 truncation semantics.
+#       list_skills_lenient which enforce truncation semantics.
 #   T8  find_skills?_by_display_title( outside sanctioned canonical-title callers
 #       — banned. Every allowlisted module builds its lookup title via
 #       tenant_scoped_display_title. New callers must be vetted and added here.
@@ -33,7 +33,6 @@
 #
 # Run locally with: bash scripts/lint_anti_patterns.sh
 #
-# Promoted from .planning/spikes/025-grep-lint-anti-patterns/.
 
 set -euo pipefail
 
@@ -72,12 +71,12 @@ ALLOWLIST_T5=(
   # preflight probe agents are archived immediately — never host sessions/skills.
   "core/defaults/preflight.py"
 )
-# get_earliest_tenant is fully retired (Phase 60 / MT-1c) — the oldest-tenant
+# get_earliest_tenant is fully retired — the oldest-tenant
 # path no longer exists anywhere. Zero allowlist: any occurrence fails.
 ALLOWLIST_T6=()
 # T7: skills.list chokepoint — only ma_index.py may call it directly.
 # All other code must use list_skills_strict (write contexts) or list_skills_lenient
-# (read contexts) from ma_index, which enforce D-13 truncation semantics.
+# (read contexts) from ma_index, which enforce truncation semantics.
 ALLOWLIST_T7=("defaults/ma_index.py")
 # T8: canonical-title lookup chokepoint — only the approved modules that build
 # their lookup title via tenant_scoped_display_title may call find_skills?_by_display_title.
@@ -191,7 +190,7 @@ run_rule "T3" \
   ALLOWLIST_T3
 
 # T4: unfiltered agents/environments .list() in production source (cross-tenant leak).
-# skills.list is banned separately by T6 — the D-13 chokepoint (ma_index.py).
+# skills.list is banned separately by T6 — the chokepoint (ma_index.py).
 run_rule_prod "T4" \
   "Banned: unfiltered client.beta.{agents,environments}.list in production (cross-tenant leak)" \
   'client\.beta\.(agents|environments)\.list' \
@@ -203,15 +202,15 @@ run_rule_prod "T5" \
   '\.beta\.agents\.create\(' \
   ALLOWLIST_T5
 
-# T6: get_earliest_tenant anywhere (oldest-tenant path fully retired; Phase 60 / MT-1c).
+# T6: get_earliest_tenant anywhere (oldest-tenant path fully retired).
 run_rule_prod "T6" \
-  "Banned: get_earliest_tenant (oldest-tenant path is retired; resolve via derive_tenant_uuid; Phase 60 / MT-1c)" \
+  "Banned: get_earliest_tenant (oldest-tenant path is retired; resolve via derive_tenant_uuid)" \
   'get_earliest_tenant' \
   ALLOWLIST_T6
 
 # T7: direct client.beta.skills.list in production source outside ma_index.py.
 # All skills listing must go through list_skills_strict / list_skills_lenient
-# in ma_index.py which enforce D-13 truncation semantics (phase 71).
+# in ma_index.py which enforce truncation semantics.
 run_rule_prod "T7" \
   "Banned: client.beta.skills.list outside ma_index.py (use list_skills_strict / list_skills_lenient)" \
   'client\.beta\.skills\.list' \
@@ -219,7 +218,7 @@ run_rule_prod "T7" \
 
 # T8: find_skills?_by_display_title( outside sanctioned callers.
 # Each allowlisted module builds its lookup title via tenant_scoped_display_title
-# (D-02 mechanical enforcement, phase 71). New callers must be vetted here.
+# (mechanical enforcement). New callers must be vetted here.
 run_rule_prod "T8" \
   "Banned: find_skills?_by_display_title( outside sanctioned canonical-title callers" \
   'find_skills?_by_display_title\(' \

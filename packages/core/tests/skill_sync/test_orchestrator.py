@@ -89,7 +89,7 @@ def _make_fernet() -> MultiFernet:
 
 
 def test_tenant_scoped_display_title_uses_tenant_prefix_and_agent_slash_name() -> None:
-    """Title scheme: {t8}-{agent_name}/{name}, tenant-prefixed (D-01/D-03)."""
+    """Title scheme: {t8}-{agent_name}/{name}, tenant-prefixed."""
     tenant_id = uuid.UUID("12345678-0000-0000-0000-000000000000")
     title = tenant_scoped_display_title(
         tenant_id=tenant_id, name="brainstorming", agent_name="my-agent"
@@ -98,7 +98,7 @@ def test_tenant_scoped_display_title_uses_tenant_prefix_and_agent_slash_name() -
 
 
 def test_tenant_scoped_display_title_truncates_over_64_chars() -> None:
-    """Over-64-char titles are truncated+hashed, not hard-errored (D-03)."""
+    """Over-64-char titles are truncated+hashed, not hard-errored."""
     tenant_id = uuid.UUID("abcdef12-0000-0000-0000-000000000000")
     long_agent = "a" * 50
     long_name = "n" * 20
@@ -224,7 +224,7 @@ async def test_first_sync_creates_new_skill(
     assert len(create_calls) == 1, "skills.create should have been called once"
 
     # Row should reflect the returned id.
-    # Bundled name is owner-qualified: github.com/o/r → "o-r" (Phase 45-01 fix).
+    # Bundled name is owner-qualified: github.com/o/r → "o-r".
     async with db_session_factory() as s, s.begin():
         row = await load_user_skill(
             s, tenant_id=cli.tenant_id, principal_id=cli.id, agent_name="agent", name="o-r"
@@ -245,7 +245,7 @@ async def test_subsequent_sync_with_changed_content_uploads_new_version(
     await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     # Seed an existing row with a stale content_hash.
-    # Bundled name is owner-qualified: github.com/o/r → "o-r" (Phase 45-01 fix).
+    # Bundled name is owner-qualified: github.com/o/r → "o-r".
     async with db_session_factory() as s, s.begin():
         await upsert_user_skill(
             s,
@@ -340,7 +340,7 @@ async def test_dedup_skips_upload_when_content_hash_matches(
     extract_root = Path("/tmp") / f"daimon-test-dedup-{uuid.uuid4().hex}"
     extract_root.mkdir(parents=True, exist_ok=True)
     # Use owner-qualified repo_name to match the orchestrator's derivation for
-    # github.com/o/r (Phase 45-01 fix): owner="o", repo="r" → repo_name="o-r".
+    # github.com/o/r: owner="o", repo="r" → repo_name="o-r".
     entries = await extract_and_bundle(
         tarball_bytes=tarball, extract_root=extract_root, repo_name="o-r", split=False
     )
@@ -651,7 +651,7 @@ _ = list_user_skills_for_agent
 def _conflict_response(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
     """Duplicate-display_title rejection in the real MA shape.
 
-    Verified by scripts/probes/managed_agents/dup_display_title.py (2026-05-09):
+    Verified by the dup_display_title probe (2026-05-09):
     status_code=400, body['error']['type']='invalid_request_error',
     message='Skill cannot reuse an existing display_title: <title>'.
     """
@@ -696,8 +696,8 @@ async def test_duplicate_display_title_recovery_lands_a_new_version(
         transport=httpx.MockTransport(lambda req: httpx.Response(200, content=tarball))
     )
 
-    # The display_title that recovery will look up — tenant-scoped (D-01/D-03).
-    # Bundled name for github.com/o/r is "o-r" after Phase 45-01 owner-qualified fix.
+    # The display_title that recovery will look up — tenant-scoped.
+    # Bundled name for github.com/o/r is "o-r" (owner-qualified).
     formatted_title = tenant_scoped_display_title(
         tenant_id=cli.tenant_id, name="o-r", agent_name="agent"
     )
@@ -783,7 +783,7 @@ async def test_recovery_raises_skills_list_truncated_error_on_full_page(
     """Full skills page during recovery raises SkillsListTruncatedError → lands in failed_uploads.
 
     With on_truncation="raise", find_skill_by_display_title raises SkillsListTruncatedError
-    when the page is full (D-13). The _upload_all except-Exception boundary records it in
+    when the page is full. The _upload_all except-Exception boundary records it in
     report.failed_uploads, so the failure is observable without silent data corruption.
     """
     cli = await make_cli_principal(db_session, os_user="alice")
@@ -1384,7 +1384,7 @@ async def test_sync_agent_skills_attach_is_noop_when_skill_already_attached(
     extract_root = Path("/tmp") / f"daimon-test-attach-noop-{uuid.uuid4().hex}"
     extract_root.mkdir(parents=True, exist_ok=True)
     # Use owner-qualified repo_name to match the orchestrator's derivation for
-    # github.com/o/r (Phase 45-01 fix): owner="o", repo="r" → repo_name="o-r".
+    # github.com/o/r: owner="o", repo="r" → repo_name="o-r".
     entries = await extract_and_bundle(
         tarball_bytes=tarball, extract_root=extract_root, repo_name="o-r", split=False
     )
@@ -1549,7 +1549,7 @@ async def test_sync_agent_skills_skips_attach_when_agent_not_found(
 
 
 # ---------------------------------------------------------------------------
-# Phase 45-01: bundled name-collision regression (PHASE-45-ORPHAN-01)
+# Bundled name-collision regression
 # ---------------------------------------------------------------------------
 
 
@@ -1560,7 +1560,7 @@ async def test_bundled_sync_two_repos_same_trailing_segment_keeps_both_skills(
 ) -> None:
     """Two bundled repos with colliding trailing URL segments must NOT share a user_skills row.
 
-    Mechanism B bug (45-RESEARCH.md D-16): in bundled mode (split=False) the skill name
+    Mechanism B bug: in bundled mode (split=False) the skill name
     derives from the last URL segment only. Two repos 'orgA/skills' and 'orgB/skills' both
     produce name='skills'; the second upsert overwrites the first row (same PK).  A
     subsequent single-repo sync then orphan-deletes the survivor, losing orgA's skill.
@@ -1647,7 +1647,7 @@ async def test_bundled_sync_two_repos_same_trailing_segment_keeps_both_skills(
     # execution via concurrency=1; this does not affect the naming fix under test.
     monkeypatch.setattr(orch_mod, "_UPLOAD_CONCURRENCY", 1)
 
-    # Phase 1: sync both repos in one call.
+    # Step 1: sync both repos in one call.
     repo_a = SkillRepo(url=url_a, branch="main", split=False)
     repo_b = SkillRepo(url=url_b, branch="main", split=False)
 
@@ -1683,7 +1683,7 @@ async def test_bundled_sync_two_repos_same_trailing_segment_keeps_both_skills(
     # Find orgA's row name so we can check it survives the single-repo sync.
     row_a = next(r for r in all_rows if r.source_repo_url == url_a)
 
-    # Phase 2: single-repo sync of orgB only — orgA's row must survive, orgA's MA skill
+    # Step 2: single-repo sync of orgB only — orgA's row must survive, orgA's MA skill
     # must NOT be delete-called.
     delete_calls.clear()
 
@@ -1872,14 +1872,14 @@ async def test_recovery_refuses_to_push_version_onto_foreign_tenant_skill(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """D-07 / #138: recovery refuses to push a version when recovered skill is foreign-prefixed.
+    """Recovery refuses to push a version when recovered skill is foreign-prefixed.
 
     Scenario: skills.create returns a duplicate-title 400 and find_skill_by_display_title
     returns a skill whose display_title carries a DIFFERENT tenant's prefix. The orchestrator
     must refuse to push versions.create onto that foreign skill and record the refusal in
     report.failed_uploads. Zero versions.create calls against the foreign skill id.
 
-    This tests defense-in-depth: post-D-01, cross-tenant title collisions cannot happen
+    This tests defense-in-depth: cross-tenant title collisions cannot happen
     in production (distinct prefixes), but we guard against future bugs with a namespace check.
     We fake the defense-in-depth scenario directly by monkeypatching find_skill_by_display_title
     to return a foreign-prefixed skill so the namespace check fires.

@@ -23,7 +23,7 @@ class SessionContext:
 
     ``is_admin`` is derived by the adapter from the invoking member's Discord
     permissions (owner | manage_guild | administrator) or CLI context, and
-    threaded into the minted JWT as the ``"is_admin"`` claim (Phase 50, RBAC-02).
+    threaded into the minted JWT as the ``"is_admin"`` claim.
     """
 
     is_admin: bool

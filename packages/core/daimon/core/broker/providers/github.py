@@ -1,4 +1,4 @@
-"""GitHub provider — passthrough over Phase 18's get_pat (Phase 19 D-14)."""
+"""GitHub provider — reads the at-rest encrypted PAT via get_pat."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 class GitHubTokenProvider:
     """Mints a token for the ``github`` service by reading the at-rest
     encrypted PAT bound to ``account_id`` (which today doubles as the
-    principal id — see Phase 18 plan 05 SUMMARY)."""
+    principal id."""
 
     service: ClassVar[str] = "github"
 
@@ -31,10 +31,10 @@ class GitHubTokenProvider:
                 "github provider requires settings.crypto.keys to be configured"
             )
         fernet = build_multifernet(tuple(k.get_secret_value() for k in settings.crypto.keys))
-        # NOTE (Phase 25 caveat): account_id IS principal_id today because
-        # Phase 18 wrote credentials keyed on account_id-as-principal-id.
-        # Phase 25 may break this if multi-principal accounts ship.
-        # D-25: when agent_id is given, get_pat is overlay-only — if the agent has
+        # NOTE: account_id IS principal_id today because
+        # credentials are keyed on account_id-as-principal-id.
+        # This may break if multi-principal accounts ship.
+        # when agent_id is given, get_pat is overlay-only — if the agent has
         # no overlay row, None is returned and NoBindingError is raised here. This is
         # correct: an agent with no per-agent credential bound must not silently inherit
         # the principal-default PAT from another agent's Connect-GitHub action.

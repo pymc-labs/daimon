@@ -1,8 +1,8 @@
-"""Behavioral tests for the D-10 orphaned-PII backfill (migration 0024).
+"""Behavioral tests for the orphaned-PII backfill (migration 0024).
 
 These tests replay the three DELETE statements as of migration 0024's landing
 (a hand-maintained mirror, NOT mechanically coupled — an edit to the migration's
-predicates would not fail these tests) and prove the three D-10 constraints:
+predicates would not fail these tests) and prove the three constraints:
   1. Orphaned rows (no surviving principal) are deleted.
   2. Live principal rows (cli and platform) are NEVER deleted — including
      CLI users' platform='cli' oauth_state rows (the load-bearing CLI predicate
@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # one-shot sweep), update these strings to match.
 # ---------------------------------------------------------------------------
 
-# D-10 backfill: mirrors 0024_backfill_delete_orphaned_pii.py upgrade().
+# Backfill: mirrors 0024_backfill_delete_orphaned_pii.py upgrade().
 _DELETE_USER_SKILLS = sa.text(
     "DELETE FROM user_skills us"
     " WHERE NOT EXISTS (SELECT 1 FROM cli_principals c WHERE c.id = us.principal_id)"
@@ -63,7 +63,7 @@ _DELETE_GITHUB_OAUTH_STATES = sa.text(
 
 
 async def _run_sweep(session: AsyncSession) -> tuple[int, int, int]:
-    """Execute all three D-10 DELETE statements and return rowcounts."""
+    """Execute all three DELETE statements and return rowcounts."""
     r_us = cast(CursorResult[Any], await session.execute(_DELETE_USER_SKILLS))
     r_gc = cast(CursorResult[Any], await session.execute(_DELETE_GITHUB_CREDENTIALS))
     r_gos = cast(CursorResult[Any], await session.execute(_DELETE_GITHUB_OAUTH_STATES))

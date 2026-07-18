@@ -1,4 +1,4 @@
-"""Ephemeral Google Service Account JSON factory for Phase 19 GWS provider tests.
+"""Ephemeral Google Service Account JSON factory for GWS provider tests.
 
 Generates an in-memory RSA keypair on every call and emits a dict shaped like
 the JSON google-auth's `Credentials.from_service_account_info` accepts. Keys

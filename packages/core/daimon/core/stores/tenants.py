@@ -116,7 +116,7 @@ async def get_tenant_dependent_counts(
     *,
     tenant_id: uuid.UUID,
 ) -> TenantDependentCounts:
-    """Return per-table dependent-row counts for a tenant (D-01 blast-radius preview)."""
+    """Return per-table dependent-row counts for a tenant (blast-radius preview)."""
     routines = (
         await session.execute(
             select(func.count()).select_from(Routine).where(Routine.tenant_id == tenant_id)

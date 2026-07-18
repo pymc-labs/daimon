@@ -664,7 +664,7 @@ async def test_sweep_aborts_with_zero_deletes_when_skills_list_is_truncated() ->
     """SC-5 sweep half: a full _SKILLS_PAGE_LIMIT-row response causes sweep_removed_skills
     to raise SkillsListTruncatedError BEFORE issuing any delete requests.
 
-    Making delete decisions on a truncated view is unsafe (D-13) — the sweep must
+    Making delete decisions on a truncated view is unsafe — the sweep must
     hard-fail rather than silently deleting skills it cannot fully enumerate.
     """
     deleted: list[str] = []

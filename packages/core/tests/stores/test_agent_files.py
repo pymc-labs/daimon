@@ -1,4 +1,4 @@
-"""Real-DB behavior tests for the agent_files store. Phase 15 (INFRA-02)."""
+"""Real-DB behavior tests for the agent_files store."""
 
 from __future__ import annotations
 

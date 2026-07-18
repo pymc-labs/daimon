@@ -164,7 +164,7 @@ async def _reconcile_core(
             name=spec.name,
         )
 
-    # Agent pass — account_id threads the RBAC-01 guild ownership axis.
+    # Agent pass — account_id threads the guild ownership axis.
     for spec in agent_specs:
         await _run_per_resource(
             report,

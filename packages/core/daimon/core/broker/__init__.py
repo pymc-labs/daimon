@@ -1,4 +1,4 @@
-"""Token broker dispatch (Phase 19, GH-03).
+"""Token broker dispatch.
 
 The broker is a plain async function plus a stateless registry of provider
 instances. No module-level mutable state crosses request boundaries; provider

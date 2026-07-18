@@ -29,10 +29,10 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH"
 
-# Non-root user per D-07
+# Non-root runtime user
 RUN useradd --uid 1000 --create-home daimon
 
-# uv binary needed for `uv run alembic` in init service per D-08
+# uv binary needed for `uv run alembic` in init service
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app

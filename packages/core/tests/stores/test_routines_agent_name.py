@@ -1,4 +1,4 @@
-"""DB-backed tests for the `agent_name` column on routines (Phase 38-02).
+"""DB-backed tests for the `agent_name` column on routines.
 
 Covers create/update kwarg plumbing and Pydantic round-trip. Each test inlines
 its `create_routine(...)` call (per `guideline:testing`).
@@ -95,7 +95,7 @@ async def test_update_routine_omits_agent_name_when_none(
 async def test_update_routine_agent_id_only_changes_agent_id(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    """Phase 38-04: dedicated helper for the resolver self-heal write.
+    """Dedicated helper for the resolver self-heal write.
 
     Must only touch ``agent_id`` — everything else (cron_expr, timezone,
     trigger_message, enabled, agent_name, next_fire_at) stays put.

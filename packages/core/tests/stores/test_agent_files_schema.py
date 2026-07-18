@@ -1,6 +1,6 @@
-"""Phase 23 — schema-drift guard for composite primary keys.
+"""Schema-drift guard for composite primary keys.
 
-Cross-agent isolation in Phase 23's MCP self-edit tools is enforced
+Cross-agent isolation in the MCP self-edit tools is enforced
 structurally by the composite primary keys on ``agent_files`` and
 ``agent_repo_binding``. If a future migration drops or alters either key,
 agents could read or overwrite each other's rows silently. These tests

@@ -267,7 +267,7 @@ async def test_send_interrupt_and_wait_treats_requires_action_as_terminal() -> N
 def test_send_interrupt_and_wait_interrupt_terminal_is_superset_of_terminal_stop_reasons() -> None:
     """_INTERRUPT_TERMINAL must be a strict superset of _TERMINAL_STOP_REASONS.
 
-    D-10 invariant: _TERMINAL_STOP_REASONS lists only the variants
+    _TERMINAL_STOP_REASONS lists only the variants
     `send_interrupt_and_wait` treats as terminal. `terminal_stop_reason()` (the
     driver's broader helper) treats ANY status_idle, including requires_action,
     as stream-terminal -- the driver has no approval/resume loop; it finalizes

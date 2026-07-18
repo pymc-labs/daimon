@@ -1,9 +1,9 @@
 """GitHub PAT encryption + two-tier resolver.
 
-Encryption: MultiFernet wrapping a list of Fernet keys (D-04, D-19). v1 ships
+Encryption: MultiFernet wrapping a list of Fernet keys. v1 ships
 a length-1 tuple; rotation = prepend a new key.
 
-Resolver: get_pat(principal_id, agent_id=None) -> str | None. Cascade (D-25):
+Resolver: get_pat(principal_id, agent_id=None) -> str | None. Cascade:
 - agent_id given: tier-1 overlay ONLY. If no overlay row -> None (no bleed).
   get_pat(agent_id=X) never falls back to the principal-default credential.
 - agent_id=None: principal-default credential -> token or None (unchanged).
@@ -75,14 +75,14 @@ async def get_pat(
     sessionmaker: async_sessionmaker[AsyncSession],
     fernet: MultiFernet,
 ) -> str | None:
-    """Per-agent credential resolver (D-25).
+    """Per-agent credential resolver.
 
     agent_id given -> overlay-only -> None (no principal-default bleed).
     agent_id=None -> principal-default -> None (OAuth-callback / CLI path).
     """
     async with sessionmaker() as session:
         if agent_id is not None:
-            # D-25: agent path is overlay-only. No fallback to principal default.
+            # Agent path is overlay-only. No fallback to principal default.
             binding = await binding_store.get_agent_github_binding(session, agent_id=agent_id)
             if binding is None:
                 return None
@@ -107,7 +107,7 @@ async def get_github_login(
     agent_id: uuid.UUID | None = None,
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> str | None:
-    """Display-only login resolver — the non-secret peer of `get_pat` (D-25).
+    """Display-only login resolver — the non-secret peer of `get_pat`.
 
     Returns `github_login` for the resolved credential without decrypting (or
     even reading) the token, so the /agent-setup panel can show GitHub linkage

@@ -1,6 +1,6 @@
-"""Append-only per-tenant USD ledger store. TOPUP-01.
+"""Append-only per-tenant USD ledger store.
 
-Balance = SUM(delta_usd) — NEVER a mutable column (D-14/D-17). Every money write
+Balance = SUM(delta_usd) — NEVER a mutable column. Every money write
 is an idempotent INSERT keyed on a natural identity (Stripe event_id, turn id,
 trial:{tenant}); on_conflict_do_nothing(idempotency_key) makes replays a no-op.
 
@@ -50,7 +50,7 @@ async def insert_entry(
 
 
 async def get_balance(session: AsyncSession, *, tenant_id: uuid.UUID) -> Decimal:
-    """Balance = SUM(delta_usd). Empty ledger -> Decimal('0'). Negative allowed (D-14)."""
+    """Balance = SUM(delta_usd). Empty ledger -> Decimal('0'). Negative allowed."""
     stmt = select(func.coalesce(func.sum(TenantLedger.delta_usd), Decimal("0"))).where(
         TenantLedger.tenant_id == tenant_id
     )

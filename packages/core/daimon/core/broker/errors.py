@@ -1,4 +1,4 @@
-"""Typed errors for the token broker (Phase 19, GH-03).
+"""Typed errors for the token broker.
 
 Adapter boundaries (MCP tool, CLI commands) catch these and convert to
 their adapter-native error responses. Core code raises them, never

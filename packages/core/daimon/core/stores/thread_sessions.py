@@ -12,8 +12,7 @@ NULL rows (frozen pre-migration rows) never match any non-null caller, so every
 existing thread cold-creates a fresh per-caller session on the next turn.
 
 No unique constraint on thread identity — recreate intentionally inserts a
-second row while marking the old row 'dead'. See Phase 67 CONTEXT D-06/D-07,
-Phase 88 SCOPING §4/§6.
+second row while marking the old row 'dead'.
 """
 
 from __future__ import annotations
@@ -40,7 +39,7 @@ async def get_live_thread_session(
     The account_id filter is a plain equality predicate — no OR IS NULL branch.
     Rows with account_id NULL (pre-migration frozen rows) never match any live
     caller, so those threads cold-create a fresh per-caller session on the next
-    turn (Phase 88 SCOPING §4/§6 security guard).
+    turn (security guard).
     """
     orm = (
         await session.execute(

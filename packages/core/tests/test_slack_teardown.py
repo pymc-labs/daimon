@@ -1,9 +1,9 @@
-"""Tests for archive_tenant + teardown_slack_install helpers (Phase 79, SINST-02).
+"""Tests for archive_tenant + teardown_slack_install helpers.
 
 Covers:
 - archive_tenant sets Tenant.archived_at in one transaction (no-op when tenant absent)
 - teardown_slack_install soft-archives the tenant AND deletes the slack_bot_tokens row
-- teardown is idempotent when the token row is already absent (D-14)
+- teardown is idempotent when the token row is already absent
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ async def test_teardown_slack_install_archives_tenant_and_deletes_token(
 
     # Assert token row is gone (re-read via same session)
     post_token = await get_slack_bot_token(db_session, team_id=team_id)
-    assert post_token is None, "teardown_slack_install must delete the slack_bot_tokens row (D-14)"
+    assert post_token is None, "teardown_slack_install must delete the slack_bot_tokens row"
 
     # Assert tenant is soft-archived (re-SELECT via shared session)
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
@@ -59,7 +59,7 @@ async def test_teardown_slack_install_archives_tenant_and_deletes_token(
         await db_session.execute(select(Tenant).where(Tenant.id == tenant_id))
     ).scalar_one()
     assert tenant_row.archived_at == _NOW, (
-        "teardown_slack_install must set Tenant.archived_at = now (D-13)"
+        "teardown_slack_install must set Tenant.archived_at = now"
     )
 
 

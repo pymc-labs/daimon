@@ -6,7 +6,7 @@ and pushes each to MA using the same two-state logic as
 :func:`~daimon.core.defaults.reconcile_skills.reconcile_skill` — but as a
 *batch* function with per-skill error isolation.
 
-Per D-02 and D-05: this is independent from ``reconcile_skill``; they share
+This is independent from ``reconcile_skill``; they share
 the same leaf helpers but do not call each other. A failure on one skill
 records a ``FAILED`` outcome and the batch continues.
 
@@ -53,7 +53,7 @@ async def sync_skills(
     Lookup uses ``on_truncation="raise"`` — a full-page response in a create context
     is unsafe (hidden duplicates); the per-skill ``except`` boundary surfaces
     :class:`~daimon.core.errors.SkillsListTruncatedError` as a ``FAILED`` outcome
-    rather than silently creating a duplicate or missing the existing skill (D-13).
+    rather than silently creating a duplicate or missing the existing skill.
 
     Any exception raised while processing a single skill is caught; a
     ``FAILED`` outcome is recorded and the batch continues with the next skill.

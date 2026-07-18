@@ -1,4 +1,4 @@
-"""Ephemeral Files-API object TTL queue. Phase 51 (D-07)."""
+"""Ephemeral Files-API object TTL queue."""
 
 from __future__ import annotations
 

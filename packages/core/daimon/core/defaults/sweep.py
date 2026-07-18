@@ -128,7 +128,7 @@ async def sweep_removed_skills(
 
     A full skills.list page raises SkillsListTruncatedError BEFORE any delete
     decision; _run_sweep's existing except (APIError, DaimonError) boundary converts
-    it to ResourceOutcome(FAILED, "<sweep>") with zero deletions (D-13).
+    it to ResourceOutcome(FAILED, "<sweep>") with zero deletions.
     """
     all_skills = await list_skills_strict(client)
     # Skills carry no daimon_managed marker (MA skills have no metadata field),

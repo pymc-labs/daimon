@@ -327,8 +327,8 @@ async def _consume_with_reconnect(
                 event = next_task.result()
             except StopAsyncIteration:
                 return
-            # Phase 20: per-event metering. Invoke caller-bound usage_record on
-            # span.model_request_end events. Exceptions propagate (D-25 fail-closed).
+            # Per-event metering. Invoke caller-bound usage_record on
+            # span.model_request_end events. Exceptions propagate (fail-closed).
             if usage_record is not None and event.type == "span.model_request_end":
                 await usage_record(event=event, session_id=session_id)
             await lifecycle.on_sse_event(event)

@@ -219,10 +219,10 @@ async def test_apply_defaults_provisions_cli_local_deterministically(
     assert tenant_row.platform == "cli", "cli:local tenant must have platform='cli'"
     assert tenant_row.external_id == "local", "cli:local tenant must have external_id='local'"
 
-    # D-16: no tenant_ledger row (cli:local is billing-exempt, signup_credit=0)
+    # no tenant_ledger row (cli:local is billing-exempt, signup_credit=0)
     ledger_count = (
         await db_session.execute(select(func.count()).select_from(TenantLedger))
     ).scalar_one()
     assert ledger_count == 0, (
-        "apply_defaults must not seed a tenant_ledger trial row for cli:local (D-16: billing-exempt)"
+        "apply_defaults must not seed a tenant_ledger trial row for cli:local (billing-exempt)"
     )

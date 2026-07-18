@@ -1,4 +1,4 @@
-"""Install-tracking for App-token minting. Phase 56 (GHAPP-01).
+"""Install-tracking for App-token minting.
 
 Maps installation_id -> (account_login, repo_full_names) so the webhook
 handler can mint installation tokens without a per-request GitHub API call.
@@ -154,7 +154,7 @@ async def get_for_repo(
     """Find the installation whose repo_full_names contains the given repo.
 
     Used to determine whether an App installation token can be minted for
-    a given repo (D-21 auth order: App token -> PAT -> anon).
+    a given repo (credential priority: App token -> PAT -> anon).
     Returns the first matching row or None.
     """
     stmt = select(GitHubAppInstallation).where(

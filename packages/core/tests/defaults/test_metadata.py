@@ -36,7 +36,7 @@ def test_build_metadata_stamps_account_when_provided() -> None:
     account_id = uuid.uuid4()
     md = build_metadata(tenant_id=tenant_id, name="user-agent", account_id=account_id)
     assert md[MA_METADATA_KEY_ACCOUNT] == str(account_id), (
-        "account_id=UUID must stamp daimon_account=str(UUID) for per-user roster filter (D-04)"
+        "account_id=UUID must stamp daimon_account=str(UUID) for per-user roster filter"
     )
     assert md[MA_METADATA_KEY_TENANT] == str(tenant_id)
     assert md[MA_METADATA_KEY_NAME] == "user-agent"

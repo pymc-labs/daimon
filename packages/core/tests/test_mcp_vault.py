@@ -901,7 +901,7 @@ async def test_agent_x_vault_never_holds_agent_y_external_cred() -> None:
 
 
 async def test_ensure_agent_mcp_vault_does_not_restamp_matching_url_credential() -> None:
-    """Phase 88-03 (T-88-03-02): no delete+recreate on a matching-URL credential.
+    """No delete+recreate on a matching-URL credential.
 
     When the vault already has a static_bearer credential at the current public_url,
     ensure_agent_mcp_vault must leave it in place — no DELETE, no extra POST.
@@ -955,12 +955,12 @@ async def test_ensure_agent_mcp_vault_does_not_restamp_matching_url_credential()
     mutating = [c for c in call_log if c[0] in ("DELETE", "POST")]
     assert mutating == [], (
         f"matching-URL warm vault must NOT trigger any DELETE or POST "
-        f"(warm re-stamp race A3 eliminated — Phase 88-03); got: {mutating}"
+        f"(warm re-stamp race A3 eliminated); got: {mutating}"
     )
 
 
 async def test_ensure_agent_mcp_vault_long_lived_credential_never_carries_is_admin() -> None:
-    """Phase 88 ADMIN-01: the long-lived Discord vault credential never carries is_admin.
+    """The long-lived Discord vault credential never carries is_admin.
 
     This guards the invariant that ensure_agent_mcp_vault cannot bake privilege
     escalation into the daimon-mcp credential that an in-flight session or future
@@ -986,7 +986,7 @@ async def test_ensure_agent_mcp_vault_long_lived_credential_never_carries_is_adm
     token = captured[0]["auth"]["token"]  # type: ignore[index]
     claims = pyjwt.decode(token, secret, algorithms=["HS256"])  # type: ignore[arg-type]
     assert "is_admin" not in claims, (
-        "long-lived vault credential must NEVER carry is_admin (Phase 88 ADMIN-01); "
+        "long-lived vault credential must NEVER carry is_admin; "
         "a non-admin acting in a thread the creator started must not inherit admin "
         "from a frozen credential"
     )
@@ -1027,7 +1027,7 @@ async def test_minted_jwt_has_no_agent_claim() -> None:
     # Verify the expected account-scoped claims are present.
     # The account UUID is carried as the JWT `sub` claim.
     assert "sub" in claims, "JWT must carry sub (account) claim"
-    # Phase 58.5 re-key: platform and guild_id are NOT carried as wire claims —
+    # platform and guild_id are NOT carried as wire claims —
     # the JWT is account-scoped only (sub + iat).
     assert "platform" not in claims, "daimon-mcp JWT must NOT carry a platform wire claim (58.5)"
     assert "guild_id" not in claims, "daimon-mcp JWT must NOT carry a guild_id wire claim (58.5)"

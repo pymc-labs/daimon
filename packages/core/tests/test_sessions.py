@@ -449,7 +449,7 @@ async def test_create_session_existing_callers_still_work_without_session_contex
     assert result.id == "sess_existing"
 
 
-# --- Phase 51: .env resource mount threading (D-06 / SC2) -------------------
+# --- .env resource mount threading ---
 
 
 def _files_and_session_handler(
@@ -571,7 +571,7 @@ async def test_create_session_omits_resources_when_phase51_params_absent() -> No
     def _handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         assert request.url.path.endswith("/v1/sessions"), (
-            f"no Files upload expected when phase-51 params are absent; got {request.url.path}"
+            f"no Files upload expected when resource-mount params are absent; got {request.url.path}"
         )
         body = json.loads(request.content)
         return httpx.Response(
@@ -589,10 +589,10 @@ async def test_create_session_omits_resources_when_phase51_params_absent() -> No
 
     assert len(requests) == 1, "must POST only /v1/sessions; no Files upload attempted"
     body = json.loads(requests[0].content)
-    assert "resources" not in body, "no resources when phase-51 params are absent"
+    assert "resources" not in body, "no resources when resource-mount params are absent"
 
 
-# --- Phase 57: GDPR session metadata tagging (D-05 / D-06) ------------------
+# --- GDPR session metadata tagging ---
 
 
 async def test_create_session_tags_metadata_with_account_and_tenant_when_both_provided() -> None:
@@ -776,7 +776,7 @@ async def test_create_session_composes_resources_alongside_vault_ids(
     ], "resources must compose alongside vault_ids, not replace it"
 
 
-# --- Phase 66: per-agent vault isolation (SC-2b) ----------------------------
+# --- per-agent vault isolation ---
 
 
 async def test_create_session_raises_when_mcp_active_and_agent_uuid_none() -> None:
@@ -837,7 +837,7 @@ async def _seed_repo_binding_with_pat(
         default_branch=default_branch,
         ma_secret_ref="anon:",
     )
-    # Per-agent credential overlay: agent_uuid → principal_id (D-25: principal == agent).
+    # Per-agent credential overlay: agent_uuid → principal_id.
     await github_binding_store.set_agent_github_binding(
         db_session, agent_id=agent_uuid, principal_id=agent_uuid
     )
@@ -913,7 +913,7 @@ async def test_create_session_uses_app_installation_token_when_app_installed_and
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """No per-agent PAT, App installed on the (private) repo owner -> the
-    minted installation token lands in authorization_token (D-02 step 2)."""
+    minted installation token lands in authorization_token (step 2)."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
     await _seed_inline_pat_binding(db_session, tenant_id=tenant.id, agent_uuid=agent_uuid)
@@ -965,7 +965,7 @@ async def test_create_session_pat_wins_with_zero_github_app_calls(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """D-05: when both a per-agent PAT and App creds are present, the PAT wins
+    """When both a per-agent PAT and App creds are present, the PAT wins
     and resolve_clone_token issues ZERO GitHub App HTTP calls."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
@@ -1015,7 +1015,7 @@ async def test_create_session_pat_wins_with_zero_github_app_calls(
             "authorization_token": "ghp_dev_agent_token",
             "checkout": {"type": "branch", "name": "main"},
         }
-    ], "PAT must win over App coverage per D-05"
+    ], "PAT must win over App coverage"
 
 
 async def test_create_session_raises_when_private_binding_app_not_installed_no_fallback(
@@ -1023,7 +1023,7 @@ async def test_create_session_raises_when_private_binding_app_not_installed_no_f
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Private binding, no per-agent PAT, App not installed (404), no fallback
-    PAT -> resolve_clone_token raises (D-02 step 4); no session-create call
+    PAT -> resolve_clone_token raises (step 4); no session-create call
     happens with an empty authorization_token."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
@@ -1068,7 +1068,7 @@ async def test_create_session_raises_when_fernet_absent_and_no_other_credential(
 ) -> None:
     """Without the fernet kwarg, create_session cannot decrypt the per-agent PAT.
 
-    Behavior change (D-02 step 4 / C-03): the binding is ``anon:`` (public) with
+    Behavior change (step 4 / C-03): the binding is ``anon:`` (public) with
     no per-agent PAT, no App creds, and no fallback PAT resolvable — this is the
     fail-loud ``none`` branch, not a silent omit. resolve_clone_token raises."""
     tenant = await make_tenant(db_session)
@@ -1414,7 +1414,7 @@ async def test_create_session_fallback_not_used_for_inline_pat_binding(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """The guardrail (fallback PAT never clones a private binding) now surfaces
-    as a raise, not a silent omit (D-02 step 4 / C-03): a private (inline-pat:)
+    as a raise, not a silent omit (step 4 / C-03): a private (inline-pat:)
     binding with no per-agent PAT, no App coverage, and no App creds configured
     hits the fail-loud ``none`` branch even though an operator fallback PAT was
     passed — the fallback only ever applies to ``anon:`` (public) bindings."""
@@ -1454,7 +1454,7 @@ async def test_create_session_raises_when_binding_present_but_no_token(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Behavior change (D-02 step 4 / C-03): a binding exists but nothing
+    """Behavior change (step 4 / C-03): a binding exists but nothing
     resolves a clone token (no per-agent PAT, no App creds, no fallback) —
     resolve_clone_token raises instead of the old ``repo_clone.no_token``
     warn-and-omit. No session-create call happens with an empty token."""
@@ -1494,8 +1494,8 @@ async def test_create_session_raises_on_empty_fallback_pat_per_d02_behavior_chan
     """A blank DAIMON_GITHUB__FALLBACK_PAT ("" not None) must behave like "no
     token" — without the guard it builds authorization_token="" and MA 400s.
 
-    Deliberate D-02/C-03 behavior change from the pre-Phase-97 semantics: this
-    test used to assert the clone resource was silently omitted. The D-02
+    Deliberate C-03 behavior change from earlier semantics: this
+    test used to assert the clone resource was silently omitted. The
     step-4 "fail loudly" resolution order now makes resolve_clone_token raise
     on this exact case (anon: binding, no per-agent PAT, no App coverage, and
     an empty/falsy fallback PAT) instead of omitting the resource — a bound

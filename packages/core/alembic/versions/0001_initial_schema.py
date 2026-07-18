@@ -19,7 +19,7 @@ Table creation order below is dependency-ordered (FK targets before
 referencing tables), not alphabetical: tenants and accounts come first
 since nearly everything else references one or both.
 
-tenant_user_caps (D-06): created directly under its final name — the table
+tenant_user_caps: created directly under its final name — the table
 was `guild_user_caps` in the chain until a 0020 rename. The chain's
 `_not_null` column-constraint fossil names (guild_user_caps_id_not_null
 etc., a PG18 artifact of the historical ALTER path) are NOT reproduced —
@@ -618,7 +618,7 @@ def upgrade() -> None:
     op.create_index("tenant_ledger_idem_idx", "tenant_ledger", ["idempotency_key"], unique=True)
 
     # ------------------------------------------------------------------
-    # tenant_user_caps (D-06: final name from the start; pkey/fkey names
+    # tenant_user_caps (final name from the start; pkey/fkey names
     # reproduced explicitly since they survived the chain's guild_user_caps
     # -> tenant_user_caps rename unchanged — only the _not_null column
     # fossils are excluded, per the harness's normalization)

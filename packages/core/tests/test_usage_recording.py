@@ -5,7 +5,7 @@ construct the real SDK event inline (per guideline:testing) and assert:
 
 - A row appears with token columns sourced from event.model_usage
 - Replay of the same event_id is a no-op (store-side ON CONFLICT DO NOTHING)
-- DB exceptions propagate (D-25 — usage write failure IS a turn failure)
+- DB exceptions propagate (usage write failure IS a turn failure)
 
 Debit tests (TOPUP-01):
 - Guild turns write a negative tenant_ledger row in the same transaction
@@ -117,7 +117,7 @@ async def test_record_turn_usage_propagates_db_errors_no_swallow(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Per D-25 — store exceptions must propagate, not be caught here."""
+    """Store exceptions must propagate, not be caught here."""
     # Create tenant before monkeypatch so the insert runs against the real store.
     tenant = await make_tenant(db_session)
 
@@ -289,7 +289,7 @@ async def test_record_turn_usage_debit_idempotent_replay_no_double_debit(
 
 
 # ---------------------------------------------------------------------------
-# record_media_usage — Gemini media spend (RATE-01)
+# record_media_usage — Gemini media spend
 # ---------------------------------------------------------------------------
 
 
@@ -413,7 +413,7 @@ async def test_record_media_usage_propagates_db_errors_no_swallow(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Per D-25 — store exceptions must propagate, not be caught here."""
+    """Store exceptions must propagate, not be caught here."""
     tenant = await make_tenant(db_session)
 
     async def boom(*args: object, **kwargs: object) -> None:

@@ -1,7 +1,7 @@
 """Tests for daimon.core.billing — BILL-02.
 
 Covers:
-- No-cap-row exemption (D-06)
+- No-cap-row exemption
 - Threshold semantics (>= cap)
 - Override > default precedence
 - Calendar-month-UTC period boundary
@@ -81,7 +81,7 @@ async def test_is_over_cap_returns_false_when_no_cap_row(
         user_id="u1",
         now=datetime.now(UTC),
     )
-    assert over is False, "no cap row = uncapped per D-06"
+    assert over is False, "no cap row = uncapped"
 
 
 async def test_is_over_cap_returns_true_when_sum_meets_threshold(

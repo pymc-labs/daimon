@@ -1,6 +1,6 @@
-"""Read-only store for agent_google_binding (Phase 19, GH-03).
+"""Read-only store for agent_google_binding.
 
-Day-1 read-only: Phase 25's agent-setup panel will add upsert/delete
+Day-1 read-only: the agent-setup panel will add upsert/delete
 helpers. The GWS token-broker provider only needs to read the binding.
 """
 

@@ -272,7 +272,7 @@ async def get_discord_principal_for_account(
 
     Mirror of list_platform_principals_for_account but scalar + filtered to
     platform='discord'. Used by IdentityMiddleware to populate
-    AuthIdentity.platform_user_id without changing JWT shape (Phase 24).
+    AuthIdentity.platform_user_id without changing JWT shape.
     """
     stmt = select(PlatformPrincipal.external_id).where(
         PlatformPrincipal.account_id == account_id,
@@ -290,7 +290,7 @@ async def get_slack_principal_for_account(
     """Return the Slack external_id (platform user id) for this account, or None.
 
     Slack analog of get_discord_principal_for_account — used by the /agent-setup
-    audit-display resolver to render <@U…> for scope-propagation audit rows (D-06).
+    audit-display resolver to render <@U…> for scope-propagation audit rows.
     """
     stmt = select(PlatformPrincipal.external_id).where(
         PlatformPrincipal.account_id == account_id,

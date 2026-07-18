@@ -11,7 +11,7 @@ Server-side verification lives in `daimon.adapters.mcp.auth.verifier`
 (FastMCP's `JWTVerifier`, which is authlib-backed). We don't verify here.
 
 `mint_internal_mcp_token` is a v1.1 seam used by the headless routine runner
-and Phase 28's `/mcp-token mint` command. Phase 20 (Billing & Usage) may
+and the `/mcp-token mint` command. A future variant may
 supersede it with a tenant-aware variant — keep the signature stable.
 """
 
@@ -42,11 +42,11 @@ def mint_jwt(
     - ``sub`` is the string form of the account UUID (stable across principal renames).
     - ``iat`` is ``int(now.timestamp())`` (UTC assumed; caller owns tz).
     - No ``exp`` — role is resolved live from the DB on each request.
-    - When ``agent_id`` is supplied, the optional ``"agent_id"`` claim is added (Phase 19,
-      D-10/D-27). Used by the MCP ``get_cli_token`` tool to mint per-service tokens
+    - When ``agent_id`` is supplied, the optional ``"agent_id"`` claim is added
+      Used by the MCP ``get_cli_token`` tool to mint per-service tokens
       scoped to the agent without trusting tool-supplied parameters.
-    - When ``is_admin`` is ``True``, an ``"is_admin": True`` claim is added (Phase 50,
-      RBAC-02). Omitted when ``False`` to keep non-admin tokens minimal. Note: the MCP
+    - When ``is_admin`` is ``True``, an ``"is_admin": True`` claim is added
+      Omitted when ``False`` to keep non-admin tokens minimal. Note: the MCP
       admin gate only trusts ``is_admin`` when the token also carries ``internal=True``
       (minted only by ``mint_internal_mcp_token``), so a Discord vault token's baked
       ``is_admin`` claim alone never elevates a non-admin caller.
@@ -84,8 +84,8 @@ def mint_internal_mcp_token(
     Only tokens minted here (CLI/scheduler/headless) carry both claims and can gain
     admin via the claim path.
 
-    Phase 20 (Billing & Usage) may supersede this with a tenant-aware
-    variant — the signature is the seam, keep it stable. Phase 28's
+    A future variant may supersede this with a tenant-aware
+    variant — the signature is the seam, keep it stable. The
     ``/mcp-token mint`` reuses this helper directly.
     """
     return pyjwt.encode(

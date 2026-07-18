@@ -1,8 +1,8 @@
 """Tests for daimon.core.mcp_auth.mint_internal_mcp_token.
 
-Sibling to mint_jwt: a Phase 16 v1.1 seam used by `headless_runner` and
-(later) Phase 28's /mcp-token mint command. Phase 20 may supersede with a
-tenant-aware variant — keep the signature stable.
+Sibling to mint_jwt: a v1.1 seam used by `headless_runner` and
+the /mcp-token mint command. A future tenant-aware variant may supersede
+this — keep the signature stable.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def test_mint_internal_mcp_token_round_trip_decodes_claims() -> None:
         "iat": int(now.timestamp()),
         "is_admin": True,
         "internal": True,
-    }, "internal mcp token should carry exactly sub/iat/is_admin/internal (Phase 88-03)"
+    }, "internal mcp token should carry exactly sub/iat/is_admin/internal"
     assert "platform" not in decoded, "minted token must carry no platform wire claim"
     assert "guild_id" not in decoded, "minted token must carry no guild_id wire claim"
 

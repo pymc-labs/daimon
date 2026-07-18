@@ -464,7 +464,7 @@ async def test_reconcile_tenant_defaults_stamps_guild_account_on_agents(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """RBAC-01: seeded guild agents must carry daimon_account = derived guild account.
+    """Seeded guild agents must carry daimon_account = derived guild account.
 
     Environments are NOT account-owned and must NOT carry daimon_account.
     Verified via transport-fake AsyncAnthropic — captures the raw request bodies
@@ -531,7 +531,7 @@ async def test_reconcile_tenant_defaults_stamps_guild_account_on_agents(
 
     expected_account = str(_derive_account_uuid(result.tenant_id))
     assert agent_metadata.get(MA_METADATA_KEY_ACCOUNT) == expected_account, (
-        "seeded guild agent must be guild-owned (RBAC-01): "
+        "seeded guild agent must be guild-owned: "
         f"expected daimon_account={expected_account!r}, got {agent_metadata.get(MA_METADATA_KEY_ACCOUNT)!r}"
     )
     assert MA_METADATA_KEY_ACCOUNT not in env_metadata, (
@@ -884,7 +884,7 @@ async def test_reconcile_tenant_defaults_flips_status_failed_when_skills_list_pa
 
 
 # ---------------------------------------------------------------------------
-# Trial credit tests — TOPUP-01 / D-25
+# Trial credit tests
 # ---------------------------------------------------------------------------
 
 
@@ -901,7 +901,7 @@ async def test_provision_tenant_seeds_trial_credit_when_signup_credit_set(
     )
     balance = await tenant_ledger.get_balance(db_session, tenant_id=result.tenant_id)
     assert balance == Decimal("5.00"), (
-        "provision_tenant with signup_credit=5 must seed exactly +5 to the ledger (D-25)"
+        "provision_tenant with signup_credit=5 must seed exactly +5 to the ledger"
     )
 
 

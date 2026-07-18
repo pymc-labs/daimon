@@ -52,24 +52,24 @@ async def fetch_repo(
 ) -> FetchResult:
     """Download a GitHub repo tarball, extract to a temp dir, and return paths.
 
-    Applies smart strip: if the tarball contains a single top-level wrapper
-    directory (GitHub's default ``owner-repo-sha/`` wrapper), descends into it
-    so callers get the actual repo root.
+        Applies smart strip: if the tarball contains a single top-level wrapper
+        directory (GitHub's default ``owner-repo-sha/`` wrapper), descends into it
+        so callers get the actual repo root.
 
-    Returns a ``FetchResult`` with ``path`` (the working directory after smart
-    strip) and ``cleanup_dir`` (the ``mkdtemp`` root — always use this for
-    ``shutil.rmtree``).
+        Returns a ``FetchResult`` with ``path`` (the working directory after smart
+        strip) and ``cleanup_dir`` (the ``mkdtemp`` root — always use this for
+        ``shutil.rmtree``).
 
-    ``max_tarball_bytes`` bounds the raw (compressed) download via a streaming
-    Content-Length fast-reject plus cumulative byte-count abort (RATE-03,
-    D-11). ``max_tarball_decompressed_bytes`` bounds the sum of tar member
-    sizes, checked before ``extractall``, guarding against zip bombs (D-14).
-    Both default to the safe settings-mirrored constants; set to ``0`` to
-    disable either guard.
+        ``max_tarball_bytes`` bounds the raw (compressed) download via a streaming
+        Content-Length fast-reject plus cumulative byte-count abort
+    . ``max_tarball_decompressed_bytes`` bounds the sum of tar member
+        sizes, checked before ``extractall``, guarding against zip bombs.
+        Both default to the safe settings-mirrored constants; set to ``0`` to
+        disable either guard.
 
-    Raises:
-        DaimonError: if ``url`` is not a GitHub URL, the response is not 2xx,
-            or either size cap is exceeded.
+        Raises:
+            DaimonError: if ``url`` is not a GitHub URL, the response is not 2xx,
+                or either size cap is exceeded.
     """
     owner_repo = _parse_github_url(url)
     headers: dict[str, str] = {}

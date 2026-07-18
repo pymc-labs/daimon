@@ -365,7 +365,7 @@ async def test_list_platform_principals_for_account_returns_empty_list_when_no_p
 
 
 # ---------------------------------------------------------------------------
-# get_discord_principal_for_account — Phase 24 helper (Wave 0 stubs)
+# get_discord_principal_for_account — helper
 # ---------------------------------------------------------------------------
 
 
@@ -582,7 +582,7 @@ async def test_migration_0013_mode_check_constraint_rejects_invalid_value(
 
 
 # ---------------------------------------------------------------------------
-# set_active_agent_name — per-principal active agent (Phase 40)
+# set_active_agent_name — per-principal active agent
 # ---------------------------------------------------------------------------
 
 
@@ -657,7 +657,7 @@ async def test_set_active_agent_name_idempotent(
 
 
 # ---------------------------------------------------------------------------
-# Slack principal round-trip — SCORE-02
+# Slack principal round-trip
 # ---------------------------------------------------------------------------
 
 
@@ -670,11 +670,9 @@ async def test_get_or_create_platform_principal_slack_round_trips(
     )
     assert p.platform == "slack", (
         "PlatformPrincipalRow.platform must validate 'slack' — "
-        "this is the runtime model_validate gate (SCORE-02)"
+        "this is the runtime model_validate gate"
     )
-    assert p.external_id == "T123", (
-        "external_id must round-trip (D-07: same team_id as workspace_id)"
-    )
+    assert p.external_id == "T123", "external_id must round-trip (same team_id as workspace_id)"
     assert p.tenant_id == tenant.id, "tenant_id must round-trip"
 
     # Idempotency: second call returns the same row.
@@ -687,7 +685,7 @@ async def test_get_or_create_platform_principal_slack_round_trips(
 
 
 # ---------------------------------------------------------------------------
-# get_slack_principal_for_account — D-06 audit-display resolver helper
+# get_slack_principal_for_account — audit-display resolver helper
 # ---------------------------------------------------------------------------
 
 

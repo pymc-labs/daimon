@@ -404,15 +404,15 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
     schema is the source of truth; PURGED and ALLOWLIST are the human dispositions.
     A table is in scope if it has an FK to accounts.id OR a principal_id column.
     """
-    # Tables the orchestrator deletes, keyed by why they are in scope (D-06).
+    # Tables the orchestrator deletes, keyed by why they are in scope.
     purged: dict[str, str] = {
         "cli_principals": "account_id FK -> accounts.id",
         "platform_principals": "account_id FK -> accounts.id",
         "user_config": "account_id PK/FK -> accounts.id",
         "user_skills": "principal_id",
         "github_credentials": "principal_id",
-        "agent_github_binding": "principal_id (Phase 87)",
-        "mcp_tokens": "account_id FK -> accounts.id (Phase 87)",
+        "agent_github_binding": "principal_id",
+        "mcp_tokens": "account_id FK -> accounts.id",
     }
     # Intentional exclusions, each justified inline.
     allowlist: frozenset[str] = frozenset(
@@ -421,15 +421,15 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # provenance column agent_name_set_by_account_id with ON DELETE SET NULL,
             # so an account purge auto-severs the link without deleting the
             # tenant-shared config row (deleting it would erase co-tenants' data).
-            # Not an erasure gap (D-01 rationale).
+            # Not an erasure gap.
             "channel_config",
             "tenant_config",
             # Tenant/agent-scoped, no account/principal column — "purge account X"
-            # is undefined for them; deferred to a future tenant-purge path (D-01).
+            # is undefined for them; deferred to a future tenant-purge path.
             "agent_files",
             "agent_google_binding",
             "thread_sessions",
-            # Billing carve-outs retained for integrity (D-02, Phase 17).
+            # Billing carve-outs retained for integrity.
             "usage_events",
             "tenant_user_caps",
         }
@@ -531,7 +531,7 @@ async def test_collect_purge_preview_end_to_end_matches_purge_account_counts(
         scopes=("repo",),
         tenant_id=tenant.id,
     )
-    # Phase 87: a per-agent MCP token (account-scoped) — the row that crashes
+    # A per-agent MCP token (account-scoped) — the row that crashes
     # purge today — plus an agent_github_binding (principal-scoped).
     await mcp_tokens_store.create_mcp_token_row(
         db_session,

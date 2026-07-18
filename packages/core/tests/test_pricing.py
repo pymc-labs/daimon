@@ -44,9 +44,9 @@ def test_format_cost_strips_trailing_zeros() -> None:
 
 def test_model_pricing_includes_opus_sonnet_haiku() -> None:
     assert "claude-opus-4-8" in MODEL_PRICING, "opus 4.8 must be priced and selectable"
-    assert "claude-opus-4-7" in MODEL_PRICING, "opus 4.7 must be priced (D-17)"
-    assert "claude-sonnet-4-6" in MODEL_PRICING, "sonnet 4.6 must be priced (D-17)"
-    assert "claude-haiku-4-5" in MODEL_PRICING, "haiku 4.5 must be priced (D-17)"
+    assert "claude-opus-4-7" in MODEL_PRICING, "opus 4.7 must be priced"
+    assert "claude-sonnet-4-6" in MODEL_PRICING, "sonnet 4.6 must be priced"
+    assert "claude-haiku-4-5" in MODEL_PRICING, "haiku 4.5 must be priced"
     for key, rates in MODEL_PRICING.items():
         assert isinstance(rates, ModelRates), f"{key} must hold a ModelRates instance"
 

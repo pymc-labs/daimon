@@ -141,7 +141,7 @@ _TERMINAL_STOP_REASONS: frozenset[str] = frozenset({"end_turn", "retries_exhaust
 # interactive surfaces — the driver finalizes a `requires_action` idle as an
 # actionable `TurnError(kind="requires_action")`, not blank success.
 # `headless_runner` is the one caller that auto-allows tool confirmations
-# instead of stopping. Per D-10.
+# instead of stopping.
 _INTERRUPT_TERMINAL: frozenset[str] = _TERMINAL_STOP_REASONS | frozenset({"requires_action"})
 
 
@@ -206,7 +206,7 @@ async def send_interrupt_and_wait(
 
 
 # HTTP status codes that indicate a stale-version conflict on agents.update.
-# Characterized by scripts/probes/managed_agents/update_concurrency.py, run 2026-06-11:
+# Characterized by concurrent-update probing:
 # MA raises anthropic.ConflictError (status 409) with type "invalid_request_error"
 # and message "Concurrent modification detected. Please fetch the latest version and retry."
 _VERSION_CONFLICT_STATUSES: frozenset[int] = frozenset({409})
@@ -349,7 +349,7 @@ async def delete_sessions_for_account(
     Enumeration: list the tenant's agents (list_agents_by_tenant), then
     sessions.list(agent_id=...) per agent, client-side filter on
     metadata[MA_METADATA_KEY_ACCOUNT] == str(account_id). Best-effort:
-    per-session failures are counted, not raised (D-07). 404 = already gone
+    per-session failures are counted, not raised. 404 = already gone
     (idempotent), counted as deleted.
     """
     # Local imports break the circular dependency:

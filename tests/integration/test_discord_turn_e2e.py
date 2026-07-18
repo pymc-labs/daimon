@@ -4,7 +4,7 @@ Drives the real DaimonBot.on_message → _orchestrate → run_turn path against 
 transport-level fake MA (MARouter + SSE). run_turn is NOT stubbed — that is the
 non-negotiable seam that catches routing/threading/wiring regressions.
 
-Assertion surface (D-05): on terminal success DiscordTurnLifecycle.on_terminal_success
+Assertion surface: on terminal success DiscordTurnLifecycle.on_terminal_success
 edits the thinking-embed message via message_ref.edit(content=..., embed=None) — it is
 NOT a fresh thread.send. The final agent text must appear in message_ref.edit's
 content kwarg.
@@ -290,12 +290,12 @@ async def test_discord_mention_delivers_agent_reply_via_edit(
     The agent's final text "Hello from the agent!" is delivered by editing the
     thinking-embed message (message_ref.edit), NOT by a fresh thread.send. This
     asserts the complete on_message→_orchestrate→run_turn→on_terminal_success
-    chain without stubbing run_turn (TC-1 / D-04).
+    chain without stubbing run_turn (TC-1).
     """
     # Seed the tenant so the liveness gate passes (provision_status='ready' by default).
     tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
 
-    # Seed a balance credit so the is_over_balance gate passes (D-14).
+    # Seed a balance credit so the is_over_balance gate passes.
     await tenant_ledger.insert_entry(
         db_session,
         tenant_id=tenant.id,
@@ -317,13 +317,13 @@ async def test_discord_mention_delivers_agent_reply_via_edit(
     # path we care about is run_turn, not XML context construction.
     mock_build_context_xml.return_value = ("<user_query>hello</user_query>", [])
 
-    # create_session is boundary-stubbed (D-04/Pitfall 4): the heavy vault/cred
+    # create_session is boundary-stubbed: the heavy vault/cred
     # provisioning in sessions.py is not what TC-1 tests. run_turn is NOT stubbed.
     mock_create_session.return_value = _make_fake_session()
 
     await bot.on_message(message)
 
-    # D-05 assertion: the final agent text arrives via message_ref.edit(content=...)
+    # Assertion: the final agent text arrives via message_ref.edit(content=...)
     # not via a fresh thread.send (verified lifecycle.py:215-220).
     edit_calls = [c for c in message_ref.edit.call_args_list if "content" in c.kwargs]
     assert edit_calls, (

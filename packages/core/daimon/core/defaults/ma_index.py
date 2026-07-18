@@ -27,9 +27,9 @@ from daimon.core.errors import SkillsListTruncatedError
 _log = structlog.get_logger(__name__)
 
 # _SKILLS_PAGE_LIMIT is the absolute org-wide visibility window for skills.
-# ``next_page`` is NEVER populated for skills at any page boundary (live probe
-# 2026-06-10, scripts/probes/managed_agents/list_pagination.py); agents.list
-# paginates correctly under identical conditions. A full page therefore means
+# ``next_page`` is NEVER populated for skills at any page boundary (verified
+# live, 2026-06-10); agents.list paginates correctly under identical
+# conditions. A full page therefore means
 # the org skill view is truncated, not simply "more pages to follow".
 _SKILLS_PAGE_LIMIT = 100
 
@@ -78,7 +78,7 @@ async def find_agent_by_daimon_tag(
         client, tenant_id=tenant_id, name=name, include_archived=include_archived
     )
     if len(matches) > 1:
-        # D-09: account-aware tripwire. The ambiguous state is degraded but not
+        # Account-aware tripwire. The ambiguous state is degraded but not
         # an outage — adoption still proceeds with the newest match. The warning
         # makes the cross-account collision diagnosable without causing downtime.
         _log.warning(
@@ -165,7 +165,7 @@ async def _collect_skills_page(
 
     ``page_full`` is True when the number of returned rows equals
     _SKILLS_PAGE_LIMIT — because MA never populates ``next_page`` for skills,
-    a full page means the org view is truncated (D-13).
+    a full page means the org view is truncated.
     """
     rows: list[SkillListResponse] = []
     async for sk in client.beta.skills.list(limit=_SKILLS_PAGE_LIMIT):
@@ -177,14 +177,14 @@ async def list_skills_strict(client: AsyncAnthropic) -> list[SkillListResponse]:
     """Return all MA skills, raising SkillsListTruncatedError if the page is full.
 
     Use in write contexts (create, delete, dedup) where making decisions on a
-    truncated view is unsafe (D-13).
+    truncated view is unsafe.
     """
     rows, page_full = await _collect_skills_page(client)
     if page_full:
         raise SkillsListTruncatedError(
             f"skills.list returned a full page of {_SKILLS_PAGE_LIMIT} rows — "
             "MA never populates next_page for skills, so the org skill view is "
-            "truncated; create/delete decisions on this view are unsafe (D-13)"
+            "truncated; create/delete decisions on this view are unsafe"
         )
     return rows
 
@@ -193,7 +193,7 @@ async def list_skills_lenient(client: AsyncAnthropic) -> tuple[list[SkillListRes
     """Return (rows, truncated) for the MA skills page.
 
     When truncated: emits a structlog warning and a Sentry capture. Use in read
-    contexts where degraded results are acceptable but should be observable (D-13).
+    contexts where degraded results are acceptable but should be observable.
     """
     rows, page_full = await _collect_skills_page(client)
     if page_full:
@@ -220,8 +220,8 @@ async def find_skills_by_display_title(
 
     ``on_truncation="raise"`` raises SkillsListTruncatedError when the page is
     full REGARDLESS of whether a match was found — a match on a truncated view
-    can still hide duplicates (D-13 write mode). ``on_truncation="degrade"``
-    logs and captures to Sentry but returns matches (D-13 read mode). Callers
+    can still hide duplicates (write mode). ``on_truncation="degrade"``
+    logs and captures to Sentry but returns matches (read mode). Callers
     must choose explicitly: write/create/delete contexts use "raise"; read
     contexts use "degrade".
     """
@@ -231,7 +231,7 @@ async def find_skills_by_display_title(
             raise SkillsListTruncatedError(
                 f"skills.list returned a full page of {_SKILLS_PAGE_LIMIT} rows — "
                 "MA never populates next_page for skills, so the org skill view is "
-                "truncated; create/delete decisions on this view are unsafe (D-13)"
+                "truncated; create/delete decisions on this view are unsafe"
             )
         _log.warning("ma_index.skills_list_ceiling_hit", limit=_SKILLS_PAGE_LIMIT)
         sentry_sdk.capture_message("skills list truncated at MA API page limit", level="warning")

@@ -1,4 +1,4 @@
-"""Real-DB behavior tests for the pending_file_deletes store. Phase 51 (D-07)."""
+"""Real-DB behavior tests for the pending_file_deletes store."""
 
 from __future__ import annotations
 

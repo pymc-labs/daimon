@@ -51,7 +51,7 @@ class SkillRef(BaseModel):
 class SkillRepo(BaseModel):
     """Authoring-time reference to a GitHub skill repository.
 
-    Used by Phase 33's `sync_agent_skills` orchestrator. Excluded from
+    Used by the `sync_agent_skills` orchestrator. Excluded from
     `AgentSpec.model_dump()` because skill_repos do not serialize to MA —
     the sync pipeline turns them into uploaded `BetaManagedAgentsSkillParams`.
     """

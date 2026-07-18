@@ -42,14 +42,14 @@ async def reconcile_skill(
     spec, _body = load_skill_spec(skill_dir)
     display_title = tenant_scoped_display_title(tenant_id=tenant_id, name=spec.name)
     # on_truncation="raise": seed is a create context — making decisions on a truncated
-    # view is unsafe (D-13). A full page surfaces through _run_per_resource as FAILED.
+    # view is unsafe. A full page surfaces through _run_per_resource as FAILED.
     matches = await find_skills_by_display_title(client, display_title, on_truncation="raise")
     ma_match = matches[0] if matches else None
     duplicates = matches[1:] if len(matches) > 1 else []
 
     if duplicates and not dry_run:
         for dup in duplicates:
-            # Namespace belt (D-07/#138): the dedup lookup was by canonical title so a
+            # Namespace belt: the dedup lookup was by canonical title so a
             # duplicate MUST carry this tenant's prefix. A None here is a logic error —
             # raise instead of deleting a skill we do not own.
             dup_title = dup.display_title or ""

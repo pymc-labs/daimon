@@ -1,4 +1,4 @@
-"""Tests for daimon.core.tenant_balance — TOPUP-01 (D-14/D-15).
+"""Tests for daimon.core.tenant_balance — TOPUP-01.
 
 Covers is_over_balance (balance gate) and debit_amount (pure math).
 
@@ -74,7 +74,7 @@ async def test_is_over_balance_returns_true_when_balance_depleted(
     result = await tenant_balance.is_over_balance(
         sessionmaker=db_session_factory, tenant_id=tenant.id
     )
-    assert result is True, "balance=0 must be considered depleted (D-14: balance > 0 required)"
+    assert result is True, "balance=0 must be considered depleted (balance > 0 required)"
 
 
 async def test_is_over_balance_returns_true_when_balance_negative(
@@ -113,7 +113,7 @@ async def test_is_over_balance_returns_false_when_balance_positive(
     result = await tenant_balance.is_over_balance(
         sessionmaker=db_session_factory, tenant_id=tenant.id
     )
-    assert result is False, "positive balance must allow turns (D-14)"
+    assert result is False, "positive balance must allow turns"
 
 
 async def test_is_over_balance_dm_exemption_returns_false_when_tenant_id_none(

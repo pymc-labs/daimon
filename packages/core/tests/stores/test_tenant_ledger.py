@@ -102,7 +102,7 @@ async def test_negative_delta_usd_drives_balance_negative(
     )
     balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant.id)
     assert balance == Decimal("-5.00"), (
-        "negative delta_usd (debit/clawback) must be allowed and drive balance negative (D-14)"
+        "negative delta_usd (debit/clawback) must be allowed and drive balance negative"
     )
 
 

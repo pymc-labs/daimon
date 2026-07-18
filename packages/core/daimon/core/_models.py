@@ -329,7 +329,7 @@ class GitHubOauthState(Base):
     )
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)  # D-17 snapshot
+    scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)  # snapshot of scopes
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -414,7 +414,7 @@ class UserSkill(Base):
 
 class AgentGithubBinding(Base):
     """Per-agent GitHub credential overlay. Day-1 always empty; populated by
-    Phase 25 (Discord agent-setup panel). Single credential per principal day-1,
+    Discord agent-setup panel. Single credential per principal day-1,
     so no github_login discriminator.
     """
 
@@ -425,9 +425,9 @@ class AgentGithubBinding(Base):
 
 
 class AgentGoogleBinding(Base):
-    """Per-agent Google Workspace identity overlay (Phase 19, GH-03).
+    """Per-agent Google Workspace identity overlay.
 
-    Empty day-1; populated by Phase 25 agent-setup panel. Holds the email
+    Empty day-1; populated by the agent-setup panel. Holds the email
     + scope set the token broker mints credentials for via domain-wide
     delegation against the tenant service account.
     """
@@ -449,7 +449,7 @@ class AgentGoogleBinding(Base):
 
 
 class UsageEvent(Base):
-    """Per-turn token row for billing/observability. D-11, D-13.
+    """Per-turn token row for billing/observability.
 
     UNIQUE (managed_session_id, event_id) ensures SSE-replay idempotency:
     `replay_events` (turn/driver.py) refolds events on reconnect; without
@@ -494,7 +494,7 @@ class UsageEvent(Base):
 
 
 class TenantUserCap(Base):
-    """Per-(tenant, user) cap. NULL platform_user_id row = tenant-wide default. D-06.
+    """Per-(tenant, user) cap. NULL platform_user_id row = tenant-wide default.
 
     NULLS NOT DISTINCT on the UNIQUE means the default row collides with itself
     on upsert (one default per tenant). Postgres 15+.
@@ -530,7 +530,7 @@ class TenantUserCap(Base):
 
 
 class PaymentEvent(Base):
-    """Stripe webhook dedup row. NOT a ledger. D-18.
+    """Stripe webhook dedup row. NOT a ledger.
 
     PK is the Stripe event id (text), not a surrogate UUID — see RESEARCH
     Pitfall 7. The compare-and-set in `try_claim_credit` relies on this.
@@ -540,7 +540,7 @@ class PaymentEvent(Base):
     __table_args__ = (Index("payment_events_tenant_idx", "tenant_id"),)
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
-    # THREAD-02 complete (Phase 53, migration 0016): payment_events.tenant_id flipped NOT NULL.
+    # payment_events.tenant_id is NOT NULL (migration applied).
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("tenants.id", ondelete="CASCADE"),
@@ -555,7 +555,7 @@ class PaymentEvent(Base):
 
 
 class TenantLedger(Base):
-    """Append-only per-tenant USD ledger. Balance = SUM(delta_usd). D-14/D-17.
+    """Append-only per-tenant USD ledger. Balance = SUM(delta_usd).
 
     NEVER a mutable balance column — every credit (topup/trial) and debit
     (turn/clawback) is one immutable row. Idempotency_key is the on_conflict
@@ -591,7 +591,7 @@ class TenantLedger(Base):
 
 
 class AgentFile(Base):
-    """Per-(tenant, agent, key) text blob storage. Phase 15 (INFRA-02)."""
+    """Per-(tenant, agent, key) text blob storage."""
 
     __tablename__ = "agent_files"
     __table_args__ = (PrimaryKeyConstraint("tenant_id", "agent_id", "key", name="pk_agent_files"),)
@@ -616,7 +616,7 @@ class AgentFile(Base):
 
 
 class PendingFileDelete(Base):
-    """Files-API object TTL queue. Phase 51 (D-07).
+    """Files-API object TTL queue.
 
     Records which MA-side Files-API objects to delete and when. The durable
     copy of a secret lives in `agent_files`; the uploaded Files-API object is
@@ -634,7 +634,7 @@ class PendingFileDelete(Base):
 
 
 class AgentRepoBinding(Base):
-    """Per-(tenant, agent) git repo overlay binding. Phase 15 (INFRA-03)."""
+    """Per-(tenant, agent) git repo overlay binding."""
 
     __tablename__ = "agent_repo_binding"
     __table_args__ = (PrimaryKeyConstraint("tenant_id", "agent_id", name="pk_agent_repo_binding"),)
@@ -662,10 +662,10 @@ class AgentRepoBinding(Base):
 
 
 class GitHubAppInstallation(Base):
-    """GitHub App installation record. Phase 56 (GHAPP-01).
+    """GitHub App installation record.
 
     Tracks installation_id -> (account_login, repo_full_names) for minting
-    installation tokens. D-22: install-agnostic routing by repo.full_name.
+    installation tokens. Install-agnostic routing by repo.full_name.
     """
 
     __tablename__ = "github_app_installations"
@@ -685,7 +685,7 @@ class GitHubAppInstallation(Base):
 
 
 class McpToken(Base):
-    """JTI registry for per-agent MCP JWTs (Phase 77, PHASE-77-TOKEN-01).
+    """JTI registry for per-agent MCP JWTs.
 
     Each minted token has one row. `revoked_at` is NULL while the token is
     live; `revoke_mcp_token` sets it atomically via UPDATE…RETURNING.
@@ -722,10 +722,10 @@ class McpToken(Base):
 
 
 class SlackBotToken(Base):
-    """Encrypted per-workspace Slack bot token (Phase 78, SCORE-01).
+    """Encrypted per-workspace Slack bot token.
 
     PK is `team_id` (Slack workspace ID, e.g. "T0123456789"). The store layer
-    takes/returns pre-encrypted `bytes` — it never sees the Fernet key (D-04).
+    takes/returns pre-encrypted `bytes` — it never sees the Fernet key.
     Private to `daimon.core.stores.**` per the import-linter contract.
     """
 
@@ -801,13 +801,13 @@ class SlackTurnContext(Base):
 
 
 class SlackEventDedup(Base):
-    """Exactly-once gate for inbound Slack events (Phase 80, STURN-02).
+    """Exactly-once gate for inbound Slack events.
 
     Composite natural key (team_id, channel, event_ts) — the logical Slack
     event key. Dedup MUST be on this key, NOT envelope_id: reconnect redelivers
     the same logical event with a NEW envelope_id.
 
-    Unbounded for v1 (D-03 — rows are tiny, no pruning job, no TTL, no delete
+    Unbounded for v1 (rows are tiny, no pruning job, no TTL, no delete
     cost on the ack path).
 
     Private to `daimon.core.stores.**` per the import-linter ORM contract.

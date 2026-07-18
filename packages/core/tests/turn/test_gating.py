@@ -1,4 +1,4 @@
-"""Tests for the shared turn-admission gate (daimon.core.turn.gating, SCORE-04).
+"""Tests for the shared turn-admission gate (daimon.core.turn.gating).
 
 Behavior spec:
   - should_admit_turn(current_in_flight=N, cap=M) -> True when N < M

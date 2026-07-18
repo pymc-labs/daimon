@@ -8,7 +8,7 @@ on the pushed repo:
     -> should_resync branch filter (only default_branch)
     -> bridge resolution: binding.agent_id (uuid5) -> agent_name + principal_id
        via re-derive-and-compare across the tenant's MA agents
-    -> credential selection (D-21 auth order, D-25 isolation):
+    -> credential selection (priority order, per-agent isolation):
          App installation token (preferred when App-installed)
          -> per-agent PAT overlay-only (never principal-default)
          -> anon (public repos only)
@@ -126,7 +126,7 @@ async def _resolve_agent_name_and_principal(
 
 
 # ---------------------------------------------------------------------------
-# Credential selection (D-21 auth order, D-25 isolation)
+# Credential selection (priority order, per-agent isolation)
 # ---------------------------------------------------------------------------
 
 
@@ -140,14 +140,14 @@ async def _select_credential(
     http_client: httpx.AsyncClient,
     github_settings: GithubSettings | None,
 ) -> str | None:
-    """Select the best available credential per D-21 auth order + D-25 isolation.
+    """Select the best available credential per the priority order with per-agent isolation.
 
     Priority:
     1. App installation token (preferred when an installation exists AND App is configured)
     2. Per-agent PAT overlay ONLY (binding.agent_id keyed; never falls back to principal-default)
     3. None (anon — public repos only)
 
-    Never resolves agent_id=None (principal-default). That is the D-25 bleed vector.
+    Never resolves agent_id=None (principal-default). That is the credential-bleed vector.
     """
     # Tier 1: App installation token
     if github_settings is not None and github_settings.app_id is not None:
@@ -167,7 +167,7 @@ async def _select_credential(
                 )
                 return token
 
-    # Tier 2: per-agent PAT overlay — D-25: agent_id given, NEVER agent_id=None
+    # Tier 2: per-agent PAT overlay — agent_id given, NEVER agent_id=None
     # get_pat with agent_id resolves the overlay-only path; returns None if no overlay row
     pat = await get_pat(
         principal_id=binding.agent_id,  # per-agent path: principal_id not used when agent_id is set
@@ -198,7 +198,7 @@ async def resync_bound_repo(
     For each binding on repo_full_name:
       - Branch-filter: skip if ref doesn't target binding.default_branch.
       - Bridge-resolve: binding.agent_id (uuid5) -> agent_name + principal_id.
-      - Credential-select: App token > per-agent PAT overlay > anon (D-21/D-25).
+      - Credential-select: App token > per-agent PAT overlay > anon.
       - sync_agent_skills with a one-element repos list.
       - Persist last_sync_at/last_sync_error regardless of outcome.
 
@@ -316,7 +316,7 @@ async def _resync_one_binding(
                 # sync_agent_skills does NOT re-resolve a per-agent PAT (which would
                 # shadow the App installation token). No transport wrapper / extra
                 # client is created — the credential threads cleanly through the param.
-                # D-13: thread github_settings.max_tarball_bytes so an operator cap
+                # Thread github_settings.max_tarball_bytes so an operator cap
                 # override (including 0-disables) reaches the fetcher on this edge.
                 # When github_settings is None, omit the kwarg so the safe
                 # sync_agent_skills default (50 MiB) applies.

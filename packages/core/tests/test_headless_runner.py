@@ -1,7 +1,7 @@
 """Tests for daimon.core.headless_runner.run_turn.
 
 Non-interactive turn driver — opens an MA session, sends a single trigger
-message, drains SSE through Phase 4 reducers until terminal `status_idle`,
+message, drains SSE through the turn-state reducers until terminal `status_idle`,
 returns the truncated final-message tail.
 
 Tests use transport-level fakes via build_fake_anthropic and MARouter from
@@ -407,7 +407,7 @@ async def test_run_turn_calls_usage_record_for_span_model_request_end() -> None:
 
 
 async def test_run_turn_propagates_usage_record_factory_exception() -> None:
-    """If usage_record raises (per D-25 fail-closed), run_turn lets it propagate."""
+    """If usage_record raises (fail-closed), run_turn lets it propagate."""
     events: list[BetaManagedAgentsSessionEvent] = [
         BetaManagedAgentsSpanModelRequestEndEvent(
             id="evt_span_boom",
@@ -644,7 +644,7 @@ async def test_run_turn_raises_when_mcp_active_and_agent_uuid_none() -> None:
 
 
 async def test_run_turn_stamps_session_metadata_with_tenant_and_account() -> None:
-    """CLB-07 regression: a scheduler-fired (headless) session must carry
+    """A scheduler-fired (headless) session must carry
     daimon_tenant + daimon_account metadata, mirroring create_session's stamp
     (test_sessions.py::test_create_session_tags_metadata_with_account_and_tenant_when_both_provided),
     so sweep_headless_usage (usage_sweep.py:57-61) does not skip it and routine
@@ -692,7 +692,7 @@ async def test_run_turn_stamps_session_metadata_with_tenant_and_account() -> Non
     )
 
 
-# --- Phase 51: .env resource mount threading (D-06 / SC2) -------------------
+# --- .env resource mount threading ---
 
 
 def _idle_events() -> list[BetaManagedAgentsSessionEvent]:
@@ -989,9 +989,9 @@ async def test_run_turn_omits_resources_when_phase51_params_absent() -> None:
         trigger_message="hi",
     )
 
-    assert tail == "ok", "turn drains normally without phase-51 params"
+    assert tail == "ok", "turn drains normally without resource-mount params"
     assert len(bodies) == 1, "exactly one session-create call"
-    assert "resources" not in bodies[0], "no resources when phase-51 params are absent"
+    assert "resources" not in bodies[0], "no resources when resource-mount params are absent"
 
 
 async def test_run_turn_composes_resources_alongside_vault_ids(

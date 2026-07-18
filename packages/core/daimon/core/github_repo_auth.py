@@ -1,4 +1,4 @@
-"""Clone-credential resolution for App-or-PAT repo auth (D-01/D-02/D-05/D-08).
+"""Clone-credential resolution for App-or-PAT repo auth.
 
 Owns the mode decision (pure) and the token-resolution orchestration + panel
 coverage probe (shell, injected httpx). No DB access, no module-level
@@ -43,9 +43,9 @@ def select_clone_auth(
     binding_is_public: bool,
     has_fallback_pat: bool,
 ) -> Literal["pat", "app", "public", "none"]:
-    """Decide the clone-auth mode per the D-02 precedence table.
+    """Decide the clone-auth mode per the precedence table.
 
-    Order: per-agent PAT (D-05: always wins) -> App installed on the repo
+    Order: per-agent PAT (always wins) -> App installed on the repo
     owner -> operator fallback PAT on a verified-public (``anon:``) binding
     -> none (caller must raise; never emit an empty ``authorization_token``).
 
@@ -71,9 +71,9 @@ async def resolve_clone_token(
     app_private_key: SecretStr | None,
     now: int,
 ) -> str:
-    """Resolve the clone token for a bound repo per D-01/D-02/D-05/D-08.
+    """Resolve the clone token for a bound repo.
 
-    Short-circuits on ``per_agent_pat`` before any GitHub HTTP call (D-05 PAT
+    Short-circuits on ``per_agent_pat`` before any GitHub HTTP call (per-agent PAT
     wins; Pitfall 2 — never mint a JWT / do an installation lookup when a PAT
     is already available). Otherwise attempts the App installation-token
     path (on-demand ``GET /repos/{owner}/{repo}/installation`` ->
@@ -98,7 +98,7 @@ async def resolve_clone_token(
 
     Raises:
         DaimonError: When no PAT, App coverage, or fallback PAT resolves —
-            the D-02 step-4 fail-loud branch.
+            the fail-loud branch.
     """
     # Empty string is "no token" (same as fallback_pat's bool() handling below);
     # returning it verbatim would emit an empty authorization_token (MA 400s).
@@ -164,7 +164,7 @@ async def is_app_installed_for_repo(
     repo: str,
     now: int,
 ) -> bool:
-    """Bind-time App-coverage probe for setup panels (D-06).
+    """Bind-time App-coverage probe for setup panels.
 
     Returns False (never raises) when App creds are unset, so panels on
     non-App deployments just show the PAT path.

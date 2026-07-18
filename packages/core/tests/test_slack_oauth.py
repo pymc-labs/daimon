@@ -77,7 +77,7 @@ def test_slack_bot_scopes_constant_contains_required_v3_day1_scopes() -> None:
         "users:read",
         "channels:history",
         "groups:history",
-        "reactions:write",  # D-01: ⌛ queued-mention reaction parity (Phase 80)
+        "reactions:write",  # queued-mention reaction parity
         "files:read",  # attachments & vision: read event.files + fetch url_private
         "channels:read",  # channel tools: public channel metadata + membership checks
         "groups:read",  # channel tools: private channel metadata + membership checks
@@ -318,7 +318,7 @@ def test_verify_state_returns_none_for_expired_token() -> None:
 
 
 def test_verify_state_returns_empty_dict_for_replay_within_ttl() -> None:
-    """D-06: replay within TTL is accepted (no nonce store)."""
+    """Replay within TTL is accepted (no nonce store)."""
     secret = "test_signing_secret"
     mint_now = 1_700_000_000.0
     token = mint_state(signing_secret=secret, now=mint_now)

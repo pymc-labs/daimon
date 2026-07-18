@@ -223,7 +223,7 @@ async def test_fetch_tarball_follows_redirect() -> None:
     assert call_count["n"] == 2, "exactly two requests should have been made (initial + redirect)"
 
 
-# --- RATE-03: streaming size guard tests ---
+# --- streaming size guard tests ---
 
 
 async def test_fetch_tarball_raises_tarball_too_large_on_content_length_header() -> None:

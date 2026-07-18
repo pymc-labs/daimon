@@ -397,7 +397,7 @@ async def test_resync_app_token_wins_over_per_agent_pat(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """WR-01 / D-21: when BOTH an App installation AND a per-agent PAT exist, the App
+    """When BOTH an App installation AND a per-agent PAT exist, the App
     installation token must win (App > PAT > anon). Previously the fetcher re-resolved
     and unconditionally sent the per-agent PAT, silently shadowing the App token.
     """
@@ -495,7 +495,7 @@ async def test_resync_pat_tier_is_per_agent(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """D-25 isolation: two agents bound to the same repo.
+    """Per-agent credential isolation: two agents bound to the same repo.
     Only agent A has a per-agent credential overlay.
     Agent A's resync fetches with A's PAT.
     Agent B's resync fetches with NO credential (anon/public).
@@ -532,7 +532,7 @@ async def test_resync_pat_tier_is_per_agent(
     await _setup_binding(db_session, tenant_id=tenant_id, agent_id=agent_id_a, repo_url=repo_url)
     await _setup_binding(db_session, tenant_id=tenant_id, agent_id=agent_id_b, repo_url=repo_url)
 
-    # Only agent A gets a per-agent credential overlay (D-25 model)
+    # Only agent A gets a per-agent credential overlay
     pat_a = "ghp_agent_a_token_xyz"
     await cred_store.upsert_credential(
         db_session,
@@ -590,7 +590,7 @@ async def test_resync_pat_tier_is_per_agent(
     assert auth_a is not None, "agent A must carry an Authorization header"
     assert pat_a in auth_a, f"agent A's fetch must use agent A's PAT; got header: {auth_a!r}"
 
-    # Agent B must fetch with NO credential (anon) — D-25: never principal-default
+    # Agent B must fetch with NO credential (anon) — never principal-default
     assert len(auth_headers_b) >= 1, "agent B must trigger a tarball fetch"
     auth_b = auth_headers_b[0]
     assert auth_b is None, (
@@ -740,14 +740,14 @@ async def test_panel_and_webhook_share_one_skill_ledger(
     )
 
 
-# --- RATE-03: resync edge honors github_settings.max_tarball_bytes ---
+# --- resync edge honors github_settings.max_tarball_bytes ---
 
 
 async def test_resync_honors_github_settings_max_tarball_bytes_cap(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """D-13/D-11: an operator-configured tiny max_tarball_bytes cap must reach the
+    """An operator-configured tiny max_tarball_bytes cap must reach the
     fetcher on the webhook resync edge — an over-cap tarball is skipped (repo
     recorded as errored via last_sync_error) rather than being buffered whole,
     proving github_settings.max_tarball_bytes threads through sync_agent_skills

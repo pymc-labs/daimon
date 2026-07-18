@@ -169,7 +169,7 @@ async def test_fetch_repo_with_token_uses_api_tarball_with_auth_header() -> None
         shutil.rmtree(result.cleanup_dir)
 
 
-# --- RATE-03: streaming size guard + zip-bomb bound ---
+# --- streaming size guard + zip-bomb bound ---
 
 
 async def test_fetch_repo_rejects_oversize_body_streamed() -> None:
@@ -213,7 +213,7 @@ async def test_fetch_repo_rejects_content_length_over_cap_without_reading_body()
 async def test_fetch_repo_rejects_zip_bomb_before_extractall() -> None:
     """A tarball whose member sizes total more than the decompressed cap is rejected.
 
-    KiB-scale fixture (per D-17): highly-compressible repeated bytes keep the
+    KiB-scale fixture: highly-compressible repeated bytes keep the
     gzip-compressed tarball tiny while the member's declared/actual size
     (2 KiB) exceeds a KiB-scale injected cap — no real multi-MB bomb needed.
     """

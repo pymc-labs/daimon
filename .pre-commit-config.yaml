@@ -30,7 +30,7 @@ repos:
         types: [python]
 
       # pass_filenames must stay false: passing paths overrides the
-      # [tool.pyright] include scope and drags tests/ + scripts/probes/
+      # [tool.pyright] include scope and drags tests/ + scripts/
       # (~1200 ungated errors) into the commit gate. With no args this is
       # exactly the CI invocation.
       - id: pyright

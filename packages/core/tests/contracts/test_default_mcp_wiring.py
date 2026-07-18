@@ -1,6 +1,6 @@
 """Env-gated live-MA integration test: apply_defaults injects the default MCP URL.
 
-Satisfies Phase 34 success criterion #4: dump the spec MA holds for a freshly
+Dumps the spec MA holds for a freshly
 seeded agent (client.beta.agents.retrieve(agent_id)) and assert the default
 mcp_servers entry is present.
 

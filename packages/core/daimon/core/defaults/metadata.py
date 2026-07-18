@@ -47,7 +47,7 @@ def build_metadata(
     daimon tenant and local name deterministically.
 
     When `account_id` is provided, stamp `daimon_account=str(account_id)` so the
-    Phase 25 `/agent-setup` panel can filter the roster to the invoking user.
+    The `/agent-setup` panel can filter the roster to the invoking user.
     When `account_id` is `None`, the `daimon_account` key is omitted entirely —
     this preserves the "tenant-scoped / no account" semantics of the seeded
     default agent (everyone's agent).
@@ -82,7 +82,7 @@ def tenant_scoped_display_title(
     *, tenant_id: uuid.UUID, name: str, agent_name: str | None = None
 ) -> str:
     """Return the canonical tenant-owned skill display_title. THIS IS THE ONLY
-    function allowed to produce a tenant-owned skill display_title (D-03) — use it
+    function allowed to produce a tenant-owned skill display_title — use it
     at every create/lookup/dedup/recovery site.
 
     Prefix is ``f"{str(tenant_id)[:8]}-"`` (9 chars). Body is ``name`` when

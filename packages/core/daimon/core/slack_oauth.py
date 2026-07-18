@@ -22,7 +22,7 @@ from daimon.core.errors import SlackOAuthError
 _AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
 _TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 
-# D-07/D-08: Full v3.0 day-1 bot scope set, hardcoded module-level constant.
+# Full v3.0 day-1 bot scope set, hardcoded module-level constant.
 # NOT a config field — operators cannot change this without a code change.
 SLACK_BOT_SCOPES: tuple[str, ...] = (
     "app_mentions:read",
@@ -31,13 +31,13 @@ SLACK_BOT_SCOPES: tuple[str, ...] = (
     "users:read",
     "channels:history",
     "groups:history",
-    "reactions:write",  # D-01: ⌛ queued-mention reaction parity (Phase 80)
+    "reactions:write",  # queued-mention reaction parity
     "files:read",  # attachments & vision: read event.files + fetch url_private
     "channels:read",  # channel tools: public channel metadata + membership checks
     "groups:read",  # channel tools: private channel metadata + membership checks
 )
 
-# Full user-token scope set (design D-02): one grant covers hybrid reads,
+# Full user-token scope set: one grant covers hybrid reads,
 # DMs, and search — later features never force a per-user re-authorization.
 SLACK_USER_SCOPES: tuple[str, ...] = (
     "users:read",  # author display-name resolution (users.info) on user-token reads
@@ -60,13 +60,13 @@ class SlackExchangeResult:
     access_token: str | None
     """xoxb- bot token for this workspace. None on user-only (user_scope) exchanges."""
     team_id: str | None
-    """Workspace ID (team.id). None for Enterprise Grid installs (D-04)."""
+    """Workspace ID (team.id). None for Enterprise Grid installs."""
     team_name: str | None
     """Human-readable workspace name (team.name). None for Enterprise Grid."""
     is_enterprise_install: bool
     """True when the install is org-level (Enterprise Grid).
 
-    Must be rejected by the route before any token is stored (SINST-03).
+    Must be rejected by the route before any token is stored.
     """
     expires_in: int | None
     """Token lifetime in seconds. Present only when token rotation is enabled on the Slack app."""
@@ -183,7 +183,7 @@ def mint_state(
     now: float,
     payload: Mapping[str, str] | None = None,
 ) -> str:
-    """Mint a stateless HMAC-SHA256 signed OAuth state token (D-05).
+    """Mint a stateless HMAC-SHA256 signed OAuth state token.
 
     Token format: ``base64url(body).base64url(sig)``. Body is compact JSON
     ``{"nonce": <hex16>, "iat": <int(now)>}`` plus an optional ``"payload"``
@@ -212,7 +212,7 @@ def verify_state(
     invalid or the token expired. Raises ValueError on structurally malformed
     tokens (missing '.', non-base64) — the route is the parse-guard catch site.
 
-    No single-use nonce enforcement — replay within TTL is accepted (D-06):
+    No single-use nonce enforcement — replay within TTL is accepted:
     the callback re-runs idempotent provisioning / upserts, which is harmless.
     """
     parts = token.split(".", 1)
@@ -239,7 +239,7 @@ def build_slack_connect_url(
     slack_user_id: str,
     now: float,
 ) -> str:
-    """Build the daimon-hosted per-user connect entry URL (design D-04/D-06).
+    """Build the daimon-hosted per-user connect entry URL.
 
     The signed state binds (team_id, slack_user_id); the callback rejects any
     completion by a different Slack account, so a forwarded link is inert.

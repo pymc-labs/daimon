@@ -90,7 +90,7 @@ async def reconcile_agent(
         for dup in duplicates:
             dup_account = dup.metadata.get(MA_METADATA_KEY_ACCOUNT)
             if dup_account != canonical_account:
-                # Defense in depth (D-72-01): never archive an agent whose
+                # Defense in depth: never archive an agent whose
                 # daimon_account differs from the canonical's — that would be
                 # cross-owner data loss. Warn and skip; a human must investigate.
                 _log.warning(
@@ -129,7 +129,7 @@ async def reconcile_agent(
 
     if ma_match is not None:
         existing_hash = ma_match.metadata.get(MA_METADATA_KEY_SPEC_HASH)
-        # D-06: check if MA carries a corrupted daimon-mcp entry (name==daimon-mcp,
+        # Check if MA carries a corrupted daimon-mcp entry (name==daimon-mcp,
         # foreign URL). A chat-clobber (pre-guard) never updated daimon_spec_hash, so
         # the hash short-circuit below would skip the repair indefinitely. Bypass it
         # when corruption is present so merge_mcp_servers_with_ma (spec wins on name)

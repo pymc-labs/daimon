@@ -32,7 +32,7 @@ FireFn = Callable[[RoutineRow], Awaitable[None]]
 async def _record_fire_error(
     sm: async_sessionmaker[AsyncSession], routine_id: uuid.UUID, msg: str
 ) -> None:
-    """Record a fire failure on a FRESH session (D-04 — never reuse fire's session)."""
+    """Record a fire failure on a FRESH session (never reuse fire's session)."""
     try:
         async with sm() as s, s.begin():
             await record_result(s, routine_id, tail=None, error=msg)
@@ -72,12 +72,12 @@ async def run_one_tick(
             log.exception("claim_due_fireable failed")
             return
 
-    # Pre-gather sequential cap check (D-05 / Open-Q1 recommendation: cheaper
+    # Pre-gather sequential cap check (cheaper
     # than checking inside the semaphore boundary; keeps the existing cap path).
     fireable: list[RoutineRow] = []
     for row in rows:
         if row.created_by_user_id is None:
-            # No user to bill against — treat as uncapped (DM exemption D-03 applies
+            # No user to bill against — treat as uncapped (exemption applies
             # symmetrically to routines without an attributable owner).
             over = False
         else:
@@ -99,7 +99,7 @@ async def run_one_tick(
     sem = asyncio.Semaphore(max_concurrent_fires)
 
     async def _fire_guarded(row: RoutineRow) -> None:
-        # Per-fire correlation context (D-05): every log line emitted inside this
+        # Per-fire correlation context: every log line emitted inside this
         # fire — claim/advance/record-result and the turn body — carries a fresh
         # rid and the row's tenant_id. Unbind in finally so the context is clean
         # even on the error paths.
@@ -110,7 +110,7 @@ async def run_one_tick(
                 try:
                     await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
                 except TimeoutError as err:
-                    # OB-4 (D-09): capture to Sentry, then keep the existing swallow —
+                    # Capture to Sentry, then keep the existing swallow —
                     # gather never raises and record_result still runs.
                     capture_exception_with_scope(err)
                     await _record_fire_error(sm, row.id, f"timeout: exceeded {dispatch_timeout_s}s")

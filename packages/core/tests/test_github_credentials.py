@@ -138,7 +138,7 @@ async def test_get_pat_agent_no_overlay_returns_none(
     db_session_factory: async_sessionmaker[AsyncSession],
     fernet: MultiFernet,
 ) -> None:
-    """D-25 fix: get_pat with agent_id given and no overlay row returns None,
+    """get_pat with agent_id given and no overlay row returns None,
     even when the principal has a default credential. No bleed."""
     principal_id = uuid.uuid4()
     agent_id = uuid.uuid4()  # no binding row for this agent
@@ -161,7 +161,7 @@ async def test_get_pat_agent_no_overlay_returns_none(
     )
     assert result is None, (
         "get_pat(agent_id=X) with no overlay row must return None — "
-        "NOT the principal-default credential (D-25 bleed fix)"
+        "NOT the principal-default credential (bleed fix)"
     )
 
 
@@ -207,7 +207,7 @@ async def test_get_github_login_returns_overlay_login_for_agent(
 async def test_get_github_login_agent_no_overlay_returns_none(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """No binding for the agent → None, no principal-default bleed (D-25)."""
+    """No binding for the agent → None, no principal-default bleed."""
     principal_id = uuid.uuid4()
     agent_id = uuid.uuid4()  # no binding row
 

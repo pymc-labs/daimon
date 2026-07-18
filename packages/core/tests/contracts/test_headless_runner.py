@@ -1,12 +1,12 @@
 """Contract test for `run_turn` against real MA + local daimon-mcp.
 
-This is the Phase 39 canary. It fires one routine end-to-end through
+This is a canary that fires one routine end-to-end through
 `daimon.core.headless_runner.run_turn` with `mcp_settings`/`account_id`
 populated, boots a real local daimon-mcp uvicorn server (via the
 `local_daimon_mcp` fixture), and asserts:
 
 1. The MA session was opened with a non-empty `vault_ids` (i.e. the
-   per-account daimon-mcp vault was bound — what Phase 38's staging
+   per-account daimon-mcp vault was bound — what the staging
    regression was missing).
 2. No `session.error` event with `error.type == "mcp_connection_failed_error"`
    surfaced during the turn (MA could initialize daimon-mcp).

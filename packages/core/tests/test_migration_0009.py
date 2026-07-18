@@ -1,4 +1,4 @@
-"""Round-trip test for Alembic 0009 (Phase 15).
+"""Round-trip test for Alembic 0009.
 
 Verifies that after `alembic upgrade head`, both tables created by 0009 exist
 with the correct composite PK constraint names. The db_engine fixture guarantees
@@ -26,7 +26,7 @@ async def test_migration_0009_creates_both_tables(db_engine: AsyncEngine) -> Non
         )
         names = [row[0] for row in result.fetchall()]
     assert names == ["agent_files", "agent_repo_binding"], (
-        "both Phase 15 tables should exist after migrations run"
+        "both tables should exist after migrations run"
     )
 
 

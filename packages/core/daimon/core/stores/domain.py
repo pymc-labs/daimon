@@ -111,7 +111,7 @@ class UserConfigRow(BaseModel):
 
 @dataclass(frozen=True)
 class TenantDependentCounts:
-    """Per-table dependent-row counts for a single tenant (D-01).
+    """Per-table dependent-row counts for a single tenant.
 
     Used by delete_tenant to give callers a blast-radius preview before
     confirming a cascade delete.
@@ -244,7 +244,7 @@ class AgentGithubBindingRow(BaseModel):
 
 
 class AgentGoogleBindingRow(BaseModel):
-    """Pydantic row for AgentGoogleBinding (Phase 19, GH-03).
+    """Pydantic row for AgentGoogleBinding.
 
     `scopes` is a tuple (not list) so the frozen model stays hashable.
     """
@@ -333,7 +333,7 @@ class UserSkillRow(BaseModel):
 
 
 class AgentFileRow(BaseModel):
-    """Pydantic row for AgentFile (Phase 15, INFRA-02)."""
+    """Pydantic row for AgentFile."""
 
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -346,7 +346,7 @@ class AgentFileRow(BaseModel):
 
 
 class PendingFileDeleteRow(BaseModel):
-    """Pydantic row for PendingFileDelete (Phase 51, D-07)."""
+    """Pydantic row for PendingFileDelete."""
 
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -356,7 +356,7 @@ class PendingFileDeleteRow(BaseModel):
 
 
 class AgentRepoBindingRow(BaseModel):
-    """Pydantic row for AgentRepoBinding (Phase 15, INFRA-03)."""
+    """Pydantic row for AgentRepoBinding."""
 
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -372,7 +372,7 @@ class AgentRepoBindingRow(BaseModel):
 
 
 class GitHubAppInstallationRow(BaseModel):
-    """Pydantic row for GitHubAppInstallation (Phase 56, GHAPP-01)."""
+    """Pydantic row for GitHubAppInstallation."""
 
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -384,7 +384,7 @@ class GitHubAppInstallationRow(BaseModel):
 
 
 class McpTokenRow(BaseModel):
-    """Pydantic row for McpToken (Phase 77, PHASE-77-TOKEN-01).
+    """Pydantic row for McpToken.
 
     Represents a minted agent-scoped MCP JWT registered in the `mcp_tokens`
     table. The verifier reads `revoked_at` to reject revoked tokens without

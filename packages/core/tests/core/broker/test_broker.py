@@ -1,8 +1,7 @@
-"""Behavioral tests for the token broker package (Phase 19, GH-03).
+"""Behavioral tests for the token broker package.
 
 These started life as Wave 0 RED stubs (ImportError-only) and are turned
-green by Wave 3 plan 19-03 when the broker implementation lands. Plan 03
-task 3.2 renames this file to ``test_broker.py``.
+green by the broker implementation when it lands.
 
 Per testing skill: real DB sessions, no ``model_construct``, no ``AsyncMock``
 on SDK methods. ``google.oauth2.service_account.Credentials.refresh`` is

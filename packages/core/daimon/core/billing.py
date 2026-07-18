@@ -2,10 +2,10 @@
 
 Per `guideline:architecture` — `is_over_cap` is the single source of truth
 for admission. Adapter wrappers call it before `anthropic.beta.sessions.create`
-(D-01, D-02). No-cap-row short-circuits to False (D-06). Otherwise: True iff
+No-cap-row short-circuits to False. Otherwise: True iff
 sum(usage_events.cost since calendar-month-UTC) >= effective_cap.
 
-Exceptions propagate per D-24 (fail-closed admission).
+Exceptions propagate (fail-closed admission).
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ def load_billing_config() -> BillingConfig | None:
 
 
 def _calendar_month_start_utc(now: datetime) -> datetime:
-    """First day of the calendar month at 00:00 UTC. D-09. Pitfall 3."""
+    """First day of the calendar month at 00:00 UTC."""
     return datetime(now.year, now.month, 1, tzinfo=UTC)
 
 
@@ -95,11 +95,11 @@ async def is_over_cap(
     user_id: str,
     now: datetime,
 ) -> bool:
-    """Adapter-edge admission decision. D-02, D-06, D-08, D-09.
+    """Adapter-edge admission decision.
 
     Returns True iff the user has spent at-or-above their effective cap
     in the calendar-month UTC window containing ``now``. Returns False when
-    billing_config is None (billing disabled). Exceptions propagate (D-24).
+    billing_config is None (billing disabled). Exceptions propagate.
 
     ``now`` is injected by the caller (the adapter edge) rather than read from
     the clock here, per guideline:architecture — keeps the decision pure and
@@ -114,7 +114,7 @@ async def is_over_cap(
             user_id=user_id,
         )
         if cap is None:
-            return False  # D-06 no row = uncapped
+            return False  # no row = uncapped
         period_start = _calendar_month_start_utc(now)
         spent = await usage_events.cost_for_user_in_tenant_since(
             s,
