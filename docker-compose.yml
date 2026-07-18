@@ -4,10 +4,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-daimon}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-daimon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env.example)}
       POSTGRES_DB: ${POSTGRES_DB:-daimon}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
       - ./scripts/db/init:/docker-entrypoint-initdb.d:ro
@@ -26,7 +26,7 @@ services:
       - path: .env
         required: false
     environment:
-      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:-daimon}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env.example)}@postgres:5432/${POSTGRES_DB:-daimon}
       DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required for `daimon defaults apply`}
     volumes:
       - ./defaults:/app/defaults:ro
@@ -43,7 +43,7 @@ services:
       - path: .env
         required: false
     environment:
-      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:-daimon}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env.example)}@postgres:5432/${POSTGRES_DB:-daimon}
       DAIMON_MCP__JWT_SECRET: ${DAIMON_MCP__JWT_SECRET:?DAIMON_MCP__JWT_SECRET is required}
       DAIMON_MCP__PUBLIC_URL: ${DAIMON_MCP__PUBLIC_URL:?DAIMON_MCP__PUBLIC_URL is required}
       DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
@@ -67,7 +67,7 @@ services:
       - path: .env
         required: false
     environment:
-      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:-daimon}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env.example)}@postgres:5432/${POSTGRES_DB:-daimon}
       DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
     entrypoint: ["python", "-m", "daimon.adapters.discord"]
     restart: unless-stopped
@@ -81,11 +81,11 @@ services:
       - path: .env
         required: false
     environment:
-      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:-daimon}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env.example)}@postgres:5432/${POSTGRES_DB:-daimon}
       DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
       DAIMON_MCP__JWT_SECRET: ${DAIMON_MCP__JWT_SECRET:?DAIMON_MCP__JWT_SECRET is required}
       DAIMON_MCP__PUBLIC_URL: ${DAIMON_MCP__PUBLIC_URL:?DAIMON_MCP__PUBLIC_URL is required}
-    entrypoint: ["python", "-m", "daimon.adapters.scheduler"]
+    entrypoint: ["daimon-scheduler"]
     restart: unless-stopped
 
 volumes:

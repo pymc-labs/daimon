@@ -9,8 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-RUN curl -LsSf https://astral.sh/uv/0.9.11/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
+COPY --from=ghcr.io/astral-sh/uv:0.9.11 /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 
