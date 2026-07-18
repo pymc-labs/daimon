@@ -1,4 +1,4 @@
-"""Tests for gating decorators: require_registered_guild, require_admin."""
+"""Tests for gating decorators: require_registered_guild."""
 
 from __future__ import annotations
 
@@ -7,13 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.discord.checks import (
-    require_admin,
     require_registered_guild,
     resolve_tenant_for_interaction,
 )
-from daimon.core._models import Account, PlatformPrincipal, Tenant
 from daimon.core.defaults.provisioning import provision_tenant
-from daimon.core.ma_identity import derive_tenant_uuid
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -125,145 +122,6 @@ class TestRequireRegisteredGuild:
 
         interaction.response.send_message.assert_not_awaited()
         wrapped.assert_awaited_once()
-
-
-# ---------------------------------------------------------------------------
-# require_admin
-# ---------------------------------------------------------------------------
-
-
-class TestRequireAdmin:
-    async def test_rejects_user_role(
-        self,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """Discord user with role='user' is rejected with ephemeral error."""
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id="123456")
-        tenant = Tenant(id=tenant_id, platform="discord", external_id="123456")
-        db_session.add(tenant)
-        await db_session.flush()
-
-        account = Account(tenant_id=tenant.id, role="user")
-        db_session.add(account)
-        await db_session.flush()
-
-        principal = PlatformPrincipal(
-            tenant_id=tenant.id,
-            platform="discord",
-            external_id="111",
-            account_id=account.id,
-        )
-        db_session.add(principal)
-        await db_session.flush()
-
-        wrapped = AsyncMock()
-
-        @require_admin
-        async def handler(self: object, interaction: object) -> None:  # type: ignore[override]
-            await wrapped(self, interaction)  # type: ignore[arg-type]
-
-        interaction = _make_interaction(
-            sessionmaker=db_session_factory,
-            user_id=111,
-        )
-
-        await handler(MagicMock(), interaction)
-
-        interaction.response.send_message.assert_awaited_once()
-        call_kwargs = interaction.response.send_message.call_args
-        assert "admin" in call_kwargs.args[0].lower(), "rejection message should mention admin"
-        assert call_kwargs.kwargs.get("ephemeral") is True, "rejection should be ephemeral"
-        wrapped.assert_not_awaited()
-
-    async def test_passes_admin_role(
-        self,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """Discord user with role='admin' passes through to handler."""
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id="123456")
-        tenant = Tenant(id=tenant_id, platform="discord", external_id="123456")
-        db_session.add(tenant)
-        await db_session.flush()
-
-        account = Account(tenant_id=tenant.id, role="admin")
-        db_session.add(account)
-        await db_session.flush()
-
-        principal = PlatformPrincipal(
-            tenant_id=tenant.id,
-            platform="discord",
-            external_id="222",
-            account_id=account.id,
-        )
-        db_session.add(principal)
-        await db_session.flush()
-
-        wrapped = AsyncMock()
-
-        @require_admin
-        async def handler(self: object, interaction: object) -> None:  # type: ignore[override]
-            await wrapped(self, interaction)  # type: ignore[arg-type]
-
-        interaction = _make_interaction(
-            sessionmaker=db_session_factory,
-            user_id=222,
-        )
-
-        await handler(MagicMock(), interaction)
-
-        interaction.response.send_message.assert_not_awaited()
-        wrapped.assert_awaited_once()
-
-    async def test_auto_creates_user_account_and_rejects(
-        self,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """First-time Discord user gets auto-created account (role='user') and is rejected."""
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id="123456")
-        tenant = Tenant(id=tenant_id, platform="discord", external_id="123456")
-        db_session.add(tenant)
-        # No account or principal seeded for external_id="333"
-        await db_session.flush()
-
-        wrapped = AsyncMock()
-
-        @require_admin
-        async def handler(self: object, interaction: object) -> None:  # type: ignore[override]
-            await wrapped(self, interaction)  # type: ignore[arg-type]
-
-        interaction = _make_interaction(
-            sessionmaker=db_session_factory,
-            user_id=333,
-        )
-
-        await handler(MagicMock(), interaction)
-
-        # Should be rejected since auto-created account has role='user'
-        interaction.response.send_message.assert_awaited_once()
-        call_kwargs = interaction.response.send_message.call_args
-        assert call_kwargs.kwargs.get("ephemeral") is True, "rejection should be ephemeral"
-        wrapped.assert_not_awaited()
-
-        # Verify account was auto-created with role='user' in the DB
-        from daimon.core._models import Account as Acc
-        from daimon.core._models import PlatformPrincipal as PP
-        from sqlalchemy import select
-
-        pp_row = (
-            await db_session.execute(
-                select(PP).where(
-                    PP.tenant_id == tenant.id,
-                    PP.platform == "discord",
-                    PP.external_id == "333",
-                )
-            )
-        ).scalar_one()
-        created_account = await db_session.get(Acc, pp_row.account_id)
-        assert created_account is not None, "account should have been created for first-time user"
-        assert created_account.role == "user", "auto-created account should have role='user'"
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,6 @@
 """Interactive View components for Discord UI.
 
 GuardedView gates on allowed_user_id and prevents double-click via _handled flag.
-ConfirmationView (60s) for destructive slash commands.
 CancelView for interrupting running turns (no timeout -- lifecycle manages removal).
 
 All Views are non-persistent (VIEW-04): no custom_id, no bot.add_view(). CancelView uses
@@ -50,37 +49,6 @@ class GuardedView(discord.ui.View):
             item.disabled = True  # type: ignore[union-attr]  # Item union; buttons have .disabled
         if self.message is not None:
             await self.message.edit(view=self)
-
-
-class ConfirmationView(GuardedView):
-    """Destructive command confirmation (60s timeout)."""
-
-    def __init__(self, *, allowed_user_id: int) -> None:
-        super().__init__(allowed_user_id=allowed_user_id, timeout=60.0)
-        self.confirmed: bool | None = None
-
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.green)
-    async def confirm_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button[ConfirmationView],
-    ) -> None:
-        self.confirmed = True
-        self._finalize()
-        await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
-    async def cancel_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button[ConfirmationView],
-    ) -> None:
-        self.confirmed = False
-        self._finalize()
-        await interaction.response.edit_message(view=self)
-
-    async def on_timeout(self) -> None:
-        await super().on_timeout()
 
 
 class CancelView(GuardedView):

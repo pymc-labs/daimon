@@ -135,7 +135,7 @@ async def test_handle_routine_action_pause_flips_enabled_to_false_and_triggers_v
 
     # Assert routine is now disabled
     async with db_session_factory() as s:
-        updated = await get_routine(s, routine.id)
+        updated = await get_routine(s, routine.id, tenant_id=tenant_id)
     assert updated is not None, "routine must still exist after pause"
     assert updated.enabled is False, "pause action should set enabled=False"
 
@@ -177,7 +177,7 @@ async def test_handle_routine_action_non_admin_non_creator_leaves_enabled_unchan
     await handle_routine_action(runtime, payload)  # type: ignore[arg-type]
 
     async with db_session_factory() as s:
-        after = await get_routine(s, routine.id)
+        after = await get_routine(s, routine.id, tenant_id=tenant_id)
     assert after is not None, "routine must still exist"
     assert after.enabled is True, "non-admin/non-creator click must not change enabled state"
 
@@ -213,7 +213,7 @@ async def test_handle_routine_action_cross_tenant_routine_id_is_refused_with_no_
     await handle_routine_action(runtime, payload)  # type: ignore[arg-type]
 
     async with db_session_factory() as s:
-        after = await get_routine(s, routine_a.id)
+        after = await get_routine(s, routine_a.id, tenant_id=tenant_a_id)
     assert after is not None, "routine A must still exist"
     assert after.enabled is True, "cross-tenant routine_id must be refused without any DB write"
 
@@ -251,7 +251,7 @@ async def test_handle_routine_action_delete_by_creator_pushes_confirm_modal_and_
 
     # Routine must NOT be deleted yet — the confirm modal is only pushed.
     async with db_session_factory() as s:
-        still = await get_routine(s, routine.id)
+        still = await get_routine(s, routine.id, tenant_id=tenant_id)
     assert still is not None, "delete overflow must not delete before confirmation"
 
     client_fake: Any = fake_slack_web_client
@@ -288,7 +288,7 @@ async def test_handle_routine_action_delete_by_non_admin_non_creator_is_refused(
     await handle_routine_action(runtime, payload)  # type: ignore[arg-type]
 
     async with db_session_factory() as s:
-        still = await get_routine(s, routine.id)
+        still = await get_routine(s, routine.id, tenant_id=tenant_id)
     assert still is not None, "routine must still exist"
 
     client_fake: Any = fake_slack_web_client

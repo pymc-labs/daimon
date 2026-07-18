@@ -43,7 +43,7 @@ def require_flow_prerequisites() -> tuple[str, str]:
     api_key = os.environ.get("DAIMON_TEST_ANTHROPIC_API_KEY")
     if not api_key:
         pytest.skip("DAIMON_TEST_ANTHROPIC_API_KEY not set — flow tests skipped")
-    url = os.environ.get("DAIMON_DATABASE__TEST_URL") or os.environ.get("DAIMON_TEST_DATABASE_URL")
+    url = os.environ.get("DAIMON_DATABASE__TEST_URL")
     if not url:
         pytest.skip("DAIMON_DATABASE__TEST_URL not set — flow tests skipped")
     db_name = urlparse(url).path.lstrip("/")

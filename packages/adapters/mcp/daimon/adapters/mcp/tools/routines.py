@@ -117,8 +117,8 @@ async def _get_routine_impl(
 ) -> RoutineRow:
     tenant_id = auth.tenant_id
     async with runtime.session_factory() as session:
-        row = await routines_store.get_routine(session, routine_id)
-    if row is None or row.tenant_id != tenant_id:
+        row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
+    if row is None:
         raise ToolError("routine not found")
     return row
 
@@ -136,8 +136,8 @@ async def _update_routine_impl(
 ) -> RoutineRow:
     tenant_id = auth.tenant_id
     async with runtime.session_factory() as session, session.begin():
-        row = await routines_store.get_routine(session, routine_id)
-        if row is None or row.tenant_id != tenant_id:
+        row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
+        if row is None:
             raise ToolError("routine not found")
 
         # Recompute next_fire_at only when cron or timezone is being changed.
@@ -164,6 +164,7 @@ async def _update_routine_impl(
         updated = await routines_store.update_routine(
             session,
             routine_id,
+            tenant_id=tenant_id,
             cron_expr=cron_expr,
             timezone_=timezone,
             trigger_message=trigger_message,
@@ -185,10 +186,9 @@ async def _delete_routine_impl(
 ) -> DeleteResult:
     tenant_id = auth.tenant_id
     async with runtime.session_factory() as session, session.begin():
-        row = await routines_store.get_routine(session, routine_id)
-        if row is None or row.tenant_id != tenant_id:
+        deleted = await routines_store.delete_routine(session, routine_id, tenant_id=tenant_id)
+        if not deleted:
             raise ToolError("routine not found")
-        await routines_store.delete_routine(session, routine_id)
     return DeleteResult(deleted=True, routine_id=str(routine_id))
 
 

@@ -167,20 +167,13 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
 
             async with runtime.sessionmaker() as session, session.begin():
                 # TOCTOU-safe: re-fetch and validate inside session.begin().
-                row = await get_routine(session, routine_id)
+                # Tenant scoping is enforced by the store (tenant_id kwarg).
+                row = await get_routine(session, routine_id, tenant_id=tenant_id)
                 if row is None:
                     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                         channel=channel_id or user_id,
                         user=user_id,
                         text="This routine no longer exists.",
-                    )
-                    return
-                # T-82-05: cross-tenant tamper guard.
-                if row.tenant_id != tenant_id:
-                    log.warning(
-                        "slack.routines_action.cross_tenant_refused",
-                        routine_id=routine_id_str,
-                        team_id=team_id,
                     )
                     return
                 # T-82-06: authority check at click time (TOCTOU-safe).
@@ -201,9 +194,9 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
 
                 now = datetime.now(UTC)
                 if action_value == "pause":
-                    await pause_routine(session, routine_id)
+                    await pause_routine(session, routine_id, tenant_id=tenant_id)
                 else:
-                    await resume_routine(session, routine_id, now=now)
+                    await resume_routine(session, routine_id, tenant_id=tenant_id, now=now)
 
             # Re-render after successful write.
             async with runtime.sessionmaker() as session:
@@ -228,21 +221,13 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 return
 
             async with runtime.sessionmaker() as session:
-                row = await get_routine(session, routine_id)
+                row = await get_routine(session, routine_id, tenant_id=tenant_id)
 
             if row is None:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
                     user=user_id,
                     text="This routine no longer exists.",
-                )
-                return
-            # Cross-tenant tamper guard.
-            if row.tenant_id != tenant_id:
-                log.warning(
-                    "slack.routines_action.cross_tenant_refused",
-                    routine_id=routine_id_str,
-                    team_id=team_id,
                 )
                 return
             # Authority gate before showing the confirm modal (re-checked at
@@ -280,9 +265,9 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 return
 
             async with runtime.sessionmaker() as session:
-                row = await get_routine(session, routine_id)
+                row = await get_routine(session, routine_id, tenant_id=tenant_id)
 
-            if row is None or row.tenant_id != tenant_id:
+            if row is None:
                 return
 
             if row.last_error is not None:

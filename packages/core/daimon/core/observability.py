@@ -1,7 +1,7 @@
 """Sentry observability helpers for daimon-core.
 
 Functional-core / imperative-shell split:
-  - Pure:  _scrub_event (before_send callback), build_scope_tags
+  - Pure:  _scrub_event (before_send callback)
   - Shell: init_sentry (the single I/O escape — calls sentry_sdk.init)
 
 Do NOT call sentry_sdk.init at module import time (architecture rule 3).
@@ -67,24 +67,8 @@ def _scrub_event(event: Event, hint: Hint) -> Event | None:
     return event
 
 
-# The id-only Sentry scope tag keys. Shared source of truth for both the
-# all-three build_scope_tags helper and the omit-unbound capture helper.
+# The id-only Sentry scope tag keys used by the omit-unbound capture helper.
 _SCOPE_TAG_KEYS: tuple[str, str, str] = ("tenant_id", "rid", "guild_id")
-
-
-def build_scope_tags(
-    *,
-    tenant_id: str,
-    rid: str,
-    guild_id: str,
-) -> dict[str, str]:
-    """Pure helper: return indexed id-strings for Sentry scope tags.
-
-    Only id strings are included — never message content, user text, or PII.
-    Plan 02 callers set these via sentry_sdk.set_tag after init_sentry.
-    """
-    values: dict[str, str] = {"tenant_id": tenant_id, "rid": rid, "guild_id": guild_id}
-    return {key: values[key] for key in _SCOPE_TAG_KEYS}
 
 
 def capture_exception_with_scope(exc: BaseException) -> None:

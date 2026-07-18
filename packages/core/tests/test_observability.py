@@ -4,7 +4,6 @@ Tests cover:
   - init_sentry no-ops when dsn is None
   - _scrub_event redacts secret-keyed tag values
   - _scrub_event drops request.data and extra fields
-  - build_scope_tags returns only id-string keys (no message content)
   - capture_exception_with_scope tags from contextvars, omits unbound, never raises
 """
 
@@ -17,7 +16,6 @@ import pytest
 import sentry_sdk
 from daimon.core.observability import (
     _scrub_event,
-    build_scope_tags,
     capture_exception_with_scope,
     init_sentry,
 )
@@ -193,24 +191,3 @@ def test_scrub_event_drops_message_body_when_request_data_present() -> None:
     assert "extra" not in result, (
         "extra field must be removed to prevent arbitrary payload from leaving the process"
     )
-
-
-def test_scope_tags_exclude_message_body_when_built_from_ids() -> None:
-    """build_scope_tags returns only id-string keys — no content, body, or message keys."""
-    tags = build_scope_tags(
-        tenant_id="t-123",
-        rid="r-456",
-        guild_id="g-789",
-    )
-
-    assert set(tags.keys()) == {"tenant_id", "rid", "guild_id"}, (
-        "scope tags must contain only the three id keys"
-    )
-    assert all(isinstance(v, str) for v in tags.values()), "all scope tag values must be strings"
-    for key in tags:
-        assert key not in {"content", "message", "body", "data", "text"}, (
-            f"scope tag key '{key}' looks like message content — must be an id key only"
-        )
-    assert tags["tenant_id"] == "t-123", "tenant_id must round-trip"
-    assert tags["rid"] == "r-456", "rid must round-trip"
-    assert tags["guild_id"] == "g-789", "guild_id must round-trip"

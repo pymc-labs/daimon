@@ -1086,239 +1086,235 @@ class DaimonBot(commands.Bot):
             pricing=MODEL_PRICING.get(agent.model.id),
         )
 
-        try:
-            log.info(
-                "session.ready",
-                session_id=ma_session_id,
-                thread_id=thread.id,
-                reused=reused,
-            )
+        log.info(
+            "session.ready",
+            session_id=ma_session_id,
+            thread_id=thread.id,
+            reused=reused,
+        )
 
-            # Persist mapping for the create path (after thread.id is known).
-            if not reused:
-                async with self.runtime.sessionmaker() as _map_session:
-                    row = await create_thread_session(
-                        _map_session,
-                        tenant_id=tenant_id,
-                        platform="discord",
-                        thread_id=str(thread.id),
-                        account_id=session_account_id,
-                        ma_session_id=ma_session_id,
-                    )
-                    await _map_session.commit()
-                mapping_id = row.id
-
-            # Split trigger-message attachments: API-consumable images → vision
-            # blocks; everything else (data files, unsupported/oversized images)
-            # → signed CDN URL surfaced to the agent (it has bash + network egress
-            # and curls the file itself). If it needs the file on a notebook
-            # workspace to publish, it uploads on demand via the
-            # create_attachment_upload_url MCP tool — the bot no longer uploads
-            # eagerly, so there is nothing to silently skip.
-            #
-            # attachments_override (drain path) replaces message.attachments
-            # wholesale with the merged attachments from all of the queued
-            # author's messages -- otherwise only the first queued message's
-            # attachments would ever reach the turn.
-            attachments = (
-                attachments_override if attachments_override is not None else message.attachments
-            )
-            trigger_image_atts = [a for a in attachments if is_vision_image_attachment(a)]
-            data_atts = [a for a in attachments if not is_vision_image_attachment(a)]
-            target = thread or message.channel
-
-            synthetic_prefix = build_attachment_url_prefix(data_atts)
-
-            # --- Build user message (XML history for thread mentions, raw for channel) ---
-            # Continuation turns (reused session with a watermark) use delta context
-            # (messages since the watermark). First turns use the full snapshot.
-            # History images are intentionally NOT inlined as vision blocks: MA
-            # persists and replays every image block across turns, so re-sending the
-            # thread's history images each turn compounds the per-request image count
-            # past the API's 20-image threshold, which drops its per-image dimension
-            # limit from 8000px to 2000px and 400s ordinary photos. History images
-            # already carry url= in their <attachment/> XML, so the agent can curl +
-            # read them on demand instead. (build_context_xml still reports the
-            # history image attachments; we just don't download them here.)
-            if isinstance(message.channel, discord.Thread):
-                if reused and watermark is not None:
-                    user_message, _ = await build_delta_xml(
-                        thread,
-                        trigger=message,
-                        after_message_id=int(watermark),
-                        bot_user_id=self.user.id if self.user else None,
-                    )
-                else:
-                    user_message, _ = await build_context_xml(
-                        thread,
-                        trigger=message,
-                        limit=100,
-                        bot_user_id=self.user.id if self.user else None,
-                    )
-            else:
-                if content_override is not None:
-                    user_message = content_override
-                elif isinstance(message.channel, discord.TextChannel):
-                    user_message, _ = await build_channel_context_xml(
-                        message.channel,
-                        trigger=message,
-                        bot_user_id=self.user.id if self.user else None,
-                    )
-                else:
-                    # Forum/voice channels: fall back to raw message content
-                    user_message = message.content
-
-            # Inline only the trigger message's images as base64 vision blocks.
-            # Images we can't inline (too large, too many, unsupported, fetch error)
-            # are not dropped — their signed CDN URL is surfaced below so the agent
-            # can still reach them (curl + read to view, or pass to an external API).
-            downloaded_blocks, images_skipped = await download_as_image_blocks(trigger_image_atts)
-            skipped_ids = {att.id for att, _ in images_skipped}
-            inlined_image_atts = [a for a in trigger_image_atts if a.id not in skipped_ids]
-            image_blocks = downloaded_blocks or None
-
-            # Surface a signed-CDN-URL line for every trigger image: inlined images
-            # get a handle they can forward to external APIs; skipped images get the
-            # only path left for the agent to reach them.
-            synthetic_prefix = "\n".join(
-                part
-                for part in (
-                    synthetic_prefix,
-                    build_image_url_prefix(inlined_image_atts),
-                    build_skipped_image_prefix(images_skipped),
-                )
-                if part
-            )
-            if synthetic_prefix:
-                user_message = synthetic_prefix + "\n" + user_message
-
-            if images_skipped:
-                await target.send(
-                    "Some images couldn't be inlined — I've linked them for the agent to "
-                    "fetch instead: "
-                    + ", ".join(f"`{att.filename}` ({r})" for att, r in images_skipped)
-                )
-
-            # --- Run the turn ---
-            log.info(
-                "turn.started",
-                guild_id=guild_id,
-                channel_id=parent_channel_id,
-                thread_id=thread.id,
-                session_id=ma_session_id,
-            )
-            state = await run_turn(
-                anthropic=self.runtime.anthropic,
-                session_id=ma_session_id,
-                user_message=user_message,
-                lifecycle=lifecycle,
-                cancel=cancel,
-                render_interval_s=2.0,
-                usage_record=usage_record,
-                image_blocks=image_blocks,
-            )
-
-            # --- Recreate on dead session (404 not_found_error) ---
-            # Dead = session existed but is gone (expired/GC'd); 404 is the confirmed signal.
-            # On dead session: mark old row dead, create new session + new mapping row,
-            # re-seed with full history, re-run once. If the retry also fails, let it
-            # fall through to the normal error render — no infinite loop.
-            if _is_dead_session(state) and mapping_id is not None:
-                log.info(
-                    "session.dead_recreate",
-                    old_session_id=ma_session_id,
-                    thread_id=thread.id,
-                )
-                async with self.runtime.sessionmaker() as _dead_session:
-                    await mark_dead(_dead_session, id=mapping_id)
-                    await _dead_session.commit()
-
-                ma_session_recreated = await create_session(
-                    self.runtime.anthropic,
-                    agent=agent,
-                    environment=env,
-                    mcp_settings=self.runtime.settings.mcp,
-                    account_id=principal.account_id,
+        # Persist mapping for the create path (after thread.id is known).
+        if not reused:
+            async with self.runtime.sessionmaker() as _map_session:
+                row = await create_thread_session(
+                    _map_session,
                     tenant_id=tenant_id,
-                    agent_uuid=agent_uuid,
-                    session_factory=self.runtime.sessionmaker,
-                    fernet=fernet,
-                    github_fallback_pat=(
-                        self.runtime.settings.github.fallback_pat.get_secret_value()
-                        if self.runtime.settings.github.fallback_pat is not None
-                        else None
-                    ),
-                    github_app_id=self.runtime.settings.github.app_id,
-                    github_app_private_key=(
-                        self.runtime.settings.github.app_private_key.get_secret_value()
-                        if self.runtime.settings.github.app_private_key is not None
-                        else None
-                    ),
+                    platform="discord",
+                    thread_id=str(thread.id),
+                    account_id=session_account_id,
+                    ma_session_id=ma_session_id,
                 )
-                new_session_id = ma_session_recreated.id
-                async with self.runtime.sessionmaker() as _new_map_session:
-                    new_row = await create_thread_session(
-                        _new_map_session,
-                        tenant_id=tenant_id,
-                        platform="discord",
-                        thread_id=str(thread.id),
-                        # session_account_id is always non-NULL (real account_id or
-                        # deterministic sentinel). A NULL insert here would cause a
-                        # permanent cold-create loop on the next turn (T-88-04-02).
-                        account_id=session_account_id,
-                        ma_session_id=new_session_id,
-                    )
-                    await _new_map_session.commit()
-                mapping_id = new_row.id
+                await _map_session.commit()
+            mapping_id = row.id
 
-                # Full history re-seed for the recreated session.
+        # Split trigger-message attachments: API-consumable images → vision
+        # blocks; everything else (data files, unsupported/oversized images)
+        # → signed CDN URL surfaced to the agent (it has bash + network egress
+        # and curls the file itself). If it needs the file on a notebook
+        # workspace to publish, it uploads on demand via the
+        # create_attachment_upload_url MCP tool — the bot no longer uploads
+        # eagerly, so there is nothing to silently skip.
+        #
+        # attachments_override (drain path) replaces message.attachments
+        # wholesale with the merged attachments from all of the queued
+        # author's messages -- otherwise only the first queued message's
+        # attachments would ever reach the turn.
+        attachments = (
+            attachments_override if attachments_override is not None else message.attachments
+        )
+        trigger_image_atts = [a for a in attachments if is_vision_image_attachment(a)]
+        data_atts = [a for a in attachments if not is_vision_image_attachment(a)]
+        target = thread or message.channel
+
+        synthetic_prefix = build_attachment_url_prefix(data_atts)
+
+        # --- Build user message (XML history for thread mentions, raw for channel) ---
+        # Continuation turns (reused session with a watermark) use delta context
+        # (messages since the watermark). First turns use the full snapshot.
+        # History images are intentionally NOT inlined as vision blocks: MA
+        # persists and replays every image block across turns, so re-sending the
+        # thread's history images each turn compounds the per-request image count
+        # past the API's 20-image threshold, which drops its per-image dimension
+        # limit from 8000px to 2000px and 400s ordinary photos. History images
+        # already carry url= in their <attachment/> XML, so the agent can curl +
+        # read them on demand instead. (build_context_xml still reports the
+        # history image attachments; we just don't download them here.)
+        if isinstance(message.channel, discord.Thread):
+            if reused and watermark is not None:
+                user_message, _ = await build_delta_xml(
+                    thread,
+                    trigger=message,
+                    after_message_id=int(watermark),
+                    bot_user_id=self.user.id if self.user else None,
+                )
+            else:
                 user_message, _ = await build_context_xml(
                     thread,
                     trigger=message,
                     limit=100,
                     bot_user_id=self.user.id if self.user else None,
                 )
-                if synthetic_prefix:
-                    user_message = synthetic_prefix + "\n" + user_message
-
-                cancel_retry = asyncio.Event()
-                lifecycle = DiscordTurnLifecycle(
-                    send=_send_embed,
-                    edit=_edit_message,
-                    agent_name=agent.name,
-                    model_id=agent.model.id,
-                    cancel_view=CancelView(allowed_user_id=message.author.id, cancel=cancel_retry),
-                )
-                state = await run_turn(
-                    anthropic=self.runtime.anthropic,
-                    session_id=new_session_id,
-                    user_message=user_message,
-                    lifecycle=lifecycle,
-                    cancel=cancel_retry,
-                    render_interval_s=2.0,
-                    usage_record=usage_record,
-                    image_blocks=image_blocks,
-                )
-                ma_session_id = new_session_id
-
-            if state.error is not None:
-                log.warning(
-                    "turn.error",
-                    thread_id=thread.id,
-                    session_id=ma_session_id,
-                    kind=state.error.kind,
+        else:
+            if content_override is not None:
+                user_message = content_override
+            elif isinstance(message.channel, discord.TextChannel):
+                user_message, _ = await build_channel_context_xml(
+                    message.channel,
+                    trigger=message,
+                    bot_user_id=self.user.id if self.user else None,
                 )
             else:
-                log.info("turn.completed", thread_id=thread.id, session_id=ma_session_id)
-                # --- Write watermark (bot's reply message id) ---
-                if mapping_id is not None and lifecycle.final_message_id is not None:
-                    async with self.runtime.sessionmaker() as _wm_session:
-                        await update_watermark(
-                            _wm_session,
-                            id=mapping_id,
-                            watermark_message_id=lifecycle.final_message_id,
-                        )
-                        await _wm_session.commit()
-        finally:
-            # Session deletion disabled — reuse is the point.
-            pass
+                # Forum/voice channels: fall back to raw message content
+                user_message = message.content
+
+        # Inline only the trigger message's images as base64 vision blocks.
+        # Images we can't inline (too large, too many, unsupported, fetch error)
+        # are not dropped — their signed CDN URL is surfaced below so the agent
+        # can still reach them (curl + read to view, or pass to an external API).
+        downloaded_blocks, images_skipped = await download_as_image_blocks(trigger_image_atts)
+        skipped_ids = {att.id for att, _ in images_skipped}
+        inlined_image_atts = [a for a in trigger_image_atts if a.id not in skipped_ids]
+        image_blocks = downloaded_blocks or None
+
+        # Surface a signed-CDN-URL line for every trigger image: inlined images
+        # get a handle they can forward to external APIs; skipped images get the
+        # only path left for the agent to reach them.
+        synthetic_prefix = "\n".join(
+            part
+            for part in (
+                synthetic_prefix,
+                build_image_url_prefix(inlined_image_atts),
+                build_skipped_image_prefix(images_skipped),
+            )
+            if part
+        )
+        if synthetic_prefix:
+            user_message = synthetic_prefix + "\n" + user_message
+
+        if images_skipped:
+            await target.send(
+                "Some images couldn't be inlined — I've linked them for the agent to "
+                "fetch instead: "
+                + ", ".join(f"`{att.filename}` ({r})" for att, r in images_skipped)
+            )
+
+        # --- Run the turn ---
+        log.info(
+            "turn.started",
+            guild_id=guild_id,
+            channel_id=parent_channel_id,
+            thread_id=thread.id,
+            session_id=ma_session_id,
+        )
+        state = await run_turn(
+            anthropic=self.runtime.anthropic,
+            session_id=ma_session_id,
+            user_message=user_message,
+            lifecycle=lifecycle,
+            cancel=cancel,
+            render_interval_s=2.0,
+            usage_record=usage_record,
+            image_blocks=image_blocks,
+        )
+
+        # --- Recreate on dead session (404 not_found_error) ---
+        # Dead = session existed but is gone (expired/GC'd); 404 is the confirmed signal.
+        # On dead session: mark old row dead, create new session + new mapping row,
+        # re-seed with full history, re-run once. If the retry also fails, let it
+        # fall through to the normal error render — no infinite loop.
+        if _is_dead_session(state) and mapping_id is not None:
+            log.info(
+                "session.dead_recreate",
+                old_session_id=ma_session_id,
+                thread_id=thread.id,
+            )
+            async with self.runtime.sessionmaker() as _dead_session:
+                await mark_dead(_dead_session, id=mapping_id)
+                await _dead_session.commit()
+
+            ma_session_recreated = await create_session(
+                self.runtime.anthropic,
+                agent=agent,
+                environment=env,
+                mcp_settings=self.runtime.settings.mcp,
+                account_id=principal.account_id,
+                tenant_id=tenant_id,
+                agent_uuid=agent_uuid,
+                session_factory=self.runtime.sessionmaker,
+                fernet=fernet,
+                github_fallback_pat=(
+                    self.runtime.settings.github.fallback_pat.get_secret_value()
+                    if self.runtime.settings.github.fallback_pat is not None
+                    else None
+                ),
+                github_app_id=self.runtime.settings.github.app_id,
+                github_app_private_key=(
+                    self.runtime.settings.github.app_private_key.get_secret_value()
+                    if self.runtime.settings.github.app_private_key is not None
+                    else None
+                ),
+            )
+            new_session_id = ma_session_recreated.id
+            async with self.runtime.sessionmaker() as _new_map_session:
+                new_row = await create_thread_session(
+                    _new_map_session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    thread_id=str(thread.id),
+                    # session_account_id is always non-NULL (real account_id or
+                    # deterministic sentinel). A NULL insert here would cause a
+                    # permanent cold-create loop on the next turn (T-88-04-02).
+                    account_id=session_account_id,
+                    ma_session_id=new_session_id,
+                )
+                await _new_map_session.commit()
+            mapping_id = new_row.id
+
+            # Full history re-seed for the recreated session.
+            user_message, _ = await build_context_xml(
+                thread,
+                trigger=message,
+                limit=100,
+                bot_user_id=self.user.id if self.user else None,
+            )
+            if synthetic_prefix:
+                user_message = synthetic_prefix + "\n" + user_message
+
+            cancel_retry = asyncio.Event()
+            lifecycle = DiscordTurnLifecycle(
+                send=_send_embed,
+                edit=_edit_message,
+                agent_name=agent.name,
+                model_id=agent.model.id,
+                cancel_view=CancelView(allowed_user_id=message.author.id, cancel=cancel_retry),
+            )
+            state = await run_turn(
+                anthropic=self.runtime.anthropic,
+                session_id=new_session_id,
+                user_message=user_message,
+                lifecycle=lifecycle,
+                cancel=cancel_retry,
+                render_interval_s=2.0,
+                usage_record=usage_record,
+                image_blocks=image_blocks,
+            )
+            ma_session_id = new_session_id
+
+        if state.error is not None:
+            log.warning(
+                "turn.error",
+                thread_id=thread.id,
+                session_id=ma_session_id,
+                kind=state.error.kind,
+            )
+        else:
+            log.info("turn.completed", thread_id=thread.id, session_id=ma_session_id)
+            # --- Write watermark (bot's reply message id) ---
+            if mapping_id is not None and lifecycle.final_message_id is not None:
+                async with self.runtime.sessionmaker() as _wm_session:
+                    await update_watermark(
+                        _wm_session,
+                        id=mapping_id,
+                        watermark_message_id=lifecycle.final_message_id,
+                    )
+                    await _wm_session.commit()

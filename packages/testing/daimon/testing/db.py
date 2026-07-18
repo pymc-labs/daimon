@@ -37,12 +37,9 @@ from sqlalchemy.ext.asyncio import (
 
 def _require_test_dsn() -> str:
     """Read the test DSN and refuse to proceed unless it contains 'test'."""
-    url = os.environ.get("DAIMON_DATABASE__TEST_URL") or os.environ.get("DAIMON_TEST_DATABASE_URL")
+    url = os.environ.get("DAIMON_DATABASE__TEST_URL")
     if not url:
-        raise RuntimeError(
-            "DAIMON_DATABASE__TEST_URL (or legacy DAIMON_TEST_DATABASE_URL) must be set "
-            "to run daimon tests."
-        )
+        raise RuntimeError("DAIMON_DATABASE__TEST_URL must be set to run daimon tests.")
     db_name = urlparse(url).path.lstrip("/")
     if "test" not in db_name:
         raise RuntimeError(

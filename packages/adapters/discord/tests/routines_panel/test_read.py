@@ -162,7 +162,7 @@ async def test_pause_routine_via_panel_writes_atomically(
         enabled=True,
         next_fire_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
     )
-    paused = await pause_routine_via_panel(db_session, row.id)
+    paused = await pause_routine_via_panel(db_session, row.id, tenant_id=row.tenant_id)
     assert paused is not None, "panel wrapper must return the updated row"
     assert paused.enabled is False, "wrapper must propagate enabled=False"
     assert paused.next_fire_at is None, "wrapper must clear next_fire_at"
@@ -179,7 +179,7 @@ async def test_resume_routine_via_panel_recomputes_next_fire_at(
         timezone="UTC",
     )
     now = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
-    resumed = await resume_routine_via_panel(db_session, row.id, now=now)
+    resumed = await resume_routine_via_panel(db_session, row.id, tenant_id=row.tenant_id, now=now)
     assert resumed is not None, "wrapper must return the updated row on resume"
     assert resumed.enabled is True
     expected_next = next_slot_at_or_after("*/5 * * * *", "UTC", now)

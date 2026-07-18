@@ -45,7 +45,7 @@ from typer.testing import CliRunner
 
 
 def _require_test_dsn() -> str:
-    url = os.environ.get("DAIMON_DATABASE__TEST_URL") or os.environ.get("DAIMON_TEST_DATABASE_URL")
+    url = os.environ.get("DAIMON_DATABASE__TEST_URL")
     if not url:
         raise RuntimeError("DAIMON_DATABASE__TEST_URL must be set to run these tests.")
     if "test" not in urlparse(url).path:

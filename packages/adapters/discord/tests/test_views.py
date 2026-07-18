@@ -1,4 +1,4 @@
-"""Tests for GuardedView, ConfirmationView, and CancelView."""
+"""Tests for GuardedView and CancelView."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import discord
 import pytest
 from daimon.adapters.discord.views import (
     CancelView,
-    ConfirmationView,
     GuardedView,
 )
 
@@ -88,42 +87,6 @@ class TestGuardedView:
         await view.on_timeout()  # should not raise
         for child in view.children:
             assert getattr(child, "disabled", False) is True, "button should be disabled"
-
-
-class TestConfirmationView:
-    @pytest.mark.asyncio
-    async def test_confirm_sets_state(self) -> None:
-        view = ConfirmationView(allowed_user_id=123)
-        interaction = _mock_interaction(user_id=123)
-        btn = _find_button(view, "Confirm")
-        await btn.callback(interaction)
-        assert view.confirmed is True, "confirmed should be True"
-        assert view._handled is True, "view should be finalized"
-        interaction.response.edit_message.assert_called_once_with(view=view)
-
-    @pytest.mark.asyncio
-    async def test_cancel_sets_state(self) -> None:
-        view = ConfirmationView(allowed_user_id=123)
-        interaction = _mock_interaction(user_id=123)
-        btn = _find_button(view, "Cancel")
-        await btn.callback(interaction)
-        assert view.confirmed is False, "confirmed should be False"
-        assert view._handled is True, "view should be finalized"
-        interaction.response.edit_message.assert_called_once_with(view=view)
-
-    def test_timeout_is_60(self) -> None:
-        view = ConfirmationView(allowed_user_id=123)
-        assert view.timeout == 60.0, "confirmation timeout should be 60s"
-
-    @pytest.mark.asyncio
-    async def test_on_timeout_disables_buttons(self) -> None:
-        view = ConfirmationView(allowed_user_id=123)
-        view.message = MagicMock()
-        view.message.edit = AsyncMock()
-        await view.on_timeout()
-        for child in view.children:
-            assert getattr(child, "disabled", False) is True, "button should be disabled"
-        view.message.edit.assert_called_once_with(view=view)
 
 
 class TestCancelView:

@@ -151,7 +151,7 @@ async def test_fire_skips_on_over_cap(
 
     assert fired == [], "over-cap routine must not fire"
     async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id)
+        fetched = await get_routine(s, row.id, tenant_id=tenant.id)
     assert fetched is not None
     assert fetched.last_error == "cap_exceeded", (
         f"over-cap routine must record 'cap_exceeded'; got {fetched.last_error!r}"
@@ -318,7 +318,7 @@ async def test_fire_records_error_and_skips_run_turn_when_created_by_user_id_is_
     assert not run_turn_called, "run_turn must NOT be called when created_by_user_id is None"
 
     async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id)
+        fetched = await get_routine(s, row.id, tenant_id=tenant.id)
     assert fetched is not None, "routine row must still exist after bail"
     assert fetched.last_error == "routine has no created_by_user_id", (
         f"routine must record 'routine has no created_by_user_id'; got {fetched.last_error!r}"
@@ -447,7 +447,7 @@ async def test_fire_rejects_routine_when_tenant_balance_depleted(
     )
 
     async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id)
+        fetched = await get_routine(s, row.id, tenant_id=tenant.id)
     assert fetched is not None, "routine row must still exist after rejection"
     assert fetched.last_error == "balance_depleted", (
         f"routine must record 'balance_depleted' after balance gate rejection; "

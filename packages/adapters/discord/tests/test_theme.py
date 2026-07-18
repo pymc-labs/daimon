@@ -25,8 +25,3 @@ def test_theme_module_imports_no_discord_or_adapter_module() -> None:
     assert "daimon.adapters" not in src, (
         "theme.py must not import any adapter module — it is imported by pure embed.py"
     )
-
-
-def test_dim_and_code_helpers_wrap_text() -> None:
-    assert theme.dim("x") == "-# x", "dim() must prefix with Discord subtext markdown"
-    assert theme.code("x") == "`x`", "code() must wrap text in backticks"

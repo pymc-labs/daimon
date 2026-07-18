@@ -314,10 +314,10 @@ async def test_unauthorized_pause_click_rejected(monkeypatch: pytest.MonkeyPatch
 
     pause_calls: list[Any] = []
 
-    async def _fake_get_routine(_s: Any, _id: Any) -> RoutineRow:
+    async def _fake_get_routine(_s: Any, _id: Any, **_kw: Any) -> RoutineRow:
         return row
 
-    async def _fake_pause(_s: Any, _id: Any) -> RoutineRow:
+    async def _fake_pause(_s: Any, _id: Any, **_kw: Any) -> RoutineRow:
         pause_calls.append((_s, _id))
         return row
 
@@ -372,10 +372,10 @@ async def test_creator_can_pause(monkeypatch: pytest.MonkeyPatch) -> None:
 
     invoked: list[Any] = []
 
-    async def _fake_get_routine(_s: Any, _id: Any) -> RoutineRow:
+    async def _fake_get_routine(_s: Any, _id: Any, **_kw: Any) -> RoutineRow:
         return row
 
-    async def _fake_pause(_s: Any, _id: Any) -> RoutineRow:
+    async def _fake_pause(_s: Any, _id: Any, **_kw: Any) -> RoutineRow:
         invoked.append((_s, _id))
         return row
 
@@ -428,10 +428,10 @@ async def test_pause_callback_db_failure_sends_ephemeral_error_not_raise(
     pause_btn = next(b for b in view.walk_children() if isinstance(b, _PauseButton))
     pause_btn._view = view  # type: ignore[attr-defined]  # test re-binding
 
-    async def _fake_get_routine(_s: Any, _id: Any) -> RoutineRow:
+    async def _fake_get_routine(_s: Any, _id: Any, **_kw: Any) -> RoutineRow:
         return row
 
-    async def _fake_pause_raises(_s: Any, _id: Any) -> RoutineRow:
+    async def _fake_pause_raises(_s: Any, _id: Any, **_kw: Any) -> RoutineRow:
         raise SQLAlchemyError("db down")
 
     monkeypatch.setattr(
@@ -481,10 +481,10 @@ async def test_pause_callback_unexpected_error_sends_ephemeral_error_not_raise(
     pause_btn = next(b for b in view.walk_children() if isinstance(b, _PauseButton))
     pause_btn._view = view  # type: ignore[attr-defined]  # test re-binding
 
-    async def _fake_get_routine(_s: Any, _id: Any) -> RoutineRow:
+    async def _fake_get_routine(_s: Any, _id: Any, **_kw: Any) -> RoutineRow:
         return row
 
-    async def _fake_pause_raises(_s: Any, _id: Any) -> RoutineRow:
+    async def _fake_pause_raises(_s: Any, _id: Any, **_kw: Any) -> RoutineRow:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(
@@ -533,10 +533,10 @@ async def test_admin_can_pause_anyone(monkeypatch: pytest.MonkeyPatch) -> None:
 
     invoked: list[Any] = []
 
-    async def _fake_get_routine(_s: Any, _id: Any) -> RoutineRow:
+    async def _fake_get_routine(_s: Any, _id: Any, **_kw: Any) -> RoutineRow:
         return row
 
-    async def _fake_pause(_s: Any, _id: Any) -> RoutineRow:
+    async def _fake_pause(_s: Any, _id: Any, **_kw: Any) -> RoutineRow:
         invoked.append((_s, _id))
         return row
 
@@ -596,10 +596,10 @@ async def test_picker_callback_value_outside_guild_rejected(
 
     invoked: list[Any] = []
 
-    async def _fake_get_routine(_s: Any, _id: Any) -> RoutineRow:
+    async def _fake_get_routine(_s: Any, _id: Any, **_kw: Any) -> RoutineRow:
         return row_mismatched
 
-    async def _fake_pause(_s: Any, _id: Any) -> RoutineRow:
+    async def _fake_pause(_s: Any, _id: Any, **_kw: Any) -> RoutineRow:
         invoked.append(_id)
         return row_mismatched
 

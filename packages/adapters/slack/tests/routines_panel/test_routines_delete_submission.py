@@ -83,7 +83,7 @@ async def test_run_routines_delete_by_creator_removes_row_and_refreshes_panel(
     )
 
     async with db_session_factory() as session:
-        gone = await get_routine(session, routine.id)
+        gone = await get_routine(session, routine.id, tenant_id=tenant_id)
     assert gone is None, "creator confirm submit must delete the routine row"
 
     views_update_calls = fake_slack_web_client.mock.requests.get(
@@ -126,7 +126,7 @@ async def test_run_routines_delete_by_non_admin_non_creator_leaves_row(
     )
 
     async with db_session_factory() as session:
-        still = await get_routine(session, routine.id)
+        still = await get_routine(session, routine.id, tenant_id=tenant_id)
     assert still is not None, "non-admin non-creator submit must not delete the routine"
 
 
@@ -165,5 +165,5 @@ async def test_run_routines_delete_cross_tenant_routine_id_is_refused(
     )
 
     async with db_session_factory() as session:
-        still = await get_routine(session, routine_a.id)
+        still = await get_routine(session, routine_a.id, tenant_id=tenant_a)
     assert still is not None, "cross-tenant routine_id must be refused without a delete"

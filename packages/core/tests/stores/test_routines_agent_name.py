@@ -42,7 +42,7 @@ async def test_create_routine_persists_agent_name(
         "create_routine should persist agent_name on the returned row"
     )
 
-    fetched = await get_routine(db_session, row.id)
+    fetched = await get_routine(db_session, row.id, tenant_id=tenant_id)
     assert fetched is not None, "freshly created routine must be fetchable"
     assert fetched.agent_name == "daimon", "agent_name should round-trip via get_routine"
 
@@ -63,7 +63,7 @@ async def test_update_routine_writes_agent_name(
     )
     assert row.agent_name == "daimon", "precondition: row was created with agent_name='daimon'"
 
-    updated = await update_routine(db_session, row.id, agent_name="other")
+    updated = await update_routine(db_session, row.id, tenant_id=tenant_id, agent_name="other")
     assert updated is not None, "update_routine should return the row for an existing id"
     assert updated.agent_name == "other", "update_routine should rewrite agent_name when provided"
 
@@ -84,7 +84,7 @@ async def test_update_routine_omits_agent_name_when_none(
     assert row.agent_name == "daimon", "precondition: row was created with agent_name='daimon'"
 
     # Update only cron_expr; agent_name=None should mean "no change" (PATCH semantics).
-    updated = await update_routine(db_session, row.id, cron_expr="*/5 * * * *")
+    updated = await update_routine(db_session, row.id, tenant_id=tenant_id, cron_expr="*/5 * * * *")
     assert updated is not None
     assert updated.cron_expr == "*/5 * * * *", "cron_expr should be updated"
     assert updated.agent_name == "daimon", (
@@ -115,7 +115,7 @@ async def test_update_routine_agent_id_only_changes_agent_id(
     changed = await update_routine_agent_id(db_session, row.id, "ag_new")
     assert changed is True, "update_routine_agent_id should report a row was updated"
 
-    fetched = await get_routine(db_session, row.id)
+    fetched = await get_routine(db_session, row.id, tenant_id=tenant_id)
     assert fetched is not None
     assert fetched.agent_id == "ag_new", "agent_id should be rewritten to the new id"
     assert fetched.agent_name == "daimon", "agent_name must be untouched"

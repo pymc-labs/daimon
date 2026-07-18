@@ -105,7 +105,7 @@ async def run_backfill_agent_names(
 
         # Per-row tx — canonical async sessionmaker pattern.
         async with rt.sessionmaker() as s, s.begin():
-            await update_routine(s, row.id, agent_name=resolved)
+            await update_routine(s, row.id, tenant_id=row.tenant_id, agent_name=resolved)
 
     console.print(
         f"Backfilled {len(rows)} routine(s) "

@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 
 def _test_dsn() -> str:
-    url = os.environ.get("DAIMON_DATABASE__TEST_URL") or os.environ.get("DAIMON_TEST_DATABASE_URL")
+    url = os.environ.get("DAIMON_DATABASE__TEST_URL")
     if not url:
         pytest.skip("DAIMON_DATABASE__TEST_URL must be set for advisory-lock tests")
     return url

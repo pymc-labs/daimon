@@ -91,7 +91,7 @@ class _EmptySessionPage:
 
 
 def _test_dsn() -> str:
-    url = os.environ.get("DAIMON_DATABASE__TEST_URL") or os.environ.get("DAIMON_TEST_DATABASE_URL")
+    url = os.environ.get("DAIMON_DATABASE__TEST_URL")
     if not url:
         pytest.skip("DAIMON_DATABASE__TEST_URL must be set for integration tests")
     return url
@@ -365,7 +365,7 @@ async def test_end_to_end_tick_populates_last_result_tail(
     assert rc == 0, "scheduler --once should exit 0 on success"
 
     async with sm() as s:
-        refreshed = await get_routine(s, row.id)
+        refreshed = await get_routine(s, row.id, tenant_id=tenant_id)
     assert refreshed is not None
     assert refreshed.last_result_tail == "ROUTINE_FIRED", (
         "tail should carry the agent.message text from the fake MA"
@@ -415,7 +415,7 @@ async def test_failure_records_last_error(
     assert rc == 0, "scheduler exits 0 even when a fire fails — error is per-routine"
 
     async with sm() as s:
-        refreshed = await get_routine(s, row.id)
+        refreshed = await get_routine(s, row.id, tenant_id=tenant_id)
     assert refreshed is not None
     assert refreshed.last_result_tail is None, "no tail on failure"
     assert refreshed.last_error is not None, "last_error must be recorded"
@@ -462,7 +462,7 @@ async def test_advisory_lock_blocks_second_run(
         assert rc == 1, "second scheduler must exit non-zero when lock is held"
 
         async with sm() as s:
-            refreshed = await get_routine(s, row.id)
+            refreshed = await get_routine(s, row.id, tenant_id=tenant_id)
         assert refreshed is not None
         assert refreshed.last_fired_at is None, (
             "no claim should happen when scheduler bails on lock contention"
@@ -721,7 +721,7 @@ async def test_fire_heals_archived_agent_id(
     assert rc == 0, "scheduler --once should exit 0 on success"
 
     async with sm() as s:
-        refreshed = await get_routine(s, row.id)
+        refreshed = await get_routine(s, row.id, tenant_id=tenant_id)
     assert refreshed is not None
     assert refreshed.agent_id == "ag_fresh", (
         "resolver should heal the archived agent_id to the fresh tag-lookup match"
@@ -1023,8 +1023,8 @@ async def test_end_to_end_tick_fires_each_routine_under_own_tenant(
     assert rc == 0, "scheduler --once should exit 0 on success"
 
     async with sm() as s:
-        refreshed_a = await get_routine(s, row_a.id)
-        refreshed_b = await get_routine(s, row_b.id)
+        refreshed_a = await get_routine(s, row_a.id, tenant_id=tenant_id_a)
+        refreshed_b = await get_routine(s, row_b.id, tenant_id=tenant_id_b)
 
     assert refreshed_a is not None
     assert refreshed_a.last_result_tail == "FIRED_OK", (

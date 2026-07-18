@@ -55,7 +55,7 @@ async def test_create_routine_persists_tenant_id(
     )
     assert row.tenant_id == result.tenant_id, "create_routine must persist the supplied tenant_id"
 
-    fetched = await get_routine(db_session, row.id)
+    fetched = await get_routine(db_session, row.id, tenant_id=result.tenant_id)
     assert fetched is not None
     assert fetched.tenant_id == result.tenant_id, "RoutineRow must carry tenant_id on read"
 
@@ -74,7 +74,7 @@ async def test_create_round_trip(db_session: AsyncSession, tenant_id: uuid.UUID)
     assert row.cron_expr == "*/5 * * * *", "cron_expr must be persisted"
     assert row.enabled is True, "default enabled=True"
 
-    fetched = await get_routine(db_session, row.id)
+    fetched = await get_routine(db_session, row.id, tenant_id=tenant_id)
     assert fetched is not None, "newly created routine must be fetchable by id"
     assert fetched.id == row.id, "fetched row id must match created row id"
 
@@ -122,6 +122,7 @@ async def test_update_modifies_fields(db_session: AsyncSession, tenant_id: uuid.
     updated = await update_routine(
         db_session,
         row.id,
+        tenant_id=tenant_id,
         cron_expr="0 9 * * *",
         timezone_="Asia/Tokyo",
         trigger_message="changed",
@@ -151,6 +152,7 @@ async def test_update_agent_id_and_next_fire_at(
     updated = await update_routine(
         db_session,
         row.id,
+        tenant_id=tenant_id,
         agent_id="agent_b",
         next_fire_at=new_fire_at,
     )
@@ -176,7 +178,7 @@ async def test_update_with_no_kwargs_returns_unchanged_row(
         timezone_="UTC",
         trigger_message="orig",
     )
-    returned = await update_routine(db_session, row.id)
+    returned = await update_routine(db_session, row.id, tenant_id=tenant_id)
     assert returned is not None, "update with no kwargs must return the existing row"
     assert returned.id == row.id, "returned row must be the same row"
     assert returned.agent_id == "agent_a", "agent_id must remain unchanged"
@@ -194,13 +196,13 @@ async def test_delete_removes_row(db_session: AsyncSession, tenant_id: uuid.UUID
         timezone_="UTC",
         trigger_message="m",
     )
-    deleted = await delete_routine(db_session, row.id)
+    deleted = await delete_routine(db_session, row.id, tenant_id=tenant_id)
     assert deleted is True, "delete returns True when a row was removed"
 
-    missing = await get_routine(db_session, row.id)
+    missing = await get_routine(db_session, row.id, tenant_id=tenant_id)
     assert missing is None, "deleted routine should not be fetchable"
 
-    deleted_again = await delete_routine(db_session, row.id)
+    deleted_again = await delete_routine(db_session, row.id, tenant_id=tenant_id)
     assert deleted_again is False, "delete on a missing id returns False, not an exception"
 
 
@@ -219,13 +221,13 @@ async def test_record_result_clears_last_error_on_success(
     )
     # First, set an error.
     await record_result(db_session, row.id, tail=None, error="boom")
-    err_row = await get_routine(db_session, row.id)
+    err_row = await get_routine(db_session, row.id, tenant_id=tenant_id)
     assert err_row is not None
     assert err_row.last_error == "boom", "record_result with error= sets last_error"
 
     # Then a success: error=None should NULL last_error and set tail.
     await record_result(db_session, row.id, tail="all good", error=None)
-    ok_row = await get_routine(db_session, row.id)
+    ok_row = await get_routine(db_session, row.id, tenant_id=tenant_id)
     assert ok_row is not None
     assert ok_row.last_error is None, "record_result with error=None must clear last_error"
     assert ok_row.last_result_tail == "all good", "tail must be persisted"
@@ -257,7 +259,7 @@ async def test_routine_persists_across_session_reopen(
 
     new_session = AsyncSession(bind=bind, expire_on_commit=False)
     try:
-        fetched = await get_routine(new_session, row.id)
+        fetched = await get_routine(new_session, row.id, tenant_id=tenant_id)
         assert fetched is not None, "row must survive session.close + reopen"
         assert fetched.trigger_message == "durable", "trigger_message must be preserved"
     finally:
@@ -284,7 +286,7 @@ async def test_claim_due_fireable_picks_routine_in_window(
     assert claimed[0].id == row.id, "claimed routine id must match"
 
     # After claim, step 2 must have recomputed next_fire_at to a future slot.
-    after_claim = await get_routine(db_session, row.id)
+    after_claim = await get_routine(db_session, row.id, tenant_id=tenant_id)
     assert after_claim is not None
     assert after_claim.next_fire_at is not None, "step 2 recompute must repopulate next_fire_at"
     assert after_claim.next_fire_at > now, "recomputed next_fire_at must be in the future"
@@ -339,7 +341,7 @@ async def test_advance_stale_recovers_orphans(
     touched = await advance_stale(db_session, now=now, max_age=timedelta(minutes=15), limit=200)
     assert touched == 1, "advance_stale must touch the one orphan"
 
-    after = await get_routine(db_session, orphan.id)
+    after = await get_routine(db_session, orphan.id, tenant_id=tenant_id)
     assert after is not None
     assert after.next_fire_at is not None, "orphan recovery must populate next_fire_at"
     assert after.next_fire_at > now, "recovered next_fire_at must be in the future"
@@ -521,19 +523,21 @@ async def test_pause_routine_clears_next_fire_at(
         trigger_message="m",
         next_fire_at=future,
     )
-    paused = await pause_routine(db_session, row.id)
+    paused = await pause_routine(db_session, row.id, tenant_id=tenant_id)
     assert paused is not None, "pause_routine must return the updated row"
     assert paused.enabled is False, "pause_routine must set enabled=False"
     assert paused.next_fire_at is None, "pause_routine must clear next_fire_at to NULL"
 
-    refetched = await get_routine(db_session, row.id)
+    refetched = await get_routine(db_session, row.id, tenant_id=tenant_id)
     assert refetched is not None
     assert refetched.enabled is False, "DB row must reflect enabled=False"
     assert refetched.next_fire_at is None, "DB row must reflect next_fire_at IS NULL"
 
 
-async def test_pause_routine_unknown_id_returns_none(db_session: AsyncSession) -> None:
-    result = await pause_routine(db_session, uuid.uuid4())
+async def test_pause_routine_unknown_id_returns_none(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    result = await pause_routine(db_session, uuid.uuid4(), tenant_id=tenant_id)
     assert result is None, "pause_routine on missing id must return None, not raise"
 
 
@@ -552,7 +556,7 @@ async def test_pause_routine_idempotent_on_already_paused(
         enabled=False,
         next_fire_at=None,
     )
-    paused = await pause_routine(db_session, row.id)
+    paused = await pause_routine(db_session, row.id, tenant_id=tenant_id)
     assert paused is not None, "pause_routine on already-paused row must still return the row"
     assert paused.enabled is False, "no-op must keep enabled=False"
     assert paused.next_fire_at is None, "no-op must keep next_fire_at NULL"
@@ -574,7 +578,7 @@ async def test_resume_routine_recomputes_next_fire_at(
         next_fire_at=None,
     )
     now = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
-    resumed = await resume_routine(db_session, row.id, now=now)
+    resumed = await resume_routine(db_session, row.id, tenant_id=tenant_id, now=now)
     assert resumed is not None, "resume_routine must return the updated row"
     assert resumed.enabled is True, "resume_routine must set enabled=True"
     expected_next = next_slot_at_or_after("*/5 * * * *", "UTC", now)
@@ -583,9 +587,11 @@ async def test_resume_routine_recomputes_next_fire_at(
     )
 
 
-async def test_resume_routine_unknown_id_returns_none(db_session: AsyncSession) -> None:
+async def test_resume_routine_unknown_id_returns_none(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
     now = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
-    result = await resume_routine(db_session, uuid.uuid4(), now=now)
+    result = await resume_routine(db_session, uuid.uuid4(), tenant_id=tenant_id, now=now)
     assert result is None, "resume_routine on missing id must return None, not raise"
 
 
@@ -610,8 +616,10 @@ async def test_paused_routine_not_claimed(db_session: AsyncSession, tenant_id: u
     )
 
     # Re-arm next_fire_at so a second claim window applies, then pause.
-    await update_routine(db_session, row.id, next_fire_at=now - timedelta(minutes=1))
-    paused = await pause_routine(db_session, row.id)
+    await update_routine(
+        db_session, row.id, tenant_id=tenant_id, next_fire_at=now - timedelta(minutes=1)
+    )
+    paused = await pause_routine(db_session, row.id, tenant_id=tenant_id)
     assert paused is not None, "pause must succeed"
 
     claimed_after = await claim_due_fireable(
@@ -665,3 +673,108 @@ async def test_routines_tenant_isolation(db_session: AsyncSession) -> None:
     )
     rows_a_after = await list_routines_for_tenant(db_session, tenant_id=tenant_a.id)
     assert len(rows_a_after) == 1, "tenant_b write must not affect tenant_a reads"
+
+
+# ---------------------------------------------------------------------------
+# Cross-tenant rejection at the CRUD-function level (tenant_id kwarg required)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_routine_cross_tenant_returns_none(db_session: AsyncSession) -> None:
+    tenant_a = await make_tenant(db_session)
+    tenant_b = await make_tenant(db_session)
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant_a.id,
+        created_by_user_id=None,
+        agent_id="agent_a",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="m",
+    )
+
+    wrong_tenant = await get_routine(db_session, row.id, tenant_id=tenant_b.id)
+    assert wrong_tenant is None, "get_routine with the wrong tenant_id must return None"
+
+    right_tenant = await get_routine(db_session, row.id, tenant_id=tenant_a.id)
+    assert right_tenant is not None, "get_routine with the owning tenant_id must return the row"
+    assert right_tenant.id == row.id
+
+
+async def test_update_routine_cross_tenant_returns_none_and_leaves_row_unchanged(
+    db_session: AsyncSession,
+) -> None:
+    tenant_a = await make_tenant(db_session)
+    tenant_b = await make_tenant(db_session)
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant_a.id,
+        created_by_user_id=None,
+        agent_id="agent_a",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="m",
+    )
+
+    result = await update_routine(db_session, row.id, tenant_id=tenant_b.id, enabled=False)
+    assert result is None, "update_routine with the wrong tenant_id must return None"
+
+    unchanged = await get_routine(db_session, row.id, tenant_id=tenant_a.id)
+    assert unchanged is not None
+    assert unchanged.enabled is True, "cross-tenant update must not mutate the row"
+
+    updated = await update_routine(db_session, row.id, tenant_id=tenant_a.id, enabled=False)
+    assert updated is not None, "update_routine with the owning tenant_id must succeed"
+    assert updated.enabled is False
+
+
+async def test_delete_routine_cross_tenant_returns_false_and_row_survives(
+    db_session: AsyncSession,
+) -> None:
+    tenant_a = await make_tenant(db_session)
+    tenant_b = await make_tenant(db_session)
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant_a.id,
+        created_by_user_id=None,
+        agent_id="agent_a",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="m",
+    )
+
+    deleted = await delete_routine(db_session, row.id, tenant_id=tenant_b.id)
+    assert deleted is False, "delete_routine with the wrong tenant_id must return False"
+
+    survives = await get_routine(db_session, row.id, tenant_id=tenant_a.id)
+    assert survives is not None, "cross-tenant delete must not remove the row"
+
+
+async def test_pause_and_resume_routine_cross_tenant_return_none(
+    db_session: AsyncSession,
+) -> None:
+    tenant_a = await make_tenant(db_session)
+    tenant_b = await make_tenant(db_session)
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant_a.id,
+        created_by_user_id=None,
+        agent_id="agent_a",
+        agent_name="daimon",
+        cron_expr="*/5 * * * *",
+        timezone_="UTC",
+        trigger_message="m",
+    )
+
+    paused_wrong = await pause_routine(db_session, row.id, tenant_id=tenant_b.id)
+    assert paused_wrong is None, "pause_routine with the wrong tenant_id must return None"
+
+    now = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
+    resumed_wrong = await resume_routine(db_session, row.id, tenant_id=tenant_b.id, now=now)
+    assert resumed_wrong is None, "resume_routine with the wrong tenant_id must return None"
+
+    paused_right = await pause_routine(db_session, row.id, tenant_id=tenant_a.id)
+    assert paused_right is not None, "pause_routine with the owning tenant_id must succeed"

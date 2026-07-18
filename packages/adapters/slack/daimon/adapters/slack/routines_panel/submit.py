@@ -328,19 +328,12 @@ async def run_routines_delete_submission(
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
         async with runtime.sessionmaker() as session, session.begin():
-            row = await get_routine(session, rid)
+            row = await get_routine(session, rid, tenant_id=tenant_id)
             if row is None:
                 await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
                     user=user_id,
                     text="This routine no longer exists.",
-                )
-                return
-            if row.tenant_id != tenant_id:
-                log.warning(
-                    "slack.routines_delete.cross_tenant_refused",
-                    routine_id=routine_id,
-                    team_id=team_id,
                 )
                 return
             is_admin = await resolve_is_admin(
@@ -356,7 +349,7 @@ async def run_routines_delete_submission(
                     ),
                 )
                 return
-            await delete_routine(session, rid)
+            await delete_routine(session, rid, tenant_id=tenant_id)
 
         # Refresh the underlying panel in place (best-effort — the row is gone).
         async with runtime.sessionmaker() as session:

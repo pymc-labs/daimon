@@ -134,18 +134,20 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
         routine_id = state.selected.routine.id
         runtime = self.view.runtime
 
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
         try:
             async with runtime.sessionmaker() as session, session.begin():
-                row = await get_routine(session, routine_id)
+                row = await get_routine(session, routine_id, tenant_id=tenant_id)
                 if row is None:
                     await interaction.response.send_message(
                         "This routine no longer exists.",
                         ephemeral=True,
                     )
                     return
-                if row.tenant_id != derive_tenant_uuid(
-                    platform="discord", workspace_id=str(interaction.guild_id)
-                ):
+                # Defense-in-depth: the store call above is already tenant-scoped
+                # (Routine.tenant_id == tenant_id), so this can only trip if a
+                # caller's mock/stub bypasses that filter.
+                if row.tenant_id != tenant_id:
                     await interaction.response.send_message(
                         "This routine does not belong to this guild.",
                         ephemeral=True,
@@ -166,9 +168,11 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
                     return
                 now = datetime.now(UTC)
                 if row.enabled:
-                    await pause_routine_via_panel(session, routine_id)
+                    await pause_routine_via_panel(session, routine_id, tenant_id=tenant_id)
                 else:
-                    await resume_routine_via_panel(session, routine_id, now=now)
+                    await resume_routine_via_panel(
+                        session, routine_id, tenant_id=tenant_id, now=now
+                    )
 
             await _rerender(interaction, self.view)
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:

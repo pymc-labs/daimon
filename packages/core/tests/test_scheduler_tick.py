@@ -87,7 +87,7 @@ async def test_run_one_tick_dispatches_due_routine(
 
     assert fired == [row.id], "fire must be called exactly once for the due routine"
     async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id)
+        fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
     assert fetched is not None
     assert fetched.last_result_tail == "ok", "fire must have written the success tail"
 
@@ -119,7 +119,7 @@ async def test_run_one_tick_records_cap_error(
 
     assert fired == [], "over-cap routine must not be fired"
     async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id)
+        fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
     assert fetched is not None
     assert fetched.last_error == "cap_exceeded", "cap-blocked routine must record the cap error"
 
@@ -188,7 +188,7 @@ async def test_run_one_tick_records_fire_error_via_gather(
     )
 
     async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id)
+        fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
     assert fetched is not None
     assert fetched.last_error is not None
     assert fetched.last_error.startswith("ValueError: boom"), (
@@ -218,7 +218,7 @@ async def test_run_one_tick_truncates_long_error_at_500_chars(
     )
 
     async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id)
+        fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
     assert fetched is not None
     assert fetched.last_error is not None
     assert len(fetched.last_error) <= 500, (
@@ -331,8 +331,8 @@ async def test_run_one_tick_isolates_timed_out_fire_from_sibling(
     )
 
     async with db_session_factory() as s:
-        hung_row = await get_routine(s, hung.id)
-        sib_row = await get_routine(s, sibling.id)
+        hung_row = await get_routine(s, hung.id, tenant_id=hung.tenant_id)
+        sib_row = await get_routine(s, sibling.id, tenant_id=sibling.tenant_id)
 
     assert hung_row is not None and sib_row is not None
     assert sib_row.last_result_tail == "ok", (
@@ -381,7 +381,7 @@ async def test_fire_exception_is_captured_to_sentry_and_still_swallowed(
     assert len(captured) == 1, "the broad except site must capture exactly the fire's exception"
     assert isinstance(captured[0], ValueError), "captured exception must be the raised ValueError"
     async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id)
+        fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
     assert fetched is not None and fetched.last_error is not None, (
         "capture must not replace the existing record_result swallow"
     )
@@ -426,7 +426,7 @@ async def test_timed_out_fire_is_captured_to_sentry_and_still_swallowed(
         "captured exception must be the TimeoutError raised by wait_for"
     )
     async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id)
+        fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
     assert fetched is not None and fetched.last_error is not None, (
         "timeout capture must not replace the record_result swallow"
     )
@@ -541,7 +541,7 @@ async def test_fire_timeout_records_exact_error_string(
     )
 
     async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id)
+        fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
 
     assert fetched is not None
     expected_error = f"timeout: exceeded {dispatch_timeout_s}s"
@@ -579,7 +579,7 @@ async def test_timed_out_fire_reschedules_to_next_cron_slot(
     from daimon.core.cron import next_slot_at_or_after
 
     async with db_session_factory() as s:
-        fetched = await get_routine(s, row.id)
+        fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
 
     assert fetched is not None
     assert fetched.last_error is not None and fetched.last_error.startswith("timeout:"), (

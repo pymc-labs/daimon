@@ -58,9 +58,13 @@ async def create_routine(
     return RoutineRow.model_validate(orm)
 
 
-async def get_routine(session: AsyncSession, routine_id: _uuid.UUID) -> RoutineRow | None:
+async def get_routine(
+    session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
+) -> RoutineRow | None:
     orm = (
-        await session.execute(select(Routine).where(Routine.id == routine_id))
+        await session.execute(
+            select(Routine).where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
+        )
     ).scalar_one_or_none()
     if orm is None:
         return None
@@ -98,6 +102,7 @@ async def update_routine(
     session: AsyncSession,
     routine_id: _uuid.UUID,
     *,
+    tenant_id: _uuid.UUID,
     cron_expr: str | None = None,
     timezone_: str | None = None,
     trigger_message: str | None = None,
@@ -122,11 +127,11 @@ async def update_routine(
     if next_fire_at is not None:
         values["next_fire_at"] = next_fire_at
     if not values:
-        return await get_routine(session, routine_id)
+        return await get_routine(session, routine_id, tenant_id=tenant_id)
 
     stmt = (
         update(Routine)
-        .where(Routine.id == routine_id)
+        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
         .values(**values)
         .returning(Routine)
         .execution_options(synchronize_session=False)
@@ -156,8 +161,12 @@ async def update_routine_agent_id(
     return cast(CursorResult[Any], result).rowcount > 0
 
 
-async def delete_routine(session: AsyncSession, routine_id: _uuid.UUID) -> bool:
-    result = await session.execute(delete(Routine).where(Routine.id == routine_id))
+async def delete_routine(
+    session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
+) -> bool:
+    result = await session.execute(
+        delete(Routine).where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
+    )
     rowcount = cast(CursorResult[Any], result).rowcount
     await session.flush()
     return rowcount > 0
@@ -227,14 +236,17 @@ async def get_first_routine_for_principal(
     return None if orm is None else RoutineRow.model_validate(orm)
 
 
-async def pause_routine(session: AsyncSession, routine_id: _uuid.UUID) -> RoutineRow | None:
+async def pause_routine(
+    session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
+) -> RoutineRow | None:
     """Set ``enabled=False`` and ``next_fire_at=NULL`` atomically.
 
-    Returns the updated row, or ``None`` if no row matched ``routine_id``.
+    Returns the updated row, or ``None`` if no row matched ``routine_id``
+    (including a routine_id that exists under a different tenant_id).
     """
     stmt = (
         update(Routine)
-        .where(Routine.id == routine_id)
+        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
         .values(enabled=False, next_fire_at=None)
         .returning(Routine)
         .execution_options(synchronize_session=False)
@@ -250,20 +262,22 @@ async def resume_routine(
     session: AsyncSession,
     routine_id: _uuid.UUID,
     *,
+    tenant_id: _uuid.UUID,
     now: datetime,
 ) -> RoutineRow | None:
     """Set ``enabled=True`` and ``next_fire_at`` to the next cron slot at-or-after ``now``.
 
     Caller injects ``now`` so this helper stays clock-free. Returns the
-    updated row, or ``None`` if no row matched ``routine_id``.
+    updated row, or ``None`` if no row matched ``routine_id``
+    (including a routine_id that exists under a different tenant_id).
     """
-    row = await get_routine(session, routine_id)
+    row = await get_routine(session, routine_id, tenant_id=tenant_id)
     if row is None:
         return None
     nxt = next_slot_at_or_after(row.cron_expr, row.timezone, now)
     stmt = (
         update(Routine)
-        .where(Routine.id == routine_id)
+        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
         .values(enabled=True, next_fire_at=nxt)
         .returning(Routine)
         .execution_options(synchronize_session=False)
