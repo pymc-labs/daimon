@@ -203,7 +203,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: docker build
-        run: docker build -t daimon-cma:ci .
+        run: docker build -t daimon:ci .
 
   deploy-gcp:
     name: Deploy to GCP (production)

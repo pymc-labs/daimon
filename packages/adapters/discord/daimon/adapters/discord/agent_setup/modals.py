@@ -314,7 +314,7 @@ class RepoAuthModal(discord.ui.Modal, title="Repo + Auth"):
                         )
                         coverage_note = "Couldn't verify App coverage."
                     if app_covered:
-                        coverage_note = "✅ App-covered (clones as daimon-cma[bot])"
+                        coverage_note = "✅ App-covered (clones via the configured GitHub App)"
                     else:
                         # No App coverage (or unverifiable) -> the only remaining
                         # clone token will be the operator fallback PAT, which is

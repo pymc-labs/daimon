@@ -1,5 +1,5 @@
 [project]
-name = "daimon-cma-open-source"
+name = "daimon"
 version = "0.1.0"
 description = "Self-hostable Daimon CMA — workspace root"
 requires-python = ">=3.12"

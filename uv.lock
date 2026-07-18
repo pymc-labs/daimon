@@ -15,12 +15,12 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "daimon",
     "daimon-adapter-cli",
     "daimon-adapter-discord",
     "daimon-adapter-mcp",
     "daimon-adapter-scheduler",
     "daimon-adapter-slack",
-    "daimon-cma-open-source",
     "daimon-core",
     "daimon-testing",
     "notebook-host",
@@ -748,6 +748,66 @@ wheels = [
 ]
 
 [[package]]
+name = "daimon"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "daimon-adapter-cli" },
+    { name = "daimon-adapter-discord" },
+    { name = "daimon-adapter-mcp" },
+    { name = "daimon-adapter-scheduler" },
+    { name = "daimon-adapter-slack" },
+    { name = "daimon-core" },
+]
+
+[package.optional-dependencies]
+billing = [
+    { name = "daimon-adapter-mcp", extra = ["billing"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "aioresponses" },
+    { name = "daimon-testing" },
+    { name = "fastmcp" },
+    { name = "import-linter" },
+    { name = "pre-commit" },
+    { name = "pyjwt" },
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "daimon-adapter-cli", editable = "packages/adapters/cli" },
+    { name = "daimon-adapter-discord", editable = "packages/adapters/discord" },
+    { name = "daimon-adapter-mcp", editable = "packages/adapters/mcp" },
+    { name = "daimon-adapter-mcp", extras = ["billing"], marker = "extra == 'billing'", editable = "packages/adapters/mcp" },
+    { name = "daimon-adapter-scheduler", editable = "packages/adapters/scheduler" },
+    { name = "daimon-adapter-slack", editable = "packages/adapters/slack" },
+    { name = "daimon-core", editable = "packages/core" },
+]
+provides-extras = ["billing"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "aioresponses", specifier = ">=0.7.9" },
+    { name = "daimon-testing", editable = "packages/testing" },
+    { name = "fastmcp", specifier = ">=3.2.4" },
+    { name = "import-linter", specifier = ">=2.0" },
+    { name = "pre-commit", specifier = ">=4.0" },
+    { name = "pyjwt", specifier = ">=2.12.1" },
+    { name = "pyright", specifier = ">=1.1.390" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "pytest-xdist", specifier = ">=3.6" },
+    { name = "ruff", specifier = ">=0.7.0" },
+]
+
+[[package]]
 name = "daimon-adapter-cli"
 version = "0.1.0"
 source = { editable = "packages/adapters/cli" }
@@ -915,66 +975,6 @@ requires-dist = [
     { name = "slack-sdk", specifier = ">=3.42,<4" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2" },
     { name = "structlog", specifier = ">=24" },
-]
-
-[[package]]
-name = "daimon-cma-open-source"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "daimon-adapter-cli" },
-    { name = "daimon-adapter-discord" },
-    { name = "daimon-adapter-mcp" },
-    { name = "daimon-adapter-scheduler" },
-    { name = "daimon-adapter-slack" },
-    { name = "daimon-core" },
-]
-
-[package.optional-dependencies]
-billing = [
-    { name = "daimon-adapter-mcp", extra = ["billing"] },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "aioresponses" },
-    { name = "daimon-testing" },
-    { name = "fastmcp" },
-    { name = "import-linter" },
-    { name = "pre-commit" },
-    { name = "pyjwt" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "daimon-adapter-cli", editable = "packages/adapters/cli" },
-    { name = "daimon-adapter-discord", editable = "packages/adapters/discord" },
-    { name = "daimon-adapter-mcp", editable = "packages/adapters/mcp" },
-    { name = "daimon-adapter-mcp", extras = ["billing"], marker = "extra == 'billing'", editable = "packages/adapters/mcp" },
-    { name = "daimon-adapter-scheduler", editable = "packages/adapters/scheduler" },
-    { name = "daimon-adapter-slack", editable = "packages/adapters/slack" },
-    { name = "daimon-core", editable = "packages/core" },
-]
-provides-extras = ["billing"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "aioresponses", specifier = ">=0.7.9" },
-    { name = "daimon-testing", editable = "packages/testing" },
-    { name = "fastmcp", specifier = ">=3.2.4" },
-    { name = "import-linter", specifier = ">=2.0" },
-    { name = "pre-commit", specifier = ">=4.0" },
-    { name = "pyjwt", specifier = ">=2.12.1" },
-    { name = "pyright", specifier = ">=1.1.390" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-asyncio", specifier = ">=0.24" },
-    { name = "pytest-xdist", specifier = ">=3.6" },
-    { name = "ruff", specifier = ">=0.7.0" },
 ]
 
 [[package]]

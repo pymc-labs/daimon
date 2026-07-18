@@ -1,7 +1,7 @@
 # `defaults/`
 
 Authored YAML for the system-default agents, environments, and skills
-shipped with every `daimon-cma-open-source` deployment. `daimon defaults
+shipped with every `daimon` deployment. `daimon defaults
 apply` reconciles this tree into Managed Agents; each seeded agent/environment
 is stamped with a `daimon_managed=true` metadata marker so reconciliation and
 sweeps can distinguish seeded defaults from operator-created resources.
