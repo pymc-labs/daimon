@@ -57,8 +57,8 @@ def test_main_view_policy_button_is_link_style_pointing_to_policy_url() -> None:
     assert policy.style == discord.ButtonStyle.link, (
         "Policy button must be link style (opens browser, no callback)"
     )
-    assert policy.url == "https://daimon.dev/privacy", (
-        "Policy URL must point to the daimon privacy policy page (D-PLACEHOLDER day-1)"
+    assert policy.url == "https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md", (
+        "Policy URL must point to the in-repo daimon privacy policy page"
     )
 
 

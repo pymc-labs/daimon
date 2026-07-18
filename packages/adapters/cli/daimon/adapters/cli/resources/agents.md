@@ -35,14 +35,14 @@ Every line carries `kind`, `session_id`, `turn_id`. Kinds:
 
 ### Example — failed
 ```jsonl
-{"kind":"terminal","status":"failed","error":{"kind":"upstream","message":"502 bad gateway"},"state":{}}
+{"kind":"terminal","session_id":"sess_1","turn_id":"turn_1","status":"failed","error":{"kind":"upstream","message":"502 bad gateway"},"state":{}}
 ```
 
 ## Exit codes
 | Code | Meaning |
 |------|---------|
-| 0    | terminal `end_turn` or `max_turns` |
-| 1    | bootstrap error, upstream error, cancel, bad args |
+| 0    | terminal with no error (typically `end_turn` or `max_turns`) |
+| 1    | bootstrap error, upstream error, bad args |
 
 ## Bootstrap errors
 - `db_not_migrated` — run `uv run alembic upgrade head`.

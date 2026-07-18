@@ -23,9 +23,8 @@ gh repo list
 
 The tool requires:
 
-- For `github`: An operator must have already run `daimon auth github` (or a
-  Discord user must have authorized via `/agent-setup`). Tokens are minted
-  from the persisted PAT.
+- For `github`: an operator (or a Discord user via `/agent-setup`) must have
+  bound a GitHub PAT. Tokens are minted from the persisted PAT.
 - For `gcloud`: The agent must be bound to a Google identity
   (`agent_google_binding`) with appropriate scopes, configured by an operator.
   Tokens are short-lived (≈1 hour) impersonated access tokens.

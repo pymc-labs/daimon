@@ -69,15 +69,20 @@ delimiter.
 | `host_port` | `DAIMON_NOTEBOOK__HOST_PORT` | `8001` |
 | `marimo_port_start` | `DAIMON_NOTEBOOK__MARIMO_PORT_START` | `8100` |
 | `marimo_port_end` | `DAIMON_NOTEBOOK__MARIMO_PORT_END` | `8160` |
-| `subprocess_ttl_seconds` | `DAIMON_NOTEBOOK__SUBPROCESS_TTL_SECONDS` | `7200` |
+| `subprocess_ttl_seconds` | `DAIMON_NOTEBOOK__SUBPROCESS_TTL_SECONDS` | `86400` |
 | `sweep_interval_seconds` | `DAIMON_NOTEBOOK__SWEEP_INTERVAL_SECONDS` | `300` |
 | `spawn_timeout_seconds` | `DAIMON_NOTEBOOK__SPAWN_TIMEOUT_SECONDS` | `20` |
+| `validate_on_publish` | `DAIMON_NOTEBOOK__VALIDATE_ON_PUBLISH` | `true` (run `marimo export` before serving, catching notebooks that fail to execute) |
+| `validation_timeout_seconds` | `DAIMON_NOTEBOOK__VALIDATION_TIMEOUT_SECONDS` | `60` (wall-clock budget for that validation export; a slow-but-valid notebook is published anyway) |
 | `public_host` | `DAIMON_NOTEBOOK__PUBLIC_HOST` | `localhost` |
+| `public_url_base` | `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` | *(unset — set when behind a TLS terminator that strips the internal port, e.g. Fly's https edge)* |
 | `max_source_bytes` | `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` | `1048576` (1 MiB) |
+| `max_attachment_bytes_ceiling` | `DAIMON_NOTEBOOK__MAX_ATTACHMENT_BYTES_CEILING` | `104857600` (100 MiB; host-side hard ceiling, defense-in-depth above the daimon-side cap) |
 | `allowed_origins` | `DAIMON_NOTEBOOK__ALLOWED_ORIGINS` | *(empty — check disabled)* |
 | `marimo_rlimit_as_bytes` | `DAIMON_NOTEBOOK__MARIMO_RLIMIT_AS_BYTES` | `4294967296` (4 GiB) |
 | `marimo_rlimit_cpu_seconds` | `DAIMON_NOTEBOOK__MARIMO_RLIMIT_CPU_SECONDS` | `3600` |
 | `pids_file` | `DAIMON_NOTEBOOK__PIDS_FILE` | *(defaults to `<data_dir>/pids.json`)* |
+| `blogs_file` | `DAIMON_NOTEBOOK__BLOGS_FILE` | *(defaults to `<data_dir>/blogs.json`)* |
 
 ### Rotating the admin bearer
 
@@ -174,18 +179,21 @@ fly deploy --config apps/notebook-host/fly.notebook.toml --app <your-app-name>
 
 ## What is intentionally NOT here
 
-**AST allowlist filter** (`services/notebook/filter.py` from Lite, ~194 lines).
-That filter existed for untrusted public-trial users who were strangers to the
-operator. DS teams running `pandas`, `sklearn`, and `sqlalchemy` notebooks hit
-it constantly. Dropped entirely for the self-hosted audience.
+**AST allowlist filter.** A filter that statically inspects notebook source
+and blocks disallowed imports/calls would matter for untrusted public-trial
+users who are strangers to the operator. DS teams running `pandas`, `sklearn`,
+and `sqlalchemy` notebooks would hit such a filter constantly. Dropped
+entirely for the self-hosted audience, where the notebook author and the
+operator are the same trust domain.
 
-**Trial-quota / rate-limit model** (`rate_limit.py` + `notebook_trial_usage`
-table from Lite). A SaaS construct that self-hosters don't meter against
-themselves. Closes issue #28 as not-a-gap.
+**Trial-quota / rate-limit model.** A per-user quota and rate-limit system is
+a SaaS construct that self-hosters don't need to meter against themselves.
+Closes issue #28 as not-a-gap.
 
-**`skill_bundler.py`** (Lite's per-trial filesystem skill copier). The OS fork
+**Per-notebook filesystem skill bundler.** A component that copies skill
+files into a per-notebook filesystem sandbox isn't needed here: this fork
 uses MA-resolved skills via `defaults/skills/` as first-class server-side
-resources; no on-disk skill materialization is needed.
+resources, so no on-disk skill materialization is required.
 
 **Public-trial flow.** The threat model for public trials (anonymous users,
 shared infra, aggressive quotas) is different from trusted-team self-hosting.

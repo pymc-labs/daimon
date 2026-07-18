@@ -1,6 +1,6 @@
 #!/bin/sh
 # Run idempotent first-boot seeding, then exec the per-process command from
-# fly.toml [processes]. See docs/deploy/production.md for context.
+# fly.toml [processes].
 #
 # Skip `daimon defaults apply` when invoked as `alembic ...` — that path is
 # the Fly release_command VM, which runs migrations and exits. Seeding belongs

@@ -414,17 +414,18 @@ def test_slack_settings_health_port_defaults_to_8083(monkeypatch: pytest.MonkeyP
 # --- privacy_policy_url (CLEAN-05) ---
 
 
-def test_privacy_policy_url_defaults_to_daimon_dev_when_unset(
+def test_privacy_policy_url_defaults_to_in_repo_doc_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No override → operator gets the original daimon.dev privacy page."""
+    """No override → operator gets the in-repo PRIVACY.md, not a dead domain."""
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     monkeypatch.delenv("DAIMON_PRIVACY_POLICY_URL", raising=False)
     settings = load_settings(_env_file=None)
-    assert str(settings.privacy_policy_url) == "https://daimon.dev/privacy", (
-        "default privacy_policy_url must remain https://daimon.dev/privacy unchanged"
-    )
+    assert (
+        str(settings.privacy_policy_url)
+        == "https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"
+    ), "default privacy_policy_url must point at the in-repo PRIVACY.md"
 
 
 def test_privacy_policy_url_overrides_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

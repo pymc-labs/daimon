@@ -8,7 +8,7 @@
 #   <your-app-name>.fly.dev  Public hostname the bot returns in URLs
 #
 # Naming convention: prefix the environment, don't suffix it
-# (e.g. production-daimon-notebook-host, production-daimon-notebook-host).
+# (e.g. production-daimon-notebook-host, staging-daimon-notebook-host).
 
 app = "<your-app-name>"
 primary_region = "ord"

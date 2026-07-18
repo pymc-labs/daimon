@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Self-hostable Discord bot built on [Anthropic Managed Agents](https://docs.anthropic.com/en/api/managed-agents/).
+Self-hostable agent platform built on [Anthropic Managed Agents](https://platform.claude.com/docs/en/managed-agents/quickstart), with Discord, Slack, MCP, and CLI adapters.
 
 **One-click install, operator-run.** You deploy daimon once, on your own
 Anthropic API key, and it serves any number of Discord servers from that
@@ -15,9 +15,10 @@ the key, you're responsible for it; the people in your servers just
 
 - **Mention-triggered threaded conversations** — `@daimon` in a channel
   starts (or continues) a threaded turn with session continuity
-- **Slash-command admin surface** — `/config`, `/agents`, `/environments`,
-  `/skills`, `/help` mirror the CLI, gated by Discord's own
-  `Manage Server` permission
+- **Slash-command admin surface** — `/agent-setup`, `/routines`, `/billing`,
+  `/privacy`, `/help` mirror the CLI; only `/agent-setup` and `/routines` are
+  gated by Discord's own `Manage Server` permission, the rest are available
+  to everyone
 - **CLI + MCP adapters** alongside Discord, all sharing the same core turn
   pipeline and tenant-scoped stores
 - **Slack adapter** (optional) — full parity with Discord, per-workspace
@@ -47,7 +48,7 @@ that responds to an `@mention` in Discord.
 cp .env.example .env
 ```
 
-Open `.env` and fill in:
+Open `.env`, uncomment and fill in:
 
 - `DAIMON_ANTHROPIC__API_KEY` — your beta-enabled Anthropic key
 - `DAIMON_MCP__JWT_SECRET` — any random string (e.g. `openssl rand -hex 32`)
@@ -58,13 +59,15 @@ Open `.env` and fill in:
 `docker compose up -d postgres`. Those three vars are guarded with
 `${VAR:?...}` (fail-fast on missing value), so all three must be set in `.env`
 before the first `docker compose` command below, not just the Anthropic key.
-You'll add `DAIMON_DISCORD__BOT_TOKEN` in step 4. `.env` is gitignored —
-secrets never get committed here.
+`POSTGRES_PASSWORD` is also required by `docker-compose.yml`; `.env.example`
+already ships it uncommented as `POSTGRES_PASSWORD=daimon`, which is fine for
+local dev. You'll add `DAIMON_DISCORD__BOT_TOKEN` in step 4. `.env` is
+gitignored — secrets never get committed here.
 
 ### 2. Install dependencies
 
 ```bash
-uv sync
+uv sync --all-extras --all-packages
 ```
 
 ### 3. Start Postgres and run migrations
@@ -75,10 +78,9 @@ export DAIMON_DATABASE_URL=postgresql+asyncpg://daimon:daimon@localhost:5432/dai
 uv run alembic upgrade head
 ```
 
-The `alembic` CLI reads the **flat** `DAIMON_DATABASE_URL` env var (not the
-nested `.env` value) — this `export` is required every time you run alembic
-directly. The running app reads the nested `DAIMON_DATABASE__URL` from `.env`
-instead; you don't need to export that one.
+The `alembic` CLI reads from the shell environment (it does not auto-load
+`.env`), so this `export` is required when running alembic directly. Either
+the flat `DAIMON_DATABASE_URL` or nested `DAIMON_DATABASE__URL` form works.
 
 Seed the default agents/environments/skills:
 
@@ -120,15 +122,20 @@ deployment.
 - `packages/adapters/discord/` — the Discord bot adapter
 - `packages/adapters/mcp/` — the MCP server adapter
 - `packages/adapters/slack/` — the Slack adapter (optional)
+- `packages/adapters/scheduler/` — the routines scheduler adapter
+- `packages/testing/` — shared test fixtures/harness
+- `apps/notebook-host/` — standalone marimo notebook host service
 - `defaults/` — YAML defaults seeded into Managed Agents + local DB
 - `docs/slack.md` — Slack adapter per-user access model
+- `tests/` — cross-package integration tests
 
 ## Architecture
 
 - **Core / adapters split**: `daimon.core` owns schema, stores, and the turn
   pipeline; it has zero adapter imports. Each `daimon.adapters.*` package
-  (CLI, Discord, MCP, Slack) owns one platform's I/O, rendering, and auth,
-  and adapters never import each other. Enforced by `import-linter` in CI.
+  (CLI, Discord, MCP, Scheduler, Slack) owns one platform's I/O, rendering,
+  and auth, and adapters never import each other. Enforced by `import-linter`
+  in CI.
 - **Managed Agents is the source of truth** for agent/environment/session/
   skill/vault content. Our own database holds identity, namespacing, and
   provenance only — no local mirror of MA state.

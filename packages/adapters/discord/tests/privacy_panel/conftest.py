@@ -37,7 +37,9 @@ def _make_preview(**overrides: Any) -> PurgePreview:
     return PurgePreview(**base)
 
 
-def _make_runtime(*, privacy_policy_url: str = "https://daimon.dev/privacy") -> DiscordRuntime:
+def _make_runtime(
+    *, privacy_policy_url: str = "https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"
+) -> DiscordRuntime:
     """Return a MagicMock spec'd against DiscordRuntime for view construction.
 
     `DiscordRuntime` is a frozen dataclass with `sessionmaker` and `anthropic`

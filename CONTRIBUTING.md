@@ -8,9 +8,12 @@ look for in a pull request.
 
 - `packages/core/` — `daimon-core` library. Owns schema (Alembic migrations),
   stores, Managed Agents helpers, and the turn pipeline. No adapter imports.
-- `packages/adapters/cli/` — `daimon` binary (Typer + `prompt_toolkit` REPL).
-- `packages/adapters/{mcp,discord,slack}/` — platform adapters. Each owns one
-  platform's I/O, rendering, and auth; adapters never import from each other.
+- `packages/adapters/cli/` — `daimon` binary (Typer CLI).
+- `packages/adapters/{mcp,discord,slack,scheduler}/` — platform adapters. Each
+  owns one platform's I/O, rendering, and auth; adapters never import from
+  each other.
+- `packages/testing/` — shared test fixtures/harness.
+- `apps/notebook-host/` — standalone marimo notebook host service.
 - `defaults/` — YAML sources for seeded agents, environments, and skills.
 
 Dependency rule (enforced by `import-linter` in CI):
@@ -51,7 +54,7 @@ Every PR must keep all four green:
 ```bash
 uv run pytest                              # tests (needs Postgres, see above)
 uv run pyright                             # strict type checking
-uv run ruff check . && uv run ruff format . # lint + format
+uv run ruff check . && uv run ruff format --check . # lint + format
 uv run lint-imports                        # package boundary contracts
 ```
 

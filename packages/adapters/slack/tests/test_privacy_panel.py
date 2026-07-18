@@ -24,7 +24,7 @@ from daimon.testing.factories import make_account, make_platform_principal, make
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-_POLICY_URL = "https://daimon.dev/privacy"
+_POLICY_URL = "https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"
 
 
 @pytest.mark.asyncio

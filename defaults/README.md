@@ -16,5 +16,4 @@ Layout:
   must equal the frontmatter `name`. Optional `references/`, `scripts/`,
   etc. are packaged into the zip.
 
-Operator workflow: edit YAML → `daimon defaults apply` (once the CLI adapter
-ships; currently `apply_defaults(...)` is the library entrypoint).
+Operator workflow: edit YAML → `daimon defaults apply`.

@@ -443,7 +443,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings
     anthropic: AnthropicSettings
     privacy_policy_url: HttpUrl = Field(
-        default=HttpUrl("https://daimon.dev/privacy"),
+        default=HttpUrl("https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"),
         description=(
             "URL rendered on the Discord and Slack privacy panels' Policy button. "
             "Override via DAIMON_PRIVACY_POLICY_URL if you host your own policy page."
