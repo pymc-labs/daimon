@@ -122,7 +122,6 @@ deployment.
 - `packages/adapters/slack/` — the Slack adapter (optional)
 - `defaults/` — YAML defaults seeded into Managed Agents + local DB
 - `docs/slack.md` — Slack adapter per-user access model
-- `scripts/probes/` — Managed Agents API probes
 
 ## Architecture
 

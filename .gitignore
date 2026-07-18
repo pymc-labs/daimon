@@ -38,5 +38,3 @@ err.txt
 agents_err.txt
 download.html
 
-# Regenerated probe output — never track results, only the probe scripts.
-scripts/probes/**/*results*.json
