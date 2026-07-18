@@ -48,7 +48,7 @@ services:
       DAIMON_MCP__PUBLIC_URL: ${DAIMON_MCP__PUBLIC_URL:?DAIMON_MCP__PUBLIC_URL is required}
       DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
     ports:
-      - "8765:8765"
+      - "127.0.0.1:8765:8765"
     entrypoint: ["uvicorn"]
     command: ["daimon.adapters.mcp.server:create_mcp_app", "--factory", "--host", "0.0.0.0", "--port", "8765"]
     healthcheck:

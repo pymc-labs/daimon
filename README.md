@@ -59,10 +59,11 @@ Open `.env`, uncomment and fill in:
 `docker compose up -d postgres`. Those three vars are guarded with
 `${VAR:?...}` (fail-fast on missing value), so all three must be set in `.env`
 before the first `docker compose` command below, not just the Anthropic key.
-`POSTGRES_PASSWORD` is also required by `docker-compose.yml`; `.env.example`
-already ships it uncommented as `POSTGRES_PASSWORD=daimon`, which is fine for
-local dev. You'll add `DAIMON_DISCORD__BOT_TOKEN` in step 4. `.env` is
-gitignored — secrets never get committed here.
+`POSTGRES_PASSWORD` is also required by `docker-compose.yml` and is guarded
+the same way — uncomment `POSTGRES_PASSWORD=` in `.env` and set a strong,
+URL-safe value (avoid `@ : / % #`, which break the interpolated asyncpg DSN).
+You'll add `DAIMON_DISCORD__BOT_TOKEN` in step 4. `.env` is gitignored —
+secrets never get committed here.
 
 ### 2. Install dependencies
 
@@ -74,7 +75,7 @@ uv sync --all-extras --all-packages
 
 ```bash
 docker compose up -d postgres
-export DAIMON_DATABASE_URL=postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+export DAIMON_DATABASE_URL=postgresql+asyncpg://daimon:<your-POSTGRES_PASSWORD>@localhost:5432/daimon
 uv run alembic upgrade head
 ```
 

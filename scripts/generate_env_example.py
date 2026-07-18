@@ -237,7 +237,9 @@ def render_env_example() -> str:
 
     lines.append("# === Docker Compose (not read by the app) ===")
     lines.append("POSTGRES_USER=daimon")
-    lines.append("POSTGRES_PASSWORD=daimon")
+    lines.append("# Required by docker-compose.yml. Set a strong, URL-safe value")
+    lines.append("# (avoid @ : / % # — it is interpolated raw into the asyncpg DSN).")
+    lines.append("# POSTGRES_PASSWORD=")
     lines.append("POSTGRES_DB=daimon")
     lines.append("POSTGRES_PORT=5432")
 
