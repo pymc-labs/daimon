@@ -35,7 +35,7 @@ def _get_runtime(interaction: BotInteraction) -> DiscordRuntime:
 @app_commands.guild_only()
 @app_commands.default_permissions(manage_guild=True)
 class RoutinesCog(commands.Cog):
-    """Admin-only panel for scheduled routines (hidden from non-manage_guild users, D-32)."""
+    """Admin-only panel for scheduled routines (hidden from non-manage_guild users)."""
 
     def __init__(self, bot: commands.Bot) -> None:
         super().__init__()

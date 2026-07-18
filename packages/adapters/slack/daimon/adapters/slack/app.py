@@ -1,8 +1,8 @@
-"""SlackApp Socket Mode listener skeleton (Phase 80, STURN-01..05).
+"""SlackApp Socket Mode listener skeleton.
 
 Ack-first entry point with dedup gate, per-event token resolution,
 Slack Connect cross-tenant rejection, uninstall teardown routing, and
-SIGTERM drain.  Turn orchestration (STURN-05/06) lands in Plan 06 which
+SIGTERM drain.  Turn orchestration is delegated here.
 fills in ``_orchestrate``.
 
 Error boundary: ``_handle_app_mention`` is the named listener boundary.
@@ -119,7 +119,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
 
-# Grace window for graceful shutdown drain (STURN-01). Must be strictly less
+# Grace window for graceful shutdown drain. Must be strictly less
 # than the deployment's 60s kill timeout to leave headroom for client.close()
 # and health-server cleanup after the drain completes.
 _DRAIN_GRACE_S: float = 50.0
@@ -165,7 +165,7 @@ class SlackApp:
     """Socket Mode listener skeleton.
 
     Owns the ack-first dispatch, pre-turn safety gates, teardown routing,
-    and SIGTERM drain.  Turn orchestration is injected by Plan 06 via
+    and SIGTERM drain.  Turn orchestration is injected via
     ``_orchestrate``.
     """
 
@@ -174,11 +174,11 @@ class SlackApp:
         # Per-thread concurrency state (keys are Slack thread_ts strings).
         self._processing: set[str] = set()
         self._pending: dict[str, list[dict[str, Any]]] = {}
-        # Per-tenant in-flight cap (STURN-06 / SCALE-01).
+        # Per-tenant in-flight cap.
         self._inflight: dict[uuid.UUID, int] = {}
         # Background task references (prevent GC before done-callbacks fire).
         self._bg_tasks: set[asyncio.Task[None]] = set()
-        # Cancel registry: status_ts -> (cancel Event, author_id) (D-01 / D-02).
+        # Cancel registry: status_ts -> (cancel Event, author_id).
         self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
         # Drain flag — set on SIGTERM; blocks new mention handling.
         self.draining: bool = False
@@ -200,7 +200,7 @@ class SlackApp:
 
         ``send_socket_mode_response`` MUST be the first awaited line for all
         envelope types EXCEPT ``view_submission``, where the ack carries the
-        computed ``response_action`` payload (RESEARCH §Pattern 2, T-82-19).
+        computed ``response_action`` payload.
 
         For ``view_submission`` we call the PURE ``evaluate_delete_submission``
         (no I/O) before the single ack, then ack exactly once with the
@@ -208,7 +208,7 @@ class SlackApp:
 
         For all other types (events_api, slash_commands, block_actions) the
         unconditional empty ack fires first; all I/O is spawned as background
-        tasks (STURN-01 Pitfall 1).
+        tasks.
         """
         # req.payload field annotation is `dict` (SDK normalises all input to dict in __init__).
         # Annotate explicitly as dict[str, Any] — the Unknown parameter is an SDK stub gap.
@@ -495,7 +495,7 @@ class SlackApp:
                 )
             return  # view_submission fully handled
 
-        # ACK FIRST for all non-view_submission envelope types (STURN-01 Pitfall 1).
+        # ACK FIRST for all non-view_submission envelope types.
         await client.send_socket_mode_response(  # ACK FIRST — no I/O before this line
             SocketModeResponse(envelope_id=req.envelope_id)
         )
@@ -510,8 +510,9 @@ class SlackApp:
             elif etype in ("app_uninstalled", "tokens_revoked"):
                 self._spawn(self._handle_teardown(team_id=team_id))
         elif req.type == "slash_commands":
-            # A1 (assumed): slash commands arrive as req.type == "slash_commands".
-            # Log req.type for unknown commands so A1 can be confirmed from staging logs.
+            # Slash commands arrive as req.type == "slash_commands".
+            # Log req.type for unknown commands so the envelope type can be
+            # confirmed from staging logs.
             cmd: str = str(payload.get("command") or "")
             if cmd == "/help":
                 self._spawn(handle_help_command(self.runtime, payload))
@@ -531,7 +532,7 @@ class SlackApp:
                 )
         elif req.type == "interactive":
             if payload.get("type") == "block_actions":
-                # STURN-04 parity: reject block actions from an external
+                # Reject block actions from an external
                 # Slack Connect workspace before any handler resolves reads
                 # against the host tenant.
                 if is_external_interactive(payload):
@@ -540,7 +541,7 @@ class SlackApp:
                 actions: list[dict[str, Any]] = payload.get("actions") or []
                 action_id: str = str(actions[0].get("action_id") or "") if actions else ""
                 if action_id == "cancel_turn":
-                    # Existing cancel path — KEEP unchanged (D-01 / D-02).
+                    # Existing cancel path — KEEP unchanged.
                     self._spawn(self._handle_block_action(payload))
                 elif (
                     action_id.startswith("routine_action:")
@@ -559,16 +560,16 @@ class SlackApp:
                 elif action_id.startswith("agent_setup__"):
                     self._spawn(handle_agent_setup_action(self.runtime, payload))
         else:
-            # Log unrecognised envelope types so A1 (slash_commands key) can be
+            # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs (T-82-20).
             log.debug("slack.on_request.unrecognised_envelope_type", req_type=req.type)
 
     def _register_cancel(self, status_ts: str, cancel: asyncio.Event, author_id: str) -> None:
-        """Register a turn's cancel Event in the status_ts-keyed registry (D-01)."""
+        """Register a turn's cancel Event in the status_ts-keyed registry."""
         self._cancel_registry[status_ts] = (cancel, author_id)
 
     def _deregister_cancel(self, status_ts: str) -> None:
-        """Remove a turn's cancel registry entry on turn completion (D-01)."""
+        """Remove a turn's cancel registry entry on turn completion."""
         self._cancel_registry.pop(status_ts, None)
 
     def _release_inflight(self, tenant_id: uuid.UUID) -> None:
@@ -598,7 +599,7 @@ class SlackApp:
         Looks up the action's status_ts in _cancel_registry; if the clicker is
         the turn's original author, sets the cancel Event so the driver
         cancel-race loop picks it up.  Non-author clicks and missing registry
-        entries are silent no-ops (D-02 / Pitfall 6/7).
+        entries are silent no-ops.
         """
         actions: list[dict[str, Any]] = payload.get("actions") or []
         if not actions or actions[0].get("action_id") != "cancel_turn":
@@ -612,7 +613,7 @@ class SlackApp:
             return  # turn already ended / deregistered (Pitfall 6/7)
         cancel, author_id = entry
         if clicker != author_id:
-            return  # D-02 author gate — silent no-op
+            return  # author gate — silent no-op
         cancel.set()
 
     async def _handle_app_mention(
@@ -621,7 +622,7 @@ class SlackApp:
         *,
         team_id: str,
     ) -> None:
-        """Pre-turn safety gates → orchestration seam (Plan 06 fills turn body).
+        """Pre-turn safety gates → orchestration seam (turn body injected).
 
         Gate order (strict):
         1. Draining check (fast path — no I/O).
@@ -630,7 +631,7 @@ class SlackApp:
         4. PER-EVENT CLIENT: decrypt + AsyncWebClient(token=...) — never cached.
         5. SLACK CONNECT GATE: ephemeral rejection for external-workspace senders.
         6. TENANT RESOLVE: derive_tenant_uuid.
-        7. Handoff to _orchestrate (Plan 06).
+        7. Handoff to _orchestrate.
 
         The full handler body is wrapped in the listener-boundary catch
         (DaimonError | anthropic.APIError | SlackApiError).  Core helpers
@@ -647,7 +648,7 @@ class SlackApp:
         event_ts: str = event.get("event_ts") or event.get("ts") or ""
 
         try:
-            # (1) DEDUP — insert_if_new before any other work (STURN-02).
+            # (1) DEDUP — insert_if_new before any other work.
             async with self.runtime.sessionmaker() as s:
                 is_new = await insert_if_new(s, team_id=team_id, channel=channel, event_ts=event_ts)
                 await s.commit()
@@ -655,7 +656,7 @@ class SlackApp:
                 log.debug("slack.event_dropped.duplicate", team_id=team_id, event_ts=event_ts)
                 return
 
-            # (2) TOKEN RESOLVE — token-existence = tenant liveness (STURN-03).
+            # (2) TOKEN RESOLVE — token-existence = tenant liveness.
             async with self.runtime.sessionmaker() as s:
                 row = await get_slack_bot_token(s, team_id=team_id)
             if row is None:
@@ -669,7 +670,7 @@ class SlackApp:
             token = decrypt_token(fernet, row.encrypted_token)
             client = AsyncWebClient(token=token)  # per-event only
 
-            # (4) SLACK CONNECT GATE — reject external-workspace senders (STURN-04).
+            # (4) SLACK CONNECT GATE — reject external-workspace senders.
             if is_slack_connect_external(event, team_id=team_id):
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=channel,
@@ -684,7 +685,7 @@ class SlackApp:
             # (5) TENANT RESOLVE.
             tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-            # (6) Orchestration seam — Plan 06 implements the turn body.
+            # (6) Orchestration seam — turn body is delegated here.
             await self._orchestrate(
                 event,
                 team_id=team_id,
@@ -777,7 +778,7 @@ class SlackApp:
 
         Gate order (strict):
         1. Per-thread queue check: if thread already processing → reactions_add ⌛
-           and enqueue (D-01 / STURN-06). No slot consumed.
+           and enqueue. No slot consumed.
         2. Per-tenant cap: read-check-increment in one synchronous span (no await
            between read and increment) — mirrors Discord bot.py:516-529.
         3. Turn body via ``_run_thread_turn``.
@@ -802,7 +803,7 @@ class SlackApp:
                 )
             return
 
-        # (2) Per-tenant concurrency cap (STURN-06 / T-80-05).
+        # (2) Per-tenant concurrency cap.
         # Read-check-increment in ONE synchronous span — no await between.
         assert self.runtime.settings.slack is not None, (
             "SlackApp._orchestrate requires slack settings (entrypoint validates at boot)"
@@ -930,7 +931,7 @@ class SlackApp:
         watermark: str | None
         reused: bool
         # Populated in the new-session path; placeholder strings on session reuse until
-        # the full Phase-81 app wiring (registry, model info for reused sessions) lands.
+        # the full app wiring (registry, model info for reused sessions) lands.
         _lc_agent_name: str = ""
         _lc_model_id: str = ""
 
@@ -1232,7 +1233,7 @@ class SlackApp:
             log.info("slack.turn.completed", thread_id=thread_id, session_id=ma_session_id)
 
     async def drain_and_close(self, client: AsyncBaseSocketModeClient) -> None:
-        """Graceful shutdown drain (STURN-01).
+        """Graceful shutdown drain.
 
         Sets draining=True so new mentions are rejected, polls ``_processing``
         until it empties or the grace window elapses, then closes the

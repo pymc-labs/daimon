@@ -13,7 +13,7 @@ import re
 _FENCE_RE = re.compile(r"^```(\S*)\s*$")
 
 # Per-block character limit for Slack's native markdown block.
-# Locked to 11800 by the Plan 02 live-workspace probe (DEFAULT path, D-07).
+# Locked to 11800 by the live-workspace probe (DEFAULT path).
 _SLACK_LIMIT = 11800
 
 

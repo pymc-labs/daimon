@@ -8,7 +8,7 @@ Session scoping note: ``_create_routine_impl`` opens and closes its own session
 internally (no explicit commit — relies on flush for the returned row). To test
 cross-operation visibility (UPDATE + claim_due_fireable), we work within the
 same ``db_session`` transaction to avoid transaction isolation boundaries. The
-tool's D-11 contract (``next_fire_at`` is stamped) is verified via the returned
+tool's contract (``next_fire_at`` is stamped) is verified via the returned
 ``RoutineRow``; the scheduler pickup loop is proven by the UPDATE + claim within
 the shared session.
 """
@@ -114,7 +114,7 @@ async def test_routine_created_via_mcp_tool_is_claimed_by_scheduler(
     runtime = _runtime(sessionmaker, client=_client_resolving("daimon", tenant_id, "agent_a"))
     auth = _auth_identity(platform="discord", external_id="g_pickup_test", tenant_id=tenant_id)
 
-    # Step 1: Call the MCP tool layer to verify D-11 (next_fire_at is stamped).
+    # Step 1: Call the MCP tool layer to verify next_fire_at is stamped.
     # _create_routine_impl manages its own session (flush-only, no cross-session
     # commit). We use the returned RoutineRow to assert the contract, then
     # independently create the same row via the store in our shared db_session
@@ -128,7 +128,7 @@ async def test_routine_created_via_mcp_tool_is_claimed_by_scheduler(
         trigger_message="hello",
         enabled=True,
     )
-    assert created.next_fire_at is not None, "create_routine must stamp next_fire_at (D-11)"
+    assert created.next_fire_at is not None, "create_routine must stamp next_fire_at"
     assert created.next_fire_at > datetime.now(UTC), (
         "next_fire_at must be in the future at create time"
     )

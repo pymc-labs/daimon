@@ -219,7 +219,7 @@ def create_mcp_app(
         )
     )
 
-    # Phase 29: build Gemini client + FileStore when DAIMON_GEMINI__API_KEY is
+    # Build Gemini client + FileStore when DAIMON_GEMINI__API_KEY is
     # configured. Both are optional — without a Gemini key the media tools
     # skip registration and the rest of the mcp surface boots normally.
     gemini_client: genai.Client | None = None
@@ -267,9 +267,9 @@ def create_mcp_app(
         register_channel_tools(mcp, runtime)
     else:
         log.info("channel tools disabled", reason="no discord or slack settings")
-    self_edit.register_self_edit_tools(mcp, runtime)  # Phase 23 — agent self-edit tools
-    register_notebook_tools(mcp, runtime)  # Phase 40 — notebook publish (raises when unconfigured)
-    register_propagation_tools(mcp, runtime)  # Phase 83 — set/clear agent default (SC5 parity)
+    self_edit.register_self_edit_tools(mcp, runtime)  # agent self-edit tools
+    register_notebook_tools(mcp, runtime)  # notebook publish (raises when unconfigured)
+    register_propagation_tools(mcp, runtime)  # set/clear agent default
 
     if gemini_client is not None and file_store is not None:
         register_media_tools(
@@ -352,7 +352,7 @@ def create_mcp_app(
     else:
         log.info("slack oauth disabled", reason="no slack settings or crypto keys")
 
-    # GitHub App clone-auth: App-clone (Phase 97 D-07) boots with only app_id +
+    # GitHub App clone-auth: App-clone boots with only app_id +
     # app_private_key — no webhook required. The /webhooks/github mount is
     # required only by skill-sync's push-driven resync and is gated separately
     # on webhook_secret (fail-fast on partial webhook config, never coupled to

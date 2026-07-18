@@ -1,6 +1,6 @@
 """Pure Gemini usage_metadata -> plain-int mapping for media-tool billing.
 
-Adapter-side because `daimon.core` cannot import `google-genai` (D-05). The
+Adapter-side because `daimon.core` cannot import `google-genai`. The
 three media services map their raw `types.GenerateContentResponseUsageMetadata`
 into this plain-int shape; `tools/media.py` passes the fields straight to
 `record_media_usage`.

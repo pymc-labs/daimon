@@ -7,7 +7,7 @@ Four modals are added on top of the Plan-03 lifecycle modals:
 - RepoAuthModal: bind repo + branch; optional inline PAT path stores
   Fernet-encrypted in `github_credentials`. Per LD-04-01, the per-agent
   binding lives in `agent_repo_binding`, NOT on AgentSpec.
-- AddSkillModal: kicks off Phase 33's sync_agent_skills via
+- AddSkillModal: kicks off sync_agent_skills via
   asyncio.create_task (fire-and-forget).
 - AddMcpModal: appends a real BetaManagedAgentsURLMCPServerParams entry
   to the agent's spec, then reconciles.
@@ -235,7 +235,7 @@ class RepoAuthModal(discord.ui.Modal, title="Repo + Auth"):
             tenant_id = await resolve_tenant_for_panel(self.runtime, interaction)
 
             # Resolve the MA agent UUID first — needed for both the per-agent
-            # credential write (D-25) and the repo binding below.
+            # credential write and the repo binding below.
             selected = self.state.selected
             if selected is None:
                 return
@@ -277,7 +277,7 @@ class RepoAuthModal(discord.ui.Modal, title="Repo + Auth"):
                         "That token can't access this repo (or the repo doesn't "
                         "exist). Paste a PAT that has access, or connect GitHub."
                     )
-                # D-25: inline PAT is written as a per-agent credential keyed on
+                # inline PAT is written as a per-agent credential keyed on
                 # agent_uuid (not account_id). Only this agent can resolve it.
                 ma_secret_ref = await store_inline_pat(
                     self.runtime,
@@ -287,7 +287,7 @@ class RepoAuthModal(discord.ui.Modal, title="Repo + Auth"):
                 )
                 pat_last4 = pat[-4:]
             else:
-                # No inline PAT -> probe GitHub App coverage first (D-06). If the
+                # No inline PAT -> probe GitHub App coverage first. If the
                 # App is installed on the repo owner, App mode will clone it
                 # (public or private) without the operator fallback PAT, so the
                 # public-only visibility check is unnecessary. A probe failure
@@ -326,7 +326,7 @@ class RepoAuthModal(discord.ui.Modal, title="Repo + Auth"):
                             raise DaimonError(
                                 "This repo is private (or not found). Paste a PAT to bind it."
                             )
-                # D-25: no inline PAT -> no per-agent credential is written. The resync
+                # No inline PAT -> no per-agent credential is written. The resync
                 # path is agent-overlay-only and never consults a principal-default, so
                 # mark the ref as anonymous rather than implying a fallback exists.
                 ma_secret_ref = "anon:"
@@ -385,7 +385,7 @@ class RepoAuthModal(discord.ui.Modal, title="Repo + Auth"):
 
 
 class AddSkillModal(discord.ui.Modal, title="Add skill repo"):
-    """Add one Skills repo URL. Kicks off Phase 33 sync_agent_skills async."""
+    """Add one Skills repo URL. Kicks off sync_agent_skills async."""
 
     def __init__(
         self,

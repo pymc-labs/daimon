@@ -5,7 +5,7 @@ Escape order is load-bearing:
   < → &lt;
   > → &gt;
 
-These tests verify the ordering invariant (D-07, SREND-02).
+These tests verify the ordering invariant.
 """
 
 from __future__ import annotations

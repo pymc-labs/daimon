@@ -2,12 +2,12 @@
 
 - on_message derives tenant_id via derive_tenant_uuid + reads liveness via get_tenant_liveness,
   threading the per-message tenant_id into _orchestrate — guild A never sees guild B's tenant.
-- The unified non-ready self-heal gate (D-03): an unprovisioned/archived guild triggers
+- The unified non-ready self-heal gate: an unprovisioned/archived guild triggers
   ensure_provisioning + replies "setting up"; a 'failed' guild spawns a background re-seed
   + replies "setting up" (the word "failed" is never user-visible); 'pending' replies
   "setting up"; only 'ready' proceeds to resolve_agent.
 - The plain agent-resolve-miss path: MAResolverMissError on a ready guild collapses to the
-  "no longer exists" message — no retry, no per-user-active fallthrough (deleted in D-05).
+  "no longer exists" message — no retry, no per-user-active fallthrough.
 """
 
 from __future__ import annotations
@@ -103,7 +103,7 @@ def _make_fake_environment(name: str = "test-env") -> BetaEnvironment:
 def _make_runtime(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> DiscordRuntime:
-    # runtime no longer carries tenant_id (D-06); on_message resolves it per-message.
+    # runtime no longer carries tenant_id; on_message resolves it per-message.
     from decimal import Decimal
 
     settings = MagicMock()
@@ -165,7 +165,7 @@ def _make_channel_message(
 
 class TestAgentResolveMiss:
     """A miss on a ready guild collapses to the plain 'no longer exists' message —
-    no retry, no per-user-active fallthrough (deleted in D-05)."""
+    no retry, no per-user-active fallthrough."""
 
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)

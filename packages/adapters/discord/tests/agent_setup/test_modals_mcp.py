@@ -325,7 +325,7 @@ async def test_add_mcp_modal_rejects_reserved_name_ephemeral_no_mutation_no_reco
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
 ) -> None:
-    """#142 D-04: submitting server name 'daimon-mcp' is rejected ephemerally
+    """Submitting server name 'daimon-mcp' is rejected ephemerally
     before defer — no state mutation, no reconcile call, zero MA/vault HTTP calls."""
     # Record any reconcile call as a failure
     reconcile_calls: list[str] = []
@@ -390,7 +390,7 @@ async def test_add_mcp_modal_rejects_own_endpoint_url_trailing_slash_variant(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
 ) -> None:
-    """#142 D-04: submitting a URL equal to public_url (trailing-slash variant)
+    """Submitting a URL equal to public_url (trailing-slash variant)
     is rejected ephemerally before defer — no reconcile, no vault write."""
     reconcile_calls: list[str] = []
 
@@ -448,7 +448,7 @@ async def test_add_mcp_modal_unrelated_server_proceeds_past_guard(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
 ) -> None:
-    """#142 D-04: an unrelated server name + URL passes the guard and reaches defer.
+    """An unrelated server name + URL passes the guard and reaches defer.
 
     The negative case: the guard must not over-block legitimate MCP servers.
     We assert that defer IS called, confirming the guard allowed the request through.

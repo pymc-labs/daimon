@@ -344,7 +344,7 @@ def test_body_text_no_none_literal_in_empty_fields(account_id: uuid.UUID) -> Non
 
 
 def test_body_text_last_sync_error_appears_in_repo_group(account_id: uuid.UUID) -> None:
-    """D-24: when last_sync_error is set, a warning line appears in the Repo & auth group."""
+    """When last_sync_error is set, a warning line appears in the Repo & auth group."""
     selected = _entry("my-agent")
     state = PanelState(
         roster=[selected],
@@ -363,7 +363,7 @@ def test_body_text_last_sync_error_appears_in_repo_group(account_id: uuid.UUID) 
 
 
 def test_body_text_last_sync_error_absent_when_none(account_id: uuid.UUID) -> None:
-    """D-24: when last_sync_error is None, no warning line appears."""
+    """When last_sync_error is None, no warning line appears."""
     selected = _entry("my-agent")
     state = PanelState(
         roster=[selected],
@@ -654,7 +654,7 @@ def test_edit_btn_disabled_for_system_agent(account_id: uuid.UUID) -> None:
 
 
 def test_admin_view_has_set_default_button(account_id: uuid.UUID) -> None:
-    """D-02: admin panel has 'Set as default…' button; disabled with no selection, enabled with one."""
+    """Admin panel has 'Set as default…' button; disabled with no selection, enabled with one."""
     state = PanelState.initial(
         roster=[],
         account_id=account_id,
@@ -677,12 +677,12 @@ def test_admin_view_has_set_default_button(account_id: uuid.UUID) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Member gating (D-06 / D-07 / D-08)
+# Member gating
 # ---------------------------------------------------------------------------
 
 
 def test_read_only_view_hides_mutation_buttons(account_id: uuid.UUID) -> None:
-    """D-07: member (is_admin=False) panel has NO mutation buttons; picker IS present."""
+    """Member (is_admin=False) panel has NO mutation buttons; picker IS present."""
     from daimon.core.scope import ChannelConfigRow, TenantConfigRow
 
     ch_row = ChannelConfigRow(agent_name="alice", channel_id="1001", tenant_id=uuid.UUID(int=0))
@@ -708,7 +708,7 @@ def test_read_only_view_hides_mutation_buttons(account_id: uuid.UUID) -> None:
 
 
 def test_read_only_body_contains_view_only_line(account_id: uuid.UUID) -> None:
-    """D-07: member panel body must contain the 'View only — ask an admin' line."""
+    """Member panel body must contain the 'View only — ask an admin' line."""
     state = PanelState.initial(
         roster=[_entry("alice")],
         account_id=account_id,
@@ -723,7 +723,7 @@ def test_read_only_body_contains_view_only_line(account_id: uuid.UUID) -> None:
 
 
 def test_read_only_body_shows_cascade_ladder(account_id: uuid.UUID) -> None:
-    """D-06/D-07: member body shows '← in effect here' cascade marker."""
+    """Member body shows '← in effect here' cascade marker."""
     from daimon.core.scope import ChannelConfigRow, TenantConfigRow
 
     channel_id = 1001
@@ -824,7 +824,7 @@ async def test_interaction_check_allows_invoker(account_id: uuid.UUID) -> None:
 
 @pytest.mark.asyncio
 async def test_admin_view_invoker_match_still_guards(account_id: uuid.UUID) -> None:
-    """D-08: non-invoker interaction still fails even on admin panel."""
+    """Non-invoker interaction still fails even on admin panel."""
     state = PanelState.initial(
         roster=[_entry("alice")],
         account_id=account_id,
@@ -898,7 +898,7 @@ async def test_delete_btn_routes_failure_through_render_error(
 
 
 # ---------------------------------------------------------------------------
-# Phase 46-02: EditView cut-over (AT-10)
+# EditView cut-over
 # ---------------------------------------------------------------------------
 
 
@@ -915,7 +915,7 @@ def test_edit_view_replaces_old_sub_views_completely() -> None:
         "_McpRemoveButton",
     ):
         assert not hasattr(panel_mod, removed_name), (
-            f"{removed_name} should be deleted in phase 46 (its behavior is folded into EditView)"
+            f"{removed_name} should be deleted (its behavior is folded into EditView)"
         )
 
 
@@ -1057,7 +1057,7 @@ async def test_load_repo_binding_reads_persisted_binding(
 
 
 # ---------------------------------------------------------------------------
-# Phase 58-02 / cascade ladder (still lives in set_default.py)
+# Cascade ladder (still lives in set_default.py)
 # ---------------------------------------------------------------------------
 
 
@@ -1082,7 +1082,7 @@ def test_cascade_container_header_is_default_agent(account_id: uuid.UUID) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Phase 40-06 / 46-02 modal: model validation
+# Modal: model validation
 # ---------------------------------------------------------------------------
 
 
@@ -1124,7 +1124,7 @@ async def test_agent_modal_rejects_unknown_model(
 
 
 # ---------------------------------------------------------------------------
-# Phase 62-04: OB-4 Sentry capture at broad panel except sites (D-09)
+# Sentry capture at broad panel except sites
 # ---------------------------------------------------------------------------
 
 
@@ -1134,7 +1134,7 @@ async def test_delete_failure_captures_to_sentry_with_tenant_context_and_swallow
     tenant_id: uuid.UUID,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """OB-4 / D-09: a failed delete (after tenant resolution) is captured to Sentry with
+    """A failed delete (after tenant resolution) is captured to Sentry with
     tenant_id + guild_id bound into contextvars, AND the handler still swallows — it
     surfaces the ephemeral render_error and returns rather than re-raising.
     """

@@ -1,7 +1,7 @@
 """Adapter-tier scoped-config write helpers for the /agent-setup Set-as-default affordance.
 
 MUST NOT import daimon.core._models (ORM is private to stores/defaults). Always writes
-mode='agent' — the per-user 'active' tier is retired (D-13). The cross-tenant scan goes
+mode='agent' — the per-user 'active' tier is retired. The cross-tenant scan goes
 through the `list_propagations_for_tenant` store helper.
 """
 

@@ -5,7 +5,7 @@ Covers:
   "Authorization: Bearer <token>" header; returns the URL (transport-level fake).
 - handle_topup_select with an admin user + amount=25: asserts checkout POST and
   ephemeral chat.postEphemeral with the mrkdwn <url|...> link.
-- handle_topup_select with a non-admin user: asserts NO checkout POST (D-02).
+- handle_topup_select with a non-admin user: asserts NO checkout POST.
 - handle_topup_select with an invalid amount: asserts NO checkout POST (T-82-10).
 
 Transport-level fakes:
@@ -347,14 +347,14 @@ async def test_handle_topup_select_admin_ephemeral_text_contains_url(
 
 
 # ---------------------------------------------------------------------------
-# Integration: handle_topup_select — non-admin user (D-02)
+# Integration: handle_topup_select — non-admin user
 # ---------------------------------------------------------------------------
 
 
 async def test_handle_topup_select_non_admin_issues_no_checkout_post(
     runtime: SlackRuntime,
 ) -> None:
-    """Non-admin click must NOT trigger a checkout POST (D-02 fail-closed)."""
+    """Non-admin click must NOT trigger a checkout POST (fail-closed)."""
     from daimon.adapters.slack.billing_panel.actions import handle_topup_select
 
     captured_checkout: list[httpx.Request] = []
@@ -393,9 +393,7 @@ async def test_handle_topup_select_non_admin_issues_no_checkout_post(
             _http_client=http_client,
         )
 
-    assert len(captured_checkout) == 0, (
-        "Non-admin must NOT trigger a checkout POST (D-02 fail-closed)"
-    )
+    assert len(captured_checkout) == 0, "Non-admin must NOT trigger a checkout POST (fail-closed)"
 
 
 # ---------------------------------------------------------------------------

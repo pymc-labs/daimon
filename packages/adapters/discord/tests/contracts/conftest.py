@@ -10,7 +10,7 @@ The core variant nukes the entire MA workspace, which is hostile to running
 against a live workspace with seeded agents (daimon, daimon-personal, real
 user agents). Each test in this package is responsible for archiving the
 resources IT created — use a per-test `RUN_TAG = uuid.uuid4().hex[:8]` and a
-`finally:`-clause `_cleanup(client, *names)` helper (see plan 35-06's
+`finally:`-clause `_cleanup(client, *names)` helper (see
 test_panel_roundtrip.py for the canonical pattern).
 """
 

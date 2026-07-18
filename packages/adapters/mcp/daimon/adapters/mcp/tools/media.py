@@ -81,10 +81,10 @@ async def _check_admission(
     billing_config: BillingConfig | None,
     tool_name: str,
 ) -> AuthIdentity:
-    """Shared admission gate for the three billed media tools (D-09).
+    """Shared admission gate for the three billed media tools.
 
     Resolves the caller's identity, then:
-    - ``platform_user_id is None`` is the trusted, fully-unbilled path (D-02):
+    - ``platform_user_id is None`` is the trusted, fully-unbilled path:
       CLI-only/internal operator tokens run with no balance/cap checks, no
       usage row, no debit. This is intentional, not an oversight — never add
       a fallback that bills this path.
@@ -142,7 +142,7 @@ async def _meter_billed_call(
 ) -> None:
     """Record spend for a successful Gemini call on the billed path only.
 
-    No-op on the trusted (``platform_user_id is None``) path — D-02. Runs
+    No-op on the trusted (``platform_user_id is None``) path. Runs
     outside any try/except: a metering DB failure IS a tool failure
     (guideline:architecture Error Propagation).
     """

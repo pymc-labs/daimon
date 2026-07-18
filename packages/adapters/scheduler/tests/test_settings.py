@@ -5,7 +5,7 @@ Behavior:
 - Fields override from `DAIMON_SCHEDULER__*` env vars.
 - The advisory-lock key is a stable int constant by default so two scheduler
   processes contend on the same key.
-- Phase 38-04: `default_environment_id` was deleted. The scheduler now
+- `default_environment_id` was deleted. The scheduler now
   resolves the environment id at fire time via `daimon.core.ma_resolver`.
 """
 
@@ -60,7 +60,7 @@ def test_scheduler_settings_health_port_reads_from_env(monkeypatch: pytest.Monke
 
 
 def test_default_environment_id_field_removed() -> None:
-    """Phase 38-04 (PHASE-38-D2 LOCKED): the scheduler no longer reads
+    """The scheduler no longer reads
     environment_id from settings — it resolves via
     `daimon.core.ma_resolver.resolve_environment` at fire time. Pin the
     deletion so a future revert doesn't silently re-add the dead config knob.

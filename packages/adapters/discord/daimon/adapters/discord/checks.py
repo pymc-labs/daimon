@@ -70,7 +70,7 @@ async def resolve_tenant_for_interaction(
     """Resolve the tenant_id owning the interaction's guild, per-interaction.
 
     Returns None for a DM context (no guild_id) or an unprovisioned guild.
-    The runtime no longer carries a boot-time tenant_id (D-06); each
+    The runtime no longer carries a boot-time tenant_id; each
     interaction resolves its own guild's tenant.
     """
     if interaction.guild_id is None:

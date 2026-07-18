@@ -45,7 +45,7 @@ def _make_runtime(
     `DiscordRuntime` is a frozen dataclass with `sessionmaker` and `anthropic`
     fields; spec-MagicMock only auto-mocks methods, so both must be assigned
     explicitly for the modal's `purge_account(sm=..., anthropic=...)` call.
-    The runtime no longer carries a tenant_id (D-06) — the privacy modal
+    The runtime no longer carries a tenant_id — the privacy modal
     resolves tenant per-interaction. `settings.privacy_policy_url` is set
     explicitly (rather than left auto-mocked) so panel.py's
     `str(runtime.settings.privacy_policy_url)` renders a real URL.

@@ -83,7 +83,7 @@ async def handle_privacy_command(
     runtime: SlackRuntime,
     payload: dict[str, Any],
 ) -> None:
-    """Handle the /privacy slash command (D-06 loading-modal → views.update pattern).
+    """Handle the /privacy slash command (loading-modal → views.update pattern).
 
     1. Resolve the per-event web_client (S2).
     2. Immediately views.open a loading modal to capture the trigger_id window.
@@ -103,7 +103,7 @@ async def handle_privacy_command(
             log.warning("privacy.command.dropped.no_token", team_id=team_id)
             return
 
-        # D-06: open loading modal before any slow I/O to stay within trigger_id TTL.
+        # Open loading modal before any slow I/O to stay within trigger_id TTL.
         resp = await web_client.views_open(  # pyright: ignore[reportUnknownMemberType]
             trigger_id=trigger_id,
             view=build_loading_view(),
@@ -161,7 +161,7 @@ async def handle_privacy_block_action(
       "privacy_delete_open"     — resolve account + preview, push the delete confirm modal
       "privacy_export"          — push a modal with the held-data summary
       "privacy_slack_disconnect" — delete the slack_user_tokens row, then
-                                    best-effort revoke (D-05: delete first)
+                                    best-effort revoke (delete first)
 
     Catches DaimonError | SlackApiError | SQLAlchemyError at the boundary (S3).
     """

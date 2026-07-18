@@ -8,7 +8,7 @@ Runs only on requests that already passed `DaimonJWTVerifier.verify_token`
   4. Ask `role_resolver` for the caller's `role` claim (stashed by verifier).
   5. Call `resolve_role` (pure sync) to map claim string to Role enum.
   6. Read platform/external_id/platform_user_id inline from injected claims (no DB call).
-  7. Ask `agent_id_resolver` for the optional Phase 19 `agent_id` claim (D-10/D-27).
+  7. Ask `agent_id_resolver` for the optional `agent_id` claim.
   8. Stash an `AuthIdentity` into `ctx.fastmcp_context.set_state("auth", ...)`.
   9. Call `enable_components` for admin sessions so admin-tagged tools are visible.
 
@@ -181,7 +181,7 @@ class IdentityMiddleware(Middleware):
         await fastmcp_ctx.set_state("auth", identity, serializable=False)
         if is_admin:
             await enable_components(fastmcp_ctx, tags={"admin"})
-        # Phase 77 PHASE-77-TOOLS-01: when agent_id is present (a verified
+        # when agent_id is present (a verified
         # derived per-agent UUID), narrow the session to agent-chat-tagged
         # tools only. disable_components(match_all=True) then
         # enable_components(tags={"agent-chat"}) — later marks override earlier

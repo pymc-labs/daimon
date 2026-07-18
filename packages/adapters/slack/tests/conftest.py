@@ -129,7 +129,7 @@ def fake_slack_web_client() -> Iterator[FakeSlackWebClient]:
     """Yield a real AsyncWebClient whose aiohttp calls are intercepted.
 
     Pre-registers canned ``ok=True`` JSON responses for the Slack Web API
-    methods the Phase 80 listener uses (see ``_SLACK_PHASE80_METHODS``).
+    methods the listener uses.
 
     No method-level ``AsyncMock`` is used — this is a transport-level fake
     that exercises the real SDK request builder and response parser.

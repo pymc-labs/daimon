@@ -20,9 +20,9 @@ async def _auth(ctx: Context) -> AuthIdentity:  # pyright: ignore[reportUnusedFu
 
 
 def _require_admin(auth: AuthIdentity) -> None:  # pyright: ignore[reportUnusedFunction]
-    """Raise ToolError with the D-28 message if the caller is not an admin.
+    """Raise ToolError if the caller is not an admin.
 
-    Call at the top of every mutating _*_impl to enforce RBAC-02 chat gating.
+    Call at the top of every mutating _*_impl to enforce admin chat gating.
     Reads (list_*/get_*/self_read*/self_list*) stay ungated.
     """
     if not auth.is_admin:

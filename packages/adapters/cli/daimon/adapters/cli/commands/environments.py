@@ -117,7 +117,7 @@ async def environments_create(*, rt: CliRuntime, console: Console, path: Path) -
         )
     # Session closed. MA calls below.
     # Tenant-scoped collision pre-check before the MA create — a same-name create
-    # would otherwise feed reconcile dedup. ANY match blocks regardless of owner (D-03).
+    # would otherwise feed reconcile dedup. ANY match blocks regardless of owner.
     matches = await find_environments_by_daimon_tag(
         rt.anthropic, tenant_id=tenant_id, name=spec.name
     )
@@ -287,7 +287,7 @@ async def environments_fork(
     # Session closed. MA calls below.
     # The dst==src guard above only catches the trivial case; a fork to an existing
     # *different* environment name would silently collide and feed reconcile dedup.
-    # Reject ANY tenant match on dst regardless of owner (D-03), before the MA create.
+    # Reject ANY tenant match on dst regardless of owner, before the MA create.
     dst_matches = await find_environments_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=dst)
     if dst_matches:
         raise StoreError(

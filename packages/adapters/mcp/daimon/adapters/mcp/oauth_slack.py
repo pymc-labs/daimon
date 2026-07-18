@@ -456,7 +456,7 @@ def _error_html(
 _CONNECT_STATE_TTL_S = 3600
 # Applies to ALL callback verifies, including install-flow states minted with
 # a 600s window — the callback intentionally does not re-enforce that
-# tighter TTL. This is fine by design (D-06): callback verification is
+# tighter TTL. This is fine by design: callback verification is
 # replay-idempotent, so a wider TTL here doesn't let a stale install state do
 # anything a fresh one couldn't.
 _CALLBACK_STATE_TTL_S = 3900
@@ -575,7 +575,7 @@ def build_oauth_slack_routes(
                 return _error_html(kind="exchange_failed")
 
         if state_payload.get("flow") == "user_connect":
-            # D-06: only the bound Slack account may complete this link.
+            # only the bound Slack account may complete this link.
             if (
                 result.team_id is None
                 or result.team_id != state_payload.get("team_id")
@@ -626,7 +626,7 @@ def build_oauth_slack_routes(
                 )
             return _connected_html()
 
-        # T-79-05 / SINST-03: enterprise hard-reject BEFORE touching team_id (Pitfall 4).
+        # enterprise hard-reject BEFORE touching team_id.
         if result.is_enterprise_install:
             return _enterprise_rejection_html()
 
@@ -636,10 +636,10 @@ def build_oauth_slack_routes(
             logger.error("slack install exchange returned no bot access_token")
             return _error_html(kind="exchange_failed")
 
-        # Non-enterprise path: team_id is non-None (D-04 contract).
+        # Non-enterprise path: team_id is non-None.
         team_id = result.team_id
         if team_id is None:
-            # SINST-03: team_id is None only for enterprise installs, rejected above.
+            # team_id is None only for enterprise installs, rejected above.
             # This branch is unreachable in normal flow; guards the type narrowing.
             return _enterprise_rejection_html()
 

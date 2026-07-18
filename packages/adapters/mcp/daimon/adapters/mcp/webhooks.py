@@ -1,8 +1,8 @@
-"""Webhook handlers — INFRA-01 surface, Phase 20 lands the Stripe handler.
+"""Webhook handlers.
 
-Phase 97 removed the GitHub OAuth web flow entirely (D-03/D-10); the GitHub
+The GitHub OAuth web flow has been removed entirely; the GitHub
 webhook here is skill-sync's push-driven resync trigger only, decoupled from
-App-clone credential resolution (D-07).
+App-clone credential resolution.
 
 Per `guideline:architecture` "no module-level singletons": Stripe billing
 config is INJECTED into the factory by `create_mcp_app`. The factory returns
@@ -292,15 +292,15 @@ def build_stripe_webhook(
     sessionmaker: async_sessionmaker[AsyncSession],
     billing_config: BillingConfig,
 ) -> Callable[[Request], Awaitable[Response]]:
-    """Construct a Stripe webhook handler with sessionmaker + config bound. D-22.
+    """Construct a Stripe webhook handler with sessionmaker + config bound.
 
     Handler flow:
       1. Read raw body bytes (Pitfall 4 — never re-serialize via json.dumps)
       2. Verify signature via stripe.Webhook.construct_event; on fail -> 400
       3. Dispatch on event.type:
-         - checkout.session.completed  -> credit (CAS-gated, D-16)
-         - charge.refunded             -> clawback (idempotent negative row, D-17)
-         - charge.dispute.created      -> clawback (idempotent negative row, D-17)
+         - checkout.session.completed  -> credit (CAS-gated)
+         - charge.refunded             -> clawback (idempotent negative row)
+         - charge.dispute.created      -> clawback (idempotent negative row)
          - anything else               -> 200 no-op
       4. For completed: validate metadata (tenant_id, amount_total);
          missing/malformed -> 200 no-op (RESEARCH OQ #4)
@@ -329,11 +329,11 @@ def build_stripe_webhook(
         event_id: str = event.id
         event_type: str = event.type
 
-        # --- completed checkout: credit the tenant ledger (D-16) ---
+        # --- completed checkout: credit the tenant ledger ---
         if event_type == "checkout.session.completed":
             return await _handle_completed(sessionmaker, event_id, event)
 
-        # --- refund / dispute: clawback (D-17) ---
+        # --- refund / dispute: clawback ---
         if event_type in ("charge.refunded", "charge.dispute.created"):
             return await _handle_clawback(sessionmaker, event_id, event_type, event)
 
@@ -472,7 +472,7 @@ async def _handle_clawback(
 ) -> Response:
     """Append a clawback ledger row on charge.refunded / charge.dispute.created.
 
-    D-17: resolve tenant + amount from the original credit via get_by_payment_intent.
+    resolve tenant + amount from the original credit via get_by_payment_intent.
 
     Model A (uniform high-water-mark): refunds and disputes share one cumulative
     clawed-back total per payment_intent. The pure _clawback_amount_from_event

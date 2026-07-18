@@ -10,7 +10,7 @@ drives both a routines tool and a discord tool through the full real chain:
 
 This test MUST use httpx.ASGITransport over create_mcp_app — the in-process
 fastmcp.Client path (StaticTokenVerifier) cannot prove server-side JOIN
-recovery (D-09).
+recovery.
 """
 
 from __future__ import annotations
@@ -170,7 +170,7 @@ async def test_claimless_token_drives_routines_and_discord_tools(
 
     # --- Build app with real DaimonJWTVerifier (not StaticTokenVerifier) ---
     # The jwt_secret param causes create_mcp_app to construct DaimonJWTVerifier;
-    # passing auth=None is the production path (D-09).
+    # passing auth=None is the production path.
     # discord settings must be non-None so register_channel_tools is called.
     app = create_mcp_app(
         settings=Settings(

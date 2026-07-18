@@ -284,7 +284,7 @@ def _runtime_with_settings(
     anthropic: Any, *, tenant_id: uuid.UUID, public_url: HttpUrl | None
 ) -> DiscordRuntime:
     """Build a DiscordRuntime carrying just the bits write.py touches."""
-    _ = tenant_id  # runtime no longer carries tenant_id (D-06); threaded into helpers
+    _ = tenant_id  # runtime no longer carries tenant_id; threaded into helpers
     settings = MagicMock()
     settings.mcp.public_url = public_url
     return DiscordRuntime(
@@ -404,7 +404,7 @@ async def test_fork_agent_rekeys_source_credential_onto_fork(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
 ) -> None:
-    """MPP-02/D-02: after fork_agent, get_pat(agent_id=fork) resolves the source's token,
+    """After fork_agent, get_pat(agent_id=fork) resolves the source's token,
     re-keyed under the fork's OWN principal."""
     tenant = Tenant(id=tenant_id, platform="discord", external_id="test-guild-fork-cred")
     db_session.add(tenant)
@@ -470,7 +470,7 @@ async def test_fork_agent_rekeys_source_credential_onto_fork(
     )
     assert fork_pat == plaintext, "fork's credential must resolve the source's token"
 
-    # D-02: deleting the source credential must not break the fork (no aliasing).
+    # Deleting the source credential must not break the fork (no aliasing).
     await delete_credential_for_principal(db_session, principal_id=source_agent_uuid)
     await db_session.commit()
     fork_pat_after_delete = await get_pat(
@@ -480,7 +480,7 @@ async def test_fork_agent_rekeys_source_credential_onto_fork(
         fernet=fernet,
     )
     assert fork_pat_after_delete == plaintext, (
-        "fork's credential must survive deletion of the source credential (D-02: no aliasing)"
+        "fork's credential must survive deletion of the source credential (no aliasing)"
     )
 
 
@@ -490,7 +490,7 @@ async def test_fork_agent_raises_when_source_credential_unresolvable(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
 ) -> None:
-    """D-04: fork_agent fails loud when the source's inline-pat binding has no
+    """fork_agent fails loud when the source's inline-pat binding has no
     resolvable credential (binding row exists, credential row does not)."""
     tenant = Tenant(id=tenant_id, platform="discord", external_id="test-guild-fork-nocred")
     db_session.add(tenant)
@@ -610,7 +610,7 @@ async def test_fork_agent_copies_repo_binding_with_rewritten_secret_ref(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
 ) -> None:
-    """MPP-02/D-03: fork's repo binding matches the source's repo_url/default_branch,
+    """Fork's repo binding matches the source's repo_url/default_branch,
     with ma_secret_ref rewritten to the fork's own inline-pat ref."""
     tenant = Tenant(id=tenant_id, platform="discord", external_id="test-guild-fork-binding")
     db_session.add(tenant)
@@ -673,7 +673,7 @@ async def test_fork_agent_copies_repo_binding_with_rewritten_secret_ref(
     assert fork_binding.repo_url == "acme/private-repo", "fork points at the same repo"
     assert fork_binding.default_branch == "develop", "default_branch copied from source"
     assert fork_binding.ma_secret_ref == f"inline-pat:{fork_agent_uuid}", (
-        "ma_secret_ref rewritten to the fork's own inline-pat ref (D-03)"
+        "ma_secret_ref rewritten to the fork's own inline-pat ref"
     )
 
 
@@ -782,7 +782,7 @@ async def test_call_reconcile_for_panel_propagates_public_url_and_account_id(
         "SC-2: personal account must NOT be used as the ownership stamp"
     )
     assert captured["public_url"] == "https://example.com/mcp", (
-        "panel write must forward public_url so Phase 34 default-MCP merge runs"
+        "panel write must forward public_url so default-MCP merge runs"
     )
     assert captured["tenant_id"] == tenant_id
     assert captured["dry_run"] is False, "panel writes are never dry-run"
@@ -947,7 +947,7 @@ async def test_create_blank_agent_rejects_duplicate_tenant_name(
         )
 
 
-# ----- D-72-01: tenant-scoped name guards -----
+# ----- Tenant-scoped name guards -----
 
 
 async def test_create_blank_agent_rejects_name_held_by_other_owner(
@@ -955,7 +955,7 @@ async def test_create_blank_agent_rejects_name_held_by_other_owner(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
 ) -> None:
-    """D-72-01: create_blank_agent rejects a name that exists under a DIFFERENT owner.
+    """create_blank_agent rejects a name that exists under a DIFFERENT owner.
 
     Any non-archived same-name agent in the tenant blocks creation regardless of
     who owns it. Zero MA write calls must fire (collision is detected before reconcile).
@@ -1011,7 +1011,7 @@ async def test_create_blank_agent_rejects_name_held_by_other_owner(
         )
 
     assert reconcile_calls == [], (
-        "D-72-01: create must raise before reconcile when another owner holds the name"
+        "create must raise before reconcile when another owner holds the name"
     )
 
 
@@ -1020,9 +1020,9 @@ async def test_fork_agent_rejects_new_name_held_by_other_owner(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
 ) -> None:
-    """D-72-01: fork_agent rejects new_name that exists under a DIFFERENT owner.
+    """fork_agent rejects new_name that exists under a DIFFERENT owner.
 
-    The old docstring promised cross-owner name reuse was allowed; D-72-01 inverts
+    The old docstring promised cross-owner name reuse was allowed; this inverts
     that: any non-archived same-name agent in the tenant blocks the fork. Zero MA
     create calls must fire.
     """
@@ -1087,7 +1087,7 @@ async def test_fork_agent_rejects_new_name_held_by_other_owner(
         )
 
     assert create_calls == [], (
-        "D-72-01: fork must raise before agents.create when another owner holds new_name"
+        "fork must raise before agents.create when another owner holds new_name"
     )
 
 
@@ -1158,7 +1158,7 @@ async def test_kick_off_skill_sync_fire_and_forget(
 async def test_kick_off_skill_sync_uses_runtime_credentials(
     monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> None:
-    """Skill-sync uses Phase 18 crypto config (build_multifernet from settings.crypto.keys)."""
+    """Skill-sync uses crypto config (build_multifernet from settings.crypto.keys)."""
     from cryptography.fernet import MultiFernet
     from daimon.adapters.discord.agent_setup.write import kick_off_skill_sync
 
@@ -1251,7 +1251,7 @@ async def test_apply_repo_modal_persists_binding(
     settings.crypto.keys = ()
     settings.github.oauth_scopes = ("repo",)
     # No App creds -> is_app_installed_for_repo returns False with zero HTTP
-    # calls (D-06); a MagicMock here would be truthy and crash build_app_jwt.
+    # calls; a MagicMock here would be truthy and crash build_app_jwt.
     settings.github.app_id = None
     settings.github.app_private_key = None
     settings.mcp.public_url = None
@@ -1544,7 +1544,7 @@ async def test_replace_agent_resources_for_panel_sends_empty_mcp_servers_when_la
 
 
 # ---------------------------------------------------------------------------
-# D-02 bare-name round-trip: strip on read, re-prefix on save
+# Bare-name round-trip: strip on read, re-prefix on save
 # ---------------------------------------------------------------------------
 
 

@@ -1,4 +1,4 @@
-"""RoutinesPanelState — per-modal state for /routines (SUX-02).
+"""RoutinesPanelState — per-modal state for /routines.
 
 Pure logic only: a glyph reducer and two frozen dataclasses.
 No I/O, no clock, no DB, no slack_sdk.

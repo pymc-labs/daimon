@@ -1,7 +1,7 @@
 """SetDefaultView + build_set_default_container + open_set_default launcher.
 
 C9 V2 cascade panel: airy routing blocks, one action select, ChannelSelect row.
-Migrated from classic discord.ui.View to LayoutView (plan 70-07).
+Migrated from classic discord.ui.View to LayoutView.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ import discord
 log = structlog.get_logger()
 
 # Scope refs are built before the per-interaction tenant is known; _do_set stamps
-# the real tenant inside the session (Pitfall 4 / D-06).
+# the real tenant inside the session.
 _PLACEHOLDER_TENANT = uuid.UUID(int=0)
 
 
@@ -284,7 +284,7 @@ class _ChannelPickSelect(discord.ui.ChannelSelect["SetDefaultView"]):
 class SetDefaultView(discord.ui.LayoutView):
     """C9 V2 cascade panel: airy routing blocks + action select + ChannelSelect.
 
-    D-02/D-03: write-immediately (no confirm); winner derivation stays in core
+    Write-immediately (no confirm); winner derivation stays in core
     scope._pick_agent; every send/edit passes AllowedMentions.none() because audit
     lines render live <@id> mentions.
     """

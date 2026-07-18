@@ -44,7 +44,7 @@ class PanelState:
     platform_principal_id: uuid.UUID = dataclasses.field(default_factory=uuid.uuid4)
     pat_last4: str | None = None
     # Persisted GitHub linkage for the selected agent, hydrated from the DB at
-    # panel-open and on agent-switch (per-agent overlay scope, D-25). Display
+    # panel-open and on agent-switch (per-agent overlay scope). Display
     # only — never the token. "(inline-pat)" for token-pasted creds.
     github_login: str | None = None
     mcp_token_last4: str | None = None

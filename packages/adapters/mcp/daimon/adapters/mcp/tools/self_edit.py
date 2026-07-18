@@ -51,7 +51,7 @@ logger = structlog.get_logger()
 class AgentRepoBindingPublic(BaseModel):
     """Agent-visible projection of ``AgentRepoBindingRow``.
 
-    Omits ``ma_secret_ref`` per D-17 — the vault URI never reaches the agent.
+    Omits ``ma_secret_ref`` — the vault URI never reaches the agent.
     The agent only sees the public binding shape (repo + branch + timestamps).
     """
 
@@ -77,7 +77,7 @@ class AgentRepoBindingPublic(BaseModel):
 
 
 def _require_agent_id(auth: AuthIdentity) -> uuid.UUID:
-    """Return ``auth.agent_id`` or raise ``ToolError`` if absent (D-20)."""
+    """Return ``auth.agent_id`` or raise ``ToolError`` if absent."""
     if auth.agent_id is None:
         raise ToolError("agent_id missing — token was not minted for an agent session")
     return auth.agent_id
@@ -191,7 +191,7 @@ async def _set_repo_binding_impl(
 ) -> AgentRepoBindingPublic:
     """Bind the calling agent to a git repo.
 
-    Order of operations (D-08): mint PAT → vault credential create → DB row
+    Order of operations: mint PAT → vault credential create → DB row
     write → best-effort old vault credential delete. Vault upload happens
     BEFORE the DB write so a vault failure leaves no binding row.
     """
@@ -236,7 +236,7 @@ async def _set_repo_binding_impl(
         )
     old_ref = old.ma_secret_ref if old is not None else None
 
-    # 4. Upload new vault credential. D-08: this MUST succeed before any DB write.
+    # 4. Upload new vault credential. this MUST succeed before any DB write.
     try:
         new_cred = await runtime.client.beta.vaults.credentials.create(
             vault_id=vault_id,
@@ -261,7 +261,7 @@ async def _set_repo_binding_impl(
         )
         raise ToolError("vault upload failed") from e
 
-    # 5. Write binding row with NEW ref. D-08 ordering: row only after upload OK.
+    # 5. Write binding row with NEW ref. ordering: row only after upload OK.
     #    Symmetric BL-01 guard: if the DB write fails after vault.create succeeded,
     #    best-effort delete the freshly-minted credential before re-raising so we
     #    don't leak an orphan vault cred on retries.
@@ -289,7 +289,7 @@ async def _set_repo_binding_impl(
             )
         raise
 
-    # 6. Best-effort delete old vault cred AFTER DB commit (D-08).
+    # 6. Best-effort delete old vault cred AFTER DB commit.
     if old_ref is not None and old_ref != new_cred.id:
         try:
             await runtime.client.beta.vaults.credentials.delete(
@@ -301,7 +301,7 @@ async def _set_repo_binding_impl(
                 "set_repo_binding outcome=orphan_old_vault_cred agent=%s",
                 agent_id,
             )
-            # Orphan acceptable per D-08; new credential is already live.
+            # Orphan acceptable; new credential is already live.
 
     logger.info(
         "set_repo_binding outcome=success service=%s account=%s agent=%s",
@@ -337,7 +337,7 @@ async def _clear_repo_binding_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
 ) -> dict[str, bool]:
-    """Remove the binding. Idempotent (D-11) and tolerant of vault delete failure (D-09)."""
+    """Remove the binding. Idempotent and tolerant of vault delete failure."""
     _require_admin(auth)
     agent_id = _require_agent_id(auth)
 
@@ -349,7 +349,7 @@ async def _clear_repo_binding_impl(
             agent_id=agent_id,
         )
 
-    # D-11 idempotency: enforced by structure (pre-check), not by swallowing
+    # Idempotency: enforced by structure (pre-check), not by swallowing
     # StoreError. If no binding exists, return immediately — no vault cleanup,
     # no DB delete attempt.
     if existing is None:
@@ -360,7 +360,7 @@ async def _clear_repo_binding_impl(
         )
         return {"cleared": True}
 
-    # Best-effort vault delete (D-09). WR-05: narrow the ToolError catch to the
+    # Best-effort vault delete. Narrow the ToolError catch to the
     # lookup only — if credentials.delete itself ever raised ToolError it would
     # be the wrong outcome label.
     try:

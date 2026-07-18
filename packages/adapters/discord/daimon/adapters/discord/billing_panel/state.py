@@ -32,8 +32,8 @@ class BillingPanelState:
     caller_turns: int
     caller_cap: Decimal | None  # None when no effective cap configured
 
-    # Guild-scoped balance (both views; D-29)
-    guild_balance_usd: Decimal  # SUM(tenant_ledger.delta_usd); negative = depleted (D-14/D-29)
+    # Guild-scoped balance (both views)
+    guild_balance_usd: Decimal  # SUM(tenant_ledger.delta_usd); negative = depleted
 
     # Guild-scoped activity (admin view only; zeros/empty for regular view)
     guild_spend: float

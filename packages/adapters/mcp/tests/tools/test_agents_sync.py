@@ -1,4 +1,4 @@
-"""DB-backed behavior tests for _create_agent_impl auto-sync (Phase 45-02).
+"""DB-backed behavior tests for _create_agent_impl auto-sync.
 
 Tests in this file require a real Postgres via db_session_factory — they exercise
 sync_agent_skills which does real DB upserts + PAT decryption. Do NOT put these
@@ -83,7 +83,7 @@ def _build_anthropic(router: MARouter) -> AsyncAnthropic:
 
 
 # ---------------------------------------------------------------------------
-# Test: auto-sync on create (PHASE-45-AUTOSYNC-01)
+# Test: auto-sync on create
 # ---------------------------------------------------------------------------
 
 
@@ -93,7 +93,7 @@ async def test_create_agent_impl_syncs_skill_repos(
 ) -> None:
     """create_agent with skill_repos=[repo] creates the agent AND syncs repos.
 
-    Verifies PHASE-45-AUTOSYNC-01: the old ToolError rejection branch is gone;
+    Verifies that the old ToolError rejection branch is gone;
     after agents.create succeeds, sync_agent_skills runs and the agent ends up
     with skills=[<anthropic_id>] via the orchestrator's attach step.
     """
@@ -116,7 +116,7 @@ async def test_create_agent_impl_syncs_skill_repos(
     skill_id = "sk_synced"
     skill_anthropic_id = skill_id
     agent_name = "test-agent"
-    # Bundled name for github.com/orgA/myskills → "orgA-myskills" (Phase 45-01 fix)
+    # Bundled name for github.com/orgA/myskills → "orgA-myskills"
     tenant_id = cli.tenant_id
     account_id = cli.account_id
 
@@ -167,7 +167,7 @@ async def test_create_agent_impl_syncs_skill_repos(
         agents_list_call_count += 1
         # Call 1: collision check (_reject_guild_name_collision) — empty → guard passes.
         # Call 2: reconcile_agent's dedup lookup — empty → reconcile takes the CREATE path.
-        # Call 3+: skill_sync lookup (D-25) — return the created agent so sync can find it.
+        # Call 3+: skill_sync lookup — return the created agent so sync can find it.
         if agents_list_call_count <= 2:
             return list_response([])
         return list_response(
@@ -305,7 +305,7 @@ async def test_create_agent_impl_syncs_skill_repos(
 
 
 # ---------------------------------------------------------------------------
-# Test: sync_warnings populated on partial failure (PHASE-45-CHAT-ERR-01)
+# Test: sync_warnings populated on partial failure
 # ---------------------------------------------------------------------------
 
 
@@ -315,7 +315,7 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
 ) -> None:
     """When sync fails for a repo, create_agent still returns AgentInfo (no raise).
 
-    Verifies PHASE-45-CHAT-ERR-01 (D-12): agents.create succeeded → tool NEVER
+    Verifies that agents.create succeeded → tool NEVER
     raises even when every repo sync fails. The returned AgentInfo.sync_warnings
     carries the failure details so the LLM caller can surface them.
     """
@@ -361,7 +361,7 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
         agents_list_call_count_2 += 1
         # Call 1: collision check — empty → guard passes.
         # Call 2: reconcile_agent's dedup lookup — empty → reconcile takes CREATE path.
-        # Call 3+: skill_sync lookup (D-25) — return created agent so sync resolves it.
+        # Call 3+: skill_sync lookup — return created agent so sync resolves it.
         if agents_list_call_count_2 <= 2:
             return list_response([])
         return list_response(
@@ -444,7 +444,7 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
         mock_fetcher_cls.return_value.fetch_tarball = AsyncMock(
             side_effect=Exception("simulated network error")
         )
-        # D-12: tool must NOT raise even when sync fails entirely
+        # tool must NOT raise even when sync fails entirely
         result = await _create_agent_impl(runtime, auth, spec)
 
     assert result.name == agent_name, "AgentInfo should still be returned on sync failure"

@@ -178,7 +178,7 @@ async def _build_fire(
             )
             account_id = principal.account_id
 
-        # Admission gate: per-tenant balance (D-14) — independent of Stripe config.
+        # Admission gate: per-tenant balance — independent of Stripe config.
         # Keys on row.tenant_id (NOT NULL). Mirror run_one_tick's cap_exceeded skip.
         if await is_over_balance(sessionmaker=sm, tenant_id=row.tenant_id):
             log.info(
@@ -206,7 +206,7 @@ async def _build_fire(
                 pricing=MODEL_PRICING.get(model_id),
             )
 
-        # Phase 38-04: resolve agent + environment by daimon-tag at fire time,
+        # Resolve agent + environment by daimon-tag at fire time,
         # self-healing across MA archive/recreate.
         # defensive: post-0012 agent_name is NOT NULL but the fallback is harmless and free.
         agent_tag = row.agent_name or deployment_default.agent_name or "daimon"
@@ -235,7 +235,7 @@ async def _build_fire(
             async with sm() as heal_s, heal_s.begin():
                 await update_routine_agent_id(heal_s, row.id, resolved_agent_id)
 
-        # Mount the agent's assembled .env on the headless turn (D-06): derive the
+        # Mount the agent's assembled .env on the headless turn: derive the
         # tenant-scoped agent UUID and pass tenant/agent/session_factory so
         # run_turn uploads + mounts the credential file.
         agent_uuid = derive_agent_uuid(tenant_id=row.tenant_id, ma_agent_id=resolved_agent_id)

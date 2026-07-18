@@ -1,4 +1,4 @@
-"""Tests for on_guild_remove soft-archive (PROV-04, D-03).
+"""Tests for on_guild_remove soft-archive.
 
 Invariant guild_remove_archive: a remove stamps archived_at=now() and NEVER deletes the
 Tenant row (RESEARCH Anti-Pattern 3 / PITFALLS #7).

@@ -323,7 +323,7 @@ def _():
 
 @app.cell
 def _(mo):
-    mo.md("""# spike 031 — %s
+    mo.md("""# subprocess test — %s
 
 Subprocess-per-notebook test. Slug embedded in the markdown so the WS
 kernel-ready payload includes it, letting the probe confirm the right

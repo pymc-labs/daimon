@@ -572,7 +572,7 @@ async def test_enterprise_install_rejected_stores_nothing(
         "rejection page must contain enterprise-rejection copy"
     )
 
-    # Zero token rows AND zero slack tenant rows (SINST-03).
+    # Zero token rows AND zero slack tenant rows.
     async with sessionmaker() as session:
         token_count = (
             await session.execute(select(func.count()).select_from(SlackBotToken))
@@ -658,7 +658,7 @@ async def test_callback_replay_idempotent(
     def make_client() -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=10.0)  # type: ignore[arg-type]
 
-    # Mint a state valid for both calls (no single-use enforcement, D-06).
+    # Mint a state valid for both calls (no single-use enforcement).
     state = mint_state(signing_secret=_SIGNING_SECRET, now=time.time())
     app = _build_isolated_slack_app(
         sessionmaker, settings=settings, fernet=fernet, client_factory=make_client
@@ -837,7 +837,7 @@ async def test_callback_user_connect_stores_token_for_matching_user(
 async def test_callback_user_connect_rejects_mismatched_user_and_stores_nothing(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A state bound to one Slack user completed by a different authed_user is rejected (D-06)."""
+    """A state bound to one Slack user completed by a different authed_user is rejected."""
     fernet_key = Fernet.generate_key().decode()
     settings = _build_slack_settings()
     fernet = build_multifernet((fernet_key,))
@@ -870,7 +870,7 @@ async def test_callback_user_connect_rejects_mismatched_user_and_stores_nothing(
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get(f"/oauth/slack/callback?code={_SLACK_CODE}&state={state}")
 
-    assert resp.status_code == 400, "authed_user mismatch must reject (D-06)"
+    assert resp.status_code == 400, "authed_user mismatch must reject"
     assert "different slack user" in resp.text.lower(), "static wrong-account copy shown"
 
     async with sessionmaker() as s:

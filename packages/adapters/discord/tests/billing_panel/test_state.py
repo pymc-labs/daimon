@@ -64,5 +64,5 @@ def test_billing_panel_state_guild_balance_usd_accepts_zero() -> None:
 def test_billing_panel_state_guild_balance_usd_accepts_negative() -> None:
     state = _make_state(guild_balance_usd=Decimal("-5.00"))
     assert state.guild_balance_usd == Decimal("-5.00"), (
-        "negative balance (depleted) must be representable (D-14)"
+        "negative balance (depleted) must be representable"
     )

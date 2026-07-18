@@ -562,7 +562,7 @@ class TestBuildDeltaXml:
         assert "bot reply to other participant" in result, (
             "build_delta_xml must include the bot's own reply in the delta window "
             "so a resuming caller's per-caller session stays coherent with what the "
-            "agent told other participants (Q1→b, Phase 88-05)"
+            "agent told other participants"
         )
         # Human message still appears.
         assert "human follow-up" in result, "human messages in the delta window must still appear"
@@ -662,7 +662,7 @@ class TestBuildDeltaXml:
         """Delta path filter after Q1→(b) fix: post-watermark messages INCLUDING bot replies
         appear in thread_delta; only the trigger is excluded.
 
-        Bot messages were previously filtered out (old behavior); Phase 88-05 removes
+        Bot messages were previously filtered out (old behavior); the current design removes
         that exclusion for cross-speaker coherence. The trigger exclusion is unchanged.
         """
         bot_msg = _make_message(
@@ -695,9 +695,7 @@ class TestBuildDeltaXml:
         delta_region = result[delta_start:delta_end]
 
         # Q1→(b): bot reply NOW appears in thread_delta for cross-speaker coherence.
-        assert "bot reply now included" in delta_region, (
-            "bot replies must appear in thread_delta after Phase 88-05 fix (Q1→b)"
-        )
+        assert "bot reply now included" in delta_region, "bot replies must appear in thread_delta"
         # Trigger is still excluded from thread_delta.
         assert "trigger should be only in user_query" not in delta_region, (
             "trigger must not appear in thread_delta"

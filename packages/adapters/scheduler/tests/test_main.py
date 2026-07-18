@@ -1,7 +1,7 @@
 """Tests for the scheduler entrypoint wiring.
 
-The scheduler-adapter cap-and-meter wiring (Phase 20-08) replaces the
-Phase-16 ``_StubCaps`` and ``_stub_usage_record`` placeholders with real
+The scheduler-adapter cap-and-meter wiring replaces the
+``_StubCaps`` and ``_stub_usage_record`` placeholders with real
 calls into ``daimon.core.billing.is_over_cap`` and
 ``daimon.core.usage_recording.record_turn_usage``. These tests exercise
 that wiring at the unit level — they do not boot the full ``run()``
@@ -92,7 +92,7 @@ async def test_caps_adapter_returns_false_when_no_cap_row(
     await db_session.commit()
     adapter = _CapsAdapter(db_session_factory, billing_config=_TEST_BILLING)
     over = await adapter.is_over_cap(tenant.id, "u1")
-    assert over is False, "no cap row -> uncapped (D-06)"
+    assert over is False, "no cap row -> uncapped"
 
 
 async def test_fire_skips_on_over_cap(
@@ -396,7 +396,7 @@ async def test_fire_rejects_routine_when_tenant_balance_depleted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_fire records balance_depleted and does not invoke run_turn when the
-    tenant ledger balance is <= 0 (D-14 admission gate, Stripe-independent)."""
+    tenant ledger balance is <= 0 (admission gate, Stripe-independent)."""
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
 
     tenant = await make_tenant(db_session)
@@ -463,7 +463,7 @@ async def test_fire_balance_gate_passes_threads_tenant_id_markup_pricing_into_us
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """usage_record_factory partial binds tenant_id, markup, and pricing so a
-    successful scheduled turn writes a transactional ledger debit (D-14/D-15)."""
+    successful scheduled turn writes a transactional ledger debit."""
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
 
     tenant = await make_tenant(db_session)
@@ -561,7 +561,7 @@ async def test_fire_balance_gate_passes_threads_tenant_id_markup_pricing_into_us
 
 
 # ---------------------------------------------------------------------------
-# Phase 58.3 RED tests — DeploymentDefault injection in scheduler (R8)
+# RED tests — DeploymentDefault injection in scheduler
 #
 # This test imports DeploymentDefault which does not yet exist (Plan 03).
 # It is RED until Plans 03 and 08 (scheduler main.py update) land.

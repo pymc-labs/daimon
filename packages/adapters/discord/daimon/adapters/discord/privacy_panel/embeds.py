@@ -55,7 +55,7 @@ def build_post_delete_container(
             "-# ⚠ Session transcripts could not be deleted from Anthropic"
             " — contact the operator if you need them removed"
         )
-    # D-09 carve-out disclosures — always shown (same three as cascade-preview).
+    # Carve-out disclosures — always shown (same three as cascade-preview).
     rows += [
         "",
         "-# Usage records are retained for service integrity and cannot be erased on request.",
@@ -63,7 +63,7 @@ def build_post_delete_container(
         "-# The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications.",
     ]
-    # rows is never empty — the D-09 carve-out rows above are unconditional.
+    # rows is never empty — the carve-out rows above are unconditional.
     checklist = "\n".join(rows)
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
         layout.header(

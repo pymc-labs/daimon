@@ -165,12 +165,12 @@ def test_summary_line_includes_phase_76_categories_when_nonzero() -> None:
     )
     assert "nothing visible to you yet" not in header, (
         "Header must NOT claim 'nothing visible to you yet' while holding "
-        f"Phase 76 category rows; got {header!r}"
+        f"category rows; got {header!r}"
     )
 
 
 def test_summary_line_omits_phase_76_categories_when_zero() -> None:
-    """Zero-count Phase 76 categories stay out of the header summary."""
+    """Zero-count categories stay out of the header summary."""
     preview = _make_preview(linked_principals=PurgePreviewRow(count=1, example="Discord:1"))
     container = build_privacy_main_container(preview, user_name="carlos")
     header = _text_displays(container)[0]

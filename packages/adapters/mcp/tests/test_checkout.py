@@ -242,14 +242,14 @@ async def test_success_cancel_pages_are_public(
 
 
 # ---------------------------------------------------------------------------
-# WR-01 / D-03: checkout must reject tokens without a tenant_id claim (fail-closed)
+# checkout must reject tokens without a tenant_id claim (fail-closed)
 # ---------------------------------------------------------------------------
 
 
 async def test_checkout_missing_tenant_id_claim_returns_403(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """WR-01 / D-03: a token with no tenant_id claim must be rejected with 403.
+    """A token with no tenant_id claim must be rejected with 403.
 
     The handler sources tenant_id exclusively from the verified JWT claim. A claim-less
     token (e.g. a static test token or an operator token without tenant scope) must

@@ -1,12 +1,12 @@
-"""RED stubs for require_manage_guild decorator (Phase 50 Wave 0).
+"""RED stubs for require_manage_guild decorator.
 
 These tests MUST FAIL until Wave 1 implements require_manage_guild in
 daimon.adapters.discord.checks.
 
 Behavior spec:
-  - Non-manage_guild member: ephemeral D-28 message sent, wrapped fn NOT called.
+  - Non-manage_guild member: ephemeral message sent, wrapped fn NOT called.
   - Member with manage_guild=True: wrapped fn IS called.
-  - Plain User (not Member): ephemeral D-28 message sent, wrapped fn NOT called.
+  - Plain User (not Member): ephemeral message sent, wrapped fn NOT called.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ async def test_require_manage_guild_rejects_member_without_perms() -> None:
         else call_args.kwargs.get("ephemeral") is True
     ), "non-admin member rejected ephemerally"
     sent_msg = call_args.args[0] if call_args.args else call_args.kwargs.get("content", "")
-    assert _D28_MESSAGE in sent_msg, "D-28 message must be sent on rejection"
+    assert _D28_MESSAGE in sent_msg, "rejection message must be sent on rejection"
     assert not interaction._inner_called, (
         "non-admin member rejected ephemerally — inner fn not called"
     )

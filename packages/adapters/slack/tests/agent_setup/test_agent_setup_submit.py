@@ -263,7 +263,7 @@ def test_evaluate_edit_agent_submission_when_model_blank_returns_proceed() -> No
 
 
 def test_evaluate_edit_repo_submission_when_pat_blank_proceeds_with_keep_flag() -> None:
-    """Blank PAT = keep stored token (D-08, T-83-16): proceed=True, pat_replace=False."""
+    """Blank PAT = keep stored token: proceed=True, pat_replace=False."""
     values = {
         **_input_value("edit_repo__url", "edit_repo__url", "https://github.com/org/repo"),
         **_input_value("edit_repo__pat", "edit_repo__pat", ""),
@@ -274,7 +274,7 @@ def test_evaluate_edit_repo_submission_when_pat_blank_proceeds_with_keep_flag() 
 
     assert decision.proceed is True, "blank PAT should proceed (empty=keep)"
     assert decision.extra.get("pat_replace") is False, (
-        "blank PAT must not set pat_replace (D-08: never overwrite stored token on blank)"
+        "blank PAT must not set pat_replace (never overwrite stored token on blank)"
     )
     assert decision.extra.get("pat") is None, "blank PAT should produce None in extra"
 
@@ -293,7 +293,7 @@ def test_evaluate_edit_repo_submission_when_pat_provided_sets_replace_flag() -> 
 
 
 # ---------------------------------------------------------------------------
-# Pure evaluator tests — evaluate_paste_secrets_submission (D-09, T-83-15, T-83-17)
+# Pure evaluator tests — evaluate_paste_secrets_submission
 # ---------------------------------------------------------------------------
 
 
@@ -344,16 +344,14 @@ def test_evaluate_paste_secrets_when_value_oversized_returns_byte_cap_error() ->
     assert "paste_secrets__content" in errors, (
         "byte-cap error must be keyed to paste_secrets__content"
     )
-    # CRITICAL (D-09): the error message must reference the KEY name, not the value.
+    # CRITICAL: the error message must reference the KEY name, not the value.
     error_text = errors["paste_secrets__content"]
     assert "MY_KEY" in error_text, "error text should name the offending key"
-    assert oversized_value not in error_text, (
-        "secret VALUE must never appear in the error message (D-09, T-83-15)"
-    )
+    assert oversized_value not in error_text, "secret VALUE must never appear in the error message"
 
 
 def test_evaluate_paste_secrets_when_valid_response_payload_does_not_contain_values() -> None:
-    """Serialized response_payload must not contain any secret value (D-09, T-83-15)."""
+    """Serialized response_payload must not contain any secret value."""
     secret_value = "s3cr3t_val_that_should_not_leak"
     content = f"API_KEY={secret_value}"
     values = _input_value("paste_secrets__content", "paste_secrets__content", content)
@@ -365,7 +363,7 @@ def test_evaluate_paste_secrets_when_valid_response_payload_does_not_contain_val
     # Serialize the response_payload and assert the value is absent.
     serialized = json.dumps(decision.response_payload)
     assert secret_value not in serialized, (
-        "secret VALUE must never appear in the response_action payload (D-09, T-83-15)"
+        "secret VALUE must never appear in the response_action payload"
     )
 
 
@@ -682,7 +680,7 @@ async def test_run_paste_secrets_submission_when_admin_and_two_pairs_posts_count
 
 
 # ---------------------------------------------------------------------------
-# Phase 94 (PAT-CLOBBER): run_edit_repo_submission preserves ma_secret_ref
+# run_edit_repo_submission preserves ma_secret_ref
 # ---------------------------------------------------------------------------
 
 
@@ -884,7 +882,7 @@ async def test_run_edit_repo_submission_when_pat_replace_true_stores_new_inline_
 
 
 # ---------------------------------------------------------------------------
-# Phase 97: run_edit_repo_submission first-time no-PAT bind writes anon:
+# run_edit_repo_submission first-time no-PAT bind writes anon:
 # ---------------------------------------------------------------------------
 
 

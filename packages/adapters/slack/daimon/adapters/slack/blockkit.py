@@ -1,7 +1,7 @@
 """Pure Block Kit state machine for Slack turn UX.
 
 Ports the Discord ``embed.py`` state machine to Slack Block Kit, dropping the
-color-based signaling (D-03: emoji carries the phase signal instead).
+color-based signaling.
 
 Converts EmbedEvents into State and Block Kit dicts with zero I/O dependencies.
 Imports only stdlib — no ``slack_sdk``, ``anthropic``, or ``daimon.core`` imports.
@@ -24,9 +24,9 @@ Terminal collapse (DONE/ERROR):
   context  — {agent_name} · {elapsed}s · {in} in / {out} out [· {cost}]
              For ERROR: ❌ {reason} prepended
 
-D-03: No color field anywhere — blocks only, no attachments.
-D-07: Preview text entity-escaped via escape_mrkdwn (& first, then < >).
-D-08: Cost/usage footer on terminal.
+No color field anywhere — blocks only, no attachments.
+Preview text entity-escaped via escape_mrkdwn (& first, then < >).
+Cost/usage footer on terminal.
 """
 
 from __future__ import annotations
@@ -290,7 +290,7 @@ def to_blocks(state: State, *, now: float | None) -> list[dict[str, Any]]:
         )
 
     # Cancel button — present only while the turn is running (non-terminal).
-    # action_id="cancel_turn"; no `value` field (D-01: rejected token-in-value).
+    # action_id="cancel_turn"; no `value` field.
     blocks.append(
         {
             "type": "actions",

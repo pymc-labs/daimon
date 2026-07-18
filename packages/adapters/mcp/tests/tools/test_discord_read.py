@@ -1,4 +1,4 @@
-"""Unit tests for Discord read-tool implementations (phase 73).
+"""Unit tests for Discord read-tool implementations.
 
 Each test calls the private ``_*_impl`` functions directly with a hand-built
 ``AuthIdentity`` and a transport-level patched ``discord.http.HTTPClient``.

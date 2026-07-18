@@ -184,7 +184,7 @@ async def test_config_propagate_empty_source(db_session: AsyncSession) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 58.3 RED tests — new scope grammar (R6)
+# RED tests — new scope grammar
 #
 # These tests call _parse_scope / _config_set_entry / _config_get_entry directly
 # against db_session (not CliRunner). They import not-yet-existing symbols

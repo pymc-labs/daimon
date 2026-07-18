@@ -59,7 +59,7 @@ def _parse_scope(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
 ) -> ScopeRef:
-    # NOTE: "deployment" is handled before _parse_scope is called (D-06)
+    # NOTE: "deployment" is handled before _parse_scope is called
     if raw == "user":
         return UserScopeRef(account_id=account_id)
     if raw == "tenant":
@@ -185,7 +185,7 @@ async def _config_get_entry(
     deployment_default: DeploymentDefault,
 ) -> None:
     if scope_str is not None:
-        # D-06/D-07: deployment is read-only; handled before _parse_scope
+        # deployment is read-only; handled before _parse_scope
         if scope_str == "deployment":
             rows = [
                 _RawRow(field="agent_name", value=deployment_default.agent_name),
@@ -286,7 +286,7 @@ async def _config_set_entry(
     value: str,
     scope_str: str,
 ) -> None:
-    # D-06/D-08: deployment is read-only; handled before _parse_scope
+    # deployment is read-only; handled before _parse_scope
     if scope_str == "deployment":
         console.print(
             "[yellow]The deployment default is read-only. "

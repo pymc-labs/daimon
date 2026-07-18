@@ -36,7 +36,7 @@ from discord.ext import commands
 
 BotInteraction = Interaction[commands.Bot]
 
-_TOP_MEMBERS_CAP = 25  # D-SORT-02 — same number as Phase 27 _PICKER_CAP, different semantics
+_TOP_MEMBERS_CAP = 25  # same number as _PICKER_CAP, different semantics
 
 
 def is_guild_admin(interaction: BotInteraction) -> bool:

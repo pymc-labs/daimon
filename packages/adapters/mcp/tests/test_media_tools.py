@@ -1,6 +1,6 @@
 """End-to-end test of the three media tools via FastMCP registration.
 
-The D-16 billing/admission/trusted-path matrix (below the guard tests)
+The billing/admission/trusted-path matrix (below the guard tests)
 drives the registered tools against real Postgres: a billed success writes
 one usage_events row + one matching tenant_ledger debit; a failed Gemini
 call writes neither; the trusted (platform_user_id=None) path writes
@@ -65,7 +65,7 @@ class _NoopGeminiClient:
 
 class _SeedAuthMiddleware(Middleware):
     """Inject a trusted (platform_user_id=None) AuthIdentity so the shared
-    admission gate (D-02) bypasses balance/cap checks without a real DB.
+    admission gate bypasses balance/cap checks without a real DB.
 
     Mirrors ``test_skills.py``'s helper of the same name — duplicated per
     the testing guideline (inline setup, no cross-test-file sharing).
@@ -152,7 +152,7 @@ async def test_generate_audio_rejects_empty_script(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# D-16 real-Postgres billing/admission/trusted-path matrix
+# real-Postgres billing/admission/trusted-path matrix
 # ---------------------------------------------------------------------------
 
 
@@ -309,7 +309,7 @@ async def test_trusted_path_writes_no_row_no_debit(
     sessionmaker: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """D-02: platform_user_id=None is the trusted, fully-unbilled path — no
+    """platform_user_id=None is the trusted, fully-unbilled path — no
     usage row and no debit are written even though the call succeeds."""
     tenant_id, account_id = await seed_tenant_and_account(db_session)
     await db_session.commit()
@@ -337,9 +337,9 @@ async def test_trusted_path_writes_no_row_no_debit(
         .scalars()
         .all()
     )
-    assert len(rows) == 0, "trusted (platform_user_id=None) path must write no usage row (D-02)"
+    assert len(rows) == 0, "trusted (platform_user_id=None) path must write no usage row"
     balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant_id)
-    assert balance == Decimal("0"), "trusted path must write no ledger debit (D-02)"
+    assert balance == Decimal("0"), "trusted path must write no ledger debit"
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ being interpreted as links or mentions. The escape order is **load-bearing**:
   3. ``>`` → ``&gt;``
 
 This module is stdlib-only — no ``slack_sdk``, ``anthropic``, or ``daimon.core``
-imports. It forms part of the functional-core rendering layer (SREND-02, D-07).
+imports. It forms part of the functional-core rendering layer.
 
 Reference: https://docs.slack.dev/messaging/formatting-message-text
 """

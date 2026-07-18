@@ -1,10 +1,10 @@
-"""Credentials sub-view (LayoutView) for /agent-setup (Phase 51, SC1/SC3, D-08..D-12).
+"""Credentials sub-view (LayoutView) for /agent-setup.
 
 Paste-only KEY=VALUE secrets management for the selected agent. V2 migration
-(plan 70-06): classic View → LayoutView, build_credentials_embed replaced with
+V2 migration: classic View → LayoutView, build_credentials_embed replaced with
 build_credentials_container.
 
-Secret hygiene (D-09) is enforced structurally, not by convention:
+Secret hygiene is enforced structurally, not by convention:
 - values never reach the container (the builder takes key NAMES only),
 - values never reach the logs (log calls record key names / counts only),
 - values never reach the Discord CDN (the modal is a TextInput; there is no
@@ -13,7 +13,7 @@ Secret hygiene (D-09) is enforced structurally, not by convention:
 
 `tenant_id` and `agent_id` are resolved once in `EditView._on_secrets` and
 threaded down here as explicit constructor args — the sub-view never re-derives
-the tenant from user input (D-12).
+the tenant from user input.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ def build_credentials_container(
     """Pure: render the Credentials container from key NAMES only.
 
     Never receives or renders a secret value — every value is omitted entirely
-    (D-09). Key names render as `KEY` chips on a single line separated by · .
+    Key names render as `KEY` chips on a single line separated by · .
     """
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
     container.add_item(
@@ -80,7 +80,7 @@ class PasteSecretModal(discord.ui.Modal, title="Add secrets"):
     """Paste KEY=VALUE lines → per-key ``put_agent_file``.
 
     No URL fetch, no attachment, no HTTP: pasted bytes go modal text → store
-    only (D-09 / GH#121).
+    only.
     """
 
     def __init__(
@@ -139,7 +139,7 @@ class PasteSecretModal(discord.ui.Modal, title="Add secrets"):
             await interaction.followup.send("No valid KEY=VALUE lines found.", ephemeral=True)
             return
 
-        # Log key NAMES only — never values (D-09).
+        # Log key NAMES only — never values.
         _log.info(
             "credentials.paste.submit",
             key_names=[k for k, _ in pairs],
@@ -180,7 +180,7 @@ class CredentialsSubView(discord.ui.LayoutView):
     Carries key NAMES only (``secret_names``) — never values. Mutations
     re-render this view in place via ``edit_original_response``; '← Back'
     replaces the message with ``EditView`` (it does NOT delete it), preserving
-    the Phase 46 ephemeral isolation invariant (D-08).
+    the ephemeral isolation invariant.
     """
 
     def __init__(
@@ -264,7 +264,7 @@ class CredentialsSubView(discord.ui.LayoutView):
         return _cb
 
     async def _on_remove(self, interaction: discord.Interaction, key_name: str) -> None:
-        # key_name is the secret KEY NAME the option carried — never a value (D-09).
+        # key_name is the secret KEY NAME the option carried — never a value.
         _log.info("credentials.remove.click", key=key_name)
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
@@ -295,9 +295,9 @@ class CredentialsSubView(discord.ui.LayoutView):
         )
 
     async def _on_back(self, interaction: discord.Interaction) -> None:
-        # edit_message replaces in-place (D-08); it does NOT delete the message.
+        # edit_message replaces in-place; it does NOT delete the message.
         # Construct the EditView so its container carries the ## ✏️ Editing header
-        # (behavior-neutral correction of the pre-V2 panel-content quirk, plan 70-06).
+        # (behavior-neutral correction of the pre-V2 panel-content quirk).
         from daimon.adapters.discord.agent_setup.edit_view import EditView
 
         await interaction.response.edit_message(
@@ -328,7 +328,7 @@ def _build_remove_select(
     """✕ Remove a secret… select listing every key (no cap).
 
     Each option's ``label``/``value`` carries ONLY the secret KEY NAME — never a
-    value, never a per-key custom_id (D-09). Disabled (empty placeholder) when
+    value, never a per-key custom_id. Disabled (empty placeholder) when
     there are no secrets; disabled (mutation-blocked) for system agents.
     """
     if len(secret_names) == 0:

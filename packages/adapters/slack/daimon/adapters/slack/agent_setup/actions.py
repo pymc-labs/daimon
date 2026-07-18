@@ -1,4 +1,4 @@
-"""Slack /agent-setup slash handler + block_action interactive handlers (SUX-01).
+"""Slack /agent-setup slash handler + block_action interactive handlers.
 
 Shell module: all I/O lives here. Pure builders (views.py), reducers
 (state.py), read-path (read.py), and write-path (write.py) are called
@@ -7,7 +7,7 @@ catch in this module (S3 pattern).
 
 Handler contract:
   handle_agent_setup_command(runtime, payload)
-    Slash-command entry: open loading modal (D-06) → background-fetch roster
+    Slash-command entry: open loading modal → background-fetch roster
     + is_admin → views.update with the L1 content view. On failure: update to
     the error view (UI-SPEC: no infinite spinner).
 
@@ -18,11 +18,11 @@ Handler contract:
 
 Security:
   - Every mutating branch re-resolves is_admin server-side post-ack and refuses
-    on False (UI-SPEC "Hiding ≠ gating", Threat T-83-10).
-  - JWT values for connect-mcp: never logged, last4/presence only (T-83-11).
+    on False ("hiding ≠ gating" principle).
+  - JWT values for connect-mcp: never logged, last4/presence only.
   - Stale agent: re-fetch tolerates missing agent → no write, re-render L1 with
-    warning notice (T-83-12).
-  - Content-fetch failure → build_error_view, never an infinite spinner (T-83-13).
+    warning notice.
+  - Content-fetch failure → build_error_view, never an infinite spinner.
 """
 
 from __future__ import annotations
@@ -272,14 +272,14 @@ def _build_section_blocks(
 
 
 async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """Slash command handler for /agent-setup (D-06 loading-modal pattern).
+    """Slash command handler for /agent-setup (loading-modal pattern).
 
     Immediately opens a "Loading…" modal with the fresh trigger_id (beats the
     ~3s expiry), then background-fetches the roster + resolves is_admin, and
     updates the modal in place with the L1 content view.
 
     On fetch failure: updates the modal to the error view — never leaves the
-    spinner (UI-SPEC "Loading-Modal Pattern", T-83-13).
+    spinner (loading-modal pattern).
 
     Args:
         runtime: Injected SlackRuntime (sessionmaker, anthropic, settings).
@@ -297,7 +297,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
 
     view_id: str = ""
     try:
-        # D-06: open loading modal immediately — must beat the ~3s trigger_id TTL.
+        # Open loading modal immediately — must beat the ~3s trigger_id TTL.
         resp = await client.views_open(  # pyright: ignore[reportUnknownMemberType]
             trigger_id=trigger_id,
             view=build_loading_view(team_id=team_id, channel_id=channel_id),
@@ -333,7 +333,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
     except (DaimonError, anthropic.APIError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:
         log.error("slack.agent_setup_command_failed", team_id=team_id, exc_info=exc)
         capture_exception_with_scope(exc)
-        # UI-SPEC: no infinite spinner — update to error view on failure.
+        # No infinite spinner — update to error view on failure.
         if view_id:
             request_id = _new_request_id()
             # Swallow secondary failure — best-effort error render.
@@ -359,7 +359,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
     the empty block_actions ack. I/O is done directly here; no second ack.
 
     Mutation branches (scope, delete, remove-*) re-resolve is_admin server-side
-    post-ack and refuse on False — hiding ≠ gating (T-83-10, UI-SPEC).
+    post-ack and refuse on False — hiding ≠ gating.
 
     Args:
         runtime: Injected SlackRuntime.
@@ -1077,7 +1077,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
             )
 
         # -----------------------------------------------------------------------
-        # Connect via MCP (D-10 ephemeral spill-out) — MUTATION: re-resolve is_admin
+        # Connect via MCP (ephemeral spill-out) — MUTATION: re-resolve is_admin
         # Modal stays OPEN — no views.update/close after the ephemeral.
         # JWT: never logged, jti only (T-83-11).
         # -----------------------------------------------------------------------
@@ -1165,7 +1165,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                 public_url=public_url,
                 jwt=token,
             )
-            # chat.postEphemeral — modal stays OPEN (D-10, T-83-11).
+            # chat.postEphemeral — modal stays OPEN.
             await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id or user_id,
                 user=user_id,

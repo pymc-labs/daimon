@@ -81,7 +81,7 @@ async def load_section_data(
     Returns different types per ``section``:
 
     - ``"secrets"``: ``list[str]`` — key NAMES only (values NEVER returned;
-      D-09 secret hygiene invariant enforced here at the boundary).
+      secret hygiene invariant enforced here at the boundary).
     - ``"agent"``: ``dict[str, str | None]`` with ``model_id`` and
       ``system_prompt`` keys (for preview / pre-fill in the edit modal).
     - ``"skills"`` / ``"mcps"``: ``list[str]`` of attached skill or MCP names.
@@ -97,7 +97,7 @@ async def load_section_data(
         Section-specific view-model value (see above).
     """
     if section == "secrets":
-        # D-09: key NAMES only — values must never leave this read layer.
+        # Key NAMES only — values must never leave this read layer.
         # Look up all tenant agents to find the MA agent ID for this name.
         agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
         ma_agent_id: str | None = None

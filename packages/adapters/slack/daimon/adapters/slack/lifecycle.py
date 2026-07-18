@@ -1,18 +1,18 @@
-"""Slack adapter implementation of TurnLifecycle — full Phase 81 rendering.
+"""Slack adapter implementation of TurnLifecycle — full rendering.
 
 SlackTurnLifecycle receives SSE events from the turn driver, accumulates
 Block Kit state via the blockkit module, debounces chat.update at 5s,
 replaces the status message in-place on terminal success with overflow
-chunk support (final_ts widened to the last posted message, D-06), applies
-the cost/usage footer (D-08), and registers/deregisters its cancel Event
-in the SlackApp registry (D-01).
+chunk support (final_ts widened to the last posted message), applies
+the cost/usage footer, and registers/deregisters its cancel Event
+in the SlackApp registry.
 
 Design decisions:
 - register/deregister injected as callables (not a dict ref) — keeps the
   lifecycle decoupled from SlackApp's internal registry representation.
 - _DEBOUNCE_S=5.0 — half of Discord's 10s; Slack threads are more real-time.
-- Final answer rendered as a native markdown block (DEFAULT path, D-07,
-  locked by Plan 02 live-workspace probe).
+- Final answer rendered as a native markdown block (DEFAULT path,
+  locked by live-workspace probe).
 - text= always passed alongside blocks= to satisfy Slack's notification
   fallback requirement (Pitfall 3).
 """
@@ -67,7 +67,7 @@ class SlackTurnLifecycle:
     Accumulates Block Kit state from SSE events, debounces chat.update at
     _DEBOUNCE_S seconds, replaces the status message in-place on terminal
     success, applies the cost/usage footer, and registers/deregisters the
-    cancel Event in the caller-supplied registry (D-01).
+    cancel Event in the caller-supplied registry.
 
     Constructor args are all keyword-only (mirrors DiscordTurnLifecycle's
     DI shape). register/deregister are injected as plain callables so the
@@ -218,12 +218,12 @@ class SlackTurnLifecycle:
         """Replace status message with final answer; post overflow chunks; widen final_ts.
 
         If no final text (tool-only or cancelled), collapses to the done footer
-        in place. Always deregisters the cancel Event in finally (D-01).
+        in place. Always deregisters the cancel Event in finally.
         """
         # Transition to the DONE phase BEFORE rendering so to_blocks emits the
         # terminal collapse (cost/usage footer, no cancel button) — matches the
         # Discord parity reference. Without this the status would render as still
-        # running and the D-08 footer would never appear.
+        # running and the footer would never appear.
         self._state = update(self._state, EmbedEvent(kind="done", label=""))
         self._apply_usage(state)
         try:
@@ -241,9 +241,9 @@ class SlackTurnLifecycle:
 
             chunks = split_for_slack_safe(escape_mrkdwn_preserving_mentions(final_text))
             first_chunk = chunks[0]
-            # First chunk + the cost/usage footer (D-08) replace the status message
+            # First chunk + the cost/usage footer replace the status message
             # in place; the terminal footer carries elapsed/tokens/cost and drops
-            # the cancel button (D-05).
+            # the cancel button.
             self._terminal = True
             first_blocks: list[dict[str, Any]] = [
                 {"type": "markdown", "text": first_chunk},
@@ -253,7 +253,7 @@ class SlackTurnLifecycle:
             assert self._status_ts is not None  # narrowing — _post_or_update always sets it
             current_ts = self._status_ts
 
-            # Overflow chunks posted as new thread replies (D-06).
+            # Overflow chunks posted as new thread replies.
             for chunk in chunks[1:]:
                 resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=self._channel,
@@ -269,7 +269,7 @@ class SlackTurnLifecycle:
                 self._deregister(self._status_ts)
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
-        """Log failure, attempt to flush error state, then deregister (D-01).
+        """Log failure, attempt to flush error state, then deregister.
 
         Does not re-raise — the lifecycle boundary absorbs all failures.
         """

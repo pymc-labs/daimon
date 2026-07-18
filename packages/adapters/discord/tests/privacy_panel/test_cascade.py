@@ -146,7 +146,7 @@ def test_cascade_container_has_confirm_step_hint() -> None:
 
 
 def test_cascade_container_user_skills_row_renders_when_nonzero() -> None:
-    """D-08: user_skills row appears when count > 0."""
+    """user_skills row appears when count > 0."""
     preview = _make_preview(user_skills=PurgePreviewRow(count=2, example="brainstorming"))
     container = build_cascade_preview_container(preview)
     joined = _joined_text(container)
@@ -166,7 +166,7 @@ def test_cascade_container_user_skills_row_absent_when_zero() -> None:
 
 
 def test_cascade_container_github_credentials_row_renders_when_nonzero() -> None:
-    """D-08: github_credentials row appears when count > 0."""
+    """github_credentials row appears when count > 0."""
     preview = _make_preview(github_credentials=PurgePreviewRow(count=1, example="octocat"))
     container = build_cascade_preview_container(preview)
     joined = _joined_text(container)
@@ -186,7 +186,7 @@ def test_cascade_container_github_credentials_row_absent_when_zero() -> None:
 
 
 def test_cascade_container_github_oauth_states_row_renders_when_nonzero() -> None:
-    """D-08: github_oauth_states row appears when count > 0."""
+    """github_oauth_states row appears when count > 0."""
     preview = _make_preview(github_oauth_states=PurgePreviewRow(count=3, example=None))
     container = build_cascade_preview_container(preview)
     joined = _joined_text(container)
@@ -205,37 +205,37 @@ def test_cascade_container_github_oauth_states_row_absent_when_zero() -> None:
 
 
 def test_cascade_container_carveout_usage_records_always_present() -> None:
-    """D-09: usage-records retention carve-out is always shown regardless of counts."""
+    """usage-records retention carve-out is always shown regardless of counts."""
     container = build_cascade_preview_container(_make_preview())
     joined = _joined_text(container)
     assert "service integrity" in joined, (
-        "Cascade container must disclose usage-records retention carve-out (D-09)"
+        "Cascade container must disclose usage-records retention carve-out"
     )
 
 
 def test_cascade_container_carveout_ma_skill_files_always_present() -> None:
-    """D-09/D-04: MA skill files carve-out is always shown."""
+    """MA skill files carve-out is always shown."""
     container = build_cascade_preview_container(_make_preview())
     joined = _joined_text(container)
     assert "Managed Agents" in joined, (
-        "Cascade container must mention Managed Agents in skill-files carve-out (D-09/D-04)"
+        "Cascade container must mention Managed Agents in skill-files carve-out"
     )
     assert "skill files" in joined.lower() or "skill" in joined.lower(), (
-        "Cascade container must disclose that uploaded skill files stay in MA (D-09/D-04)"
+        "Cascade container must disclose that uploaded skill files stay in MA"
     )
 
 
 def test_cascade_container_carveout_github_grant_always_present() -> None:
-    """D-09/D-05: GitHub-side OAuth grant carve-out is always shown."""
+    """GitHub-side OAuth grant carve-out is always shown."""
     container = build_cascade_preview_container(_make_preview())
     joined = _joined_text(container)
     assert "github.com/settings/applications" in joined, (
-        "Cascade container must direct users to revoke their GitHub OAuth grant (D-09/D-05)"
+        "Cascade container must direct users to revoke their GitHub OAuth grant"
     )
 
 
 def test_cascade_container_no_github_pats_in_what_stays() -> None:
-    """GitHub PATs are stored in our DB (not MA) since Phase 18/19 and are deleted; 'GitHub PATs' must not appear under 'What stays in Managed Agents'."""
+    """GitHub PATs are stored in our DB (not MA) and are deleted; 'GitHub PATs' must not appear under 'What stays in Managed Agents'."""
     container = build_cascade_preview_container(_make_preview())
     joined = _joined_text(container)
     assert "GitHub PATs" not in joined, (
@@ -244,7 +244,7 @@ def test_cascade_container_no_github_pats_in_what_stays() -> None:
 
 
 def test_cascade_container_mcp_tokens_row_renders_when_nonzero() -> None:
-    """Phase 87: per-agent MCP token row appears when count > 0."""
+    """per-agent MCP token row appears when count > 0."""
     preview = _make_preview(mcp_tokens=PurgePreviewRow(count=2, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
     assert "2" in joined, "mcp_tokens count must appear in the row"
@@ -252,14 +252,14 @@ def test_cascade_container_mcp_tokens_row_renders_when_nonzero() -> None:
 
 
 def test_cascade_container_mcp_tokens_row_absent_when_zero() -> None:
-    """Phase 87: per-agent MCP token row is suppressed when count == 0."""
+    """per-agent MCP token row is suppressed when count == 0."""
     preview = _make_preview(mcp_tokens=PurgePreviewRow(count=0, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
     assert "MCP token" not in joined, "zero-count mcp_tokens must NOT render a row"
 
 
 def test_cascade_container_agent_github_binding_row_renders_when_nonzero() -> None:
-    """Phase 87: per-agent GitHub credential link row appears when count > 0."""
+    """per-agent GitHub credential link row appears when count > 0."""
     preview = _make_preview(agent_github_binding=PurgePreviewRow(count=3, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
     assert "3" in joined, "agent_github_binding count must appear in the row"
@@ -269,7 +269,7 @@ def test_cascade_container_agent_github_binding_row_renders_when_nonzero() -> No
 
 
 def test_cascade_container_agent_github_binding_row_absent_when_zero() -> None:
-    """Phase 87: per-agent GitHub credential link row is suppressed when count == 0."""
+    """per-agent GitHub credential link row is suppressed when count == 0."""
     preview = _make_preview(agent_github_binding=PurgePreviewRow(count=0, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
     assert "per-agent GitHub credential link" not in joined, (

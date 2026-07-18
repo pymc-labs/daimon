@@ -2,7 +2,7 @@
 
 Sibling to ``test_server_factory.py``: that file covers settings validation
 and the four pre-existing tool groups; this file covers the wave-2 addition
-of the sessions and time tool groups (Phase 21-03).
+of the sessions and time tool groups.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ async def test_create_mcp_app_registers_sessions_and_time_tools(
     missing_routines = expected_routines - registered
     assert not missing_routines, f"routines tools must be registered; missing: {missing_routines}"
 
-    # Phase 23 (MCP-04 / SC-4): all 7 self-edit tools wired into create_mcp_app.
+    # all 7 self-edit tools wired into create_mcp_app.
     expected_self_edit = {
         "self_write_file",
         "self_read_file",

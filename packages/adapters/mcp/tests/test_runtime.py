@@ -45,7 +45,7 @@ def test_mcp_runtime_is_frozen_dataclass_with_required_fields() -> None:
 
 
 def test_mcp_runtime_media_fields_default_to_none() -> None:
-    """Phase 29: gemini_client and file_store are optional, default to None
+    """gemini_client and file_store are optional, default to None
     so non-Gemini deployments don't have to construct them."""
     sf: async_sessionmaker[AsyncSession] = async_sessionmaker()  # type: ignore[call-arg]
     rt = McpRuntime(

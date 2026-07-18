@@ -78,9 +78,9 @@ def _auth_identity(
     """Build an AuthIdentity for tool tests.
 
     ``agent_id`` defaults to a fresh UUID. Pass ``agent_id=None`` to test the
-    D-20 guard (the impl must raise ``ToolError`` before touching the DB).
+    null-agent_id guard (the impl must raise ``ToolError`` before touching the DB).
     ``is_admin`` defaults to True — these tests exercise admin-context tool flows.
-    Pass ``is_admin=False`` to test the RBAC-02 admin gate.
+    Pass ``is_admin=False`` to test the admin gate.
     """
     return AuthIdentity(
         account_id=account_id or uuid.uuid4(),
@@ -137,7 +137,7 @@ async def test_self_list_files_returns_only_caller_partition(
 async def test_self_delete_file_idempotent(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """D-10: delete on a missing key returns success without raising."""
+    """Delete on a missing key returns success without raising."""
     tenant_id = await _seed_tenant(committing_sessionmaker)
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(tenant_id=tenant_id)
@@ -172,7 +172,7 @@ async def test_self_delete_file_after_write_removes_row(
 async def test_self_write_file_rejects_empty_key(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """D-19: empty key raises StoreError at the store; tool layer remaps to ToolError."""
+    """Empty key raises StoreError at the store; tool layer remaps to ToolError."""
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity()
 
@@ -194,7 +194,7 @@ async def test_self_read_file_returns_none_on_missing(
 async def test_missing_agent_id_raises(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """D-20: every impl rejects auth.agent_id is None at the entry."""
+    """Every impl rejects auth.agent_id is None at the entry."""
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(agent_id=None)
 
@@ -366,7 +366,7 @@ async def test_set_repo_binding_happy_path(
     assert result.default_branch == "main", "default_branch must round-trip"
     assert result.agent_id == agent_id, "agent_id must come from auth"
     assert not hasattr(result, "ma_secret_ref"), (
-        "AgentRepoBindingPublic must not expose ma_secret_ref to the agent (D-17)"
+        "AgentRepoBindingPublic must not expose ma_secret_ref to the agent"
     )
 
     methods = [(m, p) for m, p, _ in record]
@@ -435,7 +435,7 @@ async def test_get_repo_binding_returns_public_projection(
     assert isinstance(result, AgentRepoBindingPublic), (
         "must be the public projection, not the raw row"
     )
-    assert not hasattr(result, "ma_secret_ref"), "projection must omit ma_secret_ref (D-17)"
+    assert not hasattr(result, "ma_secret_ref"), "projection must omit ma_secret_ref"
     assert result.default_branch == "trunk", "default_branch must round-trip"
 
 
@@ -493,7 +493,7 @@ async def test_clear_repo_binding_removes_row_and_calls_vault_delete(
 async def test_clear_repo_binding_idempotent_on_no_binding(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """D-11: clear on no binding returns {cleared: True} without raising."""
+    """Clear on no binding returns {cleared: True} without raising."""
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity()
 
@@ -509,7 +509,7 @@ async def test_clear_repo_binding_swallows_vault_delete_failure(
     db_session: AsyncSession,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """D-09: vault delete failure logs a warning but DB row still removed."""
+    """Vault delete failure logs a warning but DB row still removed."""
     tenant_id = await _seed_tenant(committing_sessionmaker)
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
@@ -547,7 +547,7 @@ async def test_set_repo_binding_vault_failure_leaves_no_row(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """D-08 (critical): vault upload failure must leave NO binding row."""
+    """(critical) Vault upload failure must leave NO binding row."""
     tenant_id = await _seed_tenant(committing_sessionmaker)
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
@@ -574,7 +574,7 @@ async def test_set_repo_binding_vault_failure_leaves_no_row(
         AgentRepoBinding.agent_id == agent_id,
     )
     assert (await db_session.execute(stmt)).scalar_one_or_none() is None, (
-        "vault upload failure must leave no binding row — D-08 upload-first ordering"
+        "vault upload failure must leave no binding row — upload-first ordering"
     )
 
 
@@ -583,7 +583,7 @@ async def test_set_repo_binding_db_failure_deletes_new_vault_cred(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """BL-01 (symmetric D-08): if set_binding raises after vaults.credentials.create
+    """If set_binding raises after vaults.credentials.create
     succeeds, the freshly-minted vault credential must be best-effort deleted before
     the exception propagates. Without cleanup, retries accumulate orphan credentials.
     """
@@ -796,7 +796,9 @@ async def test_set_repo_binding_rebind_deletes_old_credential(
     )
     assert post_idx is not None, f"POST {post_path} must occur during rebind"
     assert delete_idx is not None, f"DELETE {delete_path} must occur during rebind"
-    assert post_idx < delete_idx, "POST new cred must occur BEFORE DELETE old cred (D-08 ordering)"
+    assert post_idx < delete_idx, (
+        "POST new cred must occur BEFORE DELETE old cred (ordering guarantee)"
+    )
 
     # The DB row's ma_secret_ref must now point at the new cred.
     stmt = select(AgentRepoBinding).where(
@@ -832,7 +834,7 @@ _SELF_EDIT_TOOL_NAMES = {
 async def test_no_identity_args_in_self_edit_tool_schemas(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """D-12 / SC-4 structural: no self-edit tool exposes agent_id, tenant_id,
+    """Structural check: no self-edit tool exposes agent_id, tenant_id,
     or account_id in its input schema. Identity is JWT-resolved server-side;
     a client-supplied identity arg is a confused-deputy hole. This is a
     structural impossibility check — not defense in depth.
@@ -853,7 +855,7 @@ async def test_no_identity_args_in_self_edit_tool_schemas(
         leaked = properties & forbidden
         assert not leaked, (
             f"tool {tool.name} schema leaks identity args {leaked} — "
-            "all identity must be JWT-resolved server-side (D-12)"
+            "all identity must be JWT-resolved server-side"
         )
 
     missing = _SELF_EDIT_TOOL_NAMES - seen

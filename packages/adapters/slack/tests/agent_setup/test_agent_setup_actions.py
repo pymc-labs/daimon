@@ -287,7 +287,7 @@ async def test_handle_agent_setup_command_sends_loading_view_then_update(
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: object,
 ) -> None:
-    """handle_agent_setup_command opens a loading modal then updates it with content (D-06).
+    """handle_agent_setup_command opens a loading modal then updates it with content.
 
     FakeSlackWebClient intercepts at the aiohttp transport layer — the client
     produced by resolve_web_client uses the same aiohttp session so aioresponses
@@ -305,10 +305,8 @@ async def test_handle_agent_setup_command_sends_loading_view_then_update(
     update_calls = client_fake.mock.requests.get(
         ("POST", yarl.URL(f"{_SLACK_API_BASE}/views.update"))
     )
-    assert open_calls, "views.open must be called to display the loading modal (D-06)"
-    assert update_calls, (
-        "views.update must be called to replace the loading modal with content (D-06)"
-    )
+    assert open_calls, "views.open must be called to display the loading modal"
+    assert update_calls, "views.update must be called to replace the loading modal with content"
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +464,7 @@ async def test_handle_agent_setup_action_connect_mcp_sends_ephemeral_not_modal_u
 ) -> None:
     """connect_mcp: sends chat.postEphemeral (the config snippet), modal stays OPEN.
 
-    Per D-10: spill-outs are ephemeral; no views.update or views.push is sent.
+    Spill-outs are ephemeral; no views.update or views.push is sent.
     Requires MCP public_url + jwt_secret configured on settings.
     """
     tenant_id, fernet_key, _ = await _seed_team(db_session)
@@ -505,13 +503,13 @@ async def test_handle_agent_setup_action_connect_mcp_sends_ephemeral_not_modal_u
     )
     assert ephemeral_calls, "connect_mcp must send a chat.postEphemeral with the MCP config"
 
-    # Assert the modal was NOT updated or pushed (D-10: modal stays open)
+    # Assert the modal was NOT updated or pushed (modal stays open)
     update_calls = client_fake.mock.requests.get(
         ("POST", yarl.URL(f"{_SLACK_API_BASE}/views.update"))
     )
     push_calls = client_fake.mock.requests.get(("POST", yarl.URL(f"{_SLACK_API_BASE}/views.push")))
-    assert not update_calls, "connect_mcp must NOT call views.update — modal stays open (D-10)"
-    assert not push_calls, "connect_mcp must NOT call views.push — modal stays open (D-10)"
+    assert not update_calls, "connect_mcp must NOT call views.update — modal stays open"
+    assert not push_calls, "connect_mcp must NOT call views.push — modal stays open"
 
 
 # ---------------------------------------------------------------------------

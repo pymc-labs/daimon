@@ -100,7 +100,7 @@ def build_billing_container(
       - Server credit section
       - Top spenders header + per-member rows (top 5 shown; overflow noted)
       - Divider
-      - Top-up actions block with static_select (admin only, D-02)
+      - Top-up actions block with static_select (admin only)
 
     Member branch:
       - Header section: '💸 Billing' + period
@@ -108,7 +108,7 @@ def build_billing_container(
       - Caller section
       - Server credit section
 
-    No color fields anywhere (D-03). User/agent-derived text is escaped via
+    No color fields anywhere. User/agent-derived text is escaped via
     escape_mrkdwn (S5).
     """
     blocks: list[dict[str, Any]] = []
@@ -156,7 +156,7 @@ def build_billing_container(
             }
         )
 
-        # Top-up static_select — admin only (D-02)
+        # Top-up static_select — admin only
         topup_options: list[dict[str, Any]] = []
         for amount in (10, 25, 50, 100):
             turns = estimate_turns(

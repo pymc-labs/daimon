@@ -1,4 +1,4 @@
-"""`daimon mcp …` — operator primitives for the Phase 2 MCP adapter.
+"""`daimon mcp …` — operator primitives for the MCP adapter.
 
 Subcommands:
   * mint-token         — signs a JWT for local debug / integration tests.

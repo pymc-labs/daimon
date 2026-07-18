@@ -274,7 +274,7 @@ async def test_discord_turn_with_existing_matching_url_vault_skips_rebind(
 ) -> None:
     """Existing vault with credential at the current URL: no DELETE, no new credential POST.
 
-    Phase 88-03 removed the warm re-stamp limb (per-turn delete+recreate keyed on
+    The credential re-stamp limb was removed (per-turn delete+recreate keyed on
     is_admin claim). The credential is identity-stable — only a URL mismatch triggers
     a new credential. Same-URL warm path is now a no-op on vault credentials.
     """
@@ -306,7 +306,7 @@ async def test_discord_turn_with_existing_matching_url_vault_skips_rebind(
     delete_calls = [c for c in call_log if c[0] == "DELETE"]
     post_cred_calls = [c for c in call_log if c == ("POST", "/v1/vaults/vlt_warm/credentials")]
     assert len(delete_calls) == 0, (
-        f"existing credential at same URL must NOT be deleted (Phase 88-03 identity-stable); "
+        f"existing credential at same URL must NOT be deleted (credential is identity-stable); "
         f"got {delete_calls}"
     )
     assert len(post_cred_calls) == 0, (

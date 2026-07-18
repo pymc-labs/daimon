@@ -6,7 +6,7 @@ that can be unit-tested without a FastMCP Context.
 
 Partition scope: all five tools operate within the tenant from the caller's
 JWT claims. Cross-partition access raises ``ToolError("routine not found")``
-— same message for unknown vs. forbidden IDs so existence is not leaked (D-21).
+— same message for unknown vs. forbidden IDs so existence is not leaked.
 """
 
 from __future__ import annotations
@@ -140,14 +140,14 @@ async def _update_routine_impl(
         if row is None or row.tenant_id != tenant_id:
             raise ToolError("routine not found")
 
-        # Recompute next_fire_at only when cron or timezone is being changed (D-12).
+        # Recompute next_fire_at only when cron or timezone is being changed.
         next_fire_at: datetime | None = None
         if cron_expr is not None or timezone is not None:
             effective_cron = cron_expr if cron_expr is not None else row.cron_expr
             effective_tz = timezone if timezone is not None else row.timezone
             next_fire_at = _compute_next_fire_at(effective_cron, effective_tz)
 
-        # Phase 38-06: rename support via daimon-tag resolution at tool boundary.
+        # rename support via daimon-tag resolution at tool boundary.
         # If a new agent_name is provided and differs from the current one, look up
         # the live MA agent id and persist both fields. Unknown name -> ToolError.
         new_agent_id: str | None = None
@@ -214,7 +214,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         - the name of a tool, MCP, or skill
 
         The tool resolves ``agent_name`` to a live MA agent id at the call
-        boundary (Phase 38-06); an unknown name raises ``ToolError`` and the
+        boundary; an unknown name raises ``ToolError`` and the
         routine is not created.
 
         If you are the calling agent and do not know which agent to bind the

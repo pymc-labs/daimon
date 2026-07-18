@@ -173,7 +173,7 @@ async def test_non_admin_list_tools(
         )
 
     # Admin tools must NOT appear. Every gated mutating tool is now admin-tagged
-    # (D-08 sweep). Reads (list_agents, get_agent, list_skills, get_skill, etc.)
+    # (admin-tag sweep). Reads (list_agents, get_agent, list_skills, get_skill, etc.)
     # stay visible to all sessions.
     admin_tool_names = {
         # agents.py mutating tools
@@ -193,7 +193,7 @@ async def test_non_admin_list_tools(
         "set_repo_binding",
         "clear_repo_binding",
         # environments.py mutating tools (reads are untagged + ungated,
-        # matching agents/skills — D-08 tag/gate agreement)
+        # matching agents/skills — admin-tag/gate agreement)
         "create_environment",
         "update_environment",
         "archive_environment",
@@ -231,9 +231,9 @@ async def test_non_admin_call_admin_tool_blocked(
 ) -> None:
     """Non-admin calling call_tool('archive_agent') gets a not-found error.
 
-    After the D-08 tag sweep every gated mutating tool carries tags={'admin'},
+    After the admin-tag sweep every gated mutating tool carries tags={'admin'},
     so fastmcp's get_tool filters them for non-admin sessions before any impl
-    runs. The D-28 impl gate remains as defense-in-depth."""
+    runs. The impl gate remains as defense-in-depth."""
     admin_token, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
 
@@ -264,9 +264,9 @@ async def test_non_admin_call_admin_tool_blocked(
 async def test_non_admin_search_excludes_fork_agent(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """fork_agent is now admin-tagged (D-08 sweep) — non-admin search must not surface it.
+    """fork_agent is now admin-tagged — non-admin search must not surface it.
 
-    The D-28 impl gate remains as defense-in-depth, but the visibility layer
+    The impl gate remains as defense-in-depth, but the visibility layer
     hides it from non-admin sessions before they can call it."""
     _, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
@@ -288,9 +288,9 @@ async def test_non_admin_search_excludes_fork_agent(
 async def test_non_admin_search_excludes_skills_sync(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """skills_sync is now admin-tagged (D-08 sweep) — non-admin search must not surface it.
+    """skills_sync is now admin-tagged — non-admin search must not surface it.
 
-    The D-28 impl gate remains as defense-in-depth, but the visibility layer
+    The impl gate remains as defense-in-depth, but the visibility layer
     hides it from non-admin sessions before they can call it."""
     _, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
@@ -312,7 +312,7 @@ async def test_non_admin_search_excludes_skills_sync(
 async def test_discord_vault_token_is_admin_claim_without_internal_denied_admin_tools(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Phase 88-03 (#162): a Discord vault token with is_admin=True but no internal claim
+    """A Discord vault token with is_admin=True but no internal claim
     must NOT gain admin tool visibility.
 
     The old behavior (pre-88-03) elevated guild admins via is_admin alone. That was the
@@ -381,7 +381,7 @@ async def test_admin_search_includes_fork_agent(
     content = call_result.get("content", [])  # type: ignore[union-attr]
     output_text = " ".join(item.get("text", "") for item in content if isinstance(item, dict))
     assert "fork_agent" in output_text, (
-        f"fork_agent must be discoverable by admin after D-08 tag sweep; got: {output_text!r}"
+        f"fork_agent must be discoverable by admin after tag sweep; got: {output_text!r}"
     )
 
 

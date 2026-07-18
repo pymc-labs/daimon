@@ -1,4 +1,4 @@
-"""Tests for the /agent-setup Credentials sub-view V2 (Phase 51, SC1/SC3, D-08..D-12).
+"""Tests for the /agent-setup Credentials sub-view V2.
 
 Hygiene assertions are first-class here: no test secret VALUE may appear in any
 container TextDisplay content or in any captured log line.
@@ -124,7 +124,7 @@ def test_container_chips_on_one_line() -> None:
 
 
 def test_container_d09_values_never_reach_tree() -> None:
-    """D-09: build_credentials_container takes names only; no secret value can appear."""
+    """build_credentials_container takes names only; no secret value can appear."""
     container = build_credentials_container(
         agent_name="bot", secret_names=["XERO_API_KEY", "TOGGL_TOKEN"], is_system=False
     )
@@ -214,7 +214,7 @@ def test_subview_chips_on_one_line(account_id: uuid.UUID) -> None:
 
 
 def test_subview_d09_values_never_reach_tree(account_id: uuid.UUID) -> None:
-    """D-09 ported: constructor takes names only; no value string can appear in the view."""
+    """Constructor takes names only; no value string can appear in the view."""
     entry = _entry("bot")
     view = CredentialsSubView(
         runtime=MagicMock(spec=DiscordRuntime),
@@ -244,7 +244,7 @@ def test_subview_remove_select_option_carries_key_name_never_value(account_id: u
     option = select.options[0]
     assert option.value == "XERO_API_KEY", "option value is the key name"
     assert "XERO_API_KEY" in (option.label or ""), "option label shows the key name"
-    # The secret VALUE sentinel must appear in NO option value or label (D-09).
+    # The secret VALUE sentinel must appear in NO option value or label.
     for o in select.options:
         assert _SECRET_VALUE not in o.value, "option value never carries a secret value"
         assert _SECRET_VALUE not in (o.label or ""), "option label never carries a secret value"
@@ -447,7 +447,7 @@ async def test_remove_deletes_the_key_and_rerenders(
     keys = [r.key for r in rows]
     assert keys == ["KEEP_ME"], "the targeted key is deleted; others remain"
     interaction.edit_original_response.assert_awaited()  # view re-rendered in place
-    # The re-render view must not leak the surviving value (D-09).
+    # The re-render view must not leak the surviving value.
     rerender_kwargs = interaction.edit_original_response.call_args.kwargs
     assert _SECRET_VALUE not in str(rerender_kwargs), "no value in re-render call kwargs"
 
@@ -487,7 +487,7 @@ async def test_back_replaces_with_editview_in_place(account_id: uuid.UUID) -> No
     await view._on_back(interaction)  # pyright: ignore[reportPrivateUsage]
 
     interaction.response.edit_message.assert_awaited_once()  # back edits in place
-    interaction.delete_original_response.assert_not_called()  # back must NOT delete (D-08)
+    interaction.delete_original_response.assert_not_called()  # back must NOT delete
     sent_view = interaction.response.edit_message.call_args.kwargs["view"]
     assert isinstance(sent_view, EditView), "back returns to the unified EditView"
 
@@ -561,7 +561,7 @@ async def test_editview_secrets_button_opens_subview(
     interaction.response.edit_message.assert_awaited_once()  # secrets opens the sub-view in place
     kwargs = interaction.response.edit_message.call_args.kwargs
     assert isinstance(kwargs["view"], CredentialsSubView), "view is the CredentialsSubView"
-    # D-09: the sub-view's container must not contain the secret value
+    # The sub-view's container must not contain the secret value
     all_text = _container_all_text(kwargs["view"])
     assert _SECRET_VALUE not in all_text, "the opened view lists the key masked, never its value"
 
@@ -587,7 +587,7 @@ def test_editview_has_secrets_button_disabled_for_system_agent(account_id: uuid.
     sys_view = EditView(_state(sys_entry, account_id), runtime=runtime, allowed_user_id=42)
     sys_buttons = {b.label: b for b in _walk_buttons(sys_view) if b.label is not None}
     assert sys_buttons["Secrets"].disabled is True, (
-        "system agents see the Secrets button disabled (defensive, D-11)"
+        "system agents see the Secrets button disabled (defensive)"
     )
 
     user_entry = RosterEntry(

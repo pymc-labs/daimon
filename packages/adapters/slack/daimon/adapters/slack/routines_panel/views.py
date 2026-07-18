@@ -1,4 +1,4 @@
-"""Pure Block Kit view builders for the /routines panel (SUX-02, S4).
+"""Pure Block Kit view builders for the /routines panel.
 
 All functions return plain ``dict[str, Any]`` objects — no ``slack_sdk.models``
 types (project convention per Pitfall 5 / S4). This module imports only stdlib
@@ -34,7 +34,7 @@ _EMPTY_HINT = (
 def build_loading_view(*, channel_id: str = "") -> dict[str, Any]:
     """Return a lightweight Loading… modal to open immediately on /routines.
 
-    Opened with the fresh ``trigger_id`` (D-06) so the ~3s window is never
+    Opened with the fresh ``trigger_id`` so the ~3s window is never
     blown. The channel_id is stored in ``private_metadata`` so overflow action
     handlers can send ephemeral messages back to the original channel.
 

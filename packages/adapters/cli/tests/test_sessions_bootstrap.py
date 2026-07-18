@@ -216,7 +216,7 @@ async def test_resolve_ignores_user_scope_and_falls_to_tenant_system(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Post-D-13: the per-user-active scope tier is retired (Phase 50).
+    """The per-user-active scope tier is retired.
 
     Even when a UserScopeRef config row exists, the resolver no longer consults
     it — the cascade is channel→workspace→tenant_system. With only a user-scoped
@@ -236,7 +236,7 @@ async def test_resolve_ignores_user_scope_and_falls_to_tenant_system(
         agent_name="sys-agent",
         environment_name="sys-env",
     )
-    # A user-scoped config is written but MUST be ignored after D-13.
+    # A user-scoped config is written but MUST be ignored.
     await set_fields(
         db_session,
         scope=UserScopeRef(account_id=account.id),
@@ -322,8 +322,8 @@ async def test_resolve_ignores_user_scope_and_falls_to_tenant_system(
         default=DeploymentDefault(),
         cache=new_resolver_cache(),
     )
-    assert agent.name == "sys-agent", "user scope is retired (D-13); tenant_system applies"
-    assert env.name == "sys-env", "user scope is retired (D-13); tenant_system applies"
+    assert agent.name == "sys-agent", "user scope is retired; tenant_system applies"
+    assert env.name == "sys-env", "user scope is retired; tenant_system applies"
 
 
 @pytest.mark.asyncio

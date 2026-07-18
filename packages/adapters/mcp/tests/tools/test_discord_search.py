@@ -1,4 +1,4 @@
-"""Unit tests for the rewritten _search_messages_impl (phase 73 plan 03).
+"""Unit tests for the rewritten _search_messages_impl.
 
 Each test calls ``_search_messages_impl`` directly with a hand-built
 ``AuthIdentity`` and a transport-level patched ``discord.http.HTTPClient``.

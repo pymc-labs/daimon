@@ -4,7 +4,7 @@ Each test builds a McpRuntime with a real sessionmaker and calls the private
 _*_impl functions directly (no FastMCP Context). Covers happy path, scope
 isolation, validation errors, and PATCH update semantics.
 
-Phase 38-06: ``create_routine`` / ``update_routine`` now resolve a daimon-tag
+``create_routine`` / ``update_routine`` now resolve a daimon-tag
 ``agent_name`` to a live MA ``agent_id`` at the tool boundary. Tests wire a
 real ``AsyncAnthropic`` over ``MARouter`` (transport-level fake — never
 ``AsyncMock`` on ``client.beta.*``, per guideline:testing).
@@ -323,7 +323,7 @@ async def test_update_routine_patches_only_provided_fields(
     assert updated.cron_expr == "0 9 * * *", "cron_expr must remain unchanged"
     assert updated.trigger_message == "orig", "trigger_message must remain unchanged"
     assert updated.next_fire_at == datetime(2026, 6, 1, 9, 0, tzinfo=UTC), (
-        "next_fire_at must not be recomputed when only enabled changes (D-12)"
+        "next_fire_at must not be recomputed when only enabled changes"
     )
 
 
@@ -354,7 +354,7 @@ async def test_update_routine_recomputes_next_fire_at_when_cron_changes(
 
     assert updated.next_fire_at is not None, "next_fire_at must be set after cron update"
     assert updated.next_fire_at != original_fire, (
-        "next_fire_at must be recomputed when cron_expr changes (D-12)"
+        "next_fire_at must be recomputed when cron_expr changes"
     )
     assert updated.cron_expr == "0 10 * * *", "new cron_expr must be persisted"
 
@@ -386,7 +386,7 @@ async def test_update_routine_recomputes_next_fire_at_when_timezone_changes(
 
     assert updated.next_fire_at is not None, "next_fire_at must be set after timezone update"
     assert updated.next_fire_at != original_fire, (
-        "next_fire_at must be recomputed when timezone changes (D-12)"
+        "next_fire_at must be recomputed when timezone changes"
     )
     assert updated.timezone == "America/New_York", "new timezone must be persisted"
 
@@ -521,7 +521,7 @@ async def test_require_platform_user_id_raises_with_exact_error_string_when_miss
 
 
 # ---------------------------------------------------------------------------
-# Phase 38-06: agent_name resolution at the MCP tool boundary.
+# agent_name resolution at the MCP tool boundary.
 # ---------------------------------------------------------------------------
 
 
@@ -551,7 +551,7 @@ async def test_create_routine_resolves_agent_name_to_id(
         enabled=True,
     )
     assert row.agent_id == "ag_resolved", (
-        "the resolved MA agent id must be persisted on the row (Phase 38-06 boundary resolution)"
+        "the resolved MA agent id must be persisted on the row (boundary resolution)"
     )
     assert row.agent_name == "daimon", "the tag must be persisted for later re-resolution"
 

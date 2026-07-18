@@ -1,8 +1,8 @@
 """Real-Postgres write-path tests for agent_setup/scope_default.py.
 
-Re-homed from tests/propagate/test_write.py (Phase 54, Plan 01).
+Re-homed from tests/propagate/test_write.py.
 The behavioral coverage is preserved; per-user-tier tests are dropped
-(per D-01/D-13: the per-user tier is retired; the fold only ever writes
+(The per-user tier is retired; the fold only ever writes
 mode="agent", which is implicit and has no mode= kwarg in the new API).
 
 These tests import from `daimon.adapters.discord.agent_setup.scope_default`,
@@ -103,7 +103,7 @@ def _make_state(
 
 
 # ---------------------------------------------------------------------------
-# Write-path behavioral coverage (SC-1 / D-04 / D-09)
+# Write-path behavioral coverage
 # ---------------------------------------------------------------------------
 
 
@@ -137,7 +137,7 @@ async def test_do_propagate_clean_scope_returns_no_prior_and_stamps_audit(
 async def test_do_propagate_overwrite_returns_prior_values(
     db_session: AsyncSession,
 ) -> None:
-    """SC-3 / D-04: overwrite returns prior agent name for cascade naming."""
+    """Overwrite returns prior agent name for cascade naming."""
     tenant = await _make_tenant(db_session)
     actor_a = await _make_account(db_session, tenant)
     actor_b = await _make_account(db_session, tenant)
@@ -175,7 +175,7 @@ async def test_do_propagate_overwrite_returns_prior_values(
 async def test_do_unpropagate_deletes_row_when_only_agent_name_was_set(
     db_session: AsyncSession,
 ) -> None:
-    """D-09: clearing agent_name auto-deletes fully-NULL row."""
+    """Clearing agent_name auto-deletes fully-NULL row."""
     tenant = await _make_tenant(db_session)
     actor = await _make_account(db_session, tenant)
     scope = TenantScopeRef(tenant_id=tenant.id)
@@ -195,7 +195,7 @@ async def test_do_unpropagate_deletes_row_when_only_agent_name_was_set(
 async def test_do_unpropagate_preserves_row_when_environment_name_still_set(
     db_session: AsyncSession,
 ) -> None:
-    """D-09: clearing agent_name preserves the row when environment_name is set."""
+    """Clearing agent_name preserves the row when environment_name is set."""
     tenant = await _make_tenant(db_session)
     actor = await _make_account(db_session, tenant)
     scope = TenantScopeRef(tenant_id=tenant.id)
@@ -346,7 +346,7 @@ async def test_set_default_interaction_check_allows_admin_invoker() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 58.3 RED tests — TenantScopeRef/TenantConfigRow + deployment tier (R7)
+# RED tests — TenantScopeRef/TenantConfigRow + deployment tier
 #
 # These tests import not-yet-existing symbols (TenantScopeRef, TenantConfigRow,
 # DeploymentDefault) and are RED until Plans 03/04/07 land. That is expected.

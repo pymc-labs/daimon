@@ -1,6 +1,6 @@
 """Tests for the Block Kit pure state machine (blockkit.py).
 
-Phase 81 Plan 01 — Tasks 2 and 3.
+Tasks 2 and 3.
 
 Task 2: state machine (TurnPhase / EmbedEvent / TrailEntry / State / update)
 Task 3: to_blocks renderer (emoji title, elapsed/trail context, preview, cancel
@@ -248,7 +248,7 @@ class TestToBlocks:
         )
 
     def test_no_block_contains_color_key(self) -> None:
-        """No block dict anywhere must contain a 'color' key (D-03)."""
+        """No block dict anywhere must contain a 'color' key."""
         state = _make_state(
             phase=TurnPhase.THINKING,
             trail=(TrailEntry(emoji="⚙️", text="tool"),),
@@ -256,9 +256,7 @@ class TestToBlocks:
         )
         blocks = to_blocks(state, now=5.0)
         for block in blocks:
-            assert "color" not in block, (
-                f"block {block!r} must not contain a 'color' key (D-03: no color)"
-            )
+            assert "color" not in block, f"block {block!r} must not contain a 'color' key"
 
     def test_fmt_tokens_humanizes(self) -> None:
         assert _fmt_tokens(320) == "320", "sub-1000 counts render verbatim"

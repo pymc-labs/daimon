@@ -207,7 +207,7 @@ def _make_agent_payload_with_skill_type(
 
 
 # ---------------------------------------------------------------------------
-# CLB-08 regression test — permissive projection through the full pipeline
+# Regression test — permissive projection through the full pipeline
 # ---------------------------------------------------------------------------
 
 
@@ -361,7 +361,7 @@ async def test_get_agent_impl_returns_mcp_servers_and_skills() -> None:
     custom = next(s for s in result.skills if s.type == "custom")
     assert custom.skill_id == "skill_build", "custom skill ref must carry the MA skill id"
     assert custom.name == "build-models", (
-        "custom skill ids are opaque — get_agent must resolve the display title as bare name (D-10)"
+        "custom skill ids are opaque — get_agent must resolve the display title as bare name"
     )
     assert custom.version == "1", "skill ref must carry its pinned version"
     anthropic_skill = next(s for s in result.skills if s.type == "anthropic")
@@ -415,7 +415,7 @@ async def test_list_agents_impl_includes_mcp_servers_and_skills() -> None:
         ("docs", "https://docs.example/mcp")
     ], "the roster must show each agent's attached MCP servers"
     assert [(s.skill_id, s.name) for s in rows[0].skills] == [("skill_build", "build-models")], (
-        "the roster must show each agent's skills with bare resolved display names (D-10)"
+        "the roster must show each agent's skills with bare resolved display names"
     )
 
 
@@ -596,7 +596,7 @@ async def test_update_agent_impl_forwards_only_non_none_fields() -> None:
     assert captured.get("description") == "new desc", "should forward the description"
     assert "model" not in captured, "should omit None model field"
     assert "system" not in captured, "should omit None system field"
-    # version is sent by the SDK automatically (D-03: callers don't provide it)
+    # version is sent by the SDK automatically (callers don't provide it)
 
 
 async def test_update_agent_impl_rejects_empty_patch() -> None:
@@ -1420,7 +1420,7 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids() -> None:
 
 
 async def test_update_agent_impl_rejects_custom_skill_dict() -> None:
-    """Raw custom skill-id dicts are rejected — skills attach by bare name only (D-09)."""
+    """Raw custom skill-id dicts are rejected — skills attach by bare name only."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2777,7 +2777,7 @@ async def test_fork_agent_impl_rejects_guild_stamped_name_collision() -> None:
 
 
 async def test_create_agent_rejects_name_held_by_other_owner() -> None:
-    """D-72-01: create_agent raises ToolError when any same-name agent exists in the tenant,
+    """create_agent raises ToolError when any same-name agent exists in the tenant,
     regardless of owner. Inverted from the previous owner-scoped check — personal-stamped
     agents now also block (tenant-scoped name uniqueness matches the ma_index identity model).
     """
@@ -2790,7 +2790,7 @@ async def test_create_agent_rejects_name_held_by_other_owner() -> None:
     )
 
     def on_create(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        raise AssertionError("create must not POST when target name exists for any owner (D-72-01)")
+        raise AssertionError("create must not POST when target name exists for any owner")
 
     router = MARouter()
     router.add(
@@ -2820,7 +2820,7 @@ async def test_create_agent_rejects_name_held_by_other_owner() -> None:
 
 
 async def test_fork_agent_rejects_new_name_held_by_other_owner() -> None:
-    """D-72-01: fork_agent raises ToolError when the new name exists for any owner in the tenant.
+    """fork_agent raises ToolError when the new name exists for any owner in the tenant.
     Personal-stamped agents now also block — tenant-scoped uniqueness regardless of owner.
     """
     tenant_id = uuid.uuid4()
@@ -2832,9 +2832,7 @@ async def test_fork_agent_rejects_new_name_held_by_other_owner() -> None:
     )
 
     def on_create(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        raise AssertionError(
-            "fork must not POST create when new name exists for any owner (D-72-01)"
-        )
+        raise AssertionError("fork must not POST create when new name exists for any owner")
 
     router = MARouter()
     router.add(
@@ -2862,11 +2860,11 @@ async def test_fork_agent_rejects_new_name_held_by_other_owner() -> None:
         await _fork_agent_impl(_runtime(client), auth, source_name="source", new_name="myfork")
 
 
-# --- SC-3 / D-09 / D-10 skill-boundary tests ---------------------------------
+# --- skill-boundary tests -----------------------------------------------------
 
 
 async def test_update_agent_impl_raises_tool_error_when_skills_from_foreign_tenant() -> None:
-    """SC-3: update_agent with tenant B's canonical title as tenant A raises ToolError.
+    """update_agent with tenant B's canonical title as tenant A raises ToolError.
 
     The error message must contain tenant A's available bare skill titles and must NOT
     contain tenant B's canonical title — cross-tenant titles must never leak (SC-3).
@@ -2950,7 +2948,7 @@ async def test_update_agent_impl_raises_tool_error_when_skills_from_foreign_tena
 
 
 async def test_update_agent_impl_raises_tool_error_for_raw_custom_skill_dict() -> None:
-    """D-09: raw custom skill-id dicts raise ToolError at the chat surface."""
+    """Raw custom skill-id dicts raise ToolError at the chat surface."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2991,7 +2989,7 @@ async def test_update_agent_impl_raises_tool_error_for_raw_custom_skill_dict() -
 
 
 async def test_agent_info_skill_names_are_bare_for_own_namespace_pins() -> None:
-    """D-10: AgentInfo.skills[].name shows bare names, never the tenant prefix."""
+    """AgentInfo.skills[].name shows bare names, never the tenant prefix."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -3035,10 +3033,10 @@ async def test_agent_info_skill_names_are_bare_for_own_namespace_pins() -> None:
 
     custom = next(s for s in result.skills if s.type == "custom")
     assert custom.name == "cli-auth", (
-        "D-10: AgentInfo skill name must be the bare name, never the tenant-prefixed title"
+        "AgentInfo skill name must be the bare name, never the tenant-prefixed title"
     )
     assert own_skill_title not in (custom.name or ""), (
-        "D-10: the tenant prefix must be stripped from the displayed skill name"
+        "the tenant prefix must be stripped from the displayed skill name"
     )
 
 

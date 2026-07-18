@@ -341,7 +341,7 @@ async def call_reconcile_for_panel(
     """Reconcile the currently-selected agent.
 
     Propagates ``account_id`` (per-user metadata stamp) and ``public_url``
-    (Phase 34 default-MCP merge).
+    (default-MCP merge).
     """
     public_url = (
         str(runtime.settings.mcp.public_url)
@@ -368,7 +368,7 @@ async def store_inline_pat(
 ) -> str:
     """Fernet-encrypt the inline PAT and write a per-agent credential overlay.
 
-    D-25: stored under principal_id=agent_id (per-agent principal). Connecting
+    Stored under principal_id=agent_id (per-agent principal). Connecting
     GitHub for Agent A does not let Agent B resolve the PAT.
 
     Returns the ``ma_secret_ref`` string used by ``agent_repo_binding.set_binding``.

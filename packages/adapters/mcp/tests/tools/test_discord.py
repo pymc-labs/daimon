@@ -52,7 +52,7 @@ pytestmark = pytest.mark.asyncio
 
 # ---------------------------------------------------------------------------
 # Tiny aiohttp fake used by the two attachment-streaming tests.
-# Per RESEARCH.md "Test Strategy" / D-19 — kept inline rather than lifted to
+# Per RESEARCH.md "Test Strategy" — kept inline rather than lifted to
 # conftest until a second tool needs it.
 # ---------------------------------------------------------------------------
 
@@ -577,7 +577,7 @@ async def test_send_message_to_thread_denied_when_parent_denies_send(
 
 # ---------------------------------------------------------------------------
 # Regression pins for _require_discord_identity and _require_guild_id error
-# strings (Phase 37 Plan 05). Exact-equality assertions so any future drift
+# strings. Exact-equality assertions so any future drift
 # in the production wording — or accidental removal of the gate — fails CI
 # loudly.
 # ---------------------------------------------------------------------------
@@ -605,7 +605,7 @@ async def test_require_discord_identity_raises_with_exact_error_string_when_plat
 
 
 async def test_require_discord_identity_raises_when_platform_is_not_discord() -> None:
-    # After Phase 37, CLI sessions carry platform="cli" claims with no
+    # CLI sessions carry platform="cli" claims with no
     # platform_user_id. The gate must continue to reject them with the same
     # message — the public check is `platform_user_id is None`.
     auth = AuthIdentity(

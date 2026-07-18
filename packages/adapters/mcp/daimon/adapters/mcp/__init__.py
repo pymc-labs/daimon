@@ -1,1 +1,1 @@
-"""Daimon MCP server adapter. Phase 2."""
+"""Daimon MCP server adapter."""

@@ -1,4 +1,4 @@
-"""Tests for the agent-chat tool group (Phase 77).
+"""Tests for the agent-chat tool group.
 
 Surface is primitives-only (scoped to the caller's agent): describe_agent,
 list_sessions, start_turn, continue_turn, get_session, list_events.

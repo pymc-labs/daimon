@@ -2,7 +2,7 @@
 
 The MCP session JWT carries no agent_id claim (SC-4), so `sync_skills` cannot
 resolve credentials from auth alone. Resolution goes URL → the caller-tenant's
-agent_repo_binding → that agent's PAT overlay (D-25). Without it, private
+agent_repo_binding → that agent's PAT overlay. Without it, private
 bootstrap repos 404 on anonymous fetch (found live: test-guild bootstrap run
 sesn_01S1PW8nFn9tZongAokvVpzd).
 """

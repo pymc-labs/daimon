@@ -1,9 +1,9 @@
 """Cog metadata invariants: guild_only, registration topology, admin-gating.
 
-Phase 26 deleted ConfigCog (D-CONFIG-01, D-PERM-01).
-Phase 54 folded /propagate and /unpropagate into /agent-setup (D-10, D-11) and
+ConfigCog has been deleted.
+/propagate and /unpropagate were folded into /agent-setup and
 deleted the propagate cog and its package. The assertions here lock the
-post-Phase-54 cog set so a future re-introduction of ConfigCog or the propagate
+current cog set so a future re-introduction of ConfigCog or the propagate
 command module fails CI.
 """
 
@@ -69,13 +69,13 @@ def test_config_cog_not_importable() -> None:
 
 
 def test_propagate_cog_not_importable() -> None:
-    """D-11: commands/propagate.py is deleted; the import must fail."""
+    """commands/propagate.py is deleted; the import must fail."""
     with pytest.raises(ModuleNotFoundError):
         import daimon.adapters.discord.commands.propagate  # type: ignore[import-not-found]  # noqa: F401  intentional: must fail
 
 
 def test_propagate_package_not_importable() -> None:
-    """D-11: the propagate/ adapter package is deleted; the import must fail."""
+    """The propagate/ adapter package is deleted; the import must fail."""
     with pytest.raises(ModuleNotFoundError):
         import daimon.adapters.discord.propagate.panel  # type: ignore[import-not-found]  # noqa: F401  intentional: must fail
 
@@ -87,9 +87,9 @@ def test_routines_cog_registers_routines_slash() -> None:
 
 
 def test_routines_slash_is_admin_gated() -> None:
-    """The /routines panel is admin-only and hidden from non-admins (D-32).
+    """The /routines panel is admin-only and hidden from non-admins.
 
-    Phase 50 (D-32) made /routines a pure-admin command: hidden in the Discord UI
+    /routines is a pure-admin command: hidden in the Discord UI
     via @app_commands.default_permissions(manage_guild=True) and hard-gated with
     @require_manage_guild (defense in depth). It is NOT the DB-role @require_admin.
     """
@@ -97,11 +97,11 @@ def test_routines_slash_is_admin_gated() -> None:
 
     src = inspect.getsource(routines_module)
     assert "require_manage_guild" in src, (
-        f"/routines must be admin-gated with @require_manage_guild (D-32); not found in source:\n{src}"
+        f"/routines must be admin-gated with @require_manage_guild; not found in source:\n{src}"
     )
     assert "default_permissions(manage_guild=True)" in src, (
         "/routines must be hidden from non-admins via "
-        f"@app_commands.default_permissions(manage_guild=True) (D-32); not found in source:\n{src}"
+        f"@app_commands.default_permissions(manage_guild=True); not found in source:\n{src}"
     )
 
 

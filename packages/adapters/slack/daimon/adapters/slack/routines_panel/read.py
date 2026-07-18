@@ -1,4 +1,4 @@
-"""Load + sort + cap the routines for a single tenant for /routines (SUX-02).
+"""Load + sort + cap the routines for a single tenant for /routines.
 
 Shell module: performs real I/O (DB reads + MA agent list). Ported from
 discord/routines_panel/read.py with color dropped from RoutineEntry.

@@ -1,9 +1,9 @@
-"""create_mcp_app GitHub repo-auth boot (Phase 97: App-or-PAT, D-03/D-07/D-10).
+"""create_mcp_app GitHub repo-auth boot (App-or-PAT).
 
-D-03/D-10: the OAuth web flow + CLI-auth-status route are gone — no
+The OAuth web flow + CLI-auth-status route are gone — no
 `/oauth/github/*` route should ever be mounted.
 
-D-07: App-clone boots with only `app_id` + `app_private_key` — no
+App-clone boots with only `app_id` + `app_private_key` — no
 `webhook_secret` required. The `/webhooks/github` mount (skill-sync's
 push-driven resync trigger) is gated separately on `webhook_secret is not
 None`, and fails loud on partial config (webhook_secret without App creds,
@@ -51,22 +51,22 @@ def _route_paths(app: object) -> list[str]:
 async def test_oauth_github_routes_absent(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """D-03/D-10: no /oauth/github/* or /cli/auth/status route is ever mounted."""
+    """No /oauth/github/* or /cli/auth/status route is ever mounted."""
     app = create_mcp_app(
         settings=_settings(github=GithubSettings()),
         sessionmaker=sessionmaker,
         auth=StaticTokenVerifier(tokens={}),
     )
     route_paths = _route_paths(app)
-    assert "/oauth/github/start" not in route_paths, "OAuth start route must be gone (D-03)"
-    assert "/oauth/github/callback" not in route_paths, "OAuth callback route must be gone (D-03)"
-    assert "/cli/auth/status" not in route_paths, "cli-auth-status route must be gone (D-10)"
+    assert "/oauth/github/start" not in route_paths, "OAuth start route must be gone"
+    assert "/oauth/github/callback" not in route_paths, "OAuth callback route must be gone"
+    assert "/cli/auth/status" not in route_paths, "cli-auth-status route must be gone"
 
 
 async def test_app_clone_boots_with_only_app_id_and_private_key(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """D-07: App-clone requires only app_id + app_private_key — no webhook_secret."""
+    """App-clone requires only app_id + app_private_key — no webhook_secret."""
     app = create_mcp_app(
         settings=_settings(
             github=GithubSettings(

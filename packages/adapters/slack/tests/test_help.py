@@ -1,4 +1,4 @@
-"""Tests for help.py — build_help_blocks (pure) + handle_help_command (D-07).
+"""Tests for help.py — build_help_blocks (pure) + handle_help_command.
 
 TDD test file (written before implementation, per Task 1 plan).
 
@@ -43,9 +43,9 @@ def test_build_help_blocks_contains_all_commands_and_at_bot_entrypoint() -> None
 async def test_handle_help_command_posts_ephemeral_and_no_views_open(
     fake_slack_web_client: Any,
 ) -> None:
-    """handle_help_command must post chat.postEphemeral, never views.open (D-07).
+    """handle_help_command must post chat.postEphemeral, never views.open.
 
-    D-07: /help is ephemeral (no modal). The handler must:
+    /help is ephemeral (no modal). The handler must:
     - call chat.postEphemeral with the blocks from build_help_blocks()
     - NOT call views.open (no trigger_id / no modal)
     """
@@ -77,7 +77,7 @@ async def test_handle_help_command_posts_ephemeral_and_no_views_open(
         for req in reqs
     ]
     assert len(ephemeral_calls) >= 1, (
-        "handle_help_command must call chat.postEphemeral (D-07 — ephemeral, no modal)"
+        "handle_help_command must call chat.postEphemeral (ephemeral, no modal)"
     )
 
     views_open_calls = [
@@ -87,7 +87,7 @@ async def test_handle_help_command_posts_ephemeral_and_no_views_open(
         for req in reqs
     ]
     assert len(views_open_calls) == 0, (
-        "handle_help_command must NOT call views.open (D-07 — /help is ephemeral, not a modal)"
+        "handle_help_command must NOT call views.open (/help is ephemeral, not a modal)"
     )
 
 

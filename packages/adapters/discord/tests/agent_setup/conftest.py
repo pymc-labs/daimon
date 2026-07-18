@@ -53,7 +53,7 @@ def _stub_panel_tenant_resolution(monkeypatch: pytest.MonkeyPatch, tenant_id: uu
     """Stub per-interaction tenant resolution for panel/modal callback unit tests.
 
     Panel callbacks resolve the guild's tenant via ``resolve_tenant_for_panel``
-    (D-06), which hits the tenants table. These unit tests use a stub
+    which hits the tenants table. These unit tests use a stub
     anthropic + MagicMock interaction with no real DB, so we resolve straight
     to the in-scope ``tenant_id`` fixture — the value the callbacks thread into
     the write helpers, which is exactly what the assertions check.

@@ -157,7 +157,7 @@ def test_post_delete_container_no_retention_legalese() -> None:
 
 
 def test_post_delete_container_user_skills_row_renders_when_nonzero() -> None:
-    """D-08: user_skills checklist row appears when count > 0."""
+    """user_skills checklist row appears when count > 0."""
     result = _make_result(user_skills=3)
     container = build_post_delete_container(result)
     joined = _joined_text(container)
@@ -177,7 +177,7 @@ def test_post_delete_container_user_skills_row_absent_when_zero() -> None:
 
 
 def test_post_delete_container_github_credentials_row_renders_when_nonzero() -> None:
-    """D-08: github_credentials checklist row appears when count > 0."""
+    """github_credentials checklist row appears when count > 0."""
     result = _make_result(github_credentials=1)
     container = build_post_delete_container(result)
     joined = _joined_text(container)
@@ -197,7 +197,7 @@ def test_post_delete_container_github_credentials_row_absent_when_zero() -> None
 
 
 def test_post_delete_container_github_oauth_states_row_renders_when_nonzero() -> None:
-    """D-08: github_oauth_states checklist row appears when count > 0."""
+    """github_oauth_states checklist row appears when count > 0."""
     result = _make_result(github_oauth_states=2)
     container = build_post_delete_container(result)
     joined = _joined_text(container)
@@ -217,32 +217,32 @@ def test_post_delete_container_github_oauth_states_row_absent_when_zero() -> Non
 
 
 def test_post_delete_container_carveout_usage_records_always_present() -> None:
-    """D-09: usage-records retention carve-out is always shown on the post-delete embed."""
+    """usage-records retention carve-out is always shown on the post-delete embed."""
     result = _make_result(accounts=1)
     container = build_post_delete_container(result)
     joined = _joined_text(container)
     assert "service integrity" in joined, (
-        "Post-delete container must disclose usage-records retention carve-out (D-09)"
+        "Post-delete container must disclose usage-records retention carve-out"
     )
 
 
 def test_post_delete_container_carveout_ma_skill_files_always_present() -> None:
-    """D-09/D-04: MA skill files carve-out is always shown on the post-delete embed."""
+    """MA skill files carve-out is always shown on the post-delete embed."""
     result = _make_result(accounts=1)
     container = build_post_delete_container(result)
     joined = _joined_text(container)
     assert "Managed Agents" in joined, (
-        "Post-delete container must mention Managed Agents in skill-files carve-out (D-09/D-04)"
+        "Post-delete container must mention Managed Agents in skill-files carve-out"
     )
 
 
 def test_post_delete_container_carveout_github_grant_always_present() -> None:
-    """D-09/D-05: GitHub-side OAuth grant carve-out is always shown on the post-delete embed."""
+    """GitHub-side OAuth grant carve-out is always shown on the post-delete embed."""
     result = _make_result(accounts=1)
     container = build_post_delete_container(result)
     joined = _joined_text(container)
     assert "github.com/settings/applications" in joined, (
-        "Post-delete container must direct users to revoke their GitHub OAuth grant (D-09/D-05)"
+        "Post-delete container must direct users to revoke their GitHub OAuth grant"
     )
 
 

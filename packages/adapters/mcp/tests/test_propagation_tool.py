@@ -188,7 +188,7 @@ async def test_set_agent_default_raises_for_non_admin_and_performs_no_write(
         await _set_agent_default_impl(_runtime(committing_sessionmaker), auth, "any-agent", None)
 
     assert str(exc_info.value) == _D28_MESSAGE, (
-        "non-admin caller must be refused with the D-28 message"
+        "non-admin caller must be refused with the expected message"
     )
 
     row = await get_scope(db_session, scope=TenantScopeRef(tenant_id=tenant_id))
@@ -205,5 +205,5 @@ async def test_clear_agent_default_raises_for_non_admin(
         await _clear_agent_default_impl(_runtime(committing_sessionmaker), auth, None)
 
     assert str(exc_info.value) == _D28_MESSAGE, (
-        "non-admin caller must be refused with the D-28 message for clear as well"
+        "non-admin caller must be refused with the expected message for clear as well"
     )

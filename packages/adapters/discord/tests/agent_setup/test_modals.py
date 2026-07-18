@@ -76,13 +76,13 @@ def _runtime_for_view(
     settings.mcp = McpSettings(public_url=public_url, jwt_secret=SecretStr("a" * 32))
     settings.github.oauth_scopes = ("repo", "read:user")
     # No App creds by default -> is_app_installed_for_repo returns False with zero
-    # HTTP calls (D-06); a MagicMock here would be truthy and crash build_app_jwt.
+    # HTTP calls; a MagicMock here would be truthy and crash build_app_jwt.
     # Tests that need App-coverage behavior monkeypatch is_app_installed_for_repo.
     settings.github.app_id = None
     settings.github.app_private_key = None
     # crypto.keys is tuple[SecretStr, ...]; tests pass plain Fernet keys and wrap.
     settings.crypto.keys = tuple(MagicMock(get_secret_value=lambda k=k: k) for k in crypto_keys)
-    _ = tenant_id  # runtime no longer carries tenant_id (D-06); resolved per-interaction
+    _ = tenant_id  # runtime no longer carries tenant_id; resolved per-interaction
     return DiscordRuntime(
         settings=settings,
         anthropic=anthropic,
@@ -106,14 +106,14 @@ def _interaction(user_id: int = 42) -> MagicMock:
     return interaction
 
 
-# ----- 1. PAT masked in embed and logs (D-08) -----
+# ----- 1. PAT masked in embed and logs -----
 
 
 @pytest.mark.asyncio
 async def test_pat_masked_in_embed_and_logs(
     monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> None:
-    """D-08: plaintext PAT must never appear in logs or embed."""
+    """Plaintext PAT must never appear in logs or embed."""
     plaintext = "ghp_1234567890"
 
     async def fake_store_inline_pat(
@@ -194,7 +194,7 @@ async def test_pat_masked_in_embed_and_logs(
     )
 
 
-# ----- 2. Inline PAT persisted encrypted (Phase 18 contract) -----
+# ----- 2. Inline PAT persisted encrypted -----
 
 
 @pytest.mark.asyncio
@@ -202,7 +202,7 @@ async def test_inline_pat_persisted_encrypted(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Inline PAT must be Fernet-encrypted before DB write per Phase 18 contract."""
+    """Inline PAT must be Fernet-encrypted before DB write."""
     from daimon.core._models import Tenant
     from daimon.core.ma_identity import derive_tenant_uuid
 
@@ -232,7 +232,7 @@ async def test_inline_pat_persisted_encrypted(
         resolver_cache=new_resolver_cache(),
     )
 
-    # D-25: the credential is stored under agent_id (per-agent principal), not account_id.
+    # The credential is stored under agent_id (per-agent principal), not account_id.
     agent_uuid = uuid.uuid4()
     secret_ref = await write_mod.store_inline_pat(
         runtime,
@@ -245,7 +245,7 @@ async def test_inline_pat_persisted_encrypted(
     # Credential is stored under the per-agent principal (agent_uuid), not account_id.
     row = await creds_store.get_credential_by_principal(db_session, principal_id=agent_uuid)
     assert row is not None, (
-        "inline PAT must be persisted to github_credentials under the agent_uuid (D-25)"
+        "inline PAT must be persisted to github_credentials under the agent_uuid"
     )
     assert bytes(row.encrypted_token) != plaintext.encode(), (
         "stored token bytes must be ciphertext, never the plaintext"
@@ -256,7 +256,7 @@ async def test_inline_pat_persisted_encrypted(
     )
 
 
-# ----- 3c. Inline PAT writes per-agent overlay (D-25) -----
+# ----- 3c. Inline PAT writes per-agent overlay -----
 
 
 @pytest.mark.asyncio
@@ -264,7 +264,7 @@ async def test_store_inline_pat_writes_per_agent_overlay(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """D-25: store_inline_pat writes credential under agent_id; Agent B cannot resolve it."""
+    """store_inline_pat writes credential under agent_id; Agent B cannot resolve it."""
     from daimon.core._models import Tenant
     from daimon.core.github_credentials import get_pat
     from daimon.core.ma_identity import derive_tenant_uuid
@@ -329,7 +329,7 @@ async def test_store_inline_pat_writes_per_agent_overlay(
         fernet=fernet,
     )
     assert pat_b is None, (
-        "get_pat(agent_id=agent_b) must return None — Agent B must not resolve Agent A's PAT (D-25)"
+        "get_pat(agent_id=agent_b) must return None — Agent B must not resolve Agent A's PAT"
     )
 
 
@@ -340,7 +340,7 @@ async def test_store_inline_pat_writes_per_agent_overlay(
 async def test_skill_modal_kicks_off_sync(
     monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> None:
-    """AddSkill must hand the URL to Phase 33 orchestrator via asyncio.create_task."""
+    """AddSkill must hand the URL to the orchestrator via asyncio.create_task."""
     captured: dict[str, Any] = {}
     sync_done = asyncio.Event()
 
@@ -525,7 +525,7 @@ async def test_agent_modal_submit_does_not_rename(
 async def test_add_mcp_modal_requires_all_three_fields(
     monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> None:
-    """D-16: MA SDK couples auth to URL — all three required."""
+    """MA SDK couples auth to URL — all three required."""
 
     async def fake_reconcile(runtime: Any, state: PanelState, *, tenant_id: uuid.UUID) -> Any:
         return MagicMock()
@@ -602,7 +602,7 @@ async def test_add_mcp_modal_appends_to_spec_and_reconciles(
 async def test_add_mcp_modal_stores_auth_token_masked_in_state(
     monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> None:
-    """D-08: auth token masked in panel; never logged plaintext."""
+    """Auth token masked in panel; never logged plaintext."""
 
     async def fake_reconcile(runtime: Any, state: PanelState, *, tenant_id: uuid.UUID) -> Any:
         return MagicMock()
@@ -892,7 +892,7 @@ async def test_add_mcp_modal_resubmit_replaces_prior_vault_credential(
 async def test_skill_modal_toasts_success_on_all_synced(
     monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> None:
-    """PHASE-45-MODAL-ERR-01: all-success sync must produce an ephemeral success toast."""
+    """All-success sync must produce an ephemeral success toast."""
 
     async def fake_kickoff(
         runtime: Any, *, tenant_id: uuid.UUID, account_id: uuid.UUID, agent_name: str, repo_url: str
@@ -929,7 +929,7 @@ async def test_skill_modal_toasts_success_on_all_synced(
 async def test_skill_modal_toasts_partial_on_mixed_result(
     monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> None:
-    """PHASE-45-MODAL-ERR-01: partial sync (some ok, some failed) must produce a warning toast."""
+    """Partial sync (some ok, some failed) must produce a warning toast."""
 
     async def fake_kickoff(
         runtime: Any, *, tenant_id: uuid.UUID, account_id: uuid.UUID, agent_name: str, repo_url: str
@@ -965,7 +965,7 @@ async def test_skill_modal_toasts_partial_on_mixed_result(
 async def test_skill_modal_toasts_failure_on_all_failed(
     monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> None:
-    """PHASE-45-MODAL-ERR-01: all-failed sync (skipped repo) must produce a failure toast."""
+    """All-failed sync (skipped repo) must produce a failure toast."""
 
     async def fake_kickoff(
         runtime: Any, *, tenant_id: uuid.UUID, account_id: uuid.UUID, agent_name: str, repo_url: str
@@ -1000,7 +1000,7 @@ async def test_skill_modal_toasts_failure_on_all_failed(
 async def test_skill_modal_toasts_failure_on_exception(
     monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> None:
-    """PHASE-45-MODAL-ERR-01: exception during sync must still produce an
+    """Exception during sync must still produce an
     ephemeral failure toast (boundary catch preserved)."""
 
     async def fake_kickoff(
@@ -1204,7 +1204,7 @@ async def test_pat_bind_skips_visibility_check(
     )
 
 
-# ----- 12. D-06 App-coverage detection on the no-PAT bind path -----
+# ----- 12. App-coverage detection on the no-PAT bind path -----
 
 
 @pytest.mark.asyncio

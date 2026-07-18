@@ -6,7 +6,7 @@ Covers:
 - load_billing_snapshot member path (is_admin=False) — real DB, no member rows
 - load_billing_snapshot admin path (is_admin=True) — real DB, rows sorted by
   (-cost, platform_user_id) capped at 25
-- build_billing_container renders top-up static_select ONLY when is_admin (D-02)
+- build_billing_container renders top-up static_select ONLY when is_admin
 - empty-period clean render (zero usage produces a no-usage line, not an error)
 
 Real Postgres via the db_session / db_session_factory fixtures. No method-level
@@ -178,7 +178,7 @@ async def test_load_billing_snapshot_member_returns_only_caller_data(
     assert state.caller_user_id == _CALLER_ID, "caller_user_id must match the caller"
     assert state.caller_spend > 0.0, "caller_spend must be positive (seeded usage event)"
     assert state.caller_turns == 1, "caller_turns must be 1 (one seeded session)"
-    assert len(state.member_rows) == 0, "member path must return no member rows (D-09 self-only)"
+    assert len(state.member_rows) == 0, "member path must return no member rows (self-only)"
     assert state.guild_spend == 0.0, "member path must return zero guild_spend"
     assert state.guild_turns == 0, "member path must return zero guild_turns"
     assert state.guild_distinct_members == 0, "member path must return zero guild_distinct_members"
@@ -283,7 +283,7 @@ async def test_load_billing_snapshot_member_empty_period(
 
 
 # ---------------------------------------------------------------------------
-# Views: build_billing_container — top-up select admin gate (D-02)
+# Views: build_billing_container — top-up select admin gate
 # ---------------------------------------------------------------------------
 
 
@@ -372,16 +372,14 @@ def test_build_billing_container_renders_topup_select_for_admin() -> None:
 
 
 def test_build_billing_container_omits_topup_select_for_member() -> None:
-    """Member view must NOT include a top-up select (D-02)."""
+    """Member view must NOT include a top-up select."""
     from daimon.adapters.slack.billing_panel.views import build_billing_container
 
     state = _make_member_state()
     blocks = build_billing_container(state, now=_NOW, since=_SINCE)
 
     topup = _find_topup_select(blocks)
-    assert topup is None, (
-        "build_billing_container must NOT render top-up select for a non-admin (D-02)"
-    )
+    assert topup is None, "build_billing_container must NOT render top-up select for a non-admin"
 
 
 def test_build_billing_container_empty_period_renders_cleanly() -> None:

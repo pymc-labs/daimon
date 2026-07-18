@@ -348,7 +348,7 @@ def test_build_l2_view_private_metadata_has_no_tenant_id() -> None:
 
 
 # ---------------------------------------------------------------------------
-# build_secrets_section — secret-names-only (D-09) — selectable with -k secret
+# build_secrets_section — secret-names-only — selectable with -k secret
 # ---------------------------------------------------------------------------
 
 
@@ -377,7 +377,7 @@ def test_secrets_section_never_renders_fictional_secret_value() -> None:
     serialized = json.dumps(blocks)
     assert sentinel_value not in serialized, (
         "a fictional secret value must not appear in any rendered block "
-        "(secret hygiene D-09: build_secrets_section accepts names only)"
+        "(secret hygiene: build_secrets_section accepts names only)"
     )
 
 
@@ -405,7 +405,7 @@ def test_secrets_section_keys_only_no_values_parameter_in_signature() -> None:
     overlap = param_names & forbidden
     assert not overlap, (
         f"build_secrets_section must not accept any value parameters, "
-        f"found: {overlap} (D-09 structural guarantee)"
+        f"found: {overlap} (structural guarantee)"
     )
 
 

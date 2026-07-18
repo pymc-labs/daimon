@@ -1,6 +1,6 @@
-"""Webhook route scaffold — INFRA-01 healthz regression guard.
+"""Webhook route scaffold — healthz regression guard.
 
-Phase 20-07 turned the Stripe webhook from a 501 placeholder into a real
+The Stripe webhook was turned from a 501 placeholder into a real
 handler; the placeholder test was removed. The Stripe handler's behavior
 lives in `test_webhooks_stripe.py`.
 """

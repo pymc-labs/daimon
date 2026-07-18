@@ -1,13 +1,13 @@
-"""Pure Block Kit view builders for the /agent-setup modal stack (SUX-01, Phase 83).
+"""Pure Block Kit view builders for the /agent-setup modal stack.
 
 All functions return plain ``dict[str, Any]`` objects — no ``slack_sdk.models``
 types (project convention). This module imports only stdlib + ``state.py`` +
 ``daimon.adapters.slack.mrkdwn`` (no slack_sdk, no daimon.core). No I/O.
 
 Structural Guarantees enforced here:
-  #1 (D-09): ``build_secrets_section`` accepts ``secret_names: list[str]`` ONLY.
+  #1: ``build_secrets_section`` accepts ``secret_names: list[str]`` ONLY.
              Secret VALUES never appear as a parameter, in a block, block_id, or action_id.
-  #4 (D-08): PAT/MCP token display is ``****{last4}`` — builders receive the
+  #4: PAT/MCP token display is ``****{last4}`` — builders receive the
              pre-masked string; raw tokens are never a parameter.
 
 Block Kit limits:
@@ -54,7 +54,7 @@ _SECRET_CAP = 20
 
 
 def build_loading_view(*, team_id: str, channel_id: str) -> dict[str, Any]:
-    """Lightweight loading modal opened immediately with trigger_id (D-06).
+    """Lightweight loading modal opened immediately with trigger_id.
 
     Opened via ``views.open``; caller captures ``resp["view"]["id"]`` then
     ``views.update`` with the real content once loaded.
@@ -372,7 +372,7 @@ def build_l2_view(
     """Build the L2 section editor: header + tabs + section content.
 
     Section tab switches use ``views.update`` (not ``views.push``) to swap L2
-    in place - preserving the level-3 push budget for input forms (D-01, D-02).
+    in place - preserving the level-3 push budget for input forms.
 
     The active tab gets ``"style": "primary"`` to orient the user after each swap.
 
@@ -728,7 +728,7 @@ def build_secrets_section(
 ) -> list[dict[str, Any]]:
     """Build the Secrets section blocks for the L2 editor.
 
-    STRUCTURAL GUARANTEE (D-09, Threat T-83-03): this function accepts
+    STRUCTURAL GUARANTEE: this function accepts
     ``secret_names: list[str]`` ONLY. Secret VALUES are never a parameter,
     never appear in any block, block_id, or action_id. Key names render as
     `` `KEY` · `KEY2` `` chips; empty state renders a collapse hint.

@@ -27,7 +27,7 @@ def _make_client() -> AsyncWebClient:
 
 
 async def test_build_context_xml_calls_conversations_replies_with_limit_100() -> None:
-    """build_context_xml should call conversations_replies with limit=100 (D-02)."""
+    """build_context_xml should call conversations_replies with limit=100."""
     with AioResponsesMock() as mock:
         mock.get(
             _REPLIES_PATTERN,

@@ -97,7 +97,7 @@ def _build_roster_entry(
     carries the resolved MA skill id, so we translate via `custom_skill_titles`
     (id → bare-name map built by the caller; only this tenant's skills are
     present). The save path re-prefixes bare names to canonical titles via
-    `resolve_refs(tenant_id=...)` (D-02 chokepoint threaded by plan 71-03).
+    `resolve_refs(tenant_id=...)` (chokepoint).
     Without the translation, `reconcile_agent`'s `resolve_refs` would try to
     look up the MA id as a bare name and fail.
 
@@ -152,7 +152,7 @@ async def _build_custom_skill_title_map(
 ) -> dict[str, str]:
     """Return MA-skill-id → bare authoring name for this tenant's custom skills.
 
-    Uses list_skills_lenient (D-13) for the single skills.list call so
+    Uses list_skills_lenient for the single skills.list call so
     truncation is observable (structlog warning + Sentry) but non-fatal in
     this read context. Only includes skills whose display_title carries this
     tenant's prefix — foreign-tenant and unprefixed-legacy skills are excluded.
@@ -182,7 +182,7 @@ async def load_tenant_roster(
 
     Every member of the guild sees the same roster (guild-account-owned,
     legacy user-stamped, and unstamped system agents alike). The per-user
-    account filter (Phase 40) is retired: SC-1.
+    account filter is retired.
 
     Defaults-managed agents (daimon_managed="true") carry is_system=True so the
     panel gates edit/delete on that flag; guild seed also stamps daimon_account
@@ -213,7 +213,7 @@ async def load_selected_github_login(
 ) -> str | None:
     """Return the GitHub login linked to ``entry``'s agent, or None.
 
-    Reads the per-agent overlay (D-25, overlay-only — no principal-default
+    Reads the per-agent overlay (overlay-only — no principal-default
     bleed). Display only: the token is never read or decrypted. None when
     nothing is selected, the agent isn't created yet (New/Fork), or no
     credential is linked for that agent.
@@ -234,7 +234,7 @@ async def call_reconcile_for_panel(
     """Reconcile the currently-selected agent.
 
     Propagates `account_id` (per-user metadata stamp) and `public_url`
-    (Phase 34 default-MCP merge). Raises DaimonError if nothing is selected.
+    (default-MCP merge). Raises DaimonError if nothing is selected.
     """
     if state.selected is None:
         raise DaimonError("No agent selected; cannot reconcile.")
@@ -331,7 +331,7 @@ async def create_blank_agent(
 
     Tenant-scoped name uniqueness: rejects if `name` already exists anywhere in
     this tenant, regardless of owner. Agent names are tenant-wide identity —
-    reconcile dedup and the resolver key on (tenant, name) only (D-72-01).
+    reconcile dedup and the resolver key on (tenant, name) only.
     """
     collisions = await find_agents_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
     if collisions:
@@ -381,7 +381,7 @@ async def fork_agent(
     Rejects if `new_name` exists ANYWHERE in this tenant, regardless of owner —
     agent names are tenant-wide identity. Reconcile dedup and the resolver key
     on (tenant, name) only, so a same-name agent from any owner would collide
-    at the identity layer (D-72-01).
+    at the identity layer.
     """
     collisions = await find_agents_by_daimon_tag(
         runtime.anthropic, tenant_id=tenant_id, name=new_name
@@ -442,20 +442,20 @@ async def _copy_credential_and_repo_binding(
     fork_agent_uuid: uuid.UUID,
 ) -> None:
     """Re-key the source's per-agent GitHub credential onto the fork and copy
-    its repo binding (MPP-02, D-01..D-04).
+    its repo binding.
 
-    Generic per-server copy (D-01): today the only credential-backed MCP
+    Generic per-server copy: today the only credential-backed MCP
     server mechanism is the per-agent GitHub PAT overlay driving the repo
     clone at session-create time; this helper is the single place that
     mechanism is re-keyed, so adding a second credential-backed kind later is
     additive here rather than a new github-specific branch in `fork_agent`.
 
-    D-02: the fork's credential is written under `principal_id=fork_agent_uuid`
+    The fork's credential is written under `principal_id=fork_agent_uuid`
     — never aliased to the source principal — mirroring `store_inline_pat`.
-    D-03: the repo binding is copied with `ma_secret_ref` rewritten to the
+    The repo binding is copied with `ma_secret_ref` rewritten to the
     fork's own `inline-pat:` ref for private repos; `anon:` (and any other
     non-inline-pat ref) is copied verbatim.
-    D-04: a source binding backed by `inline-pat:` with no resolvable/
+    A source binding backed by `inline-pat:` with no resolvable/
     decryptable source credential fails the fork loud.
     """
     async with runtime.sessionmaker() as session:
@@ -513,7 +513,7 @@ async def delete_agent(runtime: DiscordRuntime, *, tenant_id: uuid.UUID, name: s
 
 
 def _build_runtime_fernet(runtime: DiscordRuntime) -> MultiFernet:
-    """Build a MultiFernet from `runtime.settings.crypto.keys` (Phase 18)."""
+    """Build a MultiFernet from `runtime.settings.crypto.keys`."""
     keys = tuple(secret.get_secret_value() for secret in runtime.settings.crypto.keys)
     return build_multifernet(keys)
 
@@ -527,7 +527,7 @@ async def store_inline_pat(
 ) -> str:
     """Fernet-encrypt the inline PAT and write a per-agent credential overlay.
 
-    D-25: the credential is stored under principal_id=agent_id (per-agent principal),
+    The credential is stored under principal_id=agent_id (per-agent principal),
     and an agent_github_binding(agent_id -> agent_id) overlay row is written so that
     get_pat(agent_id=agent_id) resolves exactly this credential. Connecting GitHub for
     Agent A does not let Agent B resolve the PAT.
@@ -536,7 +536,7 @@ async def store_inline_pat(
     """
     fernet = _build_runtime_fernet(runtime)
     # Write the per-agent credential (principal = agent_id) and the overlay binding.
-    # After this, get_pat(agent_id=agent_id) resolves exactly this token (D-25).
+    # After this, get_pat(agent_id=agent_id) resolves exactly this token.
     await upsert_credential_encrypted(
         sessionmaker=runtime.sessionmaker,
         fernet=fernet,
@@ -559,7 +559,7 @@ async def kick_off_skill_sync(
     agent_name: str,
     repo_url: str,
 ) -> SyncReport:
-    """Invoke Phase 33's `sync_agent_skills` for one repo + the selected agent.
+    """Invoke `sync_agent_skills` for one repo + the selected agent.
 
     The caller wraps in `asyncio.create_task` to fire-and-forget. Builds a
     fresh `httpx.AsyncClient` (closed when the task completes) so the orchestrator

@@ -4,7 +4,7 @@ Covers:
 - _is_admin_signal pure decision: each of is_admin / is_owner / is_primary_owner
   independently resolves to True; all-False resolves to False.
 - resolve_is_admin shell call: admin user → True; regular member → False;
-  users.info failure (SlackApiError) → False with no re-raise (D-02 fail-closed).
+  users.info failure (SlackApiError) → False with no re-raise (fail-closed).
 
 Transport-level fakes only (aioresponses, via fresh contexts per test).
 No AsyncMock on client.* methods.
@@ -112,7 +112,7 @@ async def test_resolve_is_admin_returns_false_when_users_info_reports_regular_me
 
 @pytest.mark.asyncio
 async def test_resolve_is_admin_returns_false_and_does_not_raise_on_slack_api_error() -> None:
-    """resolve_is_admin returns False (fail-closed, D-02) when users.info fails.
+    """resolve_is_admin returns False (fail-closed) when users.info fails.
 
     The SlackApiError must not propagate — the adapter boundary absorbs it.
     """

@@ -1,6 +1,6 @@
 """Tests for privacy_panel/actions.py — the "Disconnect Slack" block action.
 
-Covers handle_privacy_block_action's privacy_slack_disconnect branch (D-05
+Covers handle_privacy_block_action's privacy_slack_disconnect branch
 ordering: delete the slack_user_tokens row first, then best-effort revoke,
 then views.update either way):
 

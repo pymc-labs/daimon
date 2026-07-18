@@ -1,9 +1,9 @@
-"""Slack /help handler (SUX-05, D-07).
+"""Slack /help handler.
 
 Pure `build_help_blocks()` returns raw Block Kit section dicts listing the
 four admin commands and the @bot configure-by-chat entrypoint.
 
-`handle_help_command` posts an ephemeral message (D-07: no modal, no trigger_id).
+`handle_help_command` posts an ephemeral message (no modal, no trigger_id).
 Text constants ported verbatim from the Discord `commands/help.py` and adapted
 to Slack mrkdwn syntax.
 
@@ -62,7 +62,7 @@ def build_help_blocks() -> list[dict[str, Any]]:
 
 
 async def handle_help_command(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """Ephemeral /help handler (D-07 — no modal, no trigger_id).
+    """Ephemeral /help handler.
 
     Ack-first contract: called from app.on_request AFTER the Socket Mode ack.
     Resolves the per-event web client, then posts a chat.postEphemeral containing

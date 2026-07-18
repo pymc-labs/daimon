@@ -27,7 +27,7 @@ async def main() -> None:
         log.info("discord adapter disabled", reason="no bot token")
         sys.exit(0)
     # Configure the JSON log chain BEFORE the first log line so it takes effect.
-    # This entrypoint owns the call site (Phase 61 unexecuted).
+    # This entrypoint owns the call site.
     configure_log_level(settings.log.level)
     init_sentry(
         dsn=settings.sentry.dsn.get_secret_value() if settings.sentry.dsn else None,
@@ -46,7 +46,7 @@ async def main() -> None:
             with contextlib.suppress(NotImplementedError):
                 loop.add_signal_handler(sig, lambda: asyncio.create_task(bot._drain_and_close()))  # pyright: ignore[reportPrivateUsage]  # entrypoint owns the bot lifecycle
         # OB-3 liveness responder on the loop asyncio.run() created (co-location is
-        # the D-06 property — a hung loop fails the probe and Fly restarts us).
+        # the property that a hung loop fails the probe and Fly restarts us).
         health_server = await start_liveness_responder(settings.discord.health_port)
         log.info("starting_discord_bot")
         try:

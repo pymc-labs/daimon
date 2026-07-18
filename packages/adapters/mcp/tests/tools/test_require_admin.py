@@ -1,4 +1,4 @@
-"""Tests for _require_admin ToolError gate (Phase 50 RBAC-02).
+"""Tests for _require_admin ToolError gate.
 
 Covers:
   - _require_admin helper itself (Wave-0 contract)
@@ -53,7 +53,7 @@ def test_require_admin_raises_tool_error_when_not_admin() -> None:
     with pytest.raises(ToolError) as exc_info:
         _require_admin(auth)
     assert str(exc_info.value) == _D28_MESSAGE, (
-        "non-admin chat caller must be refused with the D-28 message"
+        "non-admin chat caller must be refused with the admin-required message"
     )
 
 
@@ -95,7 +95,7 @@ async def test_create_agent_impl_raises_when_not_admin() -> None:
     with pytest.raises(ToolError) as exc_info:
         await _create_agent_impl(runtime, auth, spec)
     assert str(exc_info.value) == _D28_MESSAGE, (
-        "_create_agent_impl must refuse non-admin with D-28 message"
+        "_create_agent_impl must refuse non-admin with admin-required message"
     )
 
 
@@ -152,7 +152,7 @@ async def test_self_write_file_impl_raises_when_not_admin() -> None:
     with pytest.raises(ToolError) as exc_info:
         await _self_write_file_impl(runtime, auth, key="config.yaml", content="hello")
     assert str(exc_info.value) == _D28_MESSAGE, (
-        "_self_write_file_impl must refuse non-admin with D-28 message"
+        "_self_write_file_impl must refuse non-admin with admin-required message"
     )
 
 
@@ -204,7 +204,9 @@ async def test_sync_impl_raises_when_not_admin() -> None:
     )
     with pytest.raises(ToolError) as exc_info:
         await _sync_impl(runtime, auth, "https://github.com/x/y", "main", "")
-    assert str(exc_info.value) == _D28_MESSAGE, "_sync_impl must refuse non-admin with D-28 message"
+    assert str(exc_info.value) == _D28_MESSAGE, (
+        "_sync_impl must refuse non-admin with admin-required message"
+    )
 
 
 async def test_list_impl_does_not_raise_admin_gate_for_non_admin() -> None:
@@ -273,7 +275,7 @@ async def test_create_environment_impl_raises_when_not_admin() -> None:
     with pytest.raises(ToolError) as exc_info:
         await _create_environment_impl(_env_runtime(MagicMock(spec=AsyncAnthropic)), auth, spec)
     assert str(exc_info.value) == _D28_MESSAGE, (
-        "_create_environment_impl must refuse non-admin with D-28 message"
+        "_create_environment_impl must refuse non-admin with admin-required message"
     )
 
 
@@ -297,7 +299,7 @@ async def test_update_environment_impl_raises_when_not_admin() -> None:
             description="x",
         )
     assert str(exc_info.value) == _D28_MESSAGE, (
-        "_update_environment_impl must refuse non-admin with D-28 message"
+        "_update_environment_impl must refuse non-admin with admin-required message"
     )
 
 
@@ -312,7 +314,7 @@ async def test_archive_environment_impl_raises_when_not_admin() -> None:
     with pytest.raises(ToolError) as exc_info:
         await _archive_environment_impl(_env_runtime(MagicMock(spec=AsyncAnthropic)), auth, "e")
     assert str(exc_info.value) == _D28_MESSAGE, (
-        "_archive_environment_impl must refuse non-admin with D-28 message"
+        "_archive_environment_impl must refuse non-admin with admin-required message"
     )
 
 

@@ -1,14 +1,14 @@
-"""get_cli_token MCP tool — Phase 19, GH-03.
+"""get_cli_token MCP tool.
 
 The agent calls this tool from inside its MA sandbox. Identity comes
 from the JWT middleware: ``auth.account_id`` (always populated) and
 ``auth.agent_id`` (populated when the JWT was minted for an agent
-session — see CONTEXT.md D-10/D-27). The tool dispatches to the
+session — the tool dispatches to the
 broker, audit-logs metadata, and returns the plaintext token.
 
 The CLI never calls this tool. (The former ``daimon auth github`` OAuth
 flow and its ``/oauth/github/*`` + ``/cli/auth/status`` routes were removed
-in Phase 97 — repo credentials now come from the GitHub App or a bound PAT.)
+— repo credentials now come from the GitHub App or a bound PAT.)
 
 Audit log invariant (T-19-04-02): the token plaintext NEVER appears in
 any log line emitted by this module. The combined-log integration test

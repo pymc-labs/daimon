@@ -5,7 +5,7 @@ Builds XML context from a Slack thread's message history via
 responding in an existing thread.
 
 Mirrors ``packages/adapters/discord/daimon/adapters/discord/context.py``:
-- ``build_context_xml``: first-turn fetch, capped at 100 messages (D-02).
+- ``build_context_xml``: first-turn fetch, capped at 100 messages.
 - ``build_delta_xml``: continuation fetch, delta since the watermark timestamp.
 
 All message text is escaped via ``xml.sax.saxutils`` (T-80-XML mitigation).
@@ -79,12 +79,12 @@ async def build_context_xml(
 ) -> str:
     """Build XML context from thread history for the first turn.
 
-    Fetches up to 100 messages via ``conversations.replies`` (D-02 cap,
+    Fetches up to 100 messages via ``conversations.replies`` (cap
     mirroring Discord ``build_context_xml(limit=100)``).  Returns a string
     with a ``<context>/<thread_history>`` block containing the replayed
     messages followed by a ``<user_query>`` element.
 
-    Truncation note (D-02): ``conversations.replies`` with no cursor returns
+    Truncation note: ``conversations.replies`` with no cursor returns
     the *first* page — the oldest 100 messages ascending from the thread root.
     For threads longer than 100 messages the model does not see recent messages.
     This is deliberate (mirrors Discord's 100-message cap) and avoids the

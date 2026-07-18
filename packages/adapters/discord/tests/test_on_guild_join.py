@@ -1,10 +1,10 @@
-"""Tests for the two-phase on_guild_join handler (D-01) + welcome channel fallback (D-04).
+"""Tests for the two-phase on_guild_join handler + welcome channel fallback.
 
 Covers VALIDATION invariants:
 - provision_idempotent: a re-join provisions exactly one Tenant + Account.
 - tenant_deterministic: the provisioned tenant_id == derive_tenant_uuid(platform, workspace_id).
 - provisioning_pending: join sets status 'pending', the bg seed (_seed_tenant_defaults) flips
-  it ready/failed (D-07), and a terminal-failure run posts the "snag" follow-up (never "failed").
+  it ready/failed, and a terminal-failure run posts the "snag" follow-up (never "failed").
 
 The MA reconcile is patched at the bot-module boundary (`reconcile_tenant_defaults`).
 Here we assert the bot's two-phase control flow + the status flip owned by _seed_tenant_defaults.
@@ -123,7 +123,7 @@ async def test_on_guild_join_provisions_pending_then_seeds_ready(
     with patch(
         "daimon.adapters.discord.bot.reconcile_tenant_defaults", new_callable=AsyncMock
     ) as mock_reconcile:
-        # _seed_tenant_defaults owns the status flip (D-07); emulate a successful reconcile.
+        # _seed_tenant_defaults owns the status flip; emulate a successful reconcile.
         mock_reconcile.return_value = ApplyReport()
 
         await bot.on_guild_join(guild)
@@ -294,7 +294,7 @@ async def test_on_guild_join_failed_posts_snag_followup(
     with patch(
         "daimon.adapters.discord.bot.reconcile_tenant_defaults", new_callable=AsyncMock
     ) as mock_reconcile:
-        # _seed_tenant_defaults owns the status flip (D-07); return the failing report.
+        # _seed_tenant_defaults owns the status flip; return the failing report.
         mock_reconcile.return_value = failing_report
 
         await bot.on_guild_join(guild)
@@ -413,7 +413,7 @@ async def test_on_guild_join_rejoin_clears_archived_at(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """#132 (D-72-02): on_guild_join must clear archived_at so the re-joined guild
+    """on_guild_join must clear archived_at so the re-joined guild
     can reach 'ready' without a wasted first mention that triggers ensure_provisioning."""
     runtime = _make_runtime(db_session_factory)
     bot = _make_bot(runtime)

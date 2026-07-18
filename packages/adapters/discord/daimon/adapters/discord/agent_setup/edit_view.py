@@ -1,11 +1,11 @@
 """EditView (LayoutView) + selects + BackButton + open_edit_view launcher.
 
-Moved verbatim from panel.py (plan 70-05, Task 1).
-V2 migration (plan 70-06): classic View → LayoutView, Auth… merge.
+Moved verbatim from panel.py.
+V2 migration: classic View → LayoutView, Auth… merge.
 
-Phase 97 removed the Connect-GitHub (OAuth) button (D-03) — the Auth… button
+The Connect-GitHub (OAuth) button was removed — the Auth… button
 now opens a single-option ephemeral follow-up (Paste a PAT…) that writes the
-per-agent github_credentials slot (D-25).
+per-agent github_credentials slot.
 """
 
 from __future__ import annotations
@@ -284,8 +284,8 @@ class _McpRemoveSelect(discord.ui.Select["EditView"]):
 class _AuthFollowUpView(discord.ui.LayoutView):
     """Ephemeral follow-up for the Auth… button: Paste a PAT… (modal).
 
-    Phase 97 removed the Connect-GitHub (OAuth) option (D-03); this now
-    writes the per-agent github_credentials slot (D-25) via the PAT modal
+    The Connect-GitHub (OAuth) option was removed; this now
+    writes the per-agent github_credentials slot via the PAT modal
     only.
     """
 
@@ -346,9 +346,9 @@ class EditView(discord.ui.LayoutView):
     row: + Add skill · + Add MCP · Auth… · Secrets · ← Back.
 
     Auth… opens an ephemeral follow-up (Paste a PAT…) that binds a per-agent
-    GitHub PAT (Phase 97 removed the Connect-GitHub OAuth option, D-03).
+    GitHub PAT (Connect-GitHub OAuth option removed).
 
-    Preserves the Phase 46 isolation invariant: this view is ephemeral and
+    Preserves the isolation invariant: this view is ephemeral and
     never edits the main panel message. Mutations re-render this view via
     ``interaction.edit_original_response`` only.
     """
@@ -421,7 +421,7 @@ class EditView(discord.ui.LayoutView):
 
         # Defensive read-only gate: system agents can never reach EditView (the
         # main panel disables Edit for them), so this `disabled` is belt-and-
-        # braces (D-11).
+        # braces (defensive).
         is_system = bool(state.selected and state.selected.is_system)
         secrets_btn: discord.ui.Button[EditView] = discord.ui.Button(
             label="Secrets",

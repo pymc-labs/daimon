@@ -33,7 +33,7 @@ def _make_runtime(
     tenant_id: uuid.UUID,
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> DiscordRuntime:
-    _ = tenant_id  # runtime no longer carries tenant_id (D-06)
+    _ = tenant_id  # runtime no longer carries tenant_id
     settings = MagicMock()
     settings.mcp = McpSettings()
     discord_settings = MagicMock()
@@ -431,7 +431,7 @@ async def test_multi_author_queue_partitions_into_per_author_turns(
 
 
 # ---------------------------------------------------------------------------
-# CLB-02 (#170): error boundaries must never let a mention drop silently.
+# Error boundaries must never let a mention drop silently.
 # ---------------------------------------------------------------------------
 
 
@@ -521,7 +521,7 @@ async def test_on_message_prologue_failure_never_escapes_and_sends_error(
 
 
 # ---------------------------------------------------------------------------
-# CLB-03 (#163): a bot-created thread must be mutex-registered from the
+# A bot-created thread must be mutex-registered from the
 # instant it's created (inside _orchestrate) through drain, so an in-thread
 # follow-up mention that arrives during the originating channel-mention turn
 # queues instead of racing a second turn onto the same thread's session.
@@ -540,7 +540,7 @@ async def test_on_message_prologue_failure_never_escapes_and_sends_error(
 async def test_channel_mention_thread_registers_and_followup_queues(
     queued_bot: DaimonBot,
 ) -> None:
-    """CLB-03 failure mode (a): concurrent turn on the same session.
+    """Failure mode (a): concurrent turn on the same session.
 
     On main, the bot-created thread never enters self._processing (it's only
     known inside _orchestrate's local `thread` variable), so a follow-up
@@ -658,7 +658,7 @@ async def test_channel_branch_processing_registration_does_not_leak_on_exception
     queued_bot: DaimonBot,
 ) -> None:
     """Defense-in-depth: even if an exception escapes _handle_mention (real
-    code never lets this happen post-CLB-02 -- its own boundary catches
+    code never lets this happen -- its own boundary catches
     everything), on_message's channel-branch finally must still discard/pop
     the registered thread id so self._processing never leaks a stale entry.
     """
@@ -682,7 +682,7 @@ async def test_channel_branch_processing_registration_does_not_leak_on_exception
 
     channel_msg = _make_channel_message(content="first")
 
-    await queued_bot.on_message(channel_msg)  # must not raise (CLB-02 outer boundary)
+    await queued_bot.on_message(channel_msg)  # must not raise (outer boundary)
 
     assert thread_id not in queued_bot._processing, (  # pyright: ignore[reportPrivateUsage]
         "a registered thread id must never leak into _processing"
@@ -694,7 +694,7 @@ async def test_channel_branch_processing_registration_does_not_leak_on_exception
 async def test_queued_followup_drains_even_when_originating_turn_fails(
     queued_bot: DaimonBot,
 ) -> None:
-    """CLB-03 failure mode (b) / drain-on-failure: a follow-up mention queued
+    """Failure mode (b) / drain-on-failure: a follow-up mention queued
     behind a bot-created thread whose originating turn subsequently FAILS
     must still get its drain turn -- never silently discarded.
 
@@ -753,7 +753,7 @@ async def test_queued_followup_drains_even_when_originating_turn_fails(
 
 
 # ---------------------------------------------------------------------------
-# CLB-04: attachments on ALL of an author's queued messages must reach the
+# Attachments on ALL of an author's queued messages must reach the
 # composite drain turn, not just author_msgs[0]'s.
 # ---------------------------------------------------------------------------
 

@@ -1,9 +1,9 @@
 """Tests for `daimon routines backfill-agent-names`.
 
-Plan 38-06 flipped `routines.agent_name` to NOT NULL — no row can be in the
-"missing agent_name" state any more, so the backfill is now a permanent no-op
-preserved as harmless dead code (operators no longer need to run it). These
-tests verify that the command runs cleanly when there is nothing to do.
+Migration 0012 flipped `routines.agent_name` to NOT NULL — no row can be in
+the "missing agent_name" state any more, so the backfill is now a permanent
+no-op that operators no longer need to run. These tests verify that the
+command runs cleanly when there is nothing to do.
 
 History: the rich behavior matrix (metadata-lookup, 404 fallback, archived
 fallback, idempotency, dry-run, 5xx, missing-daimon-name fallback) was

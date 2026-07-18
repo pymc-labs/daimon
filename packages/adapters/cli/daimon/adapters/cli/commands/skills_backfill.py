@@ -2,14 +2,14 @@
 
 For each tenant whose agents pin legacy (un-prefixed or `{agent}/{name}`-shaped)
 skills: re-create under the canonical tenant-prefixed title, re-pin agents, then
-delete the legacy skill once no agent anywhere still references it (D-06/D-07/D-14).
+delete the legacy skill once no agent anywhere still references it.
 
 Content sources:
 - Seeded skills: rebuilt from the defaults/skills/<name>/ tree via build_skill_zip.
 - Synced skills: re-created from user_skills row provenance (source_repo_url/branch/path).
 - Unrecoverable rows: reported as MANUAL for operator decision.
 
-Never calls skills.list (D-14 — broken pagination). Enumerates via agent pins.
+Never calls skills.list (broken pagination). Enumerates via agent pins.
 Re-pins BEFORE deleting legacy (Pitfall 4). Idempotent: re-running after completion
 is a no-op.
 """
@@ -277,7 +277,7 @@ async def _plan_phase(
             user_skills_by_agent.setdefault(us.agent_name, []).append(us.name)
 
         agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
-        # Collect legacy skill ids pinned by this tenant's agents (D-14: by id, never skills.list)
+        # Collect legacy skill ids pinned by this tenant's agents (by id, never skills.list)
         # skill_id -> list of agent names that pin it
         pinned: dict[str, list[str]] = {}
         for agent in agents:
@@ -287,7 +287,7 @@ async def _plan_phase(
                     pinned.setdefault(skill_pin.skill_id, []).append(agent_name)
 
         for skill_id, agent_names in pinned.items():
-            # Retrieve by id (D-14: never skills.list)
+            # Retrieve by id (never skills.list)
             skill = await client.beta.skills.retrieve(skill_id)
             title = skill.display_title or ""
             classification = classify_skill(
@@ -421,7 +421,7 @@ async def _apply_phase(
             )
         )
 
-    # Pass 2: delete legacy skills — only after ALL re-pins (Pitfall 4 / D-07)
+    # Pass 2: delete legacy skills — only after ALL re-pins
     # Recompute the org-wide referenced set AFTER all re-pins
     if legacy_to_new:
         referenced_ids = await list_referenced_skill_ids(client)

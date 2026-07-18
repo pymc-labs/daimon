@@ -1,4 +1,4 @@
-"""Slack agent-setup panel — `/agent-setup` slash command surface (SUX-01).
+"""Slack agent-setup panel — `/agent-setup` slash command surface.
 
 Subpackage structure:
   state.py   — pure private_metadata (de)serialize + reducer functions (no I/O)

@@ -1,4 +1,4 @@
-"""Phase 23 SC-5 — env-gated live integration test for self-edit tools.
+"""env-gated live integration test for self-edit tools.
 
 The ``agent_files`` round-trip is local-Postgres only; the "live" aspect of
 this test is that the tool implementation runs through a real
@@ -9,7 +9,7 @@ MA confirms read-modify-write round-trip on ``agent_files``" — and
 round-trip while the runtime carries a real SDK client.
 
 A full SSE-driven, MA-agent-invokes-the-tool live test is the spike-020
-vertical slice (`.planning/spikes/020-self-edit-vertical-slice/main.py`,
+vertical slice (this directory's live integration tests,
 19/19 cases passing). That slice + this test together form the SC-5
 evidence trail.
 

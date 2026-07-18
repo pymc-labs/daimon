@@ -4,7 +4,7 @@
 this group; each closure delegates to a module-private ``_*_impl`` function
 that can be unit-tested without a FastMCP Context.
 
-These tools close the SC5 conversational-parity gap (Phase 83, D-07): there was no
+These tools close the conversational-parity gap: there was no
 MCP tool for propagation / set-default. The same core scoped-config writes that the
 modal scope picker uses (``set_fields`` / ``unset_fields`` / ``get_scope``) are now
 reachable conversationally via ``@bot help me set up``.

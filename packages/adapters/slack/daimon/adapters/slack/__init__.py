@@ -1,1 +1,1 @@
-"""Daimon Slack adapter. Phase 79."""
+"""Daimon Slack adapter."""

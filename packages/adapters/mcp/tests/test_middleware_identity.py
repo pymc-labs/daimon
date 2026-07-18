@@ -1,6 +1,6 @@
 """Middleware identity test via FastMCP's in-memory Client.
 
-agent-chat narrowing tests (Phase 77 PHASE-77-TOOLS-01) use HTTP ASGI
+agent-chat narrowing tests use HTTP ASGI
 transport because enable_components/disable_components require a real
 session context (per test_rbac.py convention).
 """
@@ -370,7 +370,7 @@ async def test_identity_middleware_rejects_missing_tenant_id(
 
 
 async def test_auth_identity_default_agent_id_is_none() -> None:
-    """AuthIdentity.agent_id defaults to None when not supplied (Phase 19)."""
+    """AuthIdentity.agent_id defaults to None when not supplied."""
     from daimon.core.stores.domain import Role
 
     identity = AuthIdentity(
@@ -384,12 +384,12 @@ async def test_auth_identity_default_agent_id_is_none() -> None:
 async def test_identity_middleware_populates_agent_id_when_claim_present(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Phase 19: middleware decodes the agent_id JWT claim into AuthIdentity.agent_id.
+    """Middleware decodes the agent_id JWT claim into AuthIdentity.agent_id.
 
-    Note: when agent_id is present, Phase 77 narrowing fires and hides all tools
+    Note: when agent_id is present, agent-chat narrowing fires and hides all tools
     that lack the "agent-chat" tag. The whoami tool here is tagged "agent-chat"
-    so it remains callable — the Phase 19 behavior (agent_id populated on
-    AuthIdentity) is unchanged; the Phase 77 narrowing is an additive layer.
+    so it remains callable — the base behavior (agent_id populated on
+    AuthIdentity) is unchanged; the agent-chat narrowing is an additive layer.
     """
     account_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
@@ -438,7 +438,7 @@ async def test_identity_middleware_populates_agent_id_when_claim_present(
 async def test_identity_middleware_agent_id_none_when_claim_absent(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Phase 19: when the agent_id resolver returns None, AuthIdentity.agent_id is None."""
+    """When the agent_id resolver returns None, AuthIdentity.agent_id is None."""
     account_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
     captured: list[AuthIdentity | None] = []
@@ -485,7 +485,7 @@ async def test_identity_middleware_agent_id_none_when_claim_absent(
 async def test_identity_middleware_agent_id_malformed_treated_as_absent(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Phase 19 (T-19-04-07): malformed agent_id claim is treated as absent.
+    """Malformed agent_id claim is treated as absent.
 
     Fail-closed: gcloud provider raises NoBindingError downstream.
     """
@@ -646,7 +646,7 @@ async def test_identity_middleware_platform_user_id_none_when_claim_absent(
 async def test_identity_middleware_populates_is_admin_from_claim(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Phase 88-03 (ADMIN-02): middleware sets AuthIdentity.is_admin=True when both is_admin and internal claims present (trusted internal token)."""
+    """Middleware sets AuthIdentity.is_admin=True when both is_admin and internal claims present (trusted internal token)."""
     account_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
     captured: list[AuthIdentity | None] = []
@@ -701,7 +701,7 @@ async def test_identity_middleware_populates_is_admin_from_claim(
 async def test_identity_middleware_defaults_is_admin_false_when_claim_absent(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Phase 50 (RBAC-02): middleware sets AuthIdentity.is_admin=False when is_admin claim absent."""
+    """Middleware sets AuthIdentity.is_admin=False when is_admin claim absent."""
     account_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
     captured: list[AuthIdentity | None] = []
@@ -748,7 +748,7 @@ async def test_identity_middleware_defaults_is_admin_false_when_claim_absent(
 
 
 # ---------------------------------------------------------------------------
-# Phase 77 PHASE-77-TOOLS-01: agent-chat narrowing + fail-closed guard
+# agent-chat narrowing + fail-closed guard
 #
 # These tests use HTTP ASGI transport (not in-memory Client) because
 # disable_components/enable_components need a real session context.
@@ -762,7 +762,7 @@ async def test_identity_middleware_agent_id_narrows_to_agent_chat_tools(
 
     The middleware calls disable_components(match_all=True) then
     enable_components(tags={"agent-chat"}), so only agent_tool is listed
-    and regular_tool is hidden (PHASE-77-TOOLS-01).
+    and regular_tool is hidden.
     """
     agent_id = uuid.uuid4()
     token = "agent-token"
@@ -863,7 +863,7 @@ async def test_identity_middleware_malformed_agent_id_fails_closed(
 
 
 # ---------------------------------------------------------------------------
-# Phase 88-03 ADMIN-01/ADMIN-02: live DB role OR internal-token is_admin gate
+# live DB role OR internal-token is_admin gate
 # ---------------------------------------------------------------------------
 
 
@@ -989,7 +989,7 @@ async def test_internal_token_is_admin_claim_still_grants_admin(
 
     role=user, is_admin claim True, internal claim True — the mint_internal_mcp_token
     shape (CLI/scheduler/headless). Admin must be preserved; stripping it entirely would
-    break the operator-level and routine-runner admin path (D-02/D-50b).
+    break the operator-level and routine-runner admin path.
     """
     account_id_c = uuid.uuid4()
     tenant_id_c = uuid.uuid4()

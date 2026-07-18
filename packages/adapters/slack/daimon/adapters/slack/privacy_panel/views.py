@@ -122,7 +122,7 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
 
 
 def build_loading_view() -> dict[str, Any]:
-    """Lightweight loading modal opened immediately with the trigger_id (D-06).
+    """Lightweight loading modal opened immediately with the trigger_id.
 
     Shown while the background task fetches account + preview + is_admin.
     """
@@ -240,7 +240,7 @@ def build_delete_modal(
     user_name: str,
     view_id: str,
 ) -> dict[str, Any]:
-    """Single delete confirmation modal (D-04).
+    """Single delete confirmation modal.
 
     Combines the cascade preview (what-will-be-deleted / stays-in-MA / kept-elsewhere)
     with a plain_text_input for typed-username confirmation in ONE modal.
@@ -287,7 +287,7 @@ def build_delete_modal(
 
 
 def build_deleting_view() -> dict[str, Any]:
-    """Transitional "Deleting…" modal view shown while purge_account runs (D-05).
+    """Transitional "Deleting…" modal view shown while purge_account runs.
 
     Returned via response_action="update" in the view_submission ack, then
     replaced by build_post_delete_view once the background purge completes.
@@ -308,10 +308,10 @@ def build_deleting_view() -> dict[str, Any]:
 
 
 def build_post_delete_view(result: AccountPurgeResult) -> dict[str, Any]:
-    """Final status modal view enumerating what was removed (D-05).
+    """Final status modal view enumerating what was removed.
 
     Port of privacy_panel/embeds.py:15-71 (Discord) adapted to Block Kit.
-    Always includes the D-09 carve-out disclosures (usage records, skill files,
+    Always includes the carve-out disclosures (usage records, skill files,
     GitHub OAuth authorization).
     """
     rows: list[str] = []
@@ -344,7 +344,7 @@ def build_post_delete_view(result: AccountPurgeResult) -> dict[str, Any]:
             "• ⚠ Session transcripts could not be deleted from Anthropic"
             " — contact the operator if you need them removed"
         )
-    # D-09 carve-out disclosures — always shown.
+    # Carve-out disclosures — always shown.
     rows += [
         "",
         "• Usage records are retained for service integrity and cannot be erased on request.",

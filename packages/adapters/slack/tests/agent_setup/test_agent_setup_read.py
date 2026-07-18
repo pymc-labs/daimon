@@ -1,6 +1,6 @@
 """Real-Postgres tests for agent_setup/read.py.
 
-Three behaviors (D-09 security invariant + roster cap + scope-hint copy):
+Three behaviors (security invariant + roster cap + scope-hint copy):
 (a) Names-only secret hygiene: load_section_data(section="secrets") returns key
     NAMES only — the secret value never appears in the result.
 (b) Roster cap-25 over_cap: load_tenant_roster caps at 25 entries when more
@@ -92,7 +92,7 @@ def _make_agent_payload(
 
 
 # ---------------------------------------------------------------------------
-# (a) Names-only secret hygiene (D-09 — the security invariant pyright cannot check)
+# (a) Names-only secret hygiene (the security invariant pyright cannot check)
 # ---------------------------------------------------------------------------
 
 
@@ -100,7 +100,7 @@ def _make_agent_payload(
 async def test_load_section_data_secrets_returns_key_names_only_and_value_is_absent(
     db_session: AsyncSession,
 ) -> None:
-    """secrets section must return key names only — values never leave the read layer (D-09)."""
+    """secrets section must return key names only — values never leave the read layer."""
     tenant_id = await _seed_tenant(db_session)
     _account_id = await _seed_account(db_session, tenant_id)
 
@@ -142,7 +142,7 @@ async def test_load_section_data_secrets_returns_key_names_only_and_value_is_abs
 
     # The result must be a list of strings (key names only)
     assert isinstance(result, list), (
-        "secrets section must return list of key names only — values never leave the read layer (D-09)"
+        "secrets section must return list of key names only — values never leave the read layer"
     )
     secret_names: list[str] = result  # type: ignore[assignment]
     assert secret_key in secret_names, "secrets section must include the key name 'API_TOKEN'"
@@ -150,7 +150,7 @@ async def test_load_section_data_secrets_returns_key_names_only_and_value_is_abs
     # The secret VALUE must never appear anywhere in the result
     serialized = repr(result)
     assert secret_value not in serialized, (
-        "secrets section must return key names only — values never leave the read layer (D-09)"
+        "secrets section must return key names only — values never leave the read layer"
     )
 
     # Verify there is no 'value' or 'val' field on the result items (result is list[str])
@@ -162,7 +162,7 @@ async def test_load_section_data_secrets_returns_key_names_only_and_value_is_abs
     # Negative check: the result should not contain the value even after json serialization
     json_serialized = json.dumps(secret_names)
     assert secret_value not in json_serialized, (
-        "secrets section values must not appear in any serialized form of the result (D-09)"
+        "secrets section values must not appear in any serialized form of the result"
     )
 
 

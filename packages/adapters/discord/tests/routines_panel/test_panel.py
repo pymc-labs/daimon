@@ -406,7 +406,7 @@ async def test_creator_can_pause(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_pause_callback_db_failure_sends_ephemeral_error_not_raise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CLB-02 (panel): a store failure inside the button callback must post an
+    """A store failure inside the button callback must post an
     ephemeral error to the clicking user instead of raising out of the
     callback (T-95-07/T-95-08)."""
     row = _make_row(

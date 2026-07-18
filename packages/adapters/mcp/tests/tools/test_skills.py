@@ -69,7 +69,7 @@ async def test_list_impl_returns_skill_info_list() -> None:
     assert isinstance(result, list), "should return a list"
     assert len(result) == 1, "should return one skill"
     assert isinstance(result[0], SkillInfo), "should return SkillInfo items"
-    assert result[0].name == "my-skill", "should return bare name stripped of tenant prefix (D-10)"
+    assert result[0].name == "my-skill", "should return bare name stripped of tenant prefix"
 
 
 async def test_get_impl_returns_skill_detail_with_version_count() -> None:
@@ -104,7 +104,7 @@ async def test_get_impl_returns_skill_detail_with_version_count() -> None:
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     result = await _get_impl(_runtime(client), auth, "found")
     assert isinstance(result, SkillDetail), "should return a SkillDetail"
-    assert result.name == "found", "should return the bare skill name (D-10)"
+    assert result.name == "found", "should return the bare skill name"
     assert result.version_count == 3, "should count all versions"
 
 
@@ -122,7 +122,7 @@ async def test_get_impl_raises_tool_error_not_found() -> None:
 
 
 async def test_list_impl_excludes_foreign_tenant_skill_and_includes_own_and_builtins() -> None:
-    """D-11: list_skills returns only the caller's namespace + anthropic built-ins."""
+    """list_skills returns only the caller's namespace + anthropic built-ins."""
     tenant_a = uuid.uuid4()
     tenant_b = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -173,12 +173,12 @@ async def test_list_impl_excludes_foreign_tenant_skill_and_includes_own_and_buil
 
     result_names = [r.name for r in result]
     assert "my-skill" in result_names, "own-namespace skill must appear with bare name"
-    assert "cli-auth" in result_names, "anthropic built-in must appear (D-11)"
+    assert "cli-auth" in result_names, "anthropic built-in must appear"
     assert foreign_skill_display_title not in result_names, (
-        "foreign tenant's display_title must NOT appear in list result (D-11)"
+        "foreign tenant's display_title must NOT appear in list result"
     )
     assert not any(foreign_skill_display_title in r.name for r in result), (
-        "foreign tenant title must be absent from all result entries (D-11)"
+        "foreign tenant title must be absent from all result entries"
     )
 
 
@@ -217,7 +217,7 @@ async def test_list_impl_synced_shaped_skill_displays_as_agent_slash_name() -> N
 
 
 async def test_get_impl_foreign_tenant_bare_name_raises_not_found() -> None:
-    """D-11: get_skill with a bare name belonging to another tenant raises ToolError not-found."""
+    """get_skill with a bare name belonging to another tenant raises ToolError not-found."""
     tenant_a = uuid.uuid4()
     tenant_b = uuid.uuid4()
     account_id = uuid.uuid4()

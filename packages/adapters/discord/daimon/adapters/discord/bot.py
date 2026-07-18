@@ -72,7 +72,7 @@ log = structlog.get_logger()
 
 _EMBED_COLOR = theme.COLOR_BLURPLE  # Blurple — repo standard (help.py D-FORMAT-01).
 
-# Grace window for graceful shutdown drain (D-20). Must match the deployment's
+# Grace window for graceful shutdown drain. Must match the deployment's
 # container kill/stop timeout of 60s. The drain polls _processing up to this
 # many seconds before calling close(), ensuring in-flight turns are not cut
 # mid-stream.
@@ -82,7 +82,7 @@ _DRAIN_GRACE_S: float = 60.0
 # still-provisioning state is never confused with a genuine misconfiguration.
 _SETTING_UP_MESSAGE = "Daimon is setting up this server — try again in a moment."
 
-# Bounded concurrency for the on_ready re-seed sweep (D-07).
+# Bounded concurrency for the on_ready re-seed sweep.
 _SWEEP_CONCURRENCY = 4
 
 
@@ -127,7 +127,7 @@ def _log_bg_task_exception(task: asyncio.Task[None]) -> None:
 
 
 def _build_welcome_embed() -> discord.Embed:
-    """Immediate "⏳ setting up…" welcome (D-04). Pure — no I/O."""
+    """Immediate "⏳ setting up…" welcome. Pure — no I/O."""
     embed = discord.Embed(
         title="⏳ Setting up…",
         description=(
@@ -145,7 +145,7 @@ def _build_welcome_embed() -> discord.Embed:
 
 
 def _build_ready_embed() -> discord.Embed:
-    """Terminal success follow-up (D-01). Pure — no I/O."""
+    """Terminal success follow-up. Pure — no I/O."""
     return discord.Embed(
         title="✅ Ready",
         description="Mention me anywhere, or run `/agent-setup`.",
@@ -154,7 +154,7 @@ def _build_ready_embed() -> discord.Embed:
 
 
 def _build_snag_embed() -> discord.Embed:
-    """Terminal non-success follow-up (D-01). NEVER the word "failed". Pure — no I/O."""
+    """Terminal non-success follow-up. NEVER the word "failed". Pure — no I/O."""
     return discord.Embed(
         title="⚠️ Setup hit a snag",
         description="Setup hit a snag — still working on it. Mention me to nudge it along.",
@@ -163,7 +163,7 @@ def _build_snag_embed() -> discord.Embed:
 
 
 def _pick_post_channel(guild: discord.Guild) -> discord.abc.Messageable | None:
-    """D-04 channel fallback: system_channel (writable) → first sendable text channel.
+    """Channel fallback: system_channel (writable) → first sendable text channel.
 
     guild.me is None-guarded FIRST (pyright-strict completeness gate). Returns None when
     no in-guild channel is writable; the DM-owner step is handled by the async caller.
@@ -180,7 +180,7 @@ def _pick_post_channel(guild: discord.Guild) -> discord.abc.Messageable | None:
 
 
 class DaimonBot(commands.Bot):
-    """Discord bot process. Phase 5: slash commands + turn pipeline."""
+    """Discord bot process. Slash commands + turn pipeline."""
 
     def __init__(self, *, runtime: DiscordRuntime, intents: discord.Intents) -> None:
         super().__init__(command_prefix=[], intents=intents)  # type: ignore[arg-type]  # discord.py expects Iterable but [] is valid
@@ -195,11 +195,11 @@ class DaimonBot(commands.Bot):
         # Incremented before the turn starts; decremented in a finally that brackets
         # the whole drain loop so the slot is always released.
         self._inflight: dict[uuid.UUID, int] = {}
-        # In-flight seed guard (D-01): tenant_ids with a reconcile in progress.
+        # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
         # Track spawned background tasks so they aren't GC'd; discard on done.
         self._bg_tasks: set[asyncio.Task[None]] = set()
-        # Drain flag — set by _drain_and_close on SIGTERM/SIGINT (D-20).
+        # Drain flag — set by _drain_and_close on SIGTERM/SIGINT.
         # While True, on_message rejects new mentions; existing turns finish.
         self.draining: bool = False
 
@@ -212,11 +212,11 @@ class DaimonBot(commands.Bot):
         return task
 
     async def _drain_and_close(self) -> None:
-        """Graceful shutdown drain (D-20).
+        """Graceful shutdown drain.
 
         Flips draining=True so on_message rejects new mentions, then polls the
         existing _processing set until it empties or the grace window elapses.
-        Any cut turn surfaces as a retryable error (D-20, acceptable). Calls
+        Any cut turn surfaces as a retryable error (acceptable). Calls
         bot.close() unconditionally so the gateway disconnects cleanly.
         """
         self.draining = True
@@ -242,7 +242,7 @@ class DaimonBot(commands.Bot):
         await self.add_cog(PrivacyCog(self))
 
     async def _post_to_guild(self, guild: discord.Guild, embed: discord.Embed) -> None:
-        """Post an embed via the D-04 fallback chain: text channel → DM owner → skip."""
+        """Post an embed via the fallback chain: text channel → DM owner → skip."""
         channel = _pick_post_channel(guild)
         if channel is not None:
             try:
@@ -277,7 +277,7 @@ class DaimonBot(commands.Bot):
             log.exception("guild_seed_status_flip_failed", tenant_id=str(tenant_id))
 
     async def _seed_tenant_defaults(self, *, tenant_id: uuid.UUID, guild: discord.Guild) -> None:
-        """Background MA seed (D-01). Owns the pending→ready/failed status flip (D-07).
+        """Background MA seed. Owns the pending→ready/failed status flip.
         Posts the ✅/⚠️ follow-up on terminal state. In-flight guard prevents duplicate seeds.
         """
         if tenant_id in self._seeding:
@@ -322,7 +322,7 @@ class DaimonBot(commands.Bot):
             self._seeding.discard(tenant_id)
 
     async def _ensure_provisioning(self, guild: discord.Guild) -> None:
-        """Self-heal an unprovisioned/archived guild (D-03): provision + un-archive + bg seed."""
+        """Self-heal an unprovisioned/archived guild: provision + un-archive + bg seed."""
         guild_id = str(guild.id)
         result = await provision_tenant(
             self.runtime.sessionmaker,
@@ -339,7 +339,7 @@ class DaimonBot(commands.Bot):
         self._spawn(self._seed_tenant_defaults(tenant_id=result.tenant_id, guild=guild))
 
     async def on_ready(self) -> None:
-        """Forward-only reconcile sweep (D-07): provision-if-missing, re-seed pending/failed,
+        """Forward-only reconcile sweep: provision-if-missing, re-seed pending/failed,
         sync the command tree. NO archive-on-absence."""
         log.info("bot_ready", user=str(self.user))
         tenants = await list_tenants_by_platform(self.runtime.sessionmaker, platform="discord")
@@ -411,7 +411,7 @@ class DaimonBot(commands.Bot):
             log.warning("tree_sync_global_failed", error=str(exc))
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
-        """Async two-phase provisioning (D-01): provision (pending) → immediate welcome →
+        """Async two-phase provisioning: provision (pending) → immediate welcome →
         per-guild tree sync → background seed that flips ready/failed + posts the follow-up."""
         guild_id = str(guild.id)
         try:
@@ -445,7 +445,7 @@ class DaimonBot(commands.Bot):
         self._spawn(self._seed_tenant_defaults(tenant_id=result.tenant_id, guild=guild))
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
-        """Soft-archive (PROV-04, D-03): stamp archived_at=now(). NO row delete."""
+        """Soft-archive: stamp archived_at=now(). NO row delete."""
         guild_id = str(guild.id)
         log.warning("guild_removed", guild_id=guild_id, guild_name=guild.name)
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
@@ -459,7 +459,7 @@ class DaimonBot(commands.Bot):
 
     async def on_message(self, message: discord.Message) -> None:
         """Gate on mention, resolve TenantContext once + run the non-ready self-heal gate,
-        then orchestrate a turn in a thread (D-03/D-06)."""
+        then orchestrate a turn in a thread."""
         if not should_process_message(
             author_is_bot=message.author.bot,
             # Explicit @-mention only. `mentioned_in` returns True for @everyone/@here
@@ -472,13 +472,13 @@ class DaimonBot(commands.Bot):
         ):
             return
         if self.draining:
-            return  # stop admitting new mentions during drain (D-20)
+            return  # stop admitting new mentions during drain
         assert message.guild is not None
         guild = message.guild
         guild_id = str(guild.id)
 
-        # --- Unified non-ready self-heal gate (D-03) through turn completion,
-        # guarded end-to-end (#170 CLB-02). A DB hiccup or an unclassified bug
+        # --- Unified non-ready self-heal gate through turn completion,
+        # guarded end-to-end. A DB hiccup or an unclassified bug
         # anywhere in this block must never leave the mention silently dropped —
         # it always produces a best-effort error message and never re-raises out
         # of the event handler. In practice this backstop only fires for
@@ -549,7 +549,7 @@ class DaimonBot(commands.Bot):
             # _orchestrate, immediately after create_thread), so an in-thread
             # follow-up mention that arrives during the *same* originating turn
             # queues instead of racing a second turn onto that thread's session —
-            # this is the actual #163 fix (CLB-03). Phase 85's earlier closure of
+            # this is the actual fix for the in-thread queue race. The earlier closure of
             # #163 was documentation-only; its regression test covered parallel
             # channel mentions, not the channel→in-thread sequence this closes.
             #
@@ -652,7 +652,7 @@ class DaimonBot(commands.Bot):
                     guild_id,
                     tenant_id,
                     content_override=_compose_queued_content(author_msgs),
-                    # CLB-04: merge attachments from ALL of this author's
+                    # merge attachments from ALL of this author's
                     # queued messages (including author_msgs[0]'s own), in
                     # first-seen arrival order -- author_msgs[0].attachments
                     # alone would silently drop attachments on later messages.
@@ -685,7 +685,7 @@ class DaimonBot(commands.Bot):
         ``attachments_override``, when provided (drain path), replaces
         ``message.attachments`` wholesale for the turn -- it carries the merged
         attachments from ALL of the queued author's messages, not just
-        ``message``'s own (CLB-04).
+        ``message``'s own.
         """
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid)
@@ -745,12 +745,12 @@ class DaimonBot(commands.Bot):
         ``created_thread_ids``, when provided, receives the id of a
         bot-created thread as soon as it exists — even if this call later
         raises — so the caller can still drain any mentions queued against
-        that thread during this turn (#163 / CLB-03).
+        that thread during this turn.
 
         ``attachments_override``, when provided, replaces ``message.attachments``
         wholesale for the attachment split below -- the drain path uses this to
         carry the merged attachments from all of a queued author's messages
-        (CLB-04).
+        (for the merged-attachments path).
         """
         if self.user is None:
             log.warning("orchestrate_called_before_ready")
@@ -876,7 +876,7 @@ class DaimonBot(commands.Bot):
         agent = await self.runtime.anthropic.beta.agents.retrieve(agent_id)
         env = await self.runtime.anthropic.beta.environments.retrieve(env_id)
 
-        # --- Admission gate: per-tenant balance (D-14) — independent of Stripe config ---
+        # --- Admission gate: per-tenant balance — independent of Stripe config ---
         if await is_over_balance(sessionmaker=self.runtime.sessionmaker, tenant_id=tenant_id):
             log.info("turn.skipped.over_balance", guild_id=guild_id, tenant_id=str(tenant_id))
             target = thread or message.channel
@@ -885,7 +885,7 @@ class DaimonBot(commands.Bot):
             )
             return
 
-        # --- Admission gate: monthly usage cap (D-01) ---
+        # --- Admission gate: monthly usage cap ---
         over_cap = await is_over_cap(
             billing_config=self.runtime.billing_config,
             sessionmaker=self.runtime.sessionmaker,
@@ -906,7 +906,7 @@ class DaimonBot(commands.Bot):
             )
             return
 
-        # --- Derive is_admin from Discord-native permissions (RBAC-02) ---
+        # --- Derive is_admin from Discord-native permissions ---
         # author is Union[User, Member]; guild_permissions is only on Member.
         # Non-Member (DM edge case) defaults to False.
         author = message.author
@@ -914,12 +914,12 @@ class DaimonBot(commands.Bot):
             author, guild_owner_id=message.guild.owner_id if message.guild else None
         )
 
-        # --- Per-turn role upsert: sync account.role from live Discord perms (Phase 88-04 G2) ---
+        # --- Per-turn role upsert: sync account.role from live Discord perms ---
         # This write is UNCONDITIONAL — it is NOT gated by per_caller_thread_sessions.
-        # The admin-via-live-role mechanism (this write + the Phase 88-03 MCP gate) ships
+        # The admin-via-live-role mechanism (this write + the MCP gate) ships
         # active on every deploy regardless of the session-keying flag (B4 disposition).
         #
-        # (a) Runs BEFORE run_turn so the Phase 88-03 live-role gate reads the fresh DB role
+        # (a) Runs BEFORE run_turn so the live-role gate reads the fresh DB role
         #     when this turn's MCP calls arrive — ensuring the first post-deploy admin turn
         #     already has role=ADMIN when the gate evaluates.
         # (b) Idempotent per-(tenant, account_id) write: the value is derived solely from the
@@ -954,7 +954,7 @@ class DaimonBot(commands.Bot):
             # session lookup/create and the mapping commit below, so an
             # in-thread mention that arrives during that window queues instead
             # of racing a second turn onto this thread's (about-to-exist)
-            # session (#163 / CLB-03). Cleanup is owned entirely by
+            # session. Cleanup is owned entirely by
             # on_message's channel-branch finally, not here — this call does
             # NOT discard/pop, so there is no path where a queued mention is
             # dropped without being drained.
@@ -962,7 +962,7 @@ class DaimonBot(commands.Bot):
             if created_thread_ids is not None:
                 created_thread_ids.append(thread.id)
 
-        # --- Wire lifecycle with send/edit callables (D-11) ---
+        # --- Wire lifecycle with send/edit callables ---
         async def _send_embed(**kwargs: Any) -> discord.Message:
             return await thread.send(**kwargs)
 
@@ -980,10 +980,10 @@ class DaimonBot(commands.Bot):
         )
         await lifecycle.post_initial()
 
-        # --- Session find-or-create (session-per-thread reuse, D-05/D-06/D-08) ---
+        # --- Session find-or-create (session-per-thread reuse) ---
         # The per-thread mention mutex (bot.py:449-476) already serialises
         # concurrent mentions for the same thread, so there is no race in the
-        # lookup-or-create below. Do NOT add an asyncio.Lock here (D-08).
+        # lookup-or-create below. Do NOT add an asyncio.Lock here.
 
         # Compute the account_id used to key thread-session lookup and create.
         # When per_caller_thread_sessions is ON (default): use the caller's real
@@ -1116,7 +1116,7 @@ class DaimonBot(commands.Bot):
             # create_attachment_upload_url MCP tool — the bot no longer uploads
             # eagerly, so there is nothing to silently skip.
             #
-            # attachments_override (drain path, CLB-04) replaces message.attachments
+            # attachments_override (drain path) replaces message.attachments
             # wholesale with the merged attachments from all of the queued
             # author's messages -- otherwise only the first queued message's
             # attachments would ever reach the turn.
@@ -1218,7 +1218,7 @@ class DaimonBot(commands.Bot):
                 image_blocks=image_blocks,
             )
 
-            # --- Recreate on dead session (404 not_found_error, D-06) ---
+            # --- Recreate on dead session (404 not_found_error) ---
             # Dead = session existed but is gone (expired/GC'd); 404 is the confirmed signal.
             # On dead session: mark old row dead, create new session + new mapping row,
             # re-seed with full history, re-run once. If the retry also fails, let it
@@ -1310,7 +1310,7 @@ class DaimonBot(commands.Bot):
                 )
             else:
                 log.info("turn.completed", thread_id=thread.id, session_id=ma_session_id)
-                # --- Write watermark (bot's reply message id, D-05) ---
+                # --- Write watermark (bot's reply message id) ---
                 if mapping_id is not None and lifecycle.final_message_id is not None:
                     async with self.runtime.sessionmaker() as _wm_session:
                         await update_watermark(

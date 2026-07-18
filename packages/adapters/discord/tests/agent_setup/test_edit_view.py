@@ -210,7 +210,7 @@ def test_edit_view_timeout(account_id: uuid.UUID) -> None:
 
 
 def test_auth_followup_view_has_exactly_one_button(account_id: uuid.UUID) -> None:
-    """Phase 97 (D-03) removed Connect GitHub; only Paste a PAT… remains."""
+    """Connect GitHub was removed; only Paste a PAT… remains."""
     selected = _entry("agent")
     state = PanelState(roster=[selected], selected=selected, account_id=account_id)
     runtime = MagicMock()
@@ -589,7 +589,7 @@ def test_edit_view_secrets_button_disabled_for_system_agent(account_id: uuid.UUI
 
     view = EditView(state, runtime=runtime, allowed_user_id=42)
     assert _find_button(view, "Secrets").disabled is True, (
-        "system agents see the Secrets button disabled (defensive, D-11)"
+        "system agents see the Secrets button disabled (defensive)"
     )
 
     user_selected = _entry("bot")

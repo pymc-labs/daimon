@@ -1,9 +1,9 @@
 """Discord adapter implementation of the TurnLifecycle protocol.
 
-Created fresh per turn (D-08). Accumulates embed state via SSE events,
+Created fresh per turn. Accumulates embed state via SSE events,
 debounces Discord API calls, and performs a clean replace on terminal success.
 
-Design decisions D-06, D-07, D-09, D-11:
+Design decisions:
 - send/edit callables injected at construction (no discord.py imports required
   for testing)
 - 10s debounce between intermediate embed edits (SPEC-R5)
@@ -91,7 +91,7 @@ def build_discord_embed(data: EmbedData) -> discord.Embed:
 
 
 class DiscordTurnLifecycle:
-    """TurnLifecycle implementation for Discord. Created fresh per turn (D-08).
+    """TurnLifecycle implementation for Discord. Created fresh per turn.
 
     Receives SSE events, accumulates embed state, debounces Discord API calls.
     send and edit callables are injected so the class is testable without
@@ -230,7 +230,7 @@ class DiscordTurnLifecycle:
 
         response_text = extract_final_response(state.content)
         if not response_text:
-            # D-06: if tools ran but no final text, leave done embed visible.
+            # If tools ran but no final text, leave done embed visible.
             # If content is entirely empty (cancellation), show "Turn cancelled."
             has_tool_activity = any(isinstance(block, ToolUseBlock) for block in state.content)
             if has_tool_activity:
@@ -256,7 +256,7 @@ class DiscordTurnLifecycle:
         log.warning("turn.terminal_failure", error=str(err))
 
     async def on_render(self, state: TurnState) -> None:
-        # Embed state is driven by on_sse_event and terminal hooks (D-06);
+        # Embed state is driven by on_sse_event and terminal hooks;
         # render ticks only flush sealed answers so they land near-live.
         if self._terminal:
             return

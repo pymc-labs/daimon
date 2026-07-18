@@ -1,1 +1,1 @@
-"""Daimon Discord adapter. Phase 3."""
+"""Daimon Discord adapter."""

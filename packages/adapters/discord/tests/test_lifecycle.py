@@ -1,6 +1,6 @@
 """Tests for DiscordTurnLifecycle — embed state machine, debounce, clean replace.
 
-Uses plain async recorder functions per D-11. No AsyncMock, no MagicMock,
+Uses plain async recorder functions. No AsyncMock, no MagicMock,
 no FakeMessage for lifecycle send/edit mocks. The edit callable receives the
 message reference as its first positional argument.
 """
@@ -256,7 +256,7 @@ class TestErrorEmbed:
 
 
 # ---------------------------------------------------------------------------
-# on_render is a no-op (D-06)
+# on_render is a no-op
 # ---------------------------------------------------------------------------
 
 
@@ -523,13 +523,13 @@ class TestFilteredExtraction:
 
 
 # ---------------------------------------------------------------------------
-# D-06: Zero-message vs cancelled disambiguation
+# Zero-message vs cancelled disambiguation
 # ---------------------------------------------------------------------------
 
 
 class TestZeroMessageBehavior:
     async def test_zero_message_with_tools_leaves_done_embed_visible(self) -> None:
-        """D-06: tools ran but no final text -> done embed stays, no clean-replace."""
+        """tools ran but no final text -> done embed stays, no clean-replace."""
         lc, sends, edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
 

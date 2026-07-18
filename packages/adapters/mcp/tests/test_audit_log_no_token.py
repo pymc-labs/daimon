@@ -1,4 +1,4 @@
-"""Combined audit-log integration test — Phase 19 plan-checker W10.
+"""Combined audit-log integration test.
 
 Asserts the COMBINED log output across ``daimon.core.broker`` (the
 dispatch + provider layer) and ``daimon.adapters.mcp.tools.cli_token``

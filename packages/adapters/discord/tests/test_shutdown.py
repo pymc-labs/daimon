@@ -139,7 +139,7 @@ async def test_drain_awaits_inflight_then_closes() -> None:
 async def test_drain_proceeds_to_close_on_grace_window_expiry() -> None:
     """_drain_and_close calls close() even when _processing is still non-empty after the grace window.
 
-    A cut turn is acceptable (D-20 retryable); the process must not hang past the grace window.
+    A cut turn is acceptable (retryable); the process must not hang past the grace window.
     """
     bot = _make_bot()
     bot.close = AsyncMock()  # type: ignore[method-assign]

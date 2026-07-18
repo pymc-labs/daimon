@@ -1,4 +1,4 @@
-"""Slack routines panel — `/routines` slash command surface (SUX-02).
+"""Slack routines panel — `/routines` slash command surface.
 
 Subpackage structure:
   state.py   — pure glyph reducer + dataclasses (no I/O)

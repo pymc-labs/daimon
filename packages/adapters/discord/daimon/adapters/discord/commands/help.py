@@ -5,7 +5,7 @@ command tree plus the `@bot` configure-by-chat entrypoint. Open to all
 guild members (no `manage_guild` requirement); guild registration is
 still checked.
 
-Per Phase 30 D-LIST-01, the slash list is a hand-edited module constant.
+The slash list is a hand-edited module constant.
 
 Note: `from __future__ import annotations` is intentionally omitted.
 discord.py evaluates parameter annotations at import time to extract
@@ -59,7 +59,7 @@ def build_help_view() -> discord.ui.LayoutView:
 
 @app_commands.guild_only()
 class HelpCog(commands.Cog):
-    """Flat /help slash command (Phase 30 D-SHAPE-01)."""
+    """Flat /help slash command."""
 
     def __init__(self, bot: commands.Bot) -> None:
         super().__init__()

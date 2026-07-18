@@ -1,7 +1,7 @@
 """Routines admin CLI commands.
 
 Currently exposes the one-shot `backfill-agent-names` migration bridge for
-PHASE-38-D5: between migration 0011 (nullable `agent_name`) and the
+Between migration 0011 (nullable `agent_name`) and the
 forthcoming NOT NULL flip, this command walks every routine whose
 `agent_name IS NULL`, retrieves the agent from MA, and writes the daimon-tag
 into the row.
@@ -42,7 +42,7 @@ def backfill_agent_names_command(
 
     Idempotent — skips rows where ``agent_name`` is already non-NULL.
     Falls back to ``"daimon"`` when MA returns 404 OR the agent is archived
-    OR the agent's metadata lacks ``daimon_name`` (per PHASE-38-D5: only one
+    OR the agent's metadata lacks ``daimon_name`` (only one
     daimon-tagged agent per tenant today).
 
     Non-404 ``APIStatusError`` (5xx, network) propagates; the operator re-runs

@@ -84,7 +84,7 @@ class Settings(BaseSettings):
     # internal port (e.g. Fly's https edge → internal :8001). When set, it
     # replaces the `http://<public_host>:<host_port>` prefix verbatim — no
     # scheme/port mangling. Example:
-    #   DAIMON_NOTEBOOK__PUBLIC_URL_BASE="https://daimon-notebook-host.fly.dev"
+    #   DAIMON_NOTEBOOK__PUBLIC_URL_BASE="https://<your-app>.fly.dev"
     # Leave unset for local / trusted-network deployments where the
     # host_port is part of the address users actually visit.
     public_url_base: str | None = None

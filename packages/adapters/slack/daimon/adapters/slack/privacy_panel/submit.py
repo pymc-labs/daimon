@@ -1,4 +1,4 @@
-"""Privacy delete view_submission handler for Slack (D-05).
+"""Privacy delete view_submission handler for Slack.
 
 Two responsibilities:
 
@@ -65,7 +65,7 @@ def evaluate_delete_submission(payload: dict[str, Any]) -> DeleteDecision:
 
     This function has NO I/O; the caller acks the Socket Mode envelope with the
     returned payload synchronously, then calls run_purge_and_update as a background
-    task (D-05, Pitfall 2).
+    task (Pitfall 2).
     """
     view: dict[str, Any] = payload.get("view") or {}
     raw_meta: str = view.get("private_metadata") or ""
@@ -88,7 +88,7 @@ def evaluate_delete_submission(payload: dict[str, Any]) -> DeleteDecision:
     confirm_el: dict[str, Any] = confirm_block.get("confirm_name") or {}
     typed: str = str(confirm_el.get("value") or "").strip()
 
-    # Username mismatch → re-display with an error, NO purge (T-82-14 / D-05).
+    # Username mismatch → re-display with an error, NO purge.
     if not expected_name or typed != expected_name:
         return DeleteDecision(
             response_payload={
@@ -139,7 +139,7 @@ async def run_purge_and_update(
     platform_user_id: str,
     view_id: str,
 ) -> None:
-    """Purge the account and update the modal to the post-delete status view (D-05).
+    """Purge the account and update the modal to the post-delete status view.
 
     Runs AFTER the Socket Mode ack (response_action=update / "Deleting…") so the
     ~3s deadline is not at risk (Pitfall 2). Catches DaimonError | anthropic.APIError |

@@ -55,7 +55,7 @@ async def _admin_is_admin_resolver(_ctx: MiddlewareContext) -> str | None:
 
     The tokenless StaticTokenVerifier harness has no is_admin claim, so the
     default production_is_admin_resolver yields is_admin=False — which makes the
-    Phase 50 _require_admin gate (RBAC-02) refuse mutating tools. Tests that
+    The _require_admin gate refuses mutating tools. Tests that
     exercise a mutating tool's happy path pass this to run as an admin caller.
     Read-only tools are ungated and do not need it.
     """
@@ -271,5 +271,5 @@ async def test_list_skills_end_to_end(
         result = await client.call_tool("skills_list", {})
         skills = json.loads(result.content[0].text)  # type: ignore[union-attr]
         assert [s["name"] for s in skills] == ["e2e-skill"], (
-            "should list the e2e skill with bare name (D-10)"
+            "should list the e2e skill with bare name"
         )

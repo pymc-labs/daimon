@@ -1,4 +1,4 @@
-"""Stripe Checkout Session creation route + success/cancel landing. TOPUP-02 (D-16).
+"""Stripe Checkout Session creation route + success/cancel landing.
 
 stripe is an MCP-only dependency — Checkout creation lives here, never in core or the
 Discord adapter. StripeClient is constructed once at the edge (server.py) and injected;
@@ -56,7 +56,7 @@ def build_checkout_route(
         except Exception:
             return Response(status_code=400)
 
-        # WR-01 / D-03: tenant_id sourced exclusively from the verified JWT claim.
+        # tenant_id sourced exclusively from the verified JWT claim.
         # A missing or non-str or non-UUID claim is a hard 403 (fail-closed).
         token_tenant_raw = access.claims.get("tenant_id")
         if not isinstance(token_tenant_raw, str):
@@ -76,12 +76,12 @@ def build_checkout_route(
             return Response(status_code=422)
 
         params: SessionCreateParams = {
-            "mode": "payment",  # one-time, NOT subscription (D-16)
+            "mode": "payment",  # one-time, NOT subscription
             "line_items": [{"price": price_id, "quantity": 1}],
             "success_url": billing_config.success_url,
             "cancel_url": billing_config.cancel_url,
             "metadata": {
-                "tenant_id": str(tenant_id),  # the credit target (D-16)
+                "tenant_id": str(tenant_id),  # the credit target
             },
         }
         session = await stripe_client.v1.checkout.sessions.create_async(params)

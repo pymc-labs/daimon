@@ -1,4 +1,4 @@
-"""Live Discord integration tests for Phase 24 MCP-05 + Phase 73 #151 repro.
+"""Live Discord integration tests.
 
 Skipped unless ALL of the following are set:
   - DAIMON_DISCORD__BOT_TOKEN env var is set (real bot token)
@@ -6,7 +6,7 @@ Skipped unless ALL of the following are set:
   - DAIMON_TEST_GUILD_ID / DAIMON_TEST_CHANNEL_ID / DAIMON_TEST_THREAD_ID
     point at a real guild/channel/thread the bot token has access to
 
-SC-1/SC-2/SC-3 are the phase-gate tests for ROADMAP Phase 24.
+SC-1/SC-2/SC-3 are the phase-gate tests.
 The #151 repro tests (read_thread + thread-scoped search) are the live
 regression gates for the Discord read-tools revamp.
 """
@@ -159,7 +159,7 @@ async def test_send_message_and_round_trip(
         runtime,
         auth,
         channel_id=_TEST_CHANNEL_ID,
-        content=f"phase 24 test {marker}",
+        content=f"test {marker}",
     )
     assert marker in sent.content, f"sent message must carry marker {marker}"
 
@@ -232,7 +232,7 @@ async def test_read_thread_returns_messages_from_known_thread(
 ) -> None:
     """#151 repro (1/2): read_thread on the known thread returns messages.
 
-    Thread 1514307366605029462 ("Chat with replicate-agent") is a public
+    The `<test-thread-id>` thread ("Chat with replicate-agent") is a public
     thread in the test guild. An empty result means the thread-blind bug
     has regressed.
     """

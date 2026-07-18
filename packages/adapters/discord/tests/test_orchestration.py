@@ -76,7 +76,7 @@ def _make_runtime(
     pattern in `bot._orchestrate` returns realistic BetaManagedAgentsAgent /
     BetaEnvironment instances downstream.
     """
-    _ = tenant_id  # runtime no longer carries tenant_id (D-06); bot.py threads it (Plan 04)
+    _ = tenant_id  # runtime no longer carries tenant_id; bot.py threads it
     settings = MagicMock()
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")
@@ -240,7 +240,7 @@ async def _setup_workspace_and_config(
     tenant_id: uuid.UUID,
     guild_id: str = "123456",
 ) -> None:
-    """Seed trial credit so the balance gate (D-14) allows turns in these tests.
+    """Seed trial credit so the balance gate allows turns in these tests.
 
     The tenant must already exist with platform="discord", external_id=guild_id
     so that derive_tenant_uuid("discord", guild_id) matches. This function only
@@ -261,7 +261,7 @@ async def _setup_workspace_and_config(
 class TestNewThreadCreation:
     """Channel mentions create threads and run turns."""
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
+    # TODO: migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -414,7 +414,6 @@ class TestNewThreadCreation:
         assert "/agent-setup" in sent_text, "recovery hint should point at /agent-setup"
         assert "/propagate" not in sent_text, "the deleted /propagate command must not be suggested"
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -465,7 +464,6 @@ class TestNewThreadCreation:
 class TestThreadMention:
     """Thread mentions respond in-place with XML history context."""
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -506,7 +504,6 @@ class TestThreadMention:
         mock_build_xml.assert_called_once()
         mock_run_turn.assert_called_once()
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -550,7 +547,6 @@ class TestThreadMention:
         )
         assert call_kwargs["session_id"] == "sess-xml", "should use ma_session.id"
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -588,7 +584,6 @@ class TestThreadMention:
         context: ScopeContext = call_kwargs["context"]
         assert context.channel_id == "789", "should use parent_id, not thread_id"
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -626,7 +621,6 @@ class TestThreadMention:
         mock_resolve.assert_called_once()
         mock_run_turn.assert_called_once()
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -702,7 +696,6 @@ class TestConcurrentTurnProtection:
 class TestAutoArchive:
     """Thread auto-archive duration."""
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -745,7 +738,6 @@ class TestAutoArchive:
 class TestHandleMentionErrorBoundary:
     """_handle_mention error boundary uses render_error with ULID request ID."""
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -784,7 +776,7 @@ class TestHandleMentionErrorBoundary:
         await bot.on_message(message)
 
         # Error caught in _handle_mention sees message.channel (TextChannel),
-        # not the thread created inside _orchestrate (D-14 accepted edge case).
+        # not the thread created inside _orchestrate (accepted edge case).
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         error_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "rid:" in error_text, (
@@ -792,7 +784,6 @@ class TestHandleMentionErrorBoundary:
             f"got: {error_text!r}"
         )
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -830,7 +821,7 @@ class TestHandleMentionErrorBoundary:
         await bot.on_message(message)
 
         # Error caught in _handle_mention sees message.channel (TextChannel),
-        # not the thread created inside _orchestrate (D-14 accepted edge case).
+        # not the thread created inside _orchestrate (accepted edge case).
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         error_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "**" in error_text, (
@@ -904,7 +895,6 @@ class TestSetupHook:
 class TestSessionCleanup:
     """MA session is deleted on every exit path after create_session succeeds."""
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -943,7 +933,6 @@ class TestSessionCleanup:
             "session should be deleted after successful turn",
         )
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -983,7 +972,6 @@ class TestSessionCleanup:
             "session should be deleted even when run_turn raises",
         )
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -1024,7 +1012,6 @@ class TestSessionCleanup:
         )
         mock_run_turn.assert_not_called(), "run_turn should not execute when thread creation fails"  # pyright: ignore[reportUnusedExpression]
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -1062,7 +1049,6 @@ class TestSessionCleanup:
 
         mock_run_turn.assert_called_once(), "turn should complete normally despite cleanup failure"  # pyright: ignore[reportUnusedExpression]
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -1109,7 +1095,6 @@ class TestSessionCleanup:
             "original run_turn error should propagate, not cleanup error"
         )
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -1153,9 +1138,8 @@ class TestSessionCleanup:
 
 
 class TestBillingAdmissionGate:
-    """Phase 20-08: is_over_cap admission gate + usage_record wiring."""
+    """is_over_cap admission gate + usage_record wiring."""
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -1201,7 +1185,6 @@ class TestBillingAdmissionGate:
             "cap" in sent_text.lower()  # pyright: ignore[reportUnknownMemberType]
         ), f"over-cap message should mention 'cap'; got: {sent_text!r}"
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)
@@ -1263,7 +1246,6 @@ class TestBillingAdmissionGate:
 
         mock_is_over_cap.assert_not_called()
 
-    # TODO(phase-38-followup): migrate to MARouter transport-level fake
     @patch("daimon.adapters.discord.bot.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.run_turn", new_callable=AsyncMock)

@@ -1,5 +1,5 @@
-"""Tests for DaimonBot in-flight concurrency cap (SCALE-01), is_admin derivation (RBAC-02),
-per-caller session keying (Phase 88-04), and per-turn role upsert (Phase 88-04).
+"""Tests for DaimonBot in-flight concurrency cap, is_admin derivation,
+per-caller session keying, and per-turn role upsert.
 
 Plan 50-08: per-tenant in-flight counter + is_admin threading into SessionContext.
 Plan 88-04: per-(thread,account) session keying (flag-gated) + unconditional role upsert.
@@ -375,12 +375,12 @@ class TestInflightIsolation:
 
 
 class TestIsAdminDerivation:
-    """is_admin derived from manage_guild writes the live DB role (Phase 88-04).
+    """is_admin derived from manage_guild writes the live DB role.
 
-    Prior to Phase 88-04, is_admin was threaded into SessionContext and baked into
-    the long-lived vault credential. Phase 88-04 removes the SessionContext baking
-    (Phase 88-03 made the credential identity-stable) and instead writes the live
-    DB account.role each turn — the Phase 88-03 MCP gate then reads it live.
+    Prior to this change, is_admin was threaded into SessionContext and baked into
+    the long-lived vault credential. The new design removes the SessionContext baking
+    (credential is now identity-stable) and instead writes the live
+    DB account.role each turn — the MCP gate then reads it live.
 
     These tests verify that manage_guild derives correctly and that create_session
     is no longer passed session_context.
@@ -403,7 +403,7 @@ class TestIsAdminDerivation:
     ) -> None:
         """Member with manage_guild=True → account.role=admin written to the DB each turn.
 
-        Phase 88-04 replaces the defunct SessionContext(is_admin=...) baking with a
+        The current design replaces the defunct SessionContext(is_admin=...) baking with a
         live DB role write. The MCP gate reads account.role on every request (88-03).
         """
         from daimon.core.defaults.provisioning import provision_tenant
@@ -452,10 +452,10 @@ class TestIsAdminDerivation:
 
         await bot.on_message(message)
 
-        # Phase 88-04: is_admin drives a live DB role write, not SessionContext baking.
+        # is_admin drives a live DB role write, not SessionContext baking.
         mock_create_session.assert_called_once()
         assert "session_context" not in mock_create_session.call_args.kwargs, (
-            "create_session must NOT receive session_context — Phase 88-03 made the "
+            "create_session must NOT receive session_context — credential is now identity-stable; "
             "credential identity-stable; admin gate reads live DB role (88-04)"
         )
 
@@ -536,7 +536,7 @@ class TestIsAdminDerivation:
         # No session_context in create_session call.
         mock_create_session.assert_called_once()
         assert "session_context" not in mock_create_session.call_args.kwargs, (
-            "create_session must NOT receive session_context (Phase 88-04)"
+            "create_session must NOT receive session_context"
         )
 
         async with db_session_factory() as s:
@@ -609,7 +609,7 @@ class TestIsAdminDerivation:
 
         mock_create_session.assert_called_once()
         assert "session_context" not in mock_create_session.call_args.kwargs, (
-            "create_session must NOT receive session_context (Phase 88-04)"
+            "create_session must NOT receive session_context"
         )
 
         async with db_session_factory() as s:
@@ -649,7 +649,7 @@ def _make_sweep_guild(guild_id: int) -> MagicMock:
 
 
 class TestOnReadySweepProvisioning:
-    """on_ready sweep provision branch passes clear_archive=True (#132, D-72-02) and
+    """on_ready sweep provision branch passes clear_archive=True and
     posts the welcome embed before spawning the seed (#144-3)."""
 
     @patch("daimon.adapters.discord.bot.set_provision_status", new_callable=AsyncMock)
@@ -667,7 +667,7 @@ class TestOnReadySweepProvisioning:
     ) -> None:
         """on_ready sweep provision-new-guild branch must pass clear_archive=True to
         set_provision_status — defense-in-depth for guilds that rejoined while the bot
-        was down (D-72-02)."""
+        was down."""
         import uuid
 
         guild_id = 900000001
@@ -829,7 +829,7 @@ class _AsyncIter:
 
 
 class TestPerCallerSessionKeying:
-    """Per-(thread,account) session keying with flag-gated sentinel (Phase 88-04).
+    """Per-(thread,account) session keying with flag-gated sentinel.
 
     Flag ON:  get_live_thread_session + both create_thread_session calls use
               session_account_id=principal.account_id → distinct callers get
@@ -1220,7 +1220,7 @@ class TestPerCallerSessionKeying:
 
 
 class TestPerTurnRoleUpsert:
-    """Per-turn unconditional account.role upsert from Discord admin perms (Phase 88-04).
+    """Per-turn unconditional account.role upsert from Discord admin perms.
 
     The role write runs BEFORE run_turn and is NOT gated by per_caller_thread_sessions.
     It targets only the platform-principal's account — never CLI/operator accounts (T-88-04-03).
@@ -1540,7 +1540,7 @@ class TestPerTurnRoleUpsert:
 
 
 class TestDrainLoopDeCoalescing:
-    """Drain loop must partition queued mentions by author.id (G1 — Phase 88-05).
+    """Drain loop must partition queued mentions by author.id.
 
     Under per-caller sessions, coalescing distinct authors into one composite turn
     routes author B's message onto author A's session — the relocated confused-deputy

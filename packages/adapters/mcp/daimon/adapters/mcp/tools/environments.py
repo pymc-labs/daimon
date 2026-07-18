@@ -73,8 +73,8 @@ async def _reject_environment_name_collision(
     """Raise ToolError if any non-archived environment with this name exists in the tenant.
 
     Tenant-scoped name uniqueness matches the resolver's (daimon_tenant, daimon_name)
-    identity model; ANY non-empty match blocks the create regardless of owner (D-03,
-    matching the agents' _reject_guild_name_collision and Phase 72 D-72-01).
+    identity model; ANY non-empty match blocks the create regardless of owner (
+    matching the agents' _reject_guild_name_collision).
     """
     matches = await find_environments_by_daimon_tag(
         runtime.client, tenant_id=auth.tenant_id, name=name
@@ -130,7 +130,7 @@ async def _archive_environment_impl(
 
 def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     # Reads are untagged and ungated — full visibility for every session,
-    # matching the agents/skills read tools (D-08 tag/gate agreement: only
+    # matching the agents/skills read tools (admin-tag/gate agreement: only
     # mutating tools carry tags={"admin"} + the _require_admin impl gate).
     @mcp.tool
     async def list_environments(  # pyright: ignore[reportUnusedFunction]

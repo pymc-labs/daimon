@@ -3,7 +3,7 @@
 Failure modes (bad sig, malformed/missing sub, unknown account) collapse
 to None → HTTP 401 via RequireAuthMiddleware.
 
-jti-revocation tests (Phase 77 PHASE-77-TOKEN-01):
+jti-revocation tests:
 - Revoked jti → verify_token returns None (401).
 - Un-revoked agent token → still verifies.
 - No jti claim → verifies unchanged (existing non-agent flow unaffected).
@@ -92,7 +92,7 @@ async def test_verifier_rejects_unknown_account(
 
 
 # ---------------------------------------------------------------------------
-# jti-revocation tests (Phase 77 PHASE-77-TOKEN-01)
+# jti-revocation tests
 # ---------------------------------------------------------------------------
 
 

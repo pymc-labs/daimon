@@ -9,8 +9,8 @@ from daimon.adapters.slack.split import (
 
 
 def test_slack_limit_constant_is_11800() -> None:
-    """The module constant must equal the probe-locked value (81-02 SUMMARY)."""
-    assert _SLACK_LIMIT == 11800, "_SLACK_LIMIT must be 11800 (markdown block path, D-07)"
+    """The module constant must equal the probe-locked value."""
+    assert _SLACK_LIMIT == 11800, "_SLACK_LIMIT must be 11800 (markdown block path)"
 
 
 class TestSplitForSlackSafe:

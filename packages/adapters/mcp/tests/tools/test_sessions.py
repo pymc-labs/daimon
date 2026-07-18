@@ -231,7 +231,7 @@ def _make_thread_idle_event_raw(*, stop_reason_type: str = "end_turn") -> dict[s
 
 
 # ---------------------------------------------------------------------------
-# CLB-08 regression tests — permissive projections through the full pipeline
+# Regression tests — permissive projections through the full pipeline
 # ---------------------------------------------------------------------------
 
 

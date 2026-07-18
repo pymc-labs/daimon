@@ -1,12 +1,12 @@
-"""Slack admin write-gate (SUX-06).
+"""Slack admin write-gate.
 
 ``resolve_is_admin`` is the Slack analog of Discord's ``is_member_guild_admin``
 + ``require_manage_guild``: it calls ``users.info`` (I/O shell) then delegates
 to the pure ``_is_admin_signal`` decision function.
 
-Fail-closed per D-02: a transient ``SlackApiError`` from ``users.info`` is
+Fail-closed: a transient ``SlackApiError`` from ``users.info`` is
 logged and returns ``False`` — it NEVER propagates and never grants admin.
-Per D-03 the caller resolves once per interaction; no cross-interaction cache.
+The caller resolves once per interaction; no cross-interaction cache.
 """
 
 from __future__ import annotations
@@ -32,10 +32,10 @@ def _is_admin_signal(user: dict[str, Any]) -> bool:
 async def resolve_is_admin(
     client: AsyncWebClient, *, user_id: str, dev_allow_all: bool = False
 ) -> bool:
-    """Return True if the Slack user is a workspace admin, fail-closed (D-02).
+    """Return True if the Slack user is a workspace admin, fail-closed.
 
     Calls ``users.info`` via the injected per-event client; never caches the
-    result on a module or runtime (D-03).  On ``SlackApiError`` logs a warning
+    result on a module or runtime.  On ``SlackApiError`` logs a warning
     and returns ``False`` — this is the ONE deliberate sentinel-return at the
     adapter boundary, justified by the fail-closed security requirement.
 
@@ -59,6 +59,6 @@ async def resolve_is_admin(
         resp = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
     except SlackApiError as exc:
         log.warning("slack.is_admin.lookup_failed", user=user_id, exc_info=exc)
-        return False  # D-02 fail-closed
+        return False  # fail-closed
     u: dict[str, Any] = resp["user"]  # pyright: ignore[reportUnknownVariableType, reportAssignmentType]  # SlackResponse subscript is untyped
     return _is_admin_signal(u)

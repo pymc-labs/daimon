@@ -1,9 +1,9 @@
 """AgentSetupView (LayoutView) + F5 container builder + agent picker + lifecycle modals.
 
 Plan 03 shipped the panel scaffold and the New/Fork/Delete/Done lifecycle.
-Phase 46 collapsed the four edit sub-views into a single ``EditView`` reached
+The four edit sub-views were collapsed into a single ``EditView`` reached
 from the Edit button.
-Phase 54 added ``SetDefaultView`` and member read-only gating.
+``SetDefaultView`` and member read-only gating were added.
 Plan 70-05 split EditView → edit_view.py, SetDefaultView → set_default.py,
 and migrated the main panel to the locked F5 Components V2 card (LayoutView +
 Container/Section/TextDisplay/Separator). Re-exports for backwards compatibility.
@@ -64,7 +64,7 @@ def _capture_panel_exception(
     Panel handlers run OUTSIDE _handle_mention's rid bind (Pattern 4), so nothing is
     in contextvars at these sites. Bind tenant_id/guild_id/rid so the Sentry event is
     tenant-attributable, capture, then unbind so the binding does not leak past the
-    handler. Additive only — never changes the surrounding swallow (D-09).
+    handler. Additive only — never changes the surrounding swallow.
     """
     bound: dict[str, str] = {"rid": rid}
     if tenant_id is not None:
@@ -95,7 +95,7 @@ def _render_tier_value(
 
 
 def _tier_display(value: str, *, is_winner: bool) -> str:
-    """Apply the D-05 winner/dim treatment uniformly across tiers."""
+    """Apply the winner/dim treatment uniformly across tiers."""
     if is_winner:
         return f"{value} ← in effect here"
     # Dim non-winning tiers with italic markdown.
@@ -463,7 +463,7 @@ class AgentSetupView(discord.ui.LayoutView):
     Member gating is structural: non-admins get a container WITHOUT the lifecycle
     row — built that way, not cleared after the fact.
 
-    D-07/D-08: mutation buttons only appear when state.is_admin.
+    Mutation buttons only appear when state.is_admin.
     """
 
     def __init__(

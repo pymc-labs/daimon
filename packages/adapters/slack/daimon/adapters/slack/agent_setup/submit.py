@@ -16,12 +16,12 @@ Pattern mirrors ``privacy_panel/submit.py`` exactly — same Decision dataclass
 shape, same evaluate-then-spawn discipline, same boundary catch tuple.
 
 Threat register:
-- T-83-14 (EoP): every run_* re-checks resolve_is_admin before any write.
-- T-83-15 (Info-Disc): secret VALUES are validated then passed to the
+- Every run_* re-checks resolve_is_admin before any write.
+- Secret VALUES are validated then passed to the
   write layer only; they never appear in response_action payloads, error
-  strings, block_ids, action_ids, or log lines (D-09).
-- T-83-16 (Tampering): blank PAT/token = keep stored token; never overwrites.
-- T-83-17 (DoS): _SECRET_CAP + _MAX_SECRET_VALUE_BYTES enforced pre-ack.
+  strings, block_ids, action_ids, or log lines.
+- Blank PAT/token = keep stored token; never overwrites.
+- _SECRET_CAP + _MAX_SECRET_VALUE_BYTES enforced pre-ack.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ log = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------
-# Secret-paste validation constants (D-09, T-83-17)
+# Secret-paste validation constants
 # Port of packages/adapters/discord/daimon/adapters/discord/agent_setup/credentials.py:40-42
 # ---------------------------------------------------------------------------
 
@@ -289,7 +289,7 @@ def evaluate_edit_repo_submission(payload: dict[str, Any]) -> SubmitDecision:
     """Pure: validate the edit-repo form submission.
 
     repo_url: optional; if provided, must look like a URL. Empty = keep current.
-    pat:      optional (write-only, D-08). Empty = keep stored token (blank NEVER
+    pat:      optional (write-only). Empty = keep stored token (blank NEVER
               overwrites). Decision about keep-vs-replace is carried to run_* via
               extra["pat_replace"] flag.
 
@@ -310,7 +310,7 @@ def evaluate_edit_repo_submission(payload: dict[str, Any]) -> SubmitDecision:
             payload=payload,
         )
 
-    # D-08 / T-83-16: blank PAT = keep stored token; this flag is safe to log.
+    # Blank PAT = keep stored token; this flag is safe to log.
     pat_replace = bool(pat)
 
     return _success_decision(
@@ -318,7 +318,7 @@ def evaluate_edit_repo_submission(payload: dict[str, Any]) -> SubmitDecision:
         payload=payload,
         extra={
             "repo_url": url or None,
-            # CRITICAL (D-08): pat value is only in extra so run_* can use it;
+            # CRITICAL: pat value is only in extra so run_* can use it;
             # it MUST NOT appear in logs or any response_action field.
             "pat": pat or None,
             "pat_replace": pat_replace,
@@ -423,7 +423,7 @@ def evaluate_add_mcp_submission(payload: dict[str, Any]) -> SubmitDecision:
         extra={
             "mcp_name": name,
             "mcp_url": url,
-            # CRITICAL (D-08): token value only in extra; never in logs or response.
+            # CRITICAL: token value only in extra; never in logs or response.
             "token": token or None,
             "token_replace": token_replace,
         },
@@ -431,14 +431,14 @@ def evaluate_add_mcp_submission(payload: dict[str, Any]) -> SubmitDecision:
 
 
 def evaluate_paste_secrets_submission(payload: dict[str, Any]) -> SubmitDecision:
-    """Pure: validate the paste-secrets form submission (D-09, T-83-15, T-83-17).
+    """Pure: validate the paste-secrets form submission.
 
     Parses KEY=VALUE lines from paste_secrets__content. Validates:
     - Key names against _POSIX_KEY_RE
     - Total count against _SECRET_CAP (20)
     - Each value's byte length against _MAX_SECRET_VALUE_BYTES (4096)
 
-    CRITICAL (D-09): the validated values are carried to run_* for the
+    CRITICAL: the validated values are carried to run_* for the
     write ONLY via the extra dict. They MUST NOT appear in:
     - any response_action error string
     - any block_id or action_id
@@ -488,7 +488,7 @@ def evaluate_paste_secrets_submission(payload: dict[str, Any]) -> SubmitDecision
         if len(value.encode()) > _MAX_SECRET_VALUE_BYTES:
             return _error_decision(
                 "paste_secrets__content",
-                # CRITICAL (D-09): only the KEY name appears; value length is safe.
+                # CRITICAL: only the KEY name appears; value length is safe.
                 f"Value for key {key!r} exceeds the {_MAX_SECRET_VALUE_BYTES}-byte limit.",
                 meta=meta,
                 payload=payload,
@@ -497,7 +497,7 @@ def evaluate_paste_secrets_submission(payload: dict[str, Any]) -> SubmitDecision
         parsed.append((key, value))
 
     if bad_keys:
-        # Report only key NAMES — never values (D-09).
+        # Report only key NAMES — never values.
         bad_keys_str = ", ".join(bad_keys)
         return _error_decision(
             "paste_secrets__content",
@@ -528,7 +528,7 @@ def evaluate_paste_secrets_submission(payload: dict[str, Any]) -> SubmitDecision
     return _success_decision(
         meta=meta,
         payload=payload,
-        # CRITICAL (D-09): pairs carries values in memory only for write use.
+        # CRITICAL: pairs carries values in memory only for write use.
         # run_paste_secrets logs only key names. Never log extra["pairs"].
         extra={"pairs": parsed},
     )
@@ -808,7 +808,7 @@ async def run_edit_repo_submission(
     """Post-ack: update repo binding and/or inline PAT for the agent.
 
     Re-checks is_admin before any write (T-83-14).
-    D-08 / T-83-16: blank PAT field = keep stored token (never overwrites).
+    Blank PAT field = keep stored token (never overwrites).
     """
     try:
         refused = await _refuse_non_admin(
@@ -841,7 +841,7 @@ async def run_edit_repo_submission(
         pat_replace: bool = bool(extra.get("pat_replace"))
 
         if pat_replace and pat:
-            # D-08: only replace when the user explicitly typed a new value.
+            # Only replace when the user explicitly typed a new value.
             await store_inline_pat(
                 runtime,
                 account_id=account_id,
@@ -1052,7 +1052,7 @@ async def run_add_mcp_submission(
     """Post-ack: add an MCP server entry to the agent and reconcile.
 
     Re-checks is_admin before any write (T-83-14).
-    token: optional (write-only, D-08). Empty = keep stored credential.
+    token: optional (write-only). Empty = keep stored credential.
     """
     try:
         refused = await _refuse_non_admin(
@@ -1121,7 +1121,7 @@ async def run_add_mcp_submission(
             guild_account_id=account_id,
         )
 
-        # Write vault credential if token provided (D-08: blank = keep).
+        # Write vault credential if token provided (blank = keep).
         if token:
             mcp = runtime.settings.mcp
             if mcp.public_url is not None and mcp.jwt_secret is not None:
@@ -1150,7 +1150,7 @@ async def run_add_mcp_submission(
             agent_name=agent_name,
             mcp_name=mcp_name,
             mcp_url=mcp_url,
-            # CRITICAL (D-09): token value NEVER logged.
+            # CRITICAL: token value NEVER logged.
         )
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
@@ -1187,7 +1187,7 @@ async def run_paste_secrets_submission(
     """Post-ack: write validated secrets to agent_files store.
 
     Re-checks is_admin before any write (T-83-14).
-    CRITICAL (D-09 / T-83-15): only key NAMES appear in logs and ephemeral.
+    CRITICAL: only key NAMES appear in logs and ephemeral.
     Secret values are consumed here and never propagated further.
     """
     try:
@@ -1220,7 +1220,7 @@ async def run_paste_secrets_submission(
         if not pairs:
             return
 
-        # Write each secret. Log ONLY the key name (D-09 / T-83-15).
+        # Write each secret. Log ONLY the key name.
         key_names_written: list[str] = []
         async with runtime.sessionmaker.begin() as session:
             for key, value in pairs:
@@ -1262,7 +1262,7 @@ async def run_paste_secrets_submission(
             "slack.agent_setup.paste_secrets_failed",
             team_id=team_id,
             agent_name=agent_name,
-            # CRITICAL (D-09): never include secret values or keys from extra in error logs.
+            # CRITICAL: never include secret values or keys from extra in error logs.
             exc_info=exc,
         )
         _capture(exc)

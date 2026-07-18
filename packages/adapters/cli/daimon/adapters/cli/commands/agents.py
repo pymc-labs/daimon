@@ -161,7 +161,7 @@ async def agents_create(*, rt: CliRuntime, console: Console, path: Path) -> None
     # Session closed. MA calls below.
     # Tenant-scoped collision pre-check MUST precede reconcile_agent — reconcile
     # silently UPDATEs an existing name instead of raising (name-as-identity).
-    # ANY match in this tenant blocks the create regardless of owner (D-72-01, #136).
+    # ANY match in this tenant blocks the create regardless of owner.
     matches = await find_agents_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=spec.name)
     if matches:
         raise StoreError(
@@ -310,7 +310,7 @@ async def agents_fork(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    # Tenant-scoped collision pre-check on the destination name (D-72-01, #136).
+    # Tenant-scoped collision pre-check on the destination name.
     # ANY match in this tenant blocks the fork regardless of owner.
     dst_matches = await find_agents_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=dst)
     if dst_matches:

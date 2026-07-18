@@ -40,7 +40,7 @@ async def test_new_agent_metadata_roundtrips_to_ma(anthropic_client: AsyncAnthro
     """`new` path: reconcile_agent on a blank spec; assert metadata round-trips."""
     name = f"phase35-new-{RUN_TAG}"
     spec = AgentSpec.model_validate(
-        {"name": name, "model": "claude-sonnet-4-6", "system": "phase 35 new"}
+        {"name": name, "model": "claude-sonnet-4-6", "system": "new agent spec"}
     )
     try:
         await reconcile_agent(
@@ -77,7 +77,7 @@ async def test_fork_agent_creates_distinct_ma_agents_with_same_system_prompt(
     src_name = f"phase35-fork-src-{RUN_TAG}"
     fork_name = f"phase35-fork-copy-{RUN_TAG}"
     src_spec = AgentSpec.model_validate(
-        {"name": src_name, "model": "claude-sonnet-4-6", "system": "phase 35 fork source"}
+        {"name": src_name, "model": "claude-sonnet-4-6", "system": "fork source spec"}
     )
     fork_spec = src_spec.model_copy(deep=True).model_copy(update={"name": fork_name})
     try:
@@ -125,7 +125,7 @@ async def test_mcp_modal_path_roundtrips_after_bug_25_03_fix(
         {
             "name": name,
             "model": "claude-sonnet-4-6",
-            "system": "phase 35 mcp",
+            "system": "mcp agent spec",
             "mcp_servers": [{"name": "test-mcp", "type": "url", "url": "https://example.com/mcp"}],
             "tools": [
                 {

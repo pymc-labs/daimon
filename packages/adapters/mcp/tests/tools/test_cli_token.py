@@ -1,7 +1,7 @@
-"""Behavioral tests for the ``get_cli_token`` MCP tool (Phase 19, GH-03).
+"""Behavioral tests for the ``get_cli_token`` MCP tool.
 
 Started life as Wave 0 RED stubs (ImportError-only) and turned green by
-Wave 4 plan 19-04 when ``daimon.adapters.mcp.tools.cli_token`` lands.
+when ``daimon.adapters.mcp.tools.cli_token`` lands.
 Plan 04 task 4.3 promotes this file to ``test_cli_token.py``.
 
 Per testing skill: real DB sessions, no ``model_construct``, no ``AsyncMock``

@@ -67,7 +67,7 @@ def _runtime(
     sessionmaker: Any = None,
 ) -> DiscordRuntime:
     # tenant_id param retained for call-site readability; the runtime no longer
-    # carries it (D-06) — callbacks resolve tenant per-interaction.
+    # carries it — callbacks resolve tenant per-interaction.
     _ = tenant_id
     settings = MagicMock()
     settings.mcp.public_url = None
@@ -343,7 +343,7 @@ async def test_fork_blocks_collision_under_different_account(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
 ) -> None:
-    """D-72-01: any non-archived agent with the same target name in the tenant blocks fork,
+    """Any non-archived agent with the same target name in the tenant blocks fork,
     regardless of which account owns it. Tenant-wide name uniqueness."""
     guild_account = uuid.UUID("00000000-0000-0000-0000-000000007777")
     other_user_account = uuid.UUID("dddddddd-0000-0000-0000-000000000001")
@@ -422,7 +422,7 @@ async def test_delete_archives_ma_agent_and_jumps_selection(
     a = _entry("alpha")
     b = _entry("bravo")
     c = _entry("charlie")
-    # Phase 54: mutation buttons only appear for admins.
+    # Mutation buttons only appear for admins.
     state = PanelState(roster=[a, b, c], selected=b, account_id=account_id, is_admin=True)
 
     archive_calls: list[str] = []
@@ -488,7 +488,7 @@ async def test_delete_last_agent_disables_section_buttons(
     account_id: uuid.UUID,
 ) -> None:
     only = _entry("solo")
-    # Phase 54: mutation buttons only appear for admins.
+    # Mutation buttons only appear for admins.
     state = PanelState(roster=[only], selected=only, account_id=account_id, is_admin=True)
 
     agents_payload = [

@@ -4,7 +4,7 @@ Pure logic only. No I/O, no clock, no DB. The read layer (read.py) loads
 this from stores; the views layer (views.py) renders it.
 
 Ported from daimon.adapters.discord.billing_panel.state — drops
-theme/COLOR_OVER_CAP (D-03: no color signaling in Block Kit). Decimal is
+theme/COLOR_OVER_CAP. Decimal is
 kept for caller_cap and guild_balance_usd to preserve precision.
 """
 

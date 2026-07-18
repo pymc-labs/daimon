@@ -1,4 +1,4 @@
-"""Tests for SlackApp (Phase 80, STURN-01..05).
+"""Tests for SlackApp.
 
 Covers:
 - Task 1: ack-first dispatch, teardown routing, drain_and_close
@@ -794,7 +794,7 @@ async def test_orchestrate_queue_coalesce_when_thread_in_flight_adds_hourglass_a
     """queue_coalesce: a second mention while a turn is in flight adds a ⌛
     reaction and the queued mention drains into exactly one follow-up turn.
 
-    Verifies STURN-06 / D-01 parity.
+    Verifies cancel registry parity.
     """
     team_id = "T_ORCH_80_COALESCE"
     channel = "C_TEST"
@@ -1407,7 +1407,7 @@ async def test_orchestrate_first_turn_when_no_agent_configured_posts_guidance_an
 
 
 # ---------------------------------------------------------------------------
-# Phase 81 Plan 05 — cancel registry: block_actions routing + author gate
+# Cancel registry: block_actions routing + author gate
 # ---------------------------------------------------------------------------
 
 
@@ -1431,7 +1431,7 @@ def _make_block_actions_payload(
 
 
 async def test_handle_block_action_when_author_clicks_cancel_sets_event() -> None:
-    """cancel click from the turn author sets the cancel Event (D-01)."""
+    """cancel click from the turn author sets the cancel Event."""
     app = _make_app()
     cancel = asyncio.Event()
     app._cancel_registry["1000000000.000001"] = (cancel, "U_AUTHOR")  # pyright: ignore[reportPrivateUsage]
@@ -1447,7 +1447,7 @@ async def test_handle_block_action_when_author_clicks_cancel_sets_event() -> Non
 
 
 async def test_handle_block_action_when_non_author_clicks_cancel_event_unset() -> None:
-    """cancel click from a non-author leaves the cancel Event unset (D-02 author gate)."""
+    """cancel click from a non-author leaves the cancel Event unset (author gate)."""
     app = _make_app()
     cancel = asyncio.Event()
     app._cancel_registry["1000000000.000001"] = (cancel, "U_AUTHOR")  # pyright: ignore[reportPrivateUsage]
@@ -1459,7 +1459,7 @@ async def test_handle_block_action_when_non_author_clicks_cancel_event_unset() -
     )
     await app._handle_block_action(payload)  # pyright: ignore[reportPrivateUsage]
 
-    assert not cancel.is_set(), "cancel Event must NOT be set for a non-author click (D-02)"
+    assert not cancel.is_set(), "cancel Event must NOT be set for a non-author click (author gate)"
 
 
 async def test_handle_block_action_when_status_ts_not_in_registry_is_noop() -> None:
@@ -1561,7 +1561,7 @@ async def test_on_request_privacy_disconnect_block_action_spawns_privacy_handler
 
 
 # ---------------------------------------------------------------------------
-# Phase 82 Plan 05 — slash_commands branch + view_submission ack-with-payload
+# slash_commands branch + view_submission ack-with-payload
 # ---------------------------------------------------------------------------
 
 
@@ -1608,7 +1608,7 @@ async def test_on_request_slash_commands_acks_first_then_spawns_help_handler() -
 async def test_on_request_view_submission_mismatch_acks_errors_and_no_purge() -> None:
     """view_submission with wrong username acks response_action=errors; no purge spawned.
 
-    Verifies T-82-19 (ack-first) + D-05 (mismatch → re-display error, NO purge).
+    Verifies ack-first + mismatch → re-display error, NO purge.
     The ack carries the error payload; the modal is NOT dismissed.
     """
     fake_client = _FakeSocketClient()
@@ -1658,7 +1658,7 @@ async def test_on_request_view_submission_mismatch_acks_errors_and_no_purge() ->
     )
     ack_payload: dict[str, Any] = fake_client.sent_responses[0].payload or {}  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]  # SocketModeResponse.payload untyped
     assert ack_payload.get("response_action") == "errors", (
-        "mismatched username must ack with response_action=errors (D-05 — no purge)"
+        "mismatched username must ack with response_action=errors (no purge)"
     )
     mock_purge.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
 
@@ -1666,7 +1666,7 @@ async def test_on_request_view_submission_mismatch_acks_errors_and_no_purge() ->
 async def test_on_request_view_submission_match_acks_update_and_spawns_purge() -> None:
     """view_submission with correct username acks response_action=update and spawns purge.
 
-    Verifies T-82-19 (ack-first) + D-05 (match → Deleting… view, purge in background).
+    Verifies ack-first + match → Deleting… view, purge in background.
     The ack carries response_action=update; run_purge_and_update is spawned as a bg task.
     """
     fake_client = _FakeSocketClient()
@@ -1726,6 +1726,6 @@ async def test_on_request_view_submission_match_acks_update_and_spawns_purge() -
     )
     ack_payload: dict[str, Any] = fake_client.sent_responses[0].payload or {}  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]  # SocketModeResponse.payload untyped
     assert ack_payload.get("response_action") == "update", (
-        "matching username must ack with response_action=update (D-05 — Deleting… view)"
+        "matching username must ack with response_action=update (Deleting… view)"
     )
     mock_purge.assert_called_once()  # pyright: ignore[reportUnknownMemberType]

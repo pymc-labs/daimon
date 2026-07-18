@@ -75,7 +75,7 @@ async def _resolve_sync_token(
 
     The session JWT carries no agent_id claim (SC-4), so the credential is
     resolved from the URL instead: the caller-tenant's ``agent_repo_binding``
-    for this repo → that agent's PAT overlay (D-25). Other tenants' bindings
+    for this repo → that agent's PAT overlay. Other tenants' bindings
     for the same repo never resolve — no cross-tenant credential bleed.
     """
     if runtime.fernet is None:
@@ -133,7 +133,7 @@ async def _list_impl(
     result: list[SkillInfo] = []
     for row in rows:
         if row.source == "anthropic":
-            # Built-in skills: display by their raw display_title or id (D-11).
+            # Built-in skills: display by their raw display_title or id.
             display_name = row.display_title or row.id
             result.append(SkillInfo.from_ma(row, display_name=display_name))
         else:
@@ -141,9 +141,9 @@ async def _list_impl(
                 tenant_id=auth.tenant_id, display_title=row.display_title or ""
             )
             if bare is not None:
-                # Own-namespace skill: display the bare name (D-10).
+                # Own-namespace skill: display the bare name.
                 result.append(SkillInfo.from_ma(row, display_name=bare))
-            # Foreign-tenant skills are excluded from the result (D-11).
+            # Foreign-tenant skills are excluded from the result.
     return result
 
 

@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Stripe is optional — the MCP server boots without it (Phase 89 lazy
+# Stripe is optional — the MCP server boots without it (lazy
 # imports). Install `daimon-adapters-mcp[billing]` to enable Stripe top-ups.
 billing = [
     "stripe>=9,<14",

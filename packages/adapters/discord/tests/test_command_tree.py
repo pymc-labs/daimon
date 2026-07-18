@@ -56,13 +56,12 @@ def test_deprecated_slashes_are_unregistered() -> None:
     deprecated = {"agents", "skills", "environments", "propagate", "unpropagate"}
     leaked = deprecated & all_cog_names
     assert not leaked, (
-        f"deprecated slashes must remain unregistered after Plan 25-02 / Phase 54; found {leaked!r} "
-        f"in {all_cog_names!r}"
+        f"deprecated slashes must remain unregistered; found {leaked!r} in {all_cog_names!r}"
     )
 
 
 def test_agent_setup_slash_does_not_require_admin() -> None:
-    """``/agent-setup`` is per-user (D-04): guard against accidental admin gating.
+    """``/agent-setup`` is per-user: guard against accidental admin gating.
 
     The source file decorates the handler with ``@require_registered_guild`` but
     NOT ``@require_admin``. We inspect the source as the simplest unambiguous
@@ -77,7 +76,7 @@ def test_agent_setup_slash_does_not_require_admin() -> None:
     assert "@require_registered_guild" in source, (
         "agent_setup.py must keep @require_registered_guild on the /agent-setup handler"
     )
-    # The handler must NOT be guarded by admin role — D-04 says per-user, not per-admin.
+    # The handler must NOT be guarded by admin role — per-user, not per-admin.
     assert "@require_admin" not in source, (
-        "agent_setup.py must not gate /agent-setup behind @require_admin (D-04: per-user panel)"
+        "agent_setup.py must not gate /agent-setup behind @require_admin (per-user panel)"
     )

@@ -1,6 +1,6 @@
 """Per-interaction tenant resolution for /agent-setup panels and modals.
 
-The runtime no longer carries a boot-time tenant_id (D-06); each panel/modal
+The runtime no longer carries a boot-time tenant_id; each panel/modal
 callback derives its own guild's tenant id and checks it exists in tenants. Panels
 gate behind ``require_registered_guild`` so a provisioned tenant is guaranteed
 by the time a callback fires — a resolution miss is a bug, not a flow.
@@ -21,7 +21,7 @@ import discord
 async def resolve_tenant_for_panel(
     runtime: DiscordRuntime, interaction: discord.Interaction
 ) -> uuid.UUID:
-    """Resolve the interaction's guild tenant_id, per-interaction (D-06)."""
+    """Resolve the interaction's guild tenant_id, per-interaction."""
     if interaction.guild_id is None:
         raise DaimonError("Panel interaction has no guild_id; cannot resolve tenant.")
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))

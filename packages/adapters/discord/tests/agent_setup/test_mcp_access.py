@@ -1,4 +1,4 @@
-"""Behavioral tests for the Connect via MCP button flow (Phase 77).
+"""Behavioral tests for the Connect via MCP button flow.
 
 Assertions:
   (1) send_connect_via_mcp writes an mcp_tokens row and replies ephemerally

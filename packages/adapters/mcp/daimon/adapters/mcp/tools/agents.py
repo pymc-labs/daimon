@@ -256,7 +256,7 @@ async def _reject_guild_name_collision(
 
     Tenant-scoped name uniqueness matches the resolver's (daimon_tenant, daimon_name)
     identity model exactly (ma_index keys on tenant+name only); legacy personal-stamped
-    agents now also block. D-72-01 — any non-empty match raises regardless of owner.
+    agents now also block. Any non-empty match raises regardless of owner.
     """
     matches = await find_agents_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
     if matches:
@@ -355,8 +355,8 @@ async def _create_agent_impl(
     if outcome.anthropic_id is None:
         raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
     ma_agent = await runtime.client.beta.agents.retrieve(outcome.anthropic_id)
-    # D-12: agents.create succeeded — always return AgentInfo even if sync fails.
-    # D-13: if agents.create itself raises, let it propagate as ToolError.
+    # agents.create succeeded — always return AgentInfo even if sync fails.
+    # if agents.create itself raises, let it propagate as ToolError.
     warnings: list[SyncRepoFailure] | None = None
     if spec.skill_repos:
         fernet = runtime.fernet

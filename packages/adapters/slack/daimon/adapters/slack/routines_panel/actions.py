@@ -1,4 +1,4 @@
-"""Slack /routines slash handler + overflow pause/resume/output actions (SUX-02).
+"""Slack /routines slash handler + overflow pause/resume/output actions.
 
 Shell module: all I/O lives here. Pure builders (views.py) and reducers
 (state.py) are called but never catch exceptions — failures propagate to the
@@ -6,7 +6,7 @@ listener-boundary catch in this module (S3 pattern).
 
 Handler contract:
   handle_routines_command(runtime, payload)
-    Slash command entry: open loading modal (D-06) → background-fetch routines
+    Slash command entry: open loading modal → background-fetch routines
     → views.update with the content view. No TRY/EXCEPT in the pure callers.
 
   handle_routine_action(runtime, payload)
@@ -55,7 +55,7 @@ def _dev_allow_all_admin(runtime: SlackRuntime) -> bool:
 
 
 async def handle_routines_command(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """Slash command handler for /routines (D-06 loading-modal pattern).
+    """Slash command handler for /routines (loading-modal pattern).
 
     Immediately opens a "Loading…" modal with the fresh trigger_id (beats the
     ~3s expiry), then background-fetches routines and updates the modal in place.
@@ -74,7 +74,7 @@ async def handle_routines_command(runtime: SlackRuntime, payload: dict[str, Any]
         return
 
     try:
-        # D-06: open loading modal immediately — must beat the ~3s trigger_id TTL.
+        # Open loading modal immediately — must beat the ~3s trigger_id TTL.
         resp = await client.views_open(  # pyright: ignore[reportUnknownMemberType]
             trigger_id=trigger_id,
             view=build_loading_view(channel_id=channel_id),

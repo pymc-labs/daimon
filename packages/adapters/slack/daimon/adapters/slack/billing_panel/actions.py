@@ -6,17 +6,17 @@ these functions as background tasks. These are the background side of the ack.
 Pattern sequence for slash command:
   1. resolve_web_client → get per-event AsyncWebClient
   2. views.open(loading) → capture view_id
-  3. resolve_is_admin → bool (D-02 fail-closed)
+  3. resolve_is_admin → bool (fail-closed)
   4. load_billing_snapshot → BillingPanelState
   5. views.update(view_id, billing modal)
 
 Pattern sequence for billing_topup block_action:
   1. resolve_web_client → client
-  2. Re-verify is_admin (D-02 — re-check at click time, not cached)
+  2. Re-verify is_admin (re-check at click time, not cached)
   3. Validate amount ∈ preset set (T-82-10)
   4. get_or_create_platform_principal → account_id
   5. create_checkout(http_client, …) → url
-  6. chat_postEphemeral with "<url|Complete payment>" link (D-01)
+  6. chat_postEphemeral with "<url|Complete payment>" link
 
 Error boundary (S3): catches DaimonError | httpx.HTTPStatusError | SlackApiError
 at the handler level; logs + captures to Sentry. Never stripe.
@@ -53,7 +53,7 @@ async def handle_billing_command(
 ) -> None:
     """Handle the /billing slash command.
 
-    Opens a loading modal (D-06), resolves is_admin in the background (D-03),
+    Opens a loading modal, resolves is_admin in the background,
     reads usage/ledger/cap aggregates, then updates the modal with the billing view.
 
     Args:
@@ -70,7 +70,7 @@ async def handle_billing_command(
         return
 
     try:
-        # Open loading modal immediately (D-06)
+        # Open loading modal immediately
         open_resp = await client.views_open(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs
             trigger_id=trigger_id,
             view=build_loading_view(),
@@ -79,7 +79,7 @@ async def handle_billing_command(
         open_view: dict[str, str] = open_resp["view"]  # pyright: ignore[reportUnknownVariableType, reportAssignmentType, reportUnknownMemberType]  # SlackResponse untyped
         view_id: str = open_view.get("id") or ""
 
-        # Resolve admin status (D-02 fail-closed)
+        # Resolve admin status (fail-closed)
         is_admin = await resolve_is_admin(client, user_id=user_id)
 
         # Load billing snapshot from DB
@@ -124,7 +124,7 @@ async def handle_topup_select(
 ) -> None:
     """Handle the billing_topup static_select block_action.
 
-    Re-verifies admin status at click time (D-02), validates the selected amount
+    Re-verifies admin status at click time, validates the selected amount
     against the preset set (T-82-10), mints an internal token, POSTs to
     /billing/checkout, and replies with an ephemeral "<url|Complete payment>" link.
 
@@ -152,7 +152,7 @@ async def handle_topup_select(
         return
 
     try:
-        # D-02: Re-verify admin at click time (not cached)
+        # Re-verify admin at click time (not cached)
         is_admin = await resolve_is_admin(client, user_id=user_id)
         if not is_admin:
             log.warning(
@@ -199,7 +199,7 @@ async def handle_topup_select(
                 amount=amount,
             )
 
-        # D-01: Ephemeral mrkdwn link (not a url_button — those can't be ephemeral)
+        # Ephemeral mrkdwn link (not a url_button — those can't be ephemeral)
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel,
             user=user_id,

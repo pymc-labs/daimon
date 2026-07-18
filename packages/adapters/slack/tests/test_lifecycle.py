@@ -11,11 +11,11 @@ Task 1 (debounce / registry / usage):
 
 Task 2 (terminal paths — replace-in-place, overflow, collapse, failure, deregister):
   - on_terminal_success with text replaces status message in place (chat.update on status_ts).
-  - Long text posts overflow chunks via chat.postMessage; final_ts = LAST posted ts (D-06).
+  - Long text posts overflow chunks via chat.postMessage; final_ts = LAST posted ts.
   - Tool-only turn (no final text) leaves the collapsed done; no overflow post.
   - Empty content (no blocks at all) updates status message to 'Turn cancelled.'
   - on_terminal_failure posts/updates error state and does NOT raise.
-  - registry deregister callback is invoked for status_ts in the terminal finally (D-01).
+  - registry deregister callback is invoked for status_ts in the terminal finally.
   - SlackTurnLifecycle satisfies the TurnLifecycle Protocol.
 
 Transport-level fake via aioresponses (guideline:testing) — transport-level fakes only.
@@ -198,7 +198,7 @@ async def test_event_after_debounce_triggers_update(fake_slack_web_client: Any) 
 
 
 async def test_first_flush_registers_status_ts(fake_slack_web_client: Any) -> None:
-    """First flush registers status_ts with (cancel Event, author_id) in the registry (D-01)."""
+    """First flush registers status_ts with (cancel Event, author_id) in the registry."""
     lc, cancel, registered, _ = _make_lifecycle(fake_slack_web_client)
 
     await lc.on_sse_event(_thinking_event())
@@ -285,17 +285,15 @@ async def test_terminal_success_replaces_status_in_place(fake_slack_web_client: 
     assert blocks[0]["type"] == "markdown", "final answer must render as a native markdown block"
     assert "The answer is 42." in blocks[0]["text"], "first block must carry the answer text"
     assert any(b["type"] == "context" for b in blocks), (
-        "terminal message must include the cost/usage footer context block (D-08)"
+        "terminal message must include the cost/usage footer context block"
     )
-    assert not _has_actions_block(blocks), (
-        "cancel button must be removed on terminal success (D-05)"
-    )
+    assert not _has_actions_block(blocks), "cancel button must be removed on terminal success"
 
 
 async def test_terminal_success_overflow_posts_and_widens_final_ts(
     fake_slack_web_client: Any,
 ) -> None:
-    """Long text splits into overflow chunks posted via chat.postMessage; final_ts = LAST ts (D-06)."""
+    """Long text splits into overflow chunks posted via chat.postMessage; final_ts = LAST ts."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
     await lc.on_sse_event(_thinking_event())
     initial_posts = _post_count(fake_slack_web_client)
@@ -390,18 +388,18 @@ async def test_terminal_failure_does_not_raise(fake_slack_web_client: Any) -> No
     assert "❌" in text and "upstream blew up" in text, (
         "terminal failure must render the ❌ error footer with the failure reason"
     )
-    assert not _has_actions_block(blocks), "error terminal must drop the cancel button (D-05)"
+    assert not _has_actions_block(blocks), "error terminal must drop the cancel button"
 
 
 # ---------------------------------------------------------------------------
-# Task 2: Terminal — registry deregister in finally (D-01)
+# Task 2: Terminal — registry deregister in finally
 # ---------------------------------------------------------------------------
 
 
 async def test_deregister_called_in_terminal_success_finally(
     fake_slack_web_client: Any,
 ) -> None:
-    """deregister is invoked for status_ts in the on_terminal_success finally block (D-01)."""
+    """deregister is invoked for status_ts in the on_terminal_success finally block."""
     lc, _, _registered, deregistered = _make_lifecycle(fake_slack_web_client)
     await lc.on_sse_event(_thinking_event())
 
@@ -415,7 +413,7 @@ async def test_deregister_called_in_terminal_success_finally(
 async def test_deregister_called_in_terminal_failure_finally(
     fake_slack_web_client: Any,
 ) -> None:
-    """deregister is invoked for status_ts in the on_terminal_failure finally block (D-01)."""
+    """deregister is invoked for status_ts in the on_terminal_failure finally block."""
     lc, _, _registered, deregistered = _make_lifecycle(fake_slack_web_client)
     await lc.on_sse_event(_thinking_event())
 
@@ -432,7 +430,7 @@ async def test_deregister_called_in_terminal_failure_finally(
 
 
 async def test_lifecycle_satisfies_turn_lifecycle_protocol(fake_slack_web_client: Any) -> None:
-    """SlackTurnLifecycle is assignable to TurnLifecycle protocol (SREND-01)."""
+    """SlackTurnLifecycle is assignable to TurnLifecycle protocol."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
     bound: TurnLifecycle = lc  # type annotation asserts protocol conformance
     assert callable(bound.on_render), "on_render must be callable"
