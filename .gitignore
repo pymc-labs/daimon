@@ -18,12 +18,13 @@ node_modules/
 .env.fly
 
 # Assistant/tooling working dirs — local only, never commit.
-.planning/
+# (.planning without a trailing slash so the symlink form is ignored too)
+.planning
 .learning/
 .claude/
 graphify-out/
 
-# Local symlink to the private infra repo.
+# Local symlink into the private companion repo.
 /infra
 
 # Per-deployment Fly configs derived from *.example.toml templates.
@@ -37,4 +38,3 @@ scratchpad/
 err.txt
 agents_err.txt
 download.html
-
