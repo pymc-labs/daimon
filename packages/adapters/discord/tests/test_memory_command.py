@@ -100,6 +100,23 @@ async def test_memory_show_renders_content(db_session, db_session_factory) -> No
     assert "alpha" in text
 
 
+async def test_memory_show_escapes_embedded_fences(db_session, db_session_factory) -> None:
+    """Content containing ``` (agents store markdown with code blocks) must
+    not break out of the wrapping fence: exactly one opening and one closing
+    fence in the final message."""
+    content = "notes\n```python\nprint('hi')\n```\nmore notes"
+    runtime = await _setup(db_session, db_session_factory, seed={"/notes/code.md": content})
+    cog = MemoryCog(MagicMock())
+    interaction = _interaction(runtime)
+
+    await cog.memory.callback(cog, interaction, path="/notes/code.md")
+
+    sent = interaction.followup.send.call_args
+    text = sent.args[0] if sent.args else sent.kwargs.get("content", "")
+    assert text.count("```") == 2, f"embedded fence broke out: {text!r}"
+    assert "print('hi')" in text
+
+
 async def test_memory_show_truncates_content_with_closed_fence(
     db_session, db_session_factory
 ) -> None:

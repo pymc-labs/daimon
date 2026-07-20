@@ -43,8 +43,11 @@ def _fenced(header: str, content: str, limit: int) -> str:
     Truncating the CONTENT before wrapping (rather than truncating the fully
     wrapped string) guarantees the closing ``` fence is always present — a
     naive `_truncate(header + fence + content + fence)` can slice mid-fence
-    and leave an unclosed code block that corrupts rendering.
+    and leave an unclosed code block that corrupts rendering. Backtick runs
+    inside the content get a zero-width space so an embedded ``` can't close
+    the wrapping fence early.
     """
+    content = content.replace("```", "`​``")
     overhead = len(header) + len("\n```\n\n```")
     budget = limit - overhead
     if len(content) > budget:

@@ -99,6 +99,19 @@ async def test_memory_show_truncates_content_with_closed_fence(
     assert "truncated" in text
 
 
+async def test_memory_show_escapes_embedded_fences(db_session, db_session_factory) -> None:
+    """Content containing ``` (agents store markdown with code blocks) must
+    not break out of the wrapping fence: exactly one opening and one closing
+    fence in the final message."""
+    content = "notes\n```python\nprint('hi')\n```\nmore notes"
+    runtime, web = await _setup(db_session, db_session_factory, seed={"/code.md": content})
+    with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
+        await handle_memory_command(runtime, _payload("/code.md"))
+    text = web.chat_postEphemeral.call_args.kwargs["text"]
+    assert text.count("```") == 2, f"embedded fence broke out: {text!r}"
+    assert "print('hi')" in text
+
+
 async def test_memory_empty_state(db_session, db_session_factory) -> None:
     runtime, web = await _setup(db_session, db_session_factory, seed={})
     with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
