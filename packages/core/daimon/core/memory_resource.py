@@ -77,13 +77,25 @@ async def ensure_memory_store_and_mount(
                 MA_METADATA_KEY_AGENT: str(agent_id),
             },
         )
-        async with session_factory() as session, session.begin():
-            store_id = await insert_memory_store(
-                session,
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-                memory_store_id=created.id,
-            )
+        try:
+            async with session_factory() as session, session.begin():
+                store_id = await insert_memory_store(
+                    session,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    memory_store_id=created.id,
+                )
+        except Exception:
+            # The binding never landed, so nothing references the store we
+            # just created — delete it, or a DB outage mints one unreferenced
+            # active store per session attempt.
+            try:
+                await anthropic.beta.memory_stores.delete(created.id)
+            except anthropic_errors.APIError:
+                _log.warning(
+                    "memory_store.orphan_delete_failed", orphan=created.id
+                )
+            raise
         if store_id != created.id:
             # Lost the provisioning race — discard the orphan store.
             _log.info(
