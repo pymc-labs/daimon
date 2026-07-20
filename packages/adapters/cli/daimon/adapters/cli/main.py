@@ -12,6 +12,7 @@ from daimon.adapters.cli.commands.defaults import defaults_app
 from daimon.adapters.cli.commands.environments import environments_app
 from daimon.adapters.cli.commands.help import help_app
 from daimon.adapters.cli.commands.mcp import mcp_app
+from daimon.adapters.cli.commands.memory import memory_app
 from daimon.adapters.cli.commands.notebook import notebook_app
 from daimon.adapters.cli.commands.routines import routines_app
 from daimon.adapters.cli.commands.sessions import sessions_app
@@ -29,6 +30,7 @@ app.add_typer(defaults_app, name="defaults")
 app.add_typer(skills_app, name="skills")
 app.add_typer(help_app, name="help")
 app.add_typer(mcp_app, name="mcp")
+app.add_typer(memory_app, name="memory")
 app.add_typer(notebook_app, name="notebook")
 app.add_typer(routines_app, name="routines")
 app.command("run")(run_command)
