@@ -11,7 +11,8 @@ from daimon.core.stores.agent_memory_stores import (
     insert_memory_store,
 )
 from daimon.testing.factories import make_tenant
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 pytestmark = pytest.mark.asyncio
 
@@ -36,7 +37,16 @@ async def test_insert_then_get_roundtrip(db_session: AsyncSession) -> None:
 
 
 async def test_insert_conflict_returns_existing_id(db_session: AsyncSession) -> None:
-    """Race semantics: second insert loses and returns the first id."""
+    """Same-transaction conflict: a second insert against a row already
+    committed-or-flushed in *this* session/transaction is a no-op and
+    returns the existing id, not the caller's own value.
+
+    This does NOT exercise the cross-transaction race the store exists for
+    (see test_insert_conflict_across_transactions_returns_first_committed_id
+    below for that) — both inserts here share one connection/transaction, so
+    it only proves ON CONFLICT DO NOTHING behaves correctly within a single
+    transaction.
+    """
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
     await insert_memory_store(
@@ -46,6 +56,57 @@ async def test_insert_conflict_returns_existing_id(db_session: AsyncSession) -> 
         db_session, tenant_id=tenant.id, agent_id=agent_id, memory_store_id="memstore_B"
     )
     assert won == "memstore_A", "conflict must return the existing binding, not overwrite"
+
+
+async def test_insert_conflict_across_transactions_returns_first_committed_id(
+    db_engine: AsyncEngine, db_session: AsyncSession
+) -> None:
+    """Genuine cross-transaction race: transaction A inserts+commits
+    memstore_A on one connection; transaction B, on a second, independent
+    connection/session, then tries to insert memstore_B for the same
+    (tenant_id, agent_id) and must lose, returning "memstore_A".
+
+    This is the scenario ON CONFLICT DO NOTHING + follow-up SELECT actually
+    guards against (two concurrent first-sessions racing to provision an MA
+    memory store) — same-transaction duplicate inserts (see the test above)
+    can't prove that on their own.
+
+    `db_session` pins its schema via a `SET search_path` issued on its own
+    connection (daimon.testing.db.db_session); a second connection off the
+    same `db_engine` does not inherit that search_path, so we discover the
+    per-test schema name via `current_schema()` on `db_session` and set it
+    explicitly on the second connection before using it.
+    """
+    tenant = await make_tenant(db_session)
+    agent_id = uuid.uuid4()
+
+    # Transaction A: insert+commit memstore_A on db_session's connection.
+    won_a = await insert_memory_store(
+        db_session, tenant_id=tenant.id, agent_id=agent_id, memory_store_id="memstore_A"
+    )
+    assert won_a == "memstore_A"
+    await db_session.commit()
+
+    schema = (await db_session.execute(text("SELECT current_schema()"))).scalar_one()
+
+    # Transaction B: a fully independent connection/session, pinned to the
+    # same per-test schema, racing to insert memstore_B for the same key.
+    async with db_engine.connect() as other_conn:
+        await other_conn.execute(text(f'SET search_path TO "{schema}", public'))
+        other_session_factory = async_sessionmaker(bind=other_conn, expire_on_commit=False)
+        async with other_session_factory() as other_session:
+            won_b = await insert_memory_store(
+                other_session,
+                tenant_id=tenant.id,
+                agent_id=agent_id,
+                memory_store_id="memstore_B",
+            )
+            await other_session.commit()
+
+    assert won_b == "memstore_A", (
+        "the transaction that committed first must win across independent "
+        "connections, not just within one transaction"
+    )
 
 
 async def test_tenant_isolation(db_session: AsyncSession) -> None:

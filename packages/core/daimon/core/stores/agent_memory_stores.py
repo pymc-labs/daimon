@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 
 from daimon.core._models import AgentMemoryStore
+from daimon.core.errors import StoreError
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,21 +40,39 @@ async def insert_memory_store(
     ON CONFLICT DO NOTHING on the composite PK: when another writer got there
     first, the existing row's id is returned so the caller can discard its own
     just-created MA store.
+
+    Bounded retry (3 attempts): the no-op insert and the follow-up SELECT are
+    two separate statements, so a concurrent transaction can delete the
+    (tenant_id, agent_id) row in between — the SELECT then finds nothing
+    rather than the expected winner. Rather than let that surface as an
+    unhandled NoResultFound, we retry the insert (with the row now gone, our
+    insert should win) up to `max_attempts` times. If the row still can't be
+    resolved after all attempts (pathological concurrent churn), raise
+    StoreError.
     """
     stmt = (
         pg_insert(AgentMemoryStore)
         .values(tenant_id=tenant_id, agent_id=agent_id, memory_store_id=memory_store_id)
         .on_conflict_do_nothing(constraint="pk_agent_memory_store")
     )
-    await session.execute(stmt)
-    await session.flush()
-    result = await session.execute(
-        select(AgentMemoryStore.memory_store_id).where(
-            AgentMemoryStore.tenant_id == tenant_id,
-            AgentMemoryStore.agent_id == agent_id,
+    max_attempts = 3
+    for _ in range(max_attempts):
+        await session.execute(stmt)
+        await session.flush()
+        result = await session.execute(
+            select(AgentMemoryStore.memory_store_id).where(
+                AgentMemoryStore.tenant_id == tenant_id,
+                AgentMemoryStore.agent_id == agent_id,
+            )
         )
+        winner = result.scalar_one_or_none()
+        if winner is not None:
+            return winner
+    raise StoreError(
+        f"insert_memory_store: no binding for tenant={tenant_id} agent={agent_id} "
+        f"survived {max_attempts} attempts — concurrent clear_memory_store churn "
+        "outpaced the retry budget"
     )
-    return result.scalar_one()
 
 
 async def clear_memory_store(
