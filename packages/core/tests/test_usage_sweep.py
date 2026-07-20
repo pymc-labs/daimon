@@ -57,6 +57,7 @@ def _session_dict(
 ) -> dict[str, Any]:
     """A headless MA session tagged the way create_session tags it."""
     s = BetaManagedAgentsSession(
+        outcome_evaluations=[],
         id=session_id,
         agent=BetaManagedAgentsSessionAgent(
             id="agent_headless1",
@@ -208,6 +209,7 @@ async def test_sweep_skips_session_without_tenant_tag(
     """An untagged session (no daimon_tenant — e.g. a DM or foreign session) is
     skipped: no usage row, and its events are never even fetched."""
     s = BetaManagedAgentsSession(
+        outcome_evaluations=[],
         id="sesn_untagged",
         agent=BetaManagedAgentsSessionAgent(
             id="agent_x",

@@ -353,6 +353,7 @@ def _make_session(
     if extra_meta:
         meta.update(extra_meta)
     return BetaManagedAgentsSession(
+        outcome_evaluations=[],
         id=session_id,
         agent=BetaManagedAgentsSessionAgent(
             id=agent_id,

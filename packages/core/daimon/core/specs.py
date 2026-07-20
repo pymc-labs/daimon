@@ -23,6 +23,9 @@ import yaml
 from anthropic.types.beta.agent_create_params import Tool
 from anthropic.types.beta.beta_cloud_config_params import BetaCloudConfigParams
 from anthropic.types.beta.beta_managed_agents_model_param import BetaManagedAgentsModelParam
+from anthropic.types.beta.beta_managed_agents_multiagent_params import (
+    BetaManagedAgentsMultiagentParams,
+)
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
@@ -100,6 +103,7 @@ class AgentSpec(BaseModel):
     system: str | None = None
     tools: list[Annotated[Tool, Field(discriminator="type")]] | None = None
     mcp_servers: list[BetaManagedAgentsURLMCPServerParams] | None = None
+    multiagent: BetaManagedAgentsMultiagentParams | None = None
     skills: list[SkillRef] = Field(default_factory=list[SkillRef], exclude=True)
     skill_repos: list[SkillRepo] = Field(default_factory=list[SkillRepo], exclude=True)
 
@@ -165,6 +169,7 @@ class EnvironmentSpec(BaseModel):
     name: str
     config: BetaCloudConfigParams | None = None
     description: str | None = None
+    scope: Literal["organization", "account"] | None = None
 
     @model_validator(mode="after")
     def _normalize_packages_to_replace_semantics(self) -> EnvironmentSpec:

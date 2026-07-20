@@ -604,6 +604,7 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
         version=1,
     )
     _fake_session = BetaManagedAgentsSession(
+        outcome_evaluations=[],
         id="sess-first-001",
         agent=_agent_snapshot,
         created_at=_now,
@@ -887,6 +888,7 @@ async def test_orchestrate_queue_coalesce_when_thread_in_flight_adds_hourglass_a
             version=1,
         )
         mock_create_session.return_value = BetaManagedAgentsSession(
+            outcome_evaluations=[],
             id="sess-coalesce-001",
             agent=_agent_snap_c,
             created_at=_now_c,
@@ -993,6 +995,7 @@ async def test_orchestrate_first_mention_adds_eyes_reaction_before_turn(
         version=1,
     )
     _fake_session = BetaManagedAgentsSession(
+        outcome_evaluations=[],
         id="sess-eyes-001",
         agent=_agent_snapshot,
         created_at=_now,
@@ -1135,6 +1138,7 @@ async def test_orchestrate_eyes_reaction_transport_error_does_not_leak_thread_sl
         version=1,
     )
     _fake_session = BetaManagedAgentsSession(
+        outcome_evaluations=[],
         id="sess-eyes-xport-001",
         agent=_agent_snapshot,
         created_at=_now,
@@ -1288,6 +1292,7 @@ async def test_orchestrate_first_turn_when_channel_agent_propagated_resolves_cha
 
     _now = datetime.now(UTC)
     _fake_session = BetaManagedAgentsSession(
+        outcome_evaluations=[],
         id="sess-scoped-001",
         agent=BetaManagedAgentsSessionAgent(
             id="agent_scoped_id",

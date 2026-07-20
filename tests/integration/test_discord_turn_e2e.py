@@ -90,7 +90,7 @@ def _make_fake_session() -> BetaManagedAgentsSession:
         updated_at="2026-06-14T00:00:00Z",
         usage=BetaManagedAgentsSessionUsage(),
         vault_ids=[],
-        outcome_evaluations=[],  # pyright: ignore[reportCallIssue]
+        outcome_evaluations=[],
     )
 
 

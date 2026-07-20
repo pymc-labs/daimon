@@ -79,6 +79,7 @@ def _session_body(
 ) -> dict[str, Any]:
     """Build a BetaManagedAgentsSession JSON body via SDK Pydantic models."""
     return BetaManagedAgentsSession(
+        outcome_evaluations=[],
         id=session_id,
         type="session",
         status="idle",

@@ -461,6 +461,7 @@ def _make_fake_anthropic_with_sessions(
     for i in range(sessions_count):
         sid = f"sesn_target{i}"
         s = BetaManagedAgentsSession(
+            outcome_evaluations=[],
             id=sid,
             agent=BetaManagedAgentsSessionAgent(
                 id="agent_test1",
@@ -653,6 +654,7 @@ async def test_purge_account_deletes_sessions_across_all_principal_tenants(
         sessions: list[dict[str, _Any]] = []
         for i in range(session_count):
             s = BetaManagedAgentsSession(
+                outcome_evaluations=[],
                 id=f"sesn_{agent_id}_{i}",
                 agent=BetaManagedAgentsSessionAgent(
                     id=agent_id,

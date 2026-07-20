@@ -50,7 +50,7 @@ def _make_fake_session(session_id: str = "sess_test") -> BetaManagedAgentsSessio
         updated_at="2026-04-28T00:00:00Z",
         usage=BetaManagedAgentsSessionUsage(),
         vault_ids=[],
-        outcome_evaluations=[],  # pyright: ignore[reportCallIssue]
+        outcome_evaluations=[],
     )
 
 

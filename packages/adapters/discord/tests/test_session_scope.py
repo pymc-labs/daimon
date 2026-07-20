@@ -104,6 +104,7 @@ def _session_body(*, session_id: str, agent_id: str, environment_id: str) -> dic
                 "version": 1,
             },
             "created_at": "2026-04-21T00:00:00Z",
+            "outcome_evaluations": [],
             "environment_id": environment_id,
             "metadata": {},
             "resources": [],

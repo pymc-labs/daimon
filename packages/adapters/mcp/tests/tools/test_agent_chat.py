@@ -131,6 +131,7 @@ def _make_fake_session(
             "archived_at": None,
             "created_at": "2026-06-23T00:00:00Z",
             "updated_at": "2026-06-23T00:00:00Z",
+            "outcome_evaluations": [],
             "environment_id": _ENV_ID,
             "metadata": {},
             "resources": [],
