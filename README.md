@@ -48,17 +48,18 @@ own, so sharing the workspace with anything else will cause collisions.
 
 ```mermaid
 flowchart LR
-    subgraph adapters
-        direction TB
-        Discord
-        Slack
-        CLI
-        MCP
-        Scheduler
+    gA[server A] --> Discord
+    gB[server B] --> Discord
+    gN[server ...] --> Discord
+    subgraph deployment["one deployment, your API key"]
+        Discord --> core
+        Slack --> core
+        CLI --> core
+        MCP --> core
+        Scheduler --> core
+        core["daimon core<br>turn pipeline"] --> pg[("Postgres<br>one tenant per server")]
     end
-    adapters --> core["daimon core<br>turn pipeline"]
     core <--> ma["Anthropic Managed Agents<br>agents &middot; sessions &middot; skills"]
-    core --> pg[("Postgres<br>tenants &middot; thread&harr;session map")]
 ```
 
 A turn: the adapter derives the tenant from platform identity, core opens or
