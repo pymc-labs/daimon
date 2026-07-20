@@ -37,6 +37,21 @@ def _truncate(text: str) -> str:
     return text[: _SLACK_LIMIT - 20] + "\n… (truncated)"
 
 
+def _fenced(header: str, content: str, limit: int) -> str:
+    """Wrap content in a closed code fence, truncating content to fit limit.
+
+    Truncating the CONTENT before wrapping (rather than truncating the fully
+    wrapped string) guarantees the closing ``` fence is always present — a
+    naive `_truncate(header + fence + content + fence)` can slice mid-fence
+    and leave an unclosed code block that corrupts rendering.
+    """
+    overhead = len(header) + len("\n```\n\n```")
+    budget = limit - overhead
+    if len(content) > budget:
+        content = content[: budget - 16] + "\n… (truncated)"
+    return f"{header}\n```\n{content}\n```"
+
+
 async def _resolve_store(
     runtime: SlackRuntime, *, team_id: str, user_id: str, channel_id: str
 ) -> tuple[str, str] | None:
@@ -135,7 +150,7 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 mem = await runtime.anthropic.beta.memory_stores.memories.retrieve(
                     mem_id, memory_store_id=store_id
                 )
-                text = _truncate(f"*`{path_arg}`*\n```{mem.content or ''}```")
+                text = _fenced(f"*`{path_arg}`*", mem.content or "", _SLACK_LIMIT)
 
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=channel_id,

@@ -100,6 +100,28 @@ async def test_memory_show_renders_content(db_session, db_session_factory) -> No
     assert "alpha" in text
 
 
+async def test_memory_show_truncates_content_with_closed_fence(
+    db_session, db_session_factory
+) -> None:
+    """Boundary case: content ~2x the platform limit must still render under
+    Discord's hard 2000-char cap with a CLOSED code fence — never truncated
+    mid-fence, which would corrupt rendering for the rest of the message."""
+    huge_content = "x" * 3800  # ~2x _DISCORD_LIMIT (1900)
+    runtime = await _setup(
+        db_session, db_session_factory, seed={"/notes/big.md": huge_content}
+    )
+    cog = MemoryCog(MagicMock())
+    interaction = _interaction(runtime)
+
+    await cog.memory.callback(cog, interaction, path="/notes/big.md")
+
+    sent = interaction.followup.send.call_args
+    text = sent.args[0] if sent.args else sent.kwargs.get("content", "")
+    assert len(text) <= 2000, f"exceeds Discord's hard cap: {len(text)} chars"
+    assert text.rstrip().endswith("```"), f"fence not closed: {text[-40:]!r}"
+    assert "truncated" in text
+
+
 async def test_memory_empty_state(db_session, db_session_factory) -> None:
     runtime = await _setup(db_session, db_session_factory, seed={})
     cog = MemoryCog(MagicMock())

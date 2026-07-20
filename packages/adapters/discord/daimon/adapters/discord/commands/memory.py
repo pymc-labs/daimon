@@ -84,6 +84,21 @@ def _truncate(text: str) -> str:
     return text[: _DISCORD_LIMIT - 20] + "\n… (truncated)"
 
 
+def _fenced(header: str, content: str, limit: int) -> str:
+    """Wrap content in a closed code fence, truncating content to fit limit.
+
+    Truncating the CONTENT before wrapping (rather than truncating the fully
+    wrapped string) guarantees the closing ``` fence is always present — a
+    naive `_truncate(header + fence + content + fence)` can slice mid-fence
+    and leave an unclosed code block that corrupts rendering.
+    """
+    overhead = len(header) + len("\n```\n\n```")
+    budget = limit - overhead
+    if len(content) > budget:
+        content = content[: budget - 16] + "\n… (truncated)"
+    return f"{header}\n```\n{content}\n```"
+
+
 @app_commands.guild_only()
 class MemoryCog(commands.Cog):
     """Read-only view of the channel agent's persistent memory."""
@@ -148,7 +163,7 @@ class MemoryCog(commands.Cog):
             )
             content = mem.content or ""
             await interaction.followup.send(
-                _truncate(f"**`{path}`**\n```\n{content}\n```"),
+                _fenced(f"**`{path}`**", content, _DISCORD_LIMIT),
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )

@@ -79,6 +79,25 @@ async def test_memory_show(db_session, db_session_factory) -> None:
     assert "alpha" in kwargs["text"]
 
 
+async def test_memory_show_truncates_content_with_closed_fence(
+    db_session, db_session_factory
+) -> None:
+    """Boundary case: content ~2x the platform limit must still render under
+    Slack's hard 4000-char cap with a CLOSED code fence — never truncated
+    mid-fence, which would corrupt rendering for the rest of the message."""
+    huge_content = "x" * 7600  # ~2x _SLACK_LIMIT (3800)
+    runtime, web = await _setup(
+        db_session, db_session_factory, seed={"/big.md": huge_content}
+    )
+    with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
+        await handle_memory_command(runtime, _payload("/big.md"))
+    kwargs = web.chat_postEphemeral.call_args.kwargs
+    text = kwargs["text"]
+    assert len(text) <= 4000, f"exceeds Slack's hard cap: {len(text)} chars"
+    assert text.rstrip().endswith("```"), f"fence not closed: {text[-40:]!r}"
+    assert "truncated" in text
+
+
 async def test_memory_empty_state(db_session, db_session_factory) -> None:
     runtime, web = await _setup(db_session, db_session_factory, seed={})
     with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
