@@ -3,8 +3,10 @@
 
 # daimon
 
-Self-hostable agent platform built on [Anthropic Managed Agents](https://platform.claude.com/docs/en/managed-agents/quickstart).
-Mention it in Discord, message it in Slack, call it over MCP, or drive it from the CLI.
+**An AI teammate that lives in your team chat.**
+
+Open-source agent platform built on [Anthropic Managed Agents](https://platform.claude.com/docs/en/managed-agents/quickstart),
+with Discord, Slack, MCP, and CLI adapters.
 
 [![CI](https://github.com/pymc-labs/daimon/actions/workflows/ci.yml/badge.svg)](https://github.com/pymc-labs/daimon/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -12,11 +14,13 @@ Mention it in Discord, message it in Slack, call it over MCP, or drive it from t
 
 </div>
 
-You deploy daimon once, on your own Anthropic API key, and it serves any
-number of Discord servers from that single deployment. Each server is an
-isolated tenant: guilds never see each other's data even though they share
-your key. People in your servers just `@mention` the bot and get a working
-agent.
+Most chat bots are one agent shared across a workspace. daimon is
+many-to-many: you deploy it once, on your own Anthropic API key, and any
+number of Discord servers install it from that single deployment. Each
+server is an isolated tenant, so guilds never see each other's data even
+though they share your key. Once the deployment is running, adding a server
+takes about two minutes: invite the bot, run `/agent-setup`, and everyone in
+it can `@mention` a working agent.
 
 The key must belong to an Anthropic workspace dedicated to that daimon
 deployment. daimon manages the workspace's Managed Agents resources as its
