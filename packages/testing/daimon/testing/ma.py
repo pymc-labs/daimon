@@ -450,6 +450,16 @@ def _memory_response(*, store_id: str, path: str, content: str) -> dict[str, Any
     }
 
 
+def _memory_view(mem: dict[str, Any], view: str) -> dict[str, Any]:
+    """Apply the API's view semantics: `content` is populated only for
+    `view=full`; the default `basic` view nulls it (sha/size stay populated)."""
+    if view == "full":
+        return mem
+    redacted = dict(mem)
+    redacted["content"] = None
+    return redacted
+
+
 def make_fake_memory_store_handler(
     state: FakeMemoryStoreState | None = None,
 ) -> Callable[[httpx.Request], httpx.Response]:
@@ -504,15 +514,21 @@ def make_fake_memory_store_handler(
                     json={"type": "error", "error": {"type": "not_found_error", "message": "no such store"}},
                 )
             prefix = request.url.params.get("path_prefix", "/")
-            data = [x for x in st.memories.get(sid, []) if _prefix_match(x["path"], prefix)]
+            view = request.url.params.get("view", "basic")
+            data = [
+                _memory_view(x, view)
+                for x in st.memories.get(sid, [])
+                if _prefix_match(x["path"], prefix)
+            ]
             return list_response(data)
 
         m = re.fullmatch(r"/v1/memory_stores/(?P<sid>[^/]+)/memories/(?P<mid>[^/]+)", path)
         if m and method == "GET":
             sid, mid = m.group("sid"), m.group("mid")
+            view = request.url.params.get("view", "basic")
             for x in st.memories.get(sid, []):
                 if x["id"] == mid:
-                    return httpx.Response(200, json=x)
+                    return httpx.Response(200, json=_memory_view(x, view))
             return httpx.Response(
                 404,
                 json={"type": "error", "error": {"type": "not_found_error", "message": "no such memory"}},

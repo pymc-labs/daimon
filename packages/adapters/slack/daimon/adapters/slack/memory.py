@@ -148,7 +148,7 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 text = f"No memory at `{path_arg}`. Run `/memory` to list paths."
             else:
                 mem = await runtime.anthropic.beta.memory_stores.memories.retrieve(
-                    mem_id, memory_store_id=store_id
+                    mem_id, memory_store_id=store_id, view="full"
                 )
                 text = _fenced(f"*`{path_arg}`*", mem.content or "", _SLACK_LIMIT)
 

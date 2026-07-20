@@ -101,7 +101,7 @@ async def memory_show_impl(
     async for item in page:
         if item.type == "memory" and item.path == path:
             mem = await rt.anthropic.beta.memory_stores.memories.retrieve(
-                item.id, memory_store_id=store_id
+                item.id, memory_store_id=store_id, view="full"
             )
             console.print(mem.content or "")
             return

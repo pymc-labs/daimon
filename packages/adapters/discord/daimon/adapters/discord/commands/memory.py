@@ -159,7 +159,7 @@ class MemoryCog(commands.Cog):
                 )
                 return
             mem = await runtime.anthropic.beta.memory_stores.memories.retrieve(
-                mem_id, memory_store_id=store_id
+                mem_id, memory_store_id=store_id, view="full"
             )
             content = mem.content or ""
             await interaction.followup.send(
