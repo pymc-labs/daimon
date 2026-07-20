@@ -28,7 +28,8 @@ async def _setup(db_session, db_session_factory, *, seed: dict[str, str]):
     # make_tenant derives tenant_id from (platform, workspace_id) itself — it
     # doesn't take an id= override — so passing the same workspace_id the
     # command derives from (TEAM_ID) with platform="slack" reproduces the
-    # exact tenant_id the command will compute (mirrors Task 8's Discord fix).
+    # exact tenant_id the command will compute (same approach as the Discord
+    # /memory tests).
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=TEAM_ID)
     tenant = await make_tenant(db_session, platform="slack", workspace_id=TEAM_ID)
     assert tenant.id == tenant_id

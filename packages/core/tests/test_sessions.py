@@ -463,9 +463,9 @@ async def test_create_session_existing_callers_still_work_without_session_contex
 def _without_memory_resource(
     resources: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
-    """Strip the memory_store entry that Task 6 now attaches unconditionally
-    whenever tenant_id/agent_uuid/session_factory are provided, so pre-existing
-    resource-shape assertions don't need to special-case it."""
+    """Strip the memory_store entry that session provisioning attaches
+    unconditionally whenever tenant_id/agent_uuid/session_factory are provided,
+    so pre-existing resource-shape assertions don't need to special-case it."""
     if resources is None:
         return []
     return [r for r in resources if r.get("type") != "memory_store"]
@@ -481,8 +481,8 @@ def _files_and_session_handler(
     """Serve POST /v1/files (Files upload) and POST /v1/sessions.
 
     The session-create request body is captured so tests can assert on
-    `resources` / `vault_ids`. Also serves the memory-store endpoints (Task 6
-    attaches a memory store on the same tenant/agent/session_factory gate as
+    `resources` / `vault_ids`. Also serves the memory-store endpoints (a
+    memory store is attached on the same tenant/agent/session_factory gate as
     the .env mount) via ``make_fake_memory_store_handler``.
     """
     now = "2026-05-29T12:00:00Z"
@@ -1189,7 +1189,7 @@ def _warm_vault_copilot_handler(
     The existing vault already carries the daimon-mcp credential at ``public_url``
     (so ``ensure_agent_mcp_vault`` does NOT rebind with session_context=None) and
     NO Copilot credential yet — so the only credential POST is the Copilot one.
-    Also serves the memory-store endpoints (Task 6's unconditional attach).
+    Also serves the memory-store endpoints (the unconditional memory attach).
     """
     display = f"daimon-mcp:{account_id}:{agent_uuid}"
     memory_handler = make_fake_memory_store_handler()
@@ -1570,7 +1570,7 @@ async def test_create_session_raises_on_empty_fallback_pat_per_d02_behavior_chan
     assert len(bodies) == 0, "no session-create call when the clone credential fails to resolve"
 
 
-# --- Agent memory: per-agent memory store attach (Task 6) -------------------
+# --- Agent memory: per-agent memory store attach -----------------------------
 
 
 async def test_create_session_attaches_memory_store(
