@@ -661,6 +661,26 @@ class AgentRepoBinding(Base):
     )
 
 
+class AgentMemoryStore(Base):
+    """Per-(tenant, agent) MA memory store binding (agent memory feature)."""
+
+    __tablename__ = "agent_memory_store"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", name="pk_agent_memory_store"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    memory_store_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class GitHubAppInstallation(Base):
     """GitHub App installation record.
 

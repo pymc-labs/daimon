@@ -371,6 +371,17 @@ class AgentRepoBindingRow(BaseModel):
     updated_at: datetime
 
 
+class AgentMemoryStoreRow(BaseModel):
+    """Pydantic row for AgentMemoryStore (agent memory feature)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    memory_store_id: str
+    created_at: datetime
+
+
 class GitHubAppInstallationRow(BaseModel):
     """Pydantic row for GitHubAppInstallation."""
 
