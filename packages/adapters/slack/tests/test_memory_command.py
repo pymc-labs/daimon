@@ -104,3 +104,20 @@ async def test_memory_empty_state(db_session, db_session_factory) -> None:
         await handle_memory_command(runtime, _payload())
     kwargs = web.chat_postEphemeral.call_args.kwargs
     assert "no memories" in kwargs["text"].lower()
+
+
+async def test_memory_missing_agent_surfaces_ephemeral_error(
+    db_session, db_session_factory
+) -> None:
+    """When the configured agent doesn't exist on the MA side, _resolve_store
+    raises DaimonError — the user must see that message as an ephemeral reply
+    rather than the failure only being logged."""
+    runtime, web = await _setup(db_session, db_session_factory, seed={})
+    runtime.deployment_default = DeploymentDefault(
+        agent_name="ghost", environment_name="default"
+    )
+    with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
+        await handle_memory_command(runtime, _payload())
+    kwargs = web.chat_postEphemeral.call_args.kwargs
+    assert "ghost" in kwargs["text"]
+    assert "not found" in kwargs["text"].lower()

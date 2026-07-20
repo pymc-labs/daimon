@@ -158,4 +158,17 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             text=text,
         )
     except (DaimonError, anthropic.APIError, SlackApiError) as exc:
-        log.error("slack.memory_command.failed", team_id=team_id, exc_info=exc)
+        log.warning("slack.memory_command.failed", team_id=team_id, exc_info=exc)
+        error_text = (
+            str(exc)
+            if isinstance(exc, DaimonError)
+            else "Something went wrong fetching memory — try again later."
+        )
+        try:
+            await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id,
+                user=user_id,
+                text=error_text,
+            )
+        except SlackApiError:
+            pass
