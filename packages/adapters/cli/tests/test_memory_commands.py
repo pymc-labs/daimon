@@ -22,7 +22,7 @@ from rich.console import Console
 pytestmark = pytest.mark.asyncio
 
 
-async def _setup(db_session, db_session_factory):
+async def _setup(db_session, db_session_factory, *, content: str = "alpha"):
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id="999")
     tenant = await make_tenant(db_session, workspace_id="999")
     assert tenant.id == tenant_id
@@ -37,7 +37,7 @@ async def _setup(db_session, db_session_factory):
     )
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id))
     store = await client.beta.memory_stores.create(name="m", description="d")
-    await client.beta.memory_stores.memories.create(store.id, path="/a.md", content="alpha")
+    await client.beta.memory_stores.memories.create(store.id, path="/a.md", content=content)
     await insert_memory_store(
         db_session, tenant_id=tenant_id, agent_id=agent_uuid, memory_store_id=store.id
     )
@@ -66,6 +66,20 @@ async def test_memory_show_prints_content(db_session, db_session_factory) -> Non
         path="/a.md", platform="discord", workspace="999", agent="daimon",
     )
     assert "alpha" in console.export_text()
+
+
+async def test_memory_show_prints_markup_like_content_verbatim(
+    db_session, db_session_factory
+) -> None:
+    """Memory content is untrusted text: Rich markup-shaped tokens must print
+    literally rather than raise MarkupError or restyle the output."""
+    rt = await _setup(db_session, db_session_factory, content="[red]styled[/red] [/bold]")
+    console = Console(record=True)
+    await memory_show_impl(
+        rt=rt, console=console,
+        path="/a.md", platform="discord", workspace="999", agent="daimon",
+    )
+    assert "[red]styled[/red] [/bold]" in console.export_text()
 
 
 async def test_memory_list_rejects_invalid_platform(db_session, db_session_factory) -> None:

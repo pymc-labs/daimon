@@ -103,7 +103,8 @@ async def memory_show_impl(
             mem = await rt.anthropic.beta.memory_stores.memories.retrieve(
                 item.id, memory_store_id=store_id, view="full"
             )
-            console.print(mem.content or "")
+            # untrusted agent-written text — never interpret as Rich markup
+            console.print(mem.content or "", markup=False, highlight=False)
             return
     raise DaimonError(f"no memory at {path!r}")
 
