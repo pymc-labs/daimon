@@ -193,7 +193,13 @@ async def create_session(
             )
             resources.append(memory_mount)
         except (anthropic_pkg.APIError, StoreError) as exc:
-            _log.warning("memory_store.mount_failed", error=str(exc))
+            _log.warning(
+                "memory_store.mount_failed",
+                tenant_id=str(tenant_id),
+                agent_uuid=str(agent_uuid),
+                agent_name=agent.name,
+                error=str(exc),
+            )
 
     metadata: dict[str, str] = {}
     if account_id is not None:
