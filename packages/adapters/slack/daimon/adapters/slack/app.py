@@ -56,6 +56,7 @@ from daimon.adapters.slack.gating import is_external_interactive, is_slack_conne
 from daimon.adapters.slack.help import handle_help_command
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
+from daimon.adapters.slack.memory import handle_memory_command
 from daimon.adapters.slack.privacy_panel.actions import (
     handle_privacy_block_action,
     handle_privacy_command,
@@ -524,6 +525,8 @@ class SlackApp:
                 self._spawn(handle_privacy_command(self.runtime, payload))
             elif cmd == "/agent-setup":
                 self._spawn(handle_agent_setup_command(self.runtime, payload))
+            elif cmd == "/memory":
+                self._spawn(handle_memory_command(self.runtime, payload))
             else:
                 log.info(
                     "slack.on_request.unknown_command",
