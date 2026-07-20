@@ -44,22 +44,37 @@ own, so sharing the workspace with anything else will cause collisions.
 - Tenant isolation enforced at the database `tenant_id` layer, so one shared
   Anthropic key can safely power every guild
 
-## Architecture
+## How it works
 
 ```mermaid
 flowchart LR
-    gA[server A] --> Discord
-    gB[server B] --> Discord
-    gN[server ...] --> Discord
-    subgraph deployment["one deployment, your API key"]
-        Discord --> core
-        Slack --> core
-        CLI --> core
-        MCP --> core
-        Scheduler --> core
-        core["daimon core<br>turn pipeline"] --> pg[("Postgres<br>one tenant per server")]
+    a["your Discord server"] --> d
+    b["another Discord server"] --> d
+    c["a Slack workspace"] --> d
+    d["daimon<br>one deployment, your Anthropic key"] --> e["Claude<br>(Anthropic Managed Agents)"]
+```
+
+You run one copy of daimon. Every community that installs it gets its own
+agent with its own memory, and none of them can see each other's data. When
+someone `@mention`s the bot, daimon hands the conversation to Claude and
+posts the replies back into the thread.
+
+<details>
+<summary>Technical architecture</summary>
+
+```mermaid
+flowchart LR
+    subgraph adapters
+        direction TB
+        Discord
+        Slack
+        CLI
+        MCP
+        Scheduler
     end
+    adapters --> core["daimon core<br>turn pipeline"]
     core <--> ma["Anthropic Managed Agents<br>agents &middot; sessions &middot; skills"]
+    core --> pg[("Postgres<br>tenants &middot; thread&harr;session map")]
 ```
 
 A turn: the adapter derives the tenant from platform identity, core opens or
@@ -74,6 +89,8 @@ deltas into the thread until the session goes idle.
   thread-to-session mappings, config, credentials, and billing.
 - One Discord guild (or Slack workspace) is one tenant. Isolation lives at
   the database `tenant_id` layer, not the API-key boundary.
+
+</details>
 
 ## Run it yourself
 
