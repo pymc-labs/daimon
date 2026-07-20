@@ -18,6 +18,10 @@ isolated tenant: guilds never see each other's data even though they share
 your key. People in your servers just `@mention` the bot and get a working
 agent.
 
+The key must belong to an Anthropic workspace dedicated to that daimon
+deployment. daimon manages the workspace's Managed Agents resources as its
+own, so sharing the workspace with anything else will cause collisions.
+
 > **Status:** early. The code is public and you can run it yourself (see
 > below), but self-hosting is not a supported path yet. Expect rough edges
 > and breaking changes.
@@ -38,16 +42,31 @@ agent.
 
 ## Architecture
 
-<div align="center">
-  <img src="assets/architecture.svg" alt="Five adapters (Discord, Slack, CLI, MCP, Scheduler) feed daimon core, which talks to Anthropic Managed Agents and Postgres" width="820">
-</div>
+```mermaid
+flowchart LR
+    subgraph adapters
+        direction TB
+        Discord
+        Slack
+        CLI
+        MCP
+        Scheduler
+    end
+    adapters --> core["daimon core<br>turn pipeline"]
+    core <--> ma["Anthropic Managed Agents<br>agents &middot; sessions &middot; skills"]
+    core --> pg[("Postgres<br>tenants &middot; thread&harr;session map")]
+```
+
+A turn: the adapter derives the tenant from platform identity, core opens or
+resumes a Managed Agents session, streams its events, and the adapter renders
+deltas into the thread until the session goes idle.
 
 - `daimon.core` owns schema, stores, and the turn pipeline, and imports no
   adapters. Each adapter owns one platform's I/O and auth, and adapters never
   import each other. `import-linter` enforces both rules in CI.
-- Managed Agents is the source of truth for agent, environment, session,
-  skill, and vault content. The local database holds identity, namespacing,
-  and provenance only.
+- Managed Agents holds the agents, environments, sessions, and skills
+  themselves. Postgres holds only metadata about them: tenant identity,
+  thread-to-session mappings, config, credentials, and billing.
 - One Discord guild (or Slack workspace) is one tenant. Isolation lives at
   the database `tenant_id` layer, not the API-key boundary.
 
@@ -55,7 +74,8 @@ agent.
 
 Unsupported, but it works. You need an Anthropic API key **with Managed
 Agents beta access** (a closed beta: request access first, or session
-creation will fail), [Docker](https://docs.docker.com/get-docker/), and
+creation will fail) **in a workspace dedicated to this deployment**,
+[Docker](https://docs.docker.com/get-docker/), and
 [`uv`](https://docs.astral.sh/uv/).
 
 ### 1. Configure environment
