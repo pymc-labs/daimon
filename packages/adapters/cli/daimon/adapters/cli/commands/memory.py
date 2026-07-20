@@ -14,10 +14,27 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.stores.agent_memory_stores import get_memory_store_id
+from daimon.core.stores.domain import Platform
 from pydantic import BaseModel
 from rich.console import Console
 
 memory_app = typer.Typer(help="Inspect an agent's persistent memory (read-only)")
+
+_VALID_PLATFORMS = ("discord", "cli", "slack")
+
+
+def _validate_platform(value: str) -> Platform:
+    """Validate a raw CLI `--platform` value before it reaches `derive_tenant_uuid`.
+
+    Mirrors `daimon.adapters.cli.commands.tenants._validate_platform` so an
+    unrecognized platform (e.g. a typo) fails with a clear usage error instead
+    of silently deriving a wrong tenant UUID.
+    """
+    if value in _VALID_PLATFORMS:
+        return value  # type: ignore[return-value]
+    raise typer.BadParameter(
+        f"unsupported platform {value!r}; valid: {', '.join(_VALID_PLATFORMS)}"
+    )
 
 
 class _MemoryPathRow(BaseModel):
@@ -29,7 +46,8 @@ class _MemoryPathRow(BaseModel):
 async def _resolve_store_id(
     rt: CliRuntime, *, platform: str, workspace: str, agent: str
 ) -> str | None:
-    tenant_id = derive_tenant_uuid(platform=platform, workspace_id=workspace)  # type: ignore[arg-type]
+    validated_platform = _validate_platform(platform)
+    tenant_id = derive_tenant_uuid(platform=validated_platform, workspace_id=workspace)
     ma_agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=agent)
     if ma_agent is None:
         raise DaimonError(f"agent {agent!r} not found for {platform}/{workspace}")
