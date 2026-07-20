@@ -392,6 +392,17 @@ def make_fake_ma_handler() -> Callable[[httpx.Request], httpx.Response]:
 # ---------------------------------------------------------------------------
 
 
+def _prefix_match(path: str, prefix: str) -> bool:
+    """Match path against a segment-aware prefix.
+
+    Matches whole path segments: /notes/ matches /notes/todo.md but NOT /notes-archive/todo.md.
+    """
+    if prefix == "/":
+        return True
+    norm = prefix.rstrip("/") + "/"
+    return path == prefix or path.startswith(norm)
+
+
 @dataclass
 class FakeMemoryStoreState:
     """In-memory state shared between a memory-store fake and test assertions."""
@@ -447,6 +458,9 @@ def make_fake_memory_store_handler(
     Raises NotHandled for non-memory paths — compose with other handlers via
     combine_handlers. Covers: store create/retrieve/archive/delete, memory
     create/list/retrieve. (update/versions endpoints are out of v1 scope.)
+
+    When combining with make_fake_ma_handler (which returns a 404 catch-all),
+    pass this handler first to combine_handlers() so requests are tried here before fallthrough.
     """
     st = state if state is not None else FakeMemoryStoreState()
 
@@ -490,7 +504,7 @@ def make_fake_memory_store_handler(
                     json={"type": "error", "error": {"type": "not_found_error", "message": "no such store"}},
                 )
             prefix = request.url.params.get("path_prefix", "/")
-            data = [x for x in st.memories.get(sid, []) if x["path"].startswith(prefix)]
+            data = [x for x in st.memories.get(sid, []) if _prefix_match(x["path"], prefix)]
             return list_response(data)
 
         m = re.fullmatch(r"/v1/memory_stores/(?P<sid>[^/]+)/memories/(?P<mid>[^/]+)", path)

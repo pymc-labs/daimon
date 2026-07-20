@@ -41,3 +41,31 @@ async def test_create_seed_list_retrieve_archive_delete_roundtrip() -> None:
     deleted = await client.beta.memory_stores.delete(store.id)
     assert deleted.id == store.id
     assert store.id not in state.stores
+
+
+async def test_list_with_segment_aware_path_prefix() -> None:
+    """Verify path_prefix matching respects segment boundaries."""
+    state = FakeMemoryStoreState()
+    client = build_fake_anthropic(make_fake_memory_store_handler(state))
+
+    store = await client.beta.memory_stores.create(
+        name="test-store", description="test store for segment boundary"
+    )
+
+    # Create memories in two different "directories"
+    await client.beta.memory_stores.memories.create(
+        store.id, path="/notes/todo.md", content="task list"
+    )
+    await client.beta.memory_stores.memories.create(
+        store.id, path="/notes-archive/old.md", content="archived notes"
+    )
+
+    # List with prefix "/notes/" should only return /notes/todo.md, not /notes-archive/old.md
+    page = await client.beta.memory_stores.memories.list(store.id, path_prefix="/notes/")
+    paths = [m.path for m in page.data]
+    assert paths == ["/notes/todo.md"], f"Expected ['/notes/todo.md'], got {paths}"
+
+    # List with prefix "/" should return both
+    page = await client.beta.memory_stores.memories.list(store.id, path_prefix="/")
+    paths = sorted([m.path for m in page.data])
+    assert paths == ["/notes-archive/old.md", "/notes/todo.md"]
