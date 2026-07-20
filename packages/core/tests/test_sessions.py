@@ -26,7 +26,14 @@ from daimon.core.stores import agent_github_binding as github_binding_store
 from daimon.core.stores import agent_repo_binding as repo_binding_store
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import EMPTY_CLOUD_CONFIG
+from daimon.testing.ma import (
+    EMPTY_CLOUD_CONFIG,
+    FakeMemoryStoreState,
+    NotHandled,
+    combine_handlers,
+    json_body,
+    make_fake_memory_store_handler,
+)
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -453,20 +460,39 @@ async def test_create_session_existing_callers_still_work_without_session_contex
 # --- .env resource mount threading ---
 
 
+def _without_memory_resource(
+    resources: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Strip the memory_store entry that Task 6 now attaches unconditionally
+    whenever tenant_id/agent_uuid/session_factory are provided, so pre-existing
+    resource-shape assertions don't need to special-case it."""
+    if resources is None:
+        return []
+    return [r for r in resources if r.get("type") != "memory_store"]
+
+
 def _files_and_session_handler(
     *,
     file_id: str,
     session_id: str,
     session_create_bodies: list[dict[str, Any]],
+    memory_state: FakeMemoryStoreState | None = None,
 ) -> Callable[[httpx.Request], httpx.Response]:
     """Serve POST /v1/files (Files upload) and POST /v1/sessions.
 
     The session-create request body is captured so tests can assert on
-    `resources` / `vault_ids`.
+    `resources` / `vault_ids`. Also serves the memory-store endpoints (Task 6
+    attaches a memory store on the same tenant/agent/session_factory gate as
+    the .env mount) via ``make_fake_memory_store_handler``.
     """
     now = "2026-05-29T12:00:00Z"
+    memory_handler = make_fake_memory_store_handler(memory_state)
 
     def _handler(request: httpx.Request) -> httpx.Response:
+        try:
+            return memory_handler(request)
+        except NotHandled:
+            pass
         if request.method == "POST" and request.url.path == "/v1/files":
             return httpx.Response(
                 200,
@@ -525,7 +551,7 @@ async def test_create_session_mounts_env_resource_when_agent_has_secrets(
     )
 
     assert len(bodies) == 1, "exactly one session-create call"
-    resources = bodies[0].get("resources")
+    resources = _without_memory_resource(bodies[0].get("resources"))
     assert resources == [{"type": "file", "file_id": "file_env123", "mount_path": ".env"}], (
         "session-create body must carry the .env file resource when the agent has secrets"
     )
@@ -558,8 +584,8 @@ async def test_create_session_omits_resources_when_agent_has_no_secrets(
     )
 
     assert len(bodies) == 1, "exactly one session-create call"
-    assert "resources" not in bodies[0], (
-        "session-create body must omit resources when the agent has no secrets"
+    assert _without_memory_resource(bodies[0].get("resources")) == [], (
+        "session-create body must carry no non-memory resources when the agent has no secrets"
     )
 
 
@@ -690,8 +716,13 @@ async def test_create_session_composes_resources_alongside_vault_ids(
     public_url = "https://mcp.example.com/mcp"
     display = f"daimon-mcp:{account_id}:{agent_uuid}"
     bodies: list[dict[str, Any]] = []
+    memory_handler = make_fake_memory_store_handler()
 
     def _handler(request: httpx.Request) -> httpx.Response:
+        try:
+            return memory_handler(request)
+        except NotHandled:
+            pass
         if request.method == "GET" and request.url.path == "/v1/vaults":
             return httpx.Response(
                 200,
@@ -772,7 +803,7 @@ async def test_create_session_composes_resources_alongside_vault_ids(
     assert bodies[0].get("vault_ids") == ["vlt_existing"], (
         "vault_ids behavior must be preserved alongside resources"
     )
-    assert bodies[0].get("resources") == [
+    assert _without_memory_resource(bodies[0].get("resources")) == [
         {"type": "file", "file_id": "file_both", "mount_path": ".env"}
     ], "resources must compose alongside vault_ids, not replace it"
 
@@ -888,7 +919,7 @@ async def test_create_session_mounts_repo_resource_when_bound_and_pat_present(
     )
 
     assert len(bodies) == 1, "exactly one session-create call"
-    resources = bodies[0].get("resources")
+    resources = _without_memory_resource(bodies[0].get("resources"))
     assert resources == [
         {
             "type": "github_repository",
@@ -951,7 +982,7 @@ async def test_create_session_uses_app_installation_token_when_app_installed_and
     await github_client.aclose()
 
     assert len(bodies) == 1, "exactly one session-create call"
-    resources = bodies[0].get("resources")
+    resources = _without_memory_resource(bodies[0].get("resources"))
     assert resources == [
         {
             "type": "github_repository",
@@ -1008,7 +1039,7 @@ async def test_create_session_pat_wins_with_zero_github_app_calls(
     await github_client.aclose()
 
     assert len(bodies) == 1, "exactly one session-create call"
-    resources = bodies[0].get("resources")
+    resources = _without_memory_resource(bodies[0].get("resources"))
     assert resources == [
         {
             "type": "github_repository",
@@ -1136,7 +1167,9 @@ async def test_create_session_omits_repo_resource_when_unbound(
     )
 
     assert len(bodies) == 1, "exactly one session-create call"
-    assert "resources" not in bodies[0], "no repo resource when the agent is unbound"
+    assert _without_memory_resource(bodies[0].get("resources")) == [], (
+        "no non-memory resource when the agent is unbound"
+    )
 
 
 # --- Dev-agent port: Copilot MCP credential provisioning (Task 2) -----------
@@ -1156,10 +1189,16 @@ def _warm_vault_copilot_handler(
     The existing vault already carries the daimon-mcp credential at ``public_url``
     (so ``ensure_agent_mcp_vault`` does NOT rebind with session_context=None) and
     NO Copilot credential yet — so the only credential POST is the Copilot one.
+    Also serves the memory-store endpoints (Task 6's unconditional attach).
     """
     display = f"daimon-mcp:{account_id}:{agent_uuid}"
+    memory_handler = make_fake_memory_store_handler()
 
     def _handler(request: httpx.Request) -> httpx.Response:
+        try:
+            return memory_handler(request)
+        except NotHandled:
+            pass
         if request.method == "GET" and request.url.path == "/v1/vaults":
             return httpx.Response(
                 200,
@@ -1400,7 +1439,7 @@ async def test_create_session_uses_fallback_pat_for_anon_binding_without_per_age
     )
 
     assert len(bodies) == 1, "exactly one session-create call"
-    assert bodies[0].get("resources") == [
+    assert _without_memory_resource(bodies[0].get("resources")) == [
         {
             "type": "github_repository",
             "url": "https://github.com/example-org/example-repo",
@@ -1529,3 +1568,102 @@ async def test_create_session_raises_on_empty_fallback_pat_per_d02_behavior_chan
         )
 
     assert len(bodies) == 0, "no session-create call when the clone credential fails to resolve"
+
+
+# --- Agent memory: per-agent memory store attach (Task 6) -------------------
+
+
+async def test_create_session_attaches_memory_store(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """resources[] gains a memory_store entry alongside the existing mounts."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    agent_uuid = uuid.uuid4()
+    mem_state = FakeMemoryStoreState()
+    captured: dict[str, Any] = {}
+
+    agent = _make_agent(anthropic_id="ag_memory", name="daimon-memtest")
+    env = _make_env(anthropic_id="env_memory")
+
+    def capture_session_create(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/v1/sessions"):
+            body = json_body(request)
+            captured.update(body)
+            return httpx.Response(
+                200,
+                json=_session_body(
+                    session_id="sess_memory",
+                    agent_id=body["agent"],
+                    environment_id=body["environment_id"],
+                ),
+            )
+        raise NotHandled
+
+    client = build_fake_anthropic_http(
+        combine_handlers(capture_session_create, make_fake_memory_store_handler(mem_state))
+    )
+
+    await create_session(
+        client,
+        agent=agent,
+        environment=env,
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+    )
+
+    memory_resources = [
+        r for r in captured.get("resources", []) if r.get("type") == "memory_store"
+    ]
+    assert len(memory_resources) == 1, "session-create body must carry exactly one memory_store resource"
+    assert memory_resources[0]["access"] == "read_write"
+    assert memory_resources[0]["memory_store_id"] in mem_state.stores
+
+
+async def test_create_session_degrades_when_memory_provisioning_fails(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A memory-API outage must not block the session (degrade-not-block)."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    captured: dict[str, Any] = {}
+
+    agent = _make_agent(anthropic_id="ag_memory_fail")
+    env = _make_env(anthropic_id="env_memory_fail")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/memory_stores":
+            return httpx.Response(
+                500,
+                json={"type": "error", "error": {"type": "api_error", "message": "boom"}},
+            )
+        if request.method == "POST" and request.url.path.endswith("/v1/sessions"):
+            body = json_body(request)
+            captured.update(body)
+            return httpx.Response(
+                200,
+                json=_session_body(
+                    session_id="sess_memory_fail",
+                    agent_id=body["agent"],
+                    environment_id=body["environment_id"],
+                ),
+            )
+        raise AssertionError(f"unexpected call: {request.method} {request.url.path}")
+
+    client = build_fake_anthropic_http(handler)
+
+    session = await create_session(
+        client,
+        agent=agent,
+        environment=env,
+        tenant_id=tenant.id,
+        agent_uuid=uuid.uuid4(),
+        session_factory=db_session_factory,
+    )
+    assert session is not None
+    assert all(r.get("type") != "memory_store" for r in captured.get("resources", [])), (
+        "failed memory provisioning must degrade to a memory-less session, not raise"
+    )

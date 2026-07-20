@@ -11,7 +11,9 @@ import datetime as dt
 import time
 import uuid
 
+import anthropic as anthropic_pkg
 import httpx
+import structlog
 from anthropic import AsyncAnthropic, omit
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.session_create_params import Resource
@@ -19,14 +21,18 @@ from cryptography.fernet import MultiFernet
 from daimon.core.config import McpSettings
 from daimon.core.credential_env import upload_env_and_mount
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
+from daimon.core.errors import StoreError
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import resolve_clone_token
 from daimon.core.mcp_vault import add_github_copilot_credential, ensure_agent_mcp_vault
+from daimon.core.memory_resource import ensure_memory_store_and_mount
 from daimon.core.repo_resource import build_repo_resource
 from daimon.core.session_context import SessionContext
 from daimon.core.stores.agent_repo_binding import get_binding
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_log = structlog.get_logger(__name__)
 
 __all__ = ["SessionContext", "create_session"]
 
@@ -67,6 +73,14 @@ async def create_session(
     The ``resources`` kwarg is passed only when the agent actually has
     secrets; otherwise it is omitted entirely. ``resources`` composes
     alongside ``vault_ids`` — it never replaces the vault branch.
+
+    The same gate (``tenant_id`` + ``agent_uuid`` + ``session_factory``) also
+    attaches the agent's per-agent memory store via
+    ``ensure_memory_store_and_mount`` (lazily provisioned on first use). This
+    mount is degrade-not-block: a memory-store provisioning failure
+    (``anthropic.APIError`` or ``daimon.core.errors.StoreError``) is logged
+    and swallowed rather than propagated — the session is created without
+    persistent memory that turn instead of failing outright.
 
     When the agent has a repo binding, the clone credential is resolved via
     ``daimon.core.github_repo_auth.resolve_clone_token``:
@@ -165,6 +179,21 @@ async def create_session(
             repo_resource = build_repo_resource(binding, clone_token)
             if repo_resource is not None:
                 resources.append(repo_resource)
+
+        # Memory store (agent memory feature): degrade-not-block. A memory
+        # outage must never take down chat — the session just runs without
+        # persistent memory this turn.
+        try:
+            memory_mount = await ensure_memory_store_and_mount(
+                anthropic,
+                session_factory,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+                agent_name=agent.name,
+            )
+            resources.append(memory_mount)
+        except (anthropic_pkg.APIError, StoreError) as exc:
+            _log.warning("memory_store.mount_failed", error=str(exc))
 
     metadata: dict[str, str] = {}
     if account_id is not None:
