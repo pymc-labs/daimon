@@ -1,7 +1,7 @@
 [project]
 name = "daimon-testing"
 version = "0.1.0"
-description = "Shared test infrastructure for Daimon CMA"
+description = "Shared test infrastructure for Daimon"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "PyMC Labs" }]

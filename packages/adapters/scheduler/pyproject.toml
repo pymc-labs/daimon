@@ -1,7 +1,7 @@
 [project]
 name = "daimon-adapter-scheduler"
 version = "0.1.0"
-description = "Daimon CMA scheduler — polls due routines and dispatches headless turns"
+description = "Daimon scheduler: polls due routines and dispatches headless turns"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "PyMC Labs" }]

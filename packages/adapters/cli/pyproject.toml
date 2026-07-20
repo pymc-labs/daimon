@@ -1,7 +1,7 @@
 [project]
 name = "daimon-adapter-cli"
 version = "0.1.0"
-description = "Daimon CMA admin CLI"
+description = "Daimon admin CLI"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "PyMC Labs" }]

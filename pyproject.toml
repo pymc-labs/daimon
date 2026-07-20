@@ -1,7 +1,7 @@
 [project]
 name = "daimon"
 version = "0.1.0"
-description = "Self-hostable Daimon CMA — workspace root"
+description = "Self-hostable agent platform on Anthropic Managed Agents (workspace root)"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "PyMC Labs" }]
