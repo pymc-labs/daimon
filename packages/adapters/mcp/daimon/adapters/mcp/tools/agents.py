@@ -14,6 +14,7 @@ from typing import Any, Final, cast
 
 import anthropic
 import httpx
+import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
 from anthropic.types.beta.agent_create_params import Tool
@@ -61,6 +62,8 @@ from daimon.core.specs import (
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ValidationError
+
+log = structlog.get_logger()
 
 
 class AgentMcpServerInfo(BaseModel):
@@ -617,12 +620,24 @@ async def _archive_agent_impl(
         raise ToolError(f"agent '{name}' not found")
     _reject_system_agent(agent)
     await runtime.client.beta.agents.archive(agent.id)
-    await archive_memory_store_for_agent(
-        runtime.client,
-        runtime.session_factory,
-        tenant_id=auth.tenant_id,
-        agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id)),
-    )
+    try:
+        await archive_memory_store_for_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id)),
+        )
+    except anthropic.APIError:
+        # Best-effort degrade: the agent is already archived and the retry path
+        # is dead (archived agents are filtered from lookup), so a transient
+        # memory-store archive failure must not strand the agent in a failed
+        # state — mirrors the mount-side policy in memory_resource.py.
+        log.warning(
+            "archive_agent.memory_store_archive_failed",
+            tenant_id=str(auth.tenant_id),
+            agent_name=name,
+            ma_agent_id=agent.id,
+        )
 
 
 def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:

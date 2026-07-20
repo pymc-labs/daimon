@@ -11,6 +11,7 @@ import dataclasses
 import uuid
 from typing import TYPE_CHECKING, Final
 
+import anthropic
 import httpx
 import structlog
 from anthropic import AsyncAnthropic
@@ -511,12 +512,24 @@ async def delete_agent(runtime: DiscordRuntime, *, tenant_id: uuid.UUID, name: s
     if agent is None:
         raise DaimonError(f"No agent named **{name}** found.")
     await runtime.anthropic.beta.agents.archive(agent.id)
-    await archive_memory_store_for_agent(
-        runtime.anthropic,
-        runtime.sessionmaker,
-        tenant_id=tenant_id,
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
-    )
+    try:
+        await archive_memory_store_for_agent(
+            runtime.anthropic,
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
+        )
+    except anthropic.APIError:
+        # Best-effort degrade: the agent is already archived and the retry path
+        # is dead (archived agents are filtered from lookup), so a transient
+        # memory-store archive failure must not strand the agent in a failed
+        # state — mirrors the mount-side policy in memory_resource.py.
+        _log.warning(
+            "delete_agent.memory_store_archive_failed",
+            tenant_id=str(tenant_id),
+            agent_name=name,
+            ma_agent_id=agent.id,
+        )
 
 
 def _build_runtime_fernet(runtime: DiscordRuntime) -> MultiFernet:

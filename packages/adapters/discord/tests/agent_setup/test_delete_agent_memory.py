@@ -96,3 +96,68 @@ async def test_delete_agent_archives_memory_store(
     assert mem_state.stores[store.id]["archived_at"] is not None
     async with db_session_factory() as s:
         assert await get_memory_store_id(s, tenant_id=tenant.id, agent_id=agent_uuid) is None
+
+
+def _make_failing_store_archive_handler() -> Callable[[httpx.Request], httpx.Response]:
+    """500 on memory-store archive — simulates a transient MA outage."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and re.fullmatch(
+            r"/v1/memory_stores/[^/]+/archive", request.url.path
+        ):
+            return httpx.Response(
+                500,
+                json={"type": "error", "error": {"type": "api_error", "message": "boom"}},
+            )
+        raise NotHandled
+
+    return handler
+
+
+async def test_delete_agent_succeeds_when_store_archive_fails(
+    db_session, db_session_factory
+) -> None:
+    """Transient store-archive failure must not fail agent deletion.
+
+    The agent is already archived when the store archive runs; a raise here
+    would strand the flow with no retry path (archived agents are filtered
+    from lookup). delete_agent degrades best-effort instead.
+    """
+    tenant = await make_tenant(db_session)
+    mem_state = FakeMemoryStoreState()
+    client = build_fake_anthropic(
+        combine_handlers(
+            _make_archive_agent_handler(),
+            _make_failing_store_archive_handler(),
+            make_fake_memory_store_handler(mem_state),
+            make_fake_ma_handler(),
+        )
+    )
+
+    agent = await client.beta.agents.create(
+        name="doomed",
+        model="claude-sonnet-4-6",
+        metadata={"daimon_tenant": str(tenant.id), "daimon_name": "doomed"},
+    )
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=str(agent.id))
+    store = await client.beta.memory_stores.create(name="m", description="d")
+    await insert_memory_store(
+        db_session, tenant_id=tenant.id, agent_id=agent_uuid, memory_store_id=store.id
+    )
+    await db_session.commit()
+
+    runtime = MagicMock(spec=DiscordRuntime)
+    runtime.anthropic = client
+    runtime.sessionmaker = db_session_factory
+
+    # Must not raise despite the 500 from the store archive.
+    await delete_agent(runtime, tenant_id=tenant.id, name="doomed")
+
+    # Store archive never landed; the binding row remains (inert — the agent
+    # is archived, so nothing re-reads it).
+    assert mem_state.stores[store.id]["archived_at"] is None
+    async with db_session_factory() as s:
+        assert (
+            await get_memory_store_id(s, tenant_id=tenant.id, agent_id=agent_uuid)
+            == store.id
+        )
