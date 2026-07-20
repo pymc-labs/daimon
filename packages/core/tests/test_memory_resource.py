@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import pytest
 from daimon.core.memory_resource import (
@@ -103,6 +105,74 @@ async def test_lost_race_deletes_orphan_store(
     # Warm path now — rival wins, no new store created.
     assert mount["memory_store_id"] == "memstore_RIVAL"
     assert state.stores == {}
+
+
+async def test_insert_failure_deletes_created_store(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A DB failure after memory_stores.create must not leak the store:
+    the cold path deletes it before re-raising, so repeated session attempts
+    during an outage don't accumulate unreferenced active stores."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    agent_id = uuid.uuid4()
+    state = FakeMemoryStoreState()
+    client = build_fake_anthropic(make_fake_memory_store_handler(state))
+
+    calls = 0
+
+    def failing_factory():
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # first call is the binding read; second is the insert txn
+            raise RuntimeError("db down")
+        return db_session_factory()
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await ensure_memory_store_and_mount(
+            client, failing_factory,
+            tenant_id=tenant.id, agent_id=agent_id, agent_name="daimon",
+        )
+    assert state.stores == {}, "orphan store must be deleted when the insert fails"
+
+
+async def test_cold_path_lost_race_deletes_orphan(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """True cold-path lost race: the binding read finds nothing, a rival lands
+    its binding before our insert transaction runs, so insert_memory_store
+    returns the rival's id and the just-created store is deleted."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    agent_id = uuid.uuid4()
+    state = FakeMemoryStoreState()
+    client = build_fake_anthropic(make_fake_memory_store_handler(state))
+
+    calls = 0
+
+    @asynccontextmanager
+    async def _rival_then_session() -> AsyncIterator[AsyncSession]:
+        async with db_session_factory() as s, s.begin():
+            await insert_memory_store(
+                s, tenant_id=tenant.id, agent_id=agent_id,
+                memory_store_id="memstore_RIVAL",
+            )
+        async with db_session_factory() as s:
+            yield s
+
+    def racing_factory():
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # the insert txn — rival wins just before it
+            return _rival_then_session()
+        return db_session_factory()
+
+    mount = await ensure_memory_store_and_mount(
+        client, racing_factory,
+        tenant_id=tenant.id, agent_id=agent_id, agent_name="daimon",
+    )
+    assert mount["memory_store_id"] == "memstore_RIVAL"
+    assert state.stores == {}, "loser's store must be deleted after a lost race"
 
 
 async def test_archive_helper_archives_and_clears(

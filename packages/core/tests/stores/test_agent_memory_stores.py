@@ -5,13 +5,15 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from daimon.core._models import AgentMemoryStore
+from daimon.core.errors import StoreError
 from daimon.core.stores.agent_memory_stores import (
     clear_memory_store,
     get_memory_store_id,
     insert_memory_store,
 )
 from daimon.testing.factories import make_tenant
-from sqlalchemy import text
+from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 pytestmark = pytest.mark.asyncio
@@ -107,6 +109,69 @@ async def test_insert_conflict_across_transactions_returns_first_committed_id(
         "the transaction that committed first must win across independent "
         "connections, not just within one transaction"
     )
+
+
+class _ChurnSession:
+    """Delegates to a real session, but deletes the binding row just before
+    the store's follow-up SELECT — the interleaving a concurrent
+    clear_memory_store produces between the two statements of
+    insert_memory_store."""
+
+    def __init__(
+        self, real: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, churns: int
+    ) -> None:
+        self._real = real
+        self._tenant_id = tenant_id
+        self._agent_id = agent_id
+        self._churns = churns
+
+    async def execute(self, stmt, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        if getattr(stmt, "is_select", False) and self._churns > 0:
+            self._churns -= 1
+            await self._real.execute(
+                delete(AgentMemoryStore).where(
+                    AgentMemoryStore.tenant_id == self._tenant_id,
+                    AgentMemoryStore.agent_id == self._agent_id,
+                )
+            )
+        return await self._real.execute(stmt, *args, **kwargs)
+
+    async def flush(self) -> None:
+        await self._real.flush()
+
+
+async def test_insert_retries_after_concurrent_clear(db_session: AsyncSession) -> None:
+    """One concurrent clear between insert and select: the retry re-inserts
+    and wins with the caller's own id instead of raising NoResultFound."""
+    tenant = await make_tenant(db_session)
+    agent_id = uuid.uuid4()
+    churn = _ChurnSession(db_session, tenant_id=tenant.id, agent_id=agent_id, churns=1)
+    won = await insert_memory_store(
+        churn,  # type: ignore[arg-type]  # duck-typed AsyncSession
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        memory_store_id="memstore_A",
+    )
+    assert won == "memstore_A"
+    got = await get_memory_store_id(db_session, tenant_id=tenant.id, agent_id=agent_id)
+    assert got == "memstore_A"
+
+
+async def test_insert_raises_store_error_when_churn_outpaces_retries(
+    db_session: AsyncSession,
+) -> None:
+    """A clear landing between insert and select on every attempt exhausts
+    the retry budget and surfaces as StoreError, not NoResultFound."""
+    tenant = await make_tenant(db_session)
+    agent_id = uuid.uuid4()
+    churn = _ChurnSession(db_session, tenant_id=tenant.id, agent_id=agent_id, churns=99)
+    with pytest.raises(StoreError, match="retry budget"):
+        await insert_memory_store(
+            churn,  # type: ignore[arg-type]  # duck-typed AsyncSession
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            memory_store_id="memstore_A",
+        )
 
 
 async def test_tenant_isolation(db_session: AsyncSession) -> None:
