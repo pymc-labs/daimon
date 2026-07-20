@@ -3,34 +3,39 @@
 
 # daimon
 
-**An AI teammate that lives in your team chat.**
+**Your team just hired a data scientist.**
 
-Open-source agent platform built on [Anthropic Managed Agents](https://platform.claude.com/docs/en/managed-agents/quickstart),
-with Discord, Slack, MCP, and CLI adapters.
+daimon is a collaborative data science agent in your team's Discord or Slack.
+It writes and runs code, fits Bayesian models with PyMC, and delivers charts
+and runnable notebooks in the thread.
 
 [![CI](https://github.com/pymc-labs/daimon/actions/workflows/ci.yml/badge.svg)](https://github.com/pymc-labs/daimon/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](pyproject.toml)
 
+**[Add it to your server in one click →](https://daimon.decision.ai/)**
+or self-host it from this repo.
+
 </div>
+
+## It's yours. And it's open.
 
 Most chat bots are one agent shared across a workspace. daimon is
 many-to-many: you deploy it once, on your own Anthropic API key, and any
-number of Discord servers install it from that single deployment. Each
-server is an isolated tenant, so guilds never see each other's data even
-though they share your key. Once the deployment is running, adding a server
-takes about two minutes: invite the bot, run `/agent-setup`, and everyone in
-it can `@mention` a working agent.
+number of Discord servers install it from that single deployment. Every
+server is isolated: one tenant, its own data, scoped to that server. Adding
+a server takes about two minutes: invite the bot, run `/agent-setup`, and
+everyone in it can `@mention` a working agent.
 
-The key must belong to an Anthropic workspace dedicated to that daimon
-deployment. daimon manages the workspace's Managed Agents resources as its
-own, so sharing the workspace with anything else will cause collisions.
+Built on [Anthropic Managed Agents](https://platform.claude.com/docs/en/managed-agents/quickstart)
+by [PyMC Labs](https://www.pymc-labs.com), the team behind the PyMC project.
 
 > **Status:** early. The code is public and you can run it yourself (see
 > below), but self-hosting is not a supported path yet. Expect rough edges
-> and breaking changes.
+> and breaking changes. The hosted version at
+> [daimon.decision.ai](https://daimon.decision.ai/) is the easy path.
 
-## Features
+## It doesn't chat. It does the work.
 
 - `@daimon` in a channel starts (or continues) a threaded conversation with
   session continuity
@@ -96,7 +101,9 @@ deltas into the thread until the session goes idle.
 
 Unsupported, but it works. You need an Anthropic API key **with Managed
 Agents beta access** (a closed beta: request access first, or session
-creation will fail) **in a workspace dedicated to this deployment**,
+creation will fail) **in a workspace dedicated to this deployment** (daimon
+manages the workspace's Managed Agents resources as its own, so sharing the
+workspace with anything else causes collisions),
 [Docker](https://docs.docker.com/get-docker/), and
 [`uv`](https://docs.astral.sh/uv/).
 
