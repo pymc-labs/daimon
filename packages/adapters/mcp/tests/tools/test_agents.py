@@ -63,9 +63,14 @@ def _make_settings(*, public_url: str | None = None) -> MagicMock:
     return settings
 
 
-def _runtime(client: AsyncAnthropic, *, public_url: str | None = None) -> McpRuntime:
+def _runtime(
+    client: AsyncAnthropic,
+    *,
+    public_url: str | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | MagicMock | None = None,
+) -> McpRuntime:
     return McpRuntime(
-        session_factory=MagicMock(),
+        session_factory=session_factory if session_factory is not None else MagicMock(),
         client=client,  # type: ignore[arg-type]
         settings=_make_settings(public_url=public_url),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
@@ -793,7 +798,9 @@ async def test_fork_agent_impl_adds_base_toolset_when_source_lacks_it() -> None:
     )
 
 
-async def test_archive_agent_impl_calls_ma_archive() -> None:
+async def test_archive_agent_impl_calls_ma_archive(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -825,7 +832,9 @@ async def test_archive_agent_impl_calls_ma_archive() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    await _archive_agent_impl(_runtime(client), auth, "doomed")
+    await _archive_agent_impl(
+        _runtime(client, session_factory=db_session_factory), auth, "doomed"
+    )
 
     assert archived == ["ag_d"], "should archive the correct MA agent"
 
@@ -1984,7 +1993,9 @@ async def test_archive_agent_impl_rejects_system_agent_no_daimon_account() -> No
         await _archive_agent_impl(_runtime(client), auth, "daimon")
 
 
-async def test_archive_agent_impl_allows_any_stamped_agent_for_admin() -> None:
+async def test_archive_agent_impl_allows_any_stamped_agent_for_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Admin must be able to archive any stamped tenant agent regardless of which account owns it."""
     tenant_id = uuid.uuid4()
     caller_account_id = uuid.uuid4()
@@ -2023,7 +2034,9 @@ async def test_archive_agent_impl_allows_any_stamped_agent_for_admin() -> None:
     auth = AuthIdentity(
         account_id=caller_account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
-    await _archive_agent_impl(_runtime(client), auth, "alices-agent")
+    await _archive_agent_impl(
+        _runtime(client, session_factory=db_session_factory), auth, "alices-agent"
+    )
     assert archived == ["ag_other"], "admin must be able to archive any stamped tenant agent"
 
 

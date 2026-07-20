@@ -41,6 +41,7 @@ from daimon.core.github_credentials import (
 )
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.skill_sync import SyncReport, sync_agent_skills
 from daimon.core.specs import (
     AgentSpec,
@@ -510,6 +511,12 @@ async def delete_agent(runtime: DiscordRuntime, *, tenant_id: uuid.UUID, name: s
     if agent is None:
         raise DaimonError(f"No agent named **{name}** found.")
     await runtime.anthropic.beta.agents.archive(agent.id)
+    await archive_memory_store_for_agent(
+        runtime.anthropic,
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
+    )
 
 
 def _build_runtime_fernet(runtime: DiscordRuntime) -> MultiFernet:
