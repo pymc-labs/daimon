@@ -77,9 +77,10 @@ async def memory_list_impl(
     if not rows:
         console.print("No memories yet.")
         return
+    rows.sort(key=lambda r: r.path)
     emit_rows(
         console,
-        sorted(rows, key=lambda r: r.path),
+        rows,
         columns=("path",),
         as_json=as_json,
     )

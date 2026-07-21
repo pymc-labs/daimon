@@ -36,6 +36,10 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import (
+    BetaManagedAgentsDeltaEvent,
+    BetaManagedAgentsStartEvent,
+)
 from anthropic.types.beta.sessions.beta_managed_agents_session_error_event import (
     BetaManagedAgentsSessionErrorEvent,
 )
@@ -159,6 +163,12 @@ async def run_turn(
     await anthropic.beta.sessions.events.send(session.id, events=[user_message])
 
     async for event in await anthropic.beta.sessions.events.stream(session_id=session.id):
+        # SDK 0.117 widened the stream union with token-level framing events
+        # (event_start / event_delta) that are not foldable session events.
+        # Skip them — this also narrows `event` to BetaManagedAgentsSessionEvent.
+        if isinstance(event, BetaManagedAgentsStartEvent | BetaManagedAgentsDeltaEvent):
+            continue
+
         if usage_record is not None and event.type == "span.model_request_end":
             await usage_record(event=event, session_id=session.id)
 
