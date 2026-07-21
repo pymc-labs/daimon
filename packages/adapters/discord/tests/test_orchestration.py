@@ -59,7 +59,7 @@ def _make_fake_session(session_id: str = "sess_test") -> BetaManagedAgentsSessio
         updated_at="2026-04-28T00:00:00Z",
         usage=BetaManagedAgentsSessionUsage(),
         vault_ids=[],
-        outcome_evaluations=[],  # pyright: ignore[reportCallIssue]
+        outcome_evaluations=[],
     )
 
 
@@ -848,6 +848,7 @@ class TestSetupHook:
         mock_routines_cog = MagicMock()
         mock_billing_cog = MagicMock()
         mock_privacy_cog = MagicMock()
+        mock_memory_cog = MagicMock()
 
         help_mod = types.ModuleType("daimon.adapters.discord.commands.help")
         help_mod.HelpCog = mock_help_cog  # type: ignore[attr-defined]
@@ -859,6 +860,8 @@ class TestSetupHook:
         billing_mod.BillingCog = mock_billing_cog  # type: ignore[attr-defined]
         privacy_mod = types.ModuleType("daimon.adapters.discord.commands.privacy")
         privacy_mod.PrivacyCog = mock_privacy_cog  # type: ignore[attr-defined]
+        memory_mod = types.ModuleType("daimon.adapters.discord.commands.memory")
+        memory_mod.MemoryCog = mock_memory_cog  # type: ignore[attr-defined]
 
         add_cog_calls: list[object] = []
 
@@ -875,16 +878,18 @@ class TestSetupHook:
                 "daimon.adapters.discord.commands.routines": routines_mod,
                 "daimon.adapters.discord.commands.billing": billing_mod,
                 "daimon.adapters.discord.commands.privacy": privacy_mod,
+                "daimon.adapters.discord.commands.memory": memory_mod,
             },
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 5, "setup_hook should add exactly 5 Cogs"
+        assert len(add_cog_calls) == 6, "setup_hook should add exactly 6 Cogs"
         mock_help_cog.assert_called_once_with(bot)
         mock_agent_setup_cog.assert_called_once_with(bot)
         mock_routines_cog.assert_called_once_with(bot)
         mock_billing_cog.assert_called_once_with(bot)
         mock_privacy_cog.assert_called_once_with(bot)
+        mock_memory_cog.assert_called_once_with(bot)
 
 
 class TestBillingAdmissionGate:

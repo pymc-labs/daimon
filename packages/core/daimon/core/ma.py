@@ -23,7 +23,11 @@ from dataclasses import dataclass
 
 import structlog
 from anthropic import APIStatusError, AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta import (
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsDeltaEvent,
+    BetaManagedAgentsStartEvent,
+)
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionEvent,
     BetaManagedAgentsSessionStatusIdleEvent,
@@ -118,6 +122,12 @@ async def stream_events_with_dedup(
     """
     stream = await anthropic.beta.sessions.events.stream(session_id=session_id)
     async for event in stream:
+        # SDK 0.117 widened the stream union with token-level framing events
+        # (event_start / event_delta) that carry no id and are not foldable
+        # session events. Daimon folds complete events only, so skip them —
+        # this also narrows `event` to BetaManagedAgentsSessionEvent.
+        if isinstance(event, BetaManagedAgentsStartEvent | BetaManagedAgentsDeltaEvent):
+            continue
         if event.id in seen:
             continue
         seen.add(event.id)

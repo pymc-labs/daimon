@@ -129,6 +129,12 @@ async def add_github_copilot_credential(
     GitHub Copilot URL, then create the new one.
     """
     async for cred in client.beta.vaults.credentials.list(vault_id=vault_id):
+        # SDK 0.117 widened the auth union with an `environment_variable`
+        # member that has no `mcp_server_url`; narrow to static_bearer first
+        # (these creds are created as static_bearer below), matching the guard
+        # in ensure_agent_mcp_vault.
+        if cred.auth.type != "static_bearer":
+            continue
         if cred.auth.mcp_server_url == GITHUB_COPILOT_MCP_URL:
             await client.beta.vaults.credentials.delete(
                 cred.id,

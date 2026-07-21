@@ -277,6 +277,7 @@ async def test_orchestrate_continues_when_nudge_store_call_raises_sqlalchemy_err
         version=1,
     )
     _fake_session = BetaManagedAgentsSession(
+        outcome_evaluations=[],
         id="sess-nudge-fail-001",
         agent=_agent_snapshot,
         created_at=_now,

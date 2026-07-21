@@ -94,6 +94,7 @@ _MODEL_ID = "claude-sonnet-4-5"
 def _fake_session_json(session_id: str = _SESSION_ID, model_id: str = _MODEL_ID) -> dict[str, Any]:
     """Build a real BetaManagedAgentsSession payload for POST /v1/sessions responses."""
     return BetaManagedAgentsSession(
+        outcome_evaluations=[],
         id=session_id,
         type="session",
         status="idle",

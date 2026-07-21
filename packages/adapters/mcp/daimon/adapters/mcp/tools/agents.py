@@ -14,6 +14,7 @@ from typing import Any, Final, cast
 
 import anthropic
 import httpx
+import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
 from anthropic.types.beta.agent_create_params import Tool
@@ -50,6 +51,8 @@ from daimon.core.defaults.skills import resolve_skill_names
 from daimon.core.defaults.spec_merge import merge_mcp_servers_with_ma, merge_skills_with_ma
 from daimon.core.errors import DefaultsError
 from daimon.core.ma import update_agent_with_version_retry
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_report_failures
 from daimon.core.specs import (
     AgentSpec,
@@ -59,6 +62,8 @@ from daimon.core.specs import (
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ValidationError
+
+log = structlog.get_logger()
 
 
 class AgentMcpServerInfo(BaseModel):
@@ -615,6 +620,24 @@ async def _archive_agent_impl(
         raise ToolError(f"agent '{name}' not found")
     _reject_system_agent(agent)
     await runtime.client.beta.agents.archive(agent.id)
+    try:
+        await archive_memory_store_for_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id)),
+        )
+    except anthropic.APIError:
+        # Best-effort degrade: the agent is already archived and the retry path
+        # is dead (archived agents are filtered from lookup), so a transient
+        # memory-store archive failure must not strand the agent in a failed
+        # state — mirrors the mount-side policy in memory_resource.py.
+        log.warning(
+            "archive_agent.memory_store_archive_failed",
+            tenant_id=str(auth.tenant_id),
+            agent_name=name,
+            ma_agent_id=agent.id,
+        )
 
 
 def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:

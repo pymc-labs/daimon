@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "PyMC Labs" }]
 dependencies = [
-    "anthropic>=0.96",
+    "anthropic>=0.117",
     "cachetools>=7,<8",
     "croniter>=6.0,<7",
     "httpx>=0.27",

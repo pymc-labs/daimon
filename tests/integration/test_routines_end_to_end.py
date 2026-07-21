@@ -90,6 +90,20 @@ class _EmptySessionPage:
         raise StopAsyncIteration
 
 
+class _FakeMemoryStores:
+    """Stub for ``client.beta.memory_stores`` (Phase: agent-memory).
+
+    ``create_session`` now unconditionally calls
+    ``ensure_memory_store_and_mount``, which calls
+    ``anthropic.beta.memory_stores.create(...)`` on the cold path (no DB row
+    yet). These e2e tests exercise the routine-fire path, not memory
+    provisioning itself, so the stub just returns an id — mirroring how
+    ``_FakeVaults`` stubs vault provisioning above.
+    """
+
+    create = AsyncMock(return_value=SimpleNamespace(id="memstore_fake"))
+
+
 def _test_dsn() -> str:
     url = os.environ.get("DAIMON_DATABASE__TEST_URL")
     if not url:
@@ -310,6 +324,7 @@ def _build_fake_anthropic_factory(
         agents = _FakeAgents()
         environments = _FakeEnvs()
         vaults = _FakeVaults()
+        memory_stores = _FakeMemoryStores()
 
     class _FakeClient:
         beta = _FakeBeta()
@@ -658,6 +673,7 @@ def _build_archived_agent_factory(
         agents = _FakeAgents()
         environments = _FakeEnvs()
         vaults = _FakeVaults()
+        memory_stores = _FakeMemoryStores()
 
     class _FakeClient:
         beta = _FakeBeta()
@@ -951,6 +967,7 @@ def _build_two_tenant_fake_anthropic_factory(
         agents = _FakeAgents()
         environments = _FakeEnvs()
         vaults = _FakeVaults()
+        memory_stores = _FakeMemoryStores()
 
     class _FakeClient:
         beta = _FakeBeta()

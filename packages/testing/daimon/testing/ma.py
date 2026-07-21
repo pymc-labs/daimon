@@ -20,6 +20,7 @@ Custom handler composition:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import secrets
@@ -112,6 +113,14 @@ def json_body(request: httpx.Request) -> dict[str, Any]:
 def list_response(data: list[dict[str, Any]]) -> httpx.Response:
     """MA LIST shape: {data: [...], next_page: null}."""
     return httpx.Response(200, json={"data": data, "next_page": None})
+
+
+def not_found_response(message: str) -> httpx.Response:
+    """MA 404 error shape."""
+    return httpx.Response(
+        404,
+        json={"type": "error", "error": {"type": "not_found_error", "message": message}},
+    )
 
 
 def sse_response(events: list[dict[str, Any]]) -> httpx.Response:
@@ -382,5 +391,173 @@ def make_fake_ma_handler() -> Callable[[httpx.Request], httpx.Response]:
             return httpx.Response(200, json=merged)
 
         return httpx.Response(404, json={"error": f"unhandled {method} {path}"})
+
+    return handler
+
+
+# ---------------------------------------------------------------------------
+# Stateful memory-store fake (agent memory feature)
+# ---------------------------------------------------------------------------
+
+
+def _prefix_match(path: str, prefix: str) -> bool:
+    """Match path against a segment-aware prefix.
+
+    Matches whole path segments: /notes/ matches /notes/todo.md but NOT /notes-archive/todo.md.
+    """
+    if prefix == "/":
+        return True
+    norm = prefix.rstrip("/") + "/"
+    return path == prefix or path.startswith(norm)
+
+
+@dataclass
+class FakeMemoryStoreState:
+    """In-memory state shared between a memory-store fake and test assertions."""
+
+    stores: dict[str, dict[str, Any]] = field(default_factory=dict)
+    memories: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+
+
+def _memory_store_response(
+    *,
+    store_id: str,
+    name: str,
+    description: str | None,
+    metadata: dict[str, str] | None,
+    archived_at: str | None = None,
+) -> dict[str, Any]:
+    """Payload shaped like BetaManagedAgentsMemoryStore."""
+    now = datetime.now(UTC).isoformat()
+    return {
+        "id": store_id,
+        "type": "memory_store",
+        "name": name,
+        "description": description,
+        "metadata": metadata or {},
+        "created_at": now,
+        "updated_at": now,
+        "archived_at": archived_at,
+    }
+
+
+def _memory_response(*, store_id: str, path: str, content: str) -> dict[str, Any]:
+    """Payload shaped like BetaManagedAgentsMemory (memory_stores/ namespace)."""
+    now = datetime.now(UTC).isoformat()
+    return {
+        "id": _ma_id("mem"),
+        "type": "memory",
+        "memory_store_id": store_id,
+        "memory_version_id": _ma_id("memver"),
+        "path": path,
+        "content": content,
+        "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
+        "content_size_bytes": len(content.encode()),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _memory_view(mem: dict[str, Any], view: str) -> dict[str, Any]:
+    """Apply the API's view semantics: `content` is populated only for
+    `view=full`; the default `basic` view nulls it (sha/size stay populated)."""
+    if view == "full":
+        return mem
+    redacted = dict(mem)
+    redacted["content"] = None
+    return redacted
+
+
+def make_fake_memory_store_handler(
+    state: FakeMemoryStoreState | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Stateful fake for /v1/memory_stores endpoints.
+
+    Raises NotHandled for non-memory paths — compose with other handlers via
+    combine_handlers. Covers: store create/retrieve/archive/delete, memory
+    create/list/retrieve. (update/versions endpoints are out of v1 scope.)
+
+    When combining with make_fake_ma_handler (which returns a 404 catch-all),
+    pass this handler first to combine_handlers() so requests are tried here before fallthrough.
+    """
+    st = state if state is not None else FakeMemoryStoreState()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        method = request.method
+
+        if method == "POST" and path == "/v1/memory_stores":
+            body = json_body(request)
+            store_id = _ma_id("memstore")
+            store = _memory_store_response(
+                store_id=store_id,
+                name=str(body.get("name", "")),
+                description=body.get("description"),
+                metadata=body.get("metadata"),
+            )
+            st.stores[store_id] = store
+            st.memories.setdefault(store_id, [])
+            return httpx.Response(200, json=store)
+
+        m = re.fullmatch(r"/v1/memory_stores/(?P<sid>[^/]+)/memories", path)
+        if m and method == "POST":
+            sid = m.group("sid")
+            if sid not in st.stores:
+                return not_found_response("no such store")
+            body = json_body(request)
+            mem = _memory_response(
+                store_id=sid, path=str(body["path"]), content=str(body.get("content", ""))
+            )
+            st.memories[sid].append(mem)
+            return httpx.Response(200, json=mem)
+
+        if m and method == "GET":
+            sid = m.group("sid")
+            if sid not in st.stores:
+                return not_found_response("no such store")
+            prefix = request.url.params.get("path_prefix", "/")
+            view = request.url.params.get("view", "basic")
+            data = [
+                _memory_view(x, view)
+                for x in st.memories.get(sid, [])
+                if _prefix_match(x["path"], prefix)
+            ]
+            return list_response(data)
+
+        m = re.fullmatch(r"/v1/memory_stores/(?P<sid>[^/]+)/memories/(?P<mid>[^/]+)", path)
+        if m and method == "GET":
+            sid, mid = m.group("sid"), m.group("mid")
+            view = request.url.params.get("view", "basic")
+            for x in st.memories.get(sid, []):
+                if x["id"] == mid:
+                    return httpx.Response(200, json=_memory_view(x, view))
+            return not_found_response("no such memory")
+
+        m = re.fullmatch(r"/v1/memory_stores/(?P<sid>[^/]+)/archive", path)
+        if m and method == "POST":
+            sid = m.group("sid")
+            store = st.stores.get(sid)
+            if store is None:
+                return not_found_response("no such store")
+            store["archived_at"] = datetime.now(UTC).isoformat()
+            return httpx.Response(200, json=store)
+
+        m = re.fullmatch(r"/v1/memory_stores/(?P<sid>[^/]+)", path)
+        if m and method == "DELETE":
+            sid = m.group("sid")
+            if sid not in st.stores:
+                return not_found_response("no such store")
+            del st.stores[sid]
+            st.memories.pop(sid, None)
+            return httpx.Response(200, json={"id": sid, "type": "memory_store_deleted"})
+
+        if m and method == "GET":
+            sid = m.group("sid")
+            store = st.stores.get(sid)
+            if store is None:
+                return not_found_response("no such store")
+            return httpx.Response(200, json=store)
+
+        raise NotHandled
 
     return handler

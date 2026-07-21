@@ -102,6 +102,7 @@ def _fake_ma_session(*, session_id: str, agent_id: str, environment_id: str) -> 
         version=1,
     )
     return BetaManagedAgentsSession(
+        outcome_evaluations=[],
         id=session_id,
         agent=agent_snapshot,
         created_at=now,

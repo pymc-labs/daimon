@@ -63,9 +63,14 @@ def _make_settings(*, public_url: str | None = None) -> MagicMock:
     return settings
 
 
-def _runtime(client: AsyncAnthropic, *, public_url: str | None = None) -> McpRuntime:
+def _runtime(
+    client: AsyncAnthropic,
+    *,
+    public_url: str | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | MagicMock | None = None,
+) -> McpRuntime:
     return McpRuntime(
-        session_factory=MagicMock(),
+        session_factory=session_factory if session_factory is not None else MagicMock(),
         client=client,  # type: ignore[arg-type]
         settings=_make_settings(public_url=public_url),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
@@ -793,7 +798,9 @@ async def test_fork_agent_impl_adds_base_toolset_when_source_lacks_it() -> None:
     )
 
 
-async def test_archive_agent_impl_calls_ma_archive() -> None:
+async def test_archive_agent_impl_calls_ma_archive(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -825,9 +832,72 @@ async def test_archive_agent_impl_calls_ma_archive() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    await _archive_agent_impl(_runtime(client), auth, "doomed")
+    await _archive_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
     assert archived == ["ag_d"], "should archive the correct MA agent"
+
+
+async def test_archive_agent_impl_succeeds_when_store_archive_fails(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Transient memory-store archive failure must not fail agent archival.
+
+    The agent is already archived when the store archive runs; a raise here
+    would strand the flow with no retry path (archived agents are filtered
+    from lookup). _archive_agent_impl degrades best-effort instead.
+    """
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.agent_memory_stores import insert_memory_store
+    from daimon.testing.factories import make_tenant
+
+    tenant = await make_tenant(db_session)
+    account_id = uuid.uuid4()
+
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_d")
+    await insert_memory_store(
+        db_session, tenant_id=tenant.id, agent_id=agent_uuid, memory_store_id="memstore_X"
+    )
+    await db_session.commit()
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                make_ma_agent(
+                    id="ag_d",
+                    name="doomed",
+                    metadata={
+                        "daimon_tenant": str(tenant.id),
+                        "daimon_name": "doomed",
+                        "daimon_account": str(account_id),
+                    },
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/agents/([^/]+)/archive",
+        lambda _req, m: httpx.Response(
+            200, json=make_ma_agent(id=m.group(1)).model_dump(mode="json")
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/memory_stores/([^/]+)/archive",
+        lambda _req, _m: httpx.Response(
+            500,
+            json={"type": "error", "error": {"type": "api_error", "message": "boom"}},
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant.id, role=Role.ADMIN, is_admin=True)
+    # Must not raise despite the 500 from the memory-store archive.
+    await _archive_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
 
 async def test_create_agent_impl_stamps_daimon_account_when_called() -> None:
@@ -1984,7 +2054,9 @@ async def test_archive_agent_impl_rejects_system_agent_no_daimon_account() -> No
         await _archive_agent_impl(_runtime(client), auth, "daimon")
 
 
-async def test_archive_agent_impl_allows_any_stamped_agent_for_admin() -> None:
+async def test_archive_agent_impl_allows_any_stamped_agent_for_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Admin must be able to archive any stamped tenant agent regardless of which account owns it."""
     tenant_id = uuid.uuid4()
     caller_account_id = uuid.uuid4()
@@ -2023,7 +2095,9 @@ async def test_archive_agent_impl_allows_any_stamped_agent_for_admin() -> None:
     auth = AuthIdentity(
         account_id=caller_account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
-    await _archive_agent_impl(_runtime(client), auth, "alices-agent")
+    await _archive_agent_impl(
+        _runtime(client, session_factory=db_session_factory), auth, "alices-agent"
+    )
     assert archived == ["ag_other"], "admin must be able to archive any stamped tenant agent"
 
 

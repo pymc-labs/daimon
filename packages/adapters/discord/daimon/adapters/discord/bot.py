@@ -232,6 +232,7 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
         from daimon.adapters.discord.commands.billing import BillingCog
         from daimon.adapters.discord.commands.help import HelpCog
+        from daimon.adapters.discord.commands.memory import MemoryCog
         from daimon.adapters.discord.commands.privacy import PrivacyCog
         from daimon.adapters.discord.commands.routines import RoutinesCog
 
@@ -240,6 +241,7 @@ class DaimonBot(commands.Bot):
         await self.add_cog(RoutinesCog(self))
         await self.add_cog(BillingCog(self))
         await self.add_cog(PrivacyCog(self))
+        await self.add_cog(MemoryCog(self))
 
     async def _post_to_guild(self, guild: discord.Guild, embed: discord.Embed) -> None:
         """Post an embed via the fallback chain: text channel → DM owner → skip."""
