@@ -30,6 +30,10 @@ Deliberate carve-outs:
 - The user's GitHub-side OAuth grant is not revoked. No GitHub API client enters
   the purge path — we delete only our encrypted credential and oauth-state rows
   from our own DB.
+- Agent memory stores are agent-scoped and shared across all workspace users,
+  so account purge does NOT touch them — archiving one because a single member
+  invoked erasure would destroy the guild's shared agent memory. They may
+  retain information about the purged user.
 """
 
 from __future__ import annotations
