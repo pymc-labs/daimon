@@ -1,7 +1,7 @@
 [project]
 name = "daimon-core"
 version = "0.1.0"
-description = "Daimon CMA core library"
+description = "Daimon core library (Managed Agents client, stores, turn pipeline)"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "PyMC Labs" }]

@@ -1,7 +1,7 @@
 [project]
 name = "daimon-adapter-discord"
 version = "0.1.0"
-description = "Daimon CMA Discord adapter"
+description = "Daimon Discord adapter"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "PyMC Labs" }]
