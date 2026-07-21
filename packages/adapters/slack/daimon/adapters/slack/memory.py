@@ -10,6 +10,7 @@ boundary (S3).
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 import anthropic
@@ -74,9 +75,7 @@ async def _resolve_store(
             tenant_id=tenant_id,
             channel_id=channel_id,
         )
-        config = await resolve_config(
-            session, context=scope, default=runtime.deployment_default
-        )
+        config = await resolve_config(session, context=scope, default=runtime.deployment_default)
     if config.agent_name is None:
         return None
     agent = await find_agent_by_daimon_tag(
@@ -86,9 +85,7 @@ async def _resolve_store(
         raise DaimonError(f"Configured agent *{config.agent_name}* not found.")
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id))
     async with runtime.sessionmaker() as session:
-        store_id = await get_memory_store_id(
-            session, tenant_id=tenant_id, agent_id=agent_uuid
-        )
+        store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_uuid)
     if store_id is None:
         return None
     return config.agent_name, store_id
@@ -167,11 +164,9 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             if isinstance(exc, DaimonError)
             else "Something went wrong fetching memory — try again later."
         )
-        try:
+        with contextlib.suppress(SlackApiError):
             await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id,
                 user=user_id,
                 text=error_text,
             )
-        except SlackApiError:
-            pass

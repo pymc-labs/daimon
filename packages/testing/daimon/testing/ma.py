@@ -115,6 +115,14 @@ def list_response(data: list[dict[str, Any]]) -> httpx.Response:
     return httpx.Response(200, json={"data": data, "next_page": None})
 
 
+def not_found_response(message: str) -> httpx.Response:
+    """MA 404 error shape."""
+    return httpx.Response(
+        404,
+        json={"type": "error", "error": {"type": "not_found_error", "message": message}},
+    )
+
+
 def sse_response(events: list[dict[str, Any]]) -> httpx.Response:
     """Build an httpx.Response that emits SSE events for the SDK's stream parser.
 
@@ -495,10 +503,7 @@ def make_fake_memory_store_handler(
         if m and method == "POST":
             sid = m.group("sid")
             if sid not in st.stores:
-                return httpx.Response(
-                    404,
-                    json={"type": "error", "error": {"type": "not_found_error", "message": "no such store"}},
-                )
+                return not_found_response("no such store")
             body = json_body(request)
             mem = _memory_response(
                 store_id=sid, path=str(body["path"]), content=str(body.get("content", ""))
@@ -509,10 +514,7 @@ def make_fake_memory_store_handler(
         if m and method == "GET":
             sid = m.group("sid")
             if sid not in st.stores:
-                return httpx.Response(
-                    404,
-                    json={"type": "error", "error": {"type": "not_found_error", "message": "no such store"}},
-                )
+                return not_found_response("no such store")
             prefix = request.url.params.get("path_prefix", "/")
             view = request.url.params.get("view", "basic")
             data = [
@@ -529,20 +531,14 @@ def make_fake_memory_store_handler(
             for x in st.memories.get(sid, []):
                 if x["id"] == mid:
                     return httpx.Response(200, json=_memory_view(x, view))
-            return httpx.Response(
-                404,
-                json={"type": "error", "error": {"type": "not_found_error", "message": "no such memory"}},
-            )
+            return not_found_response("no such memory")
 
         m = re.fullmatch(r"/v1/memory_stores/(?P<sid>[^/]+)/archive", path)
         if m and method == "POST":
             sid = m.group("sid")
             store = st.stores.get(sid)
             if store is None:
-                return httpx.Response(
-                    404,
-                    json={"type": "error", "error": {"type": "not_found_error", "message": "no such store"}},
-                )
+                return not_found_response("no such store")
             store["archived_at"] = datetime.now(UTC).isoformat()
             return httpx.Response(200, json=store)
 
@@ -550,10 +546,7 @@ def make_fake_memory_store_handler(
         if m and method == "DELETE":
             sid = m.group("sid")
             if sid not in st.stores:
-                return httpx.Response(
-                    404,
-                    json={"type": "error", "error": {"type": "not_found_error", "message": "no such store"}},
-                )
+                return not_found_response("no such store")
             del st.stores[sid]
             st.memories.pop(sid, None)
             return httpx.Response(200, json={"id": sid, "type": "memory_store_deleted"})
@@ -562,10 +555,7 @@ def make_fake_memory_store_handler(
             sid = m.group("sid")
             store = st.stores.get(sid)
             if store is None:
-                return httpx.Response(
-                    404,
-                    json={"type": "error", "error": {"type": "not_found_error", "message": "no such store"}},
-                )
+                return not_found_response("no such store")
             return httpx.Response(200, json=store)
 
         raise NotHandled
