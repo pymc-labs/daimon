@@ -18,6 +18,10 @@ from anthropic.types.beta import (
     BetaManagedAgentsSession,
     BetaManagedAgentsStartEvent,
 )
+from anthropic.types.beta.beta_managed_agents_agent_message_preview import (
+    BetaManagedAgentsAgentMessagePreview,
+)
+from anthropic.types.beta.beta_managed_agents_delta_content import BetaManagedAgentsDeltaContent
 from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
 from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
 from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
@@ -216,14 +220,35 @@ def _stream_client_yielding(events: Sequence[Any]) -> Any:
     return client
 
 
+def _start_event(event_id: str) -> BetaManagedAgentsStartEvent:
+    return BetaManagedAgentsStartEvent(
+        type="event_start",
+        event=BetaManagedAgentsAgentMessagePreview(type="agent.message", id=event_id),
+    )
+
+
+def _delta_event(event_id: str, text: str) -> BetaManagedAgentsDeltaEvent:
+    return BetaManagedAgentsDeltaEvent(
+        type="event_delta",
+        event_id=event_id,
+        delta=BetaManagedAgentsDeltaContent(
+            type="content_delta",
+            content=BetaManagedAgentsTextBlock(type="text", text=text),
+        ),
+    )
+
+
 async def test_stream_events_with_dedup_skips_id_less_framing_events_from_0117_stream() -> None:
     """SDK 0.117 widened the stream union with event_start / event_delta framing
     events that carry no `id`. The helper must skip them — reaching `event.id`
     on one would raise — and yield only foldable session events."""
-    start = BetaManagedAgentsStartEvent.model_construct(type="event_start")
-    delta = BetaManagedAgentsDeltaEvent.model_construct(type="event_delta")
     client = _stream_client_yielding(
-        [start, _agent_message("sevt_1", "hi"), delta, _idle("sevt_2")]
+        [
+            _start_event("sevt_1"),
+            _agent_message("sevt_1", "hi"),
+            _delta_event("sevt_1", "h"),
+            _idle("sevt_2"),
+        ]
     )
     seen: set[str] = set()
 
