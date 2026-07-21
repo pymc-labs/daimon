@@ -456,9 +456,7 @@ async def test_delete_archives_ma_agent_and_jumps_selection(
             return httpx.Response(200, json=agents_payload[0])
         raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
 
-    runtime = _runtime(
-        build_stub_anthropic(handler), tenant_id, sessionmaker=db_session_factory
-    )
+    runtime = _runtime(build_stub_anthropic(handler), tenant_id, sessionmaker=db_session_factory)
     view = AgentSetupView(state, runtime=runtime, allowed_user_id=42)
 
     delete_btn = _find_button(view, "Delete")
@@ -523,9 +521,7 @@ async def test_delete_last_agent_disables_section_buttons(
             return httpx.Response(200, json=agents_payload[0])
         raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
 
-    runtime = _runtime(
-        build_stub_anthropic(handler), tenant_id, sessionmaker=db_session_factory
-    )
+    runtime = _runtime(build_stub_anthropic(handler), tenant_id, sessionmaker=db_session_factory)
     view = AgentSetupView(state, runtime=runtime, allowed_user_id=42)
 
     delete_btn = _find_button(view, "Delete")

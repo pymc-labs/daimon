@@ -43,9 +43,7 @@ async def _resolve_store(
     memory store yet. Raises DaimonError when the configured agent doesn't
     exist on the MA side.
     """
-    tenant_id = derive_tenant_uuid(
-        platform="discord", workspace_id=str(interaction.guild_id)
-    )
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
     async with runtime.sessionmaker() as session:
         principal = await get_or_create_platform_principal(
             session,
@@ -58,9 +56,7 @@ async def _resolve_store(
             tenant_id=tenant_id,
             channel_id=str(interaction.channel_id),
         )
-        config = await resolve_config(
-            session, context=scope, default=runtime.deployment_default
-        )
+        config = await resolve_config(session, context=scope, default=runtime.deployment_default)
     if config.agent_name is None:
         return None
     agent = await find_agent_by_daimon_tag(
@@ -70,9 +66,7 @@ async def _resolve_store(
         raise DaimonError(f"Configured agent **{config.agent_name}** not found.")
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id))
     async with runtime.sessionmaker() as session:
-        store_id = await get_memory_store_id(
-            session, tenant_id=tenant_id, agent_id=agent_uuid
-        )
+        store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_uuid)
     if store_id is None:
         return None
     return config.agent_name, store_id

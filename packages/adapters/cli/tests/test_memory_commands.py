@@ -52,8 +52,12 @@ async def test_memory_list_prints_paths(db_session, db_session_factory) -> None:
     rt = await _setup(db_session, db_session_factory)
     console = Console(record=True)
     await memory_list_impl(
-        rt=rt, console=console,
-        platform="discord", workspace="999", agent="daimon", as_json=False,
+        rt=rt,
+        console=console,
+        platform="discord",
+        workspace="999",
+        agent="daimon",
+        as_json=False,
     )
     assert "/a.md" in console.export_text()
 
@@ -62,8 +66,12 @@ async def test_memory_show_prints_content(db_session, db_session_factory) -> Non
     rt = await _setup(db_session, db_session_factory)
     console = Console(record=True)
     await memory_show_impl(
-        rt=rt, console=console,
-        path="/a.md", platform="discord", workspace="999", agent="daimon",
+        rt=rt,
+        console=console,
+        path="/a.md",
+        platform="discord",
+        workspace="999",
+        agent="daimon",
     )
     assert "alpha" in console.export_text()
 
@@ -76,8 +84,12 @@ async def test_memory_show_prints_markup_like_content_verbatim(
     rt = await _setup(db_session, db_session_factory, content="[red]styled[/red] [/bold]")
     console = Console(record=True)
     await memory_show_impl(
-        rt=rt, console=console,
-        path="/a.md", platform="discord", workspace="999", agent="daimon",
+        rt=rt,
+        console=console,
+        path="/a.md",
+        platform="discord",
+        workspace="999",
+        agent="daimon",
     )
     assert "[red]styled[/red] [/bold]" in console.export_text()
 
@@ -87,8 +99,12 @@ async def test_memory_list_rejects_invalid_platform(db_session, db_session_facto
     console = Console(record=True)
     with pytest.raises(typer.BadParameter, match="unsupported platform"):
         await memory_list_impl(
-            rt=rt, console=console,
-            platform="dscord", workspace="999", agent="daimon", as_json=False,
+            rt=rt,
+            console=console,
+            platform="dscord",
+            workspace="999",
+            agent="daimon",
+            as_json=False,
         )
 
 
@@ -97,6 +113,10 @@ async def test_memory_show_rejects_invalid_platform(db_session, db_session_facto
     console = Console(record=True)
     with pytest.raises(typer.BadParameter, match="unsupported platform"):
         await memory_show_impl(
-            rt=rt, console=console,
-            path="/a.md", platform="dscord", workspace="999", agent="daimon",
+            rt=rt,
+            console=console,
+            path="/a.md",
+            platform="dscord",
+            workspace="999",
+            agent="daimon",
         )

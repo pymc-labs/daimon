@@ -64,9 +64,7 @@ async def ensure_memory_store_and_mount(
     orphan store is deleted and the winner's id is used.
     """
     async with session_factory() as session:
-        store_id = await get_memory_store_id(
-            session, tenant_id=tenant_id, agent_id=agent_id
-        )
+        store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_id)
 
     if store_id is None:
         created = await anthropic.beta.memory_stores.create(
@@ -92,21 +90,15 @@ async def ensure_memory_store_and_mount(
             try:
                 await anthropic.beta.memory_stores.delete(created.id)
             except anthropic_errors.APIError:
-                _log.warning(
-                    "memory_store.orphan_delete_failed", orphan=created.id
-                )
+                _log.warning("memory_store.orphan_delete_failed", orphan=created.id)
             raise
         if store_id != created.id:
             # Lost the provisioning race — discard the orphan store.
-            _log.info(
-                "memory_store.race_lost", orphan=created.id, winner=store_id
-            )
+            _log.info("memory_store.race_lost", orphan=created.id, winner=store_id)
             try:
                 await anthropic.beta.memory_stores.delete(created.id)
             except anthropic_errors.APIError:
-                _log.warning(
-                    "memory_store.orphan_delete_failed", orphan=created.id
-                )
+                _log.warning("memory_store.orphan_delete_failed", orphan=created.id)
         else:
             _log.info(
                 "memory_store.provisioned",
@@ -135,9 +127,7 @@ async def archive_memory_store_for_agent(
     MA side → binding still cleared.
     """
     async with session_factory() as session:
-        store_id = await get_memory_store_id(
-            session, tenant_id=tenant_id, agent_id=agent_id
-        )
+        store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_id)
     if store_id is None:
         return
     try:

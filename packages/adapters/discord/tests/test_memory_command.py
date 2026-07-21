@@ -124,9 +124,7 @@ async def test_memory_show_truncates_content_with_closed_fence(
     Discord's hard 2000-char cap with a CLOSED code fence — never truncated
     mid-fence, which would corrupt rendering for the rest of the message."""
     huge_content = "x" * 3800  # ~2x _DISCORD_LIMIT (1900)
-    runtime = await _setup(
-        db_session, db_session_factory, seed={"/notes/big.md": huge_content}
-    )
+    runtime = await _setup(db_session, db_session_factory, seed={"/notes/big.md": huge_content})
     cog = MemoryCog(MagicMock())
     interaction = _interaction(runtime)
 

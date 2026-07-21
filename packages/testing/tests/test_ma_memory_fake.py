@@ -31,9 +31,7 @@ async def test_create_seed_list_retrieve_archive_delete_roundtrip() -> None:
     assert [m.path for m in page.data] == ["/notes/a.md"]
     assert page.data[0].content is None, "list defaults to view=basic (no content)"
 
-    got = await client.beta.memory_stores.memories.retrieve(
-        mem.id, memory_store_id=store.id
-    )
+    got = await client.beta.memory_stores.memories.retrieve(mem.id, memory_store_id=store.id)
     assert got.content is None, "retrieve without view=full must not return content"
     assert got.content_sha256 == mem.content_sha256
 

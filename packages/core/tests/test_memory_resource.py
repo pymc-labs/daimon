@@ -37,8 +37,11 @@ async def test_cold_path_creates_store_and_binding(
     client = build_fake_anthropic(make_fake_memory_store_handler(state))
 
     mount = await ensure_memory_store_and_mount(
-        client, db_session_factory,
-        tenant_id=tenant.id, agent_id=agent_id, agent_name="daimon",
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        agent_name="daimon",
     )
 
     assert mount["type"] == "memory_store"
@@ -67,8 +70,11 @@ async def test_warm_path_makes_no_api_calls(
 
     client = build_fake_anthropic(refuse)
     mount = await ensure_memory_store_and_mount(
-        client, db_session_factory,
-        tenant_id=tenant.id, agent_id=agent_id, agent_name="daimon",
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        agent_name="daimon",
     )
     assert mount["memory_store_id"] == "memstore_X"
 
@@ -99,8 +105,11 @@ async def test_lost_race_deletes_orphan_store(
 
     client = build_fake_anthropic(make_fake_memory_store_handler(state))
     mount = await ensure_memory_store_and_mount(
-        client, db_session_factory,
-        tenant_id=tenant.id, agent_id=agent_id, agent_name="daimon",
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        agent_name="daimon",
     )
     # Warm path now — rival wins, no new store created.
     assert mount["memory_store_id"] == "memstore_RIVAL"
@@ -130,8 +139,11 @@ async def test_insert_failure_deletes_created_store(
 
     with pytest.raises(RuntimeError, match="db down"):
         await ensure_memory_store_and_mount(
-            client, failing_factory,
-            tenant_id=tenant.id, agent_id=agent_id, agent_name="daimon",
+            client,
+            failing_factory,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            agent_name="daimon",
         )
     assert state.stores == {}, "orphan store must be deleted when the insert fails"
 
@@ -154,7 +166,9 @@ async def test_cold_path_lost_race_deletes_orphan(
     async def _rival_then_session() -> AsyncIterator[AsyncSession]:
         async with db_session_factory() as s, s.begin():
             await insert_memory_store(
-                s, tenant_id=tenant.id, agent_id=agent_id,
+                s,
+                tenant_id=tenant.id,
+                agent_id=agent_id,
                 memory_store_id="memstore_RIVAL",
             )
         async with db_session_factory() as s:
@@ -168,8 +182,11 @@ async def test_cold_path_lost_race_deletes_orphan(
         return db_session_factory()
 
     mount = await ensure_memory_store_and_mount(
-        client, racing_factory,
-        tenant_id=tenant.id, agent_id=agent_id, agent_name="daimon",
+        client,
+        racing_factory,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        agent_name="daimon",
     )
     assert mount["memory_store_id"] == "memstore_RIVAL"
     assert state.stores == {}, "loser's store must be deleted after a lost race"
@@ -185,8 +202,11 @@ async def test_archive_helper_archives_and_clears(
     client = build_fake_anthropic(make_fake_memory_store_handler(state))
 
     mount = await ensure_memory_store_and_mount(
-        client, db_session_factory,
-        tenant_id=tenant.id, agent_id=agent_id, agent_name="daimon",
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        agent_name="daimon",
     )
     store_id = mount["memory_store_id"]
 

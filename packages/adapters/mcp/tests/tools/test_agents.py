@@ -832,9 +832,7 @@ async def test_archive_agent_impl_calls_ma_archive(
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    await _archive_agent_impl(
-        _runtime(client, session_factory=db_session_factory), auth, "doomed"
-    )
+    await _archive_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
     assert archived == ["ag_d"], "should archive the correct MA agent"
 
@@ -899,9 +897,7 @@ async def test_archive_agent_impl_succeeds_when_store_archive_fails(
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant.id, role=Role.ADMIN, is_admin=True)
     # Must not raise despite the 500 from the memory-store archive.
-    await _archive_agent_impl(
-        _runtime(client, session_factory=db_session_factory), auth, "doomed"
-    )
+    await _archive_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
 
 async def test_create_agent_impl_stamps_daimon_account_when_called() -> None:

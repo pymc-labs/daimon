@@ -87,9 +87,7 @@ async def test_memory_show_truncates_content_with_closed_fence(
     Slack's hard 4000-char cap with a CLOSED code fence — never truncated
     mid-fence, which would corrupt rendering for the rest of the message."""
     huge_content = "x" * 7600  # ~2x _SLACK_LIMIT (3800)
-    runtime, web = await _setup(
-        db_session, db_session_factory, seed={"/big.md": huge_content}
-    )
+    runtime, web = await _setup(db_session, db_session_factory, seed={"/big.md": huge_content})
     with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
         await handle_memory_command(runtime, _payload("/big.md"))
     kwargs = web.chat_postEphemeral.call_args.kwargs
@@ -127,9 +125,7 @@ async def test_memory_missing_agent_surfaces_ephemeral_error(
     raises DaimonError — the user must see that message as an ephemeral reply
     rather than the failure only being logged."""
     runtime, web = await _setup(db_session, db_session_factory, seed={})
-    runtime.deployment_default = DeploymentDefault(
-        agent_name="ghost", environment_name="default"
-    )
+    runtime.deployment_default = DeploymentDefault(agent_name="ghost", environment_name="default")
     with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
         await handle_memory_command(runtime, _payload())
     kwargs = web.chat_postEphemeral.call_args.kwargs

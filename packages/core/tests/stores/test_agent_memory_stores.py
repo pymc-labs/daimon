@@ -21,9 +21,7 @@ pytestmark = pytest.mark.asyncio
 
 async def test_get_returns_none_when_unbound(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
-    result = await get_memory_store_id(
-        db_session, tenant_id=tenant.id, agent_id=uuid.uuid4()
-    )
+    result = await get_memory_store_id(db_session, tenant_id=tenant.id, agent_id=uuid.uuid4())
     assert result is None
 
 
@@ -182,9 +180,7 @@ async def test_tenant_isolation(db_session: AsyncSession) -> None:
     await insert_memory_store(
         db_session, tenant_id=t1.id, agent_id=agent_id, memory_store_id="memstore_T1"
     )
-    assert (
-        await get_memory_store_id(db_session, tenant_id=t2.id, agent_id=agent_id)
-    ) is None
+    assert (await get_memory_store_id(db_session, tenant_id=t2.id, agent_id=agent_id)) is None
 
 
 async def test_clear_is_idempotent(db_session: AsyncSession) -> None:
@@ -194,8 +190,6 @@ async def test_clear_is_idempotent(db_session: AsyncSession) -> None:
         db_session, tenant_id=tenant.id, agent_id=agent_id, memory_store_id="memstore_A"
     )
     await clear_memory_store(db_session, tenant_id=tenant.id, agent_id=agent_id)
-    assert (
-        await get_memory_store_id(db_session, tenant_id=tenant.id, agent_id=agent_id)
-    ) is None
+    assert (await get_memory_store_id(db_session, tenant_id=tenant.id, agent_id=agent_id)) is None
     # second clear must not raise
     await clear_memory_store(db_session, tenant_id=tenant.id, agent_id=agent_id)

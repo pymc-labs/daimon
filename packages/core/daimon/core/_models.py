@@ -665,9 +665,7 @@ class AgentMemoryStore(Base):
     """Per-(tenant, agent) MA memory store binding (agent memory feature)."""
 
     __tablename__ = "agent_memory_store"
-    __table_args__ = (
-        PrimaryKeyConstraint("tenant_id", "agent_id", name="pk_agent_memory_store"),
-    )
+    __table_args__ = (PrimaryKeyConstraint("tenant_id", "agent_id", name="pk_agent_memory_store"),)
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

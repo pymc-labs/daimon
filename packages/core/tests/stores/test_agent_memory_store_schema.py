@@ -21,9 +21,7 @@ def _pk_columns(sync_conn: Connection, table: str) -> list[str]:
 
 
 async def test_agent_memory_store_has_composite_pk(db_session: AsyncSession) -> None:
-    pk_cols = await db_session.run_sync(
-        lambda s: _pk_columns(s.connection(), "agent_memory_store")
-    )
+    pk_cols = await db_session.run_sync(lambda s: _pk_columns(s.connection(), "agent_memory_store"))
     assert pk_cols == ["tenant_id", "agent_id"], (
         f"agent_memory_store composite PK drift: expected (tenant_id, agent_id), got {pk_cols}"
     )

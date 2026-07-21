@@ -1614,10 +1614,10 @@ async def test_create_session_attaches_memory_store(
         session_factory=db_session_factory,
     )
 
-    memory_resources = [
-        r for r in captured.get("resources", []) if r.get("type") == "memory_store"
-    ]
-    assert len(memory_resources) == 1, "session-create body must carry exactly one memory_store resource"
+    memory_resources = [r for r in captured.get("resources", []) if r.get("type") == "memory_store"]
+    assert len(memory_resources) == 1, (
+        "session-create body must carry exactly one memory_store resource"
+    )
     assert memory_resources[0]["access"] == "read_write"
     assert memory_resources[0]["memory_store_id"] in mem_state.stores
 

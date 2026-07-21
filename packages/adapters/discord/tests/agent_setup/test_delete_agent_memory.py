@@ -60,9 +60,7 @@ def _make_archive_agent_handler() -> Callable[[httpx.Request], httpx.Response]:
     return handler
 
 
-async def test_delete_agent_archives_memory_store(
-    db_session, db_session_factory
-) -> None:
+async def test_delete_agent_archives_memory_store(db_session, db_session_factory) -> None:
     tenant = await make_tenant(db_session)
     mem_state = FakeMemoryStoreState()
     client = build_fake_anthropic(
@@ -157,7 +155,4 @@ async def test_delete_agent_succeeds_when_store_archive_fails(
     # is archived, so nothing re-reads it).
     assert mem_state.stores[store.id]["archived_at"] is None
     async with db_session_factory() as s:
-        assert (
-            await get_memory_store_id(s, tenant_id=tenant.id, agent_id=agent_uuid)
-            == store.id
-        )
+        assert await get_memory_store_id(s, tenant_id=tenant.id, agent_id=agent_uuid) == store.id
