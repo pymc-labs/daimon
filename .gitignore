@@ -18,10 +18,10 @@ node_modules/
 .env.fly
 
 # Assistant/tooling working dirs — local only, never commit.
-# (.planning without a trailing slash so the symlink form is ignored too)
+# (.planning/.claude without a trailing slash so the symlink form is ignored too)
 .planning
 .learning/
-.claude/
+.claude
 graphify-out/
 
 # Local symlinks into the private companion repo.
