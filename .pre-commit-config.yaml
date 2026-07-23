@@ -1,4 +1,14 @@
+# Install both hook types with a plain `pre-commit install` (setup script
+# relies on this) so the commit-msg gate below is active for everyone.
+default_install_hook_types: [pre-commit, commit-msg]
+
 repos:
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
