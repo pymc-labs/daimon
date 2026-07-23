@@ -24,8 +24,9 @@ node_modules/
 .claude/
 graphify-out/
 
-# Local symlink into the private companion repo.
+# Local symlinks into the private companion repo.
 /infra
+/CLAUDE.md
 
 # Per-deployment Fly configs derived from *.example.toml templates.
 apps/notebook-host/fly.notebook.toml
