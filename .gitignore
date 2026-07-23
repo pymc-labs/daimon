@@ -39,3 +39,4 @@ scratchpad/
 err.txt
 agents_err.txt
 download.html
+.playwright-mcp/
