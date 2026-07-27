@@ -5,7 +5,14 @@ from __future__ import annotations
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
-from daimon.core.pricing import MODEL_PRICING, ModelRates, cost_of, format_cost
+from daimon.core.constants import ALLOWED_MODEL_IDS
+from daimon.core.pricing import (
+    MODEL_PRICING,
+    TOOL_MODEL_PRICING,
+    ModelRates,
+    cost_of,
+    format_cost,
+)
 
 
 def test_cost_of_opus_with_cache_returns_expected_usd() -> None:
@@ -50,6 +57,15 @@ def test_model_pricing_includes_opus_sonnet_haiku() -> None:
     assert "claude-haiku-4-5" in MODEL_PRICING, "haiku 4.5 must be priced"
     for key, rates in MODEL_PRICING.items():
         assert isinstance(rates, ModelRates), f"{key} must hold a ModelRates instance"
+
+
+def test_allowed_model_ids_holds_agent_models_only() -> None:
+    assert "claude-opus-5" in ALLOWED_MODEL_IDS, "opus 5 must be selectable"
+    for model_id in TOOL_MODEL_PRICING:
+        assert model_id not in ALLOWED_MODEL_IDS, (
+            f"{model_id} is pinned by a tool and must not be selectable as an agent model"
+        )
+        assert model_id in MODEL_PRICING, f"{model_id} must still be priced for cost lookups"
 
 
 def test_cost_of_gemini_tts_model_returns_positive_cost() -> None:
