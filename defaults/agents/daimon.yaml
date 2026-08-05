@@ -81,8 +81,6 @@ skills:
     skill_id: marimo_blog
   - type: custom
     skill_id: workspace-setup
-  - type: custom
-    skill_id: pymc-artifact-style
 tools:
   - type: agent_toolset_20260401
     configs:

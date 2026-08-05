@@ -17,14 +17,17 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 # Trees to scan. This script is excluded from its own scan (it names the patterns).
 readonly SELF="scripts/lint_designators.sh"
-readonly TREES=(packages apps scripts .github)
+readonly TREES=(packages apps scripts .github defaults)
 
 failed=0
 
 # report <rule> <explanation> <extended-regex>
 report() {
     local rule="$1" why="$2" pattern="$3" hits
-    hits=$(grep -rnE "$pattern" "${TREES[@]}" 2>/dev/null | grep -v "^${SELF}:") || true
+    # $4 optionally narrows the scan to one tree (a rule that only applies there).
+    local -a scope=("${TREES[@]}")
+    [[ $# -ge 4 ]] && scope=("$4")
+    hits=$(grep -rnE "$pattern" "${scope[@]}" 2>/dev/null | grep -v "^${SELF}:") || true
     if [[ -n "$hits" ]]; then
         echo "FAIL [$rule] $why"
         echo "$hits" | sed 's/^/    /'
@@ -32,6 +35,11 @@ report() {
         failed=1
     fi
 }
+
+report "tenant-branding-in-defaults" \
+    "defaults/ is the product every operator inherits, not one operator's config; PyMC Labs branding belongs in the private tenant skill repo, delivered by repo binding" \
+    'PyMC Labs|#?(0C1F40|9FAAE2|B4E7DD|F6AE72|006FFF|1e3a5f)\b|Archivo' \
+    defaults
 
 report "private-repo-name" \
     "the companion planning repo must not be named in public code; say \"the companion planning repo\"" \
