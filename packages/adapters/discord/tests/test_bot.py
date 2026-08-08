@@ -982,13 +982,15 @@ class TestReadyEmbedSuppression:
 
     @patch("daimon.adapters.discord.bot.set_provision_status", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.reconcile_tenant_defaults", new_callable=AsyncMock)
-    async def test_boot_sweep_posts_the_embed_when_a_ready_tenant_actually_changed(
+    async def test_boot_sweep_posts_no_embed_when_a_ready_tenant_changed(
         self,
         mock_reconcile: AsyncMock,
         mock_set_provision_status: AsyncMock,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """was_ready=True but the report records a real change: the ready embed posts."""
+        """was_ready=True and the report records a real change: still zero messages.
+        Every deploy touching defaults/ reconciles every guild, so posting on
+        change means posting in every channel on every deploy."""
         from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
 
         report = ApplyReport()
@@ -1003,10 +1005,10 @@ class TestReadyEmbedSuppression:
             tenant_id=uuid.uuid4(), guild=guild, was_ready=True
         )
 
-        guild.system_channel.send.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType]
-        embed = guild.system_channel.send.await_args.kwargs["embed"]  # pyright: ignore[reportUnknownMemberType]
-        assert "ready" in (embed.title or "").lower(), (
-            "a report recording a real change must still post the ready embed"
+        assert guild.system_channel.send.await_count == 0, (  # pyright: ignore[reportUnknownMemberType]
+            "an already-ready tenant must stay silent even when the reconcile "
+            "changed something -- the ready embed is an install confirmation, "
+            "not a deploy notification"
         )
 
     @patch("daimon.adapters.discord.bot.set_provision_status", new_callable=AsyncMock)

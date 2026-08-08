@@ -164,19 +164,6 @@ def _build_snag_embed() -> discord.Embed:
     )
 
 
-def _report_has_changes(report: ApplyReport) -> bool:
-    """Whether a reconcile report records any outcome that is not a no-op skip,
-    across all four resource kinds. Pure -- no I/O.
-
-    Drives the boot sweep's confirmation-embed suppression: an all-skipped
-    report is the steady state once the reconcile's per-resource hash gate is
-    satisfied, so a quiet deploy stays quiet."""
-    return any(
-        o.action is not Action.SKIPPED
-        for o in (*report.agents, *report.environments, *report.skills, *report.system_config)
-    )
-
-
 def _compose_failure_reason(report: ApplyReport) -> str | None:
     """Compose a persisted reason from a report's failed outcomes only, one
     line per failure naming the resource kind, name, and its recorded error.
@@ -369,10 +356,13 @@ class DaimonBot(commands.Bot):
         self, *, tenant_id: uuid.UUID, guild: discord.Guild, was_ready: bool
     ) -> None:
         """Background MA seed. Owns the pending/failed→ready/failed status flip.
-        Posts the ✅/⚠️ follow-up on terminal state, EXCEPT the ready embed is
-        suppressed when the tenant was already ready before this reconcile and
-        the reconcile changed nothing -- a quiet boot sweep stays quiet (D-23).
-        In-flight guard prevents duplicate seeds.
+        Posts the ✅/⚠️ follow-up on terminal state, EXCEPT the ready embed,
+        which is posted only when the tenant was NOT already ready -- a fresh
+        install or one recovering from `failed`. An already-ready tenant never
+        gets it, no matter what the reconcile changed: every deploy that edits
+        `defaults/` reconciles every guild, and announcing that in each guild's
+        channel is noise nobody asked for. The embed answers "am I installed?",
+        which only changes on install. In-flight guard prevents duplicate seeds.
 
         `was_ready`: the tenant's provision_status immediately before this call,
         passed explicitly by the caller (which already has the row) rather than
@@ -429,7 +419,7 @@ class DaimonBot(commands.Bot):
                     status="ready",
                     clear_reason=True,
                 )
-                if not was_ready or _report_has_changes(report):
+                if not was_ready:
                     await self._post_to_guild(guild, _build_ready_embed())
             else:
                 reason = roster_failure_reason or _compose_failure_reason(report)
