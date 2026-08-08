@@ -22,6 +22,7 @@ from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAg
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
 from daimon.core.config import McpSettings
+from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
@@ -1068,6 +1069,51 @@ class TestReadyEmbedSuppression:
         )
 
         guild.system_channel.send.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType]
+
+    @patch("daimon.adapters.discord.bot.set_provision_status", new_callable=AsyncMock)
+    @patch("daimon.adapters.discord.bot.reconcile_tenant_defaults", new_callable=AsyncMock)
+    async def test_a_raising_reconcile_posts_no_embed_when_the_tenant_was_already_ready(
+        self,
+        mock_reconcile: AsyncMock,
+        mock_set_provision_status: AsyncMock,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """was_ready=True and the reconcile RAISES: still zero messages. The boot
+        sweep reconciles every guild, so one provider error would otherwise put a
+        snag embed in every channel of every install at once."""
+        mock_reconcile.side_effect = DaimonError("provider blew up")
+
+        runtime = _make_runtime(db_session_factory)
+        bot = _make_bot(runtime)
+        guild = _make_sweep_guild(900000025)
+
+        await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
+            tenant_id=uuid.uuid4(), guild=guild, was_ready=True
+        )
+
+        guild.system_channel.send.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType]
+
+    @patch("daimon.adapters.discord.bot.set_provision_status", new_callable=AsyncMock)
+    @patch("daimon.adapters.discord.bot.reconcile_tenant_defaults", new_callable=AsyncMock)
+    async def test_a_raising_reconcile_still_posts_the_snag_embed_when_not_previously_ready(
+        self,
+        mock_reconcile: AsyncMock,
+        mock_set_provision_status: AsyncMock,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """was_ready=False: a raising reconcile still announces itself, so a first
+        install that genuinely broke is never left silent."""
+        mock_reconcile.side_effect = DaimonError("provider blew up")
+
+        runtime = _make_runtime(db_session_factory)
+        bot = _make_bot(runtime)
+        guild = _make_sweep_guild(900000026)
+
+        await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
+            tenant_id=uuid.uuid4(), guild=guild, was_ready=False
+        )
+
+        guild.system_channel.send.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType]
 
     @patch("daimon.adapters.discord.bot.set_provision_status", new_callable=AsyncMock)
     @patch("daimon.adapters.discord.bot.reconcile_tenant_defaults", new_callable=AsyncMock)

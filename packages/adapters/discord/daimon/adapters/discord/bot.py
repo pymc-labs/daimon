@@ -356,13 +356,15 @@ class DaimonBot(commands.Bot):
         self, *, tenant_id: uuid.UUID, guild: discord.Guild, was_ready: bool
     ) -> None:
         """Background MA seed. Owns the pending/failed→ready/failed status flip.
-        Posts the ✅/⚠️ follow-up on terminal state, EXCEPT the ready embed,
-        which is posted only when the tenant was NOT already ready -- a fresh
-        install or one recovering from `failed`. An already-ready tenant never
-        gets it, no matter what the reconcile changed: every deploy that edits
-        `defaults/` reconciles every guild, and announcing that in each guild's
-        channel is noise nobody asked for. The embed answers "am I installed?",
-        which only changes on install. In-flight guard prevents duplicate seeds.
+        Posts the ✅/⚠️ follow-up on terminal state ONLY when the tenant was not
+        already ready -- a fresh install or one recovering from `failed`. An
+        already-ready tenant gets neither embed, no matter what the reconcile
+        changed or how it failed: every deploy that edits `defaults/`
+        reconciles every guild, and announcing that in each guild's channel is
+        noise nobody asked for. The embeds answer "am I installed?", which only
+        changes on install. That gate covers the raising paths too -- a single
+        provider error during a boot sweep would otherwise put a snag embed in
+        every channel at once. In-flight guard prevents duplicate seeds.
 
         `was_ready`: the tenant's provision_status immediately before this call,
         passed explicitly by the caller (which already has the row) rather than
@@ -452,7 +454,8 @@ class DaimonBot(commands.Bot):
             await self._flip_failed_best_effort(
                 tenant_id, reason=f"{type(exc).__name__}: {exc}", was_ready=was_ready
             )
-            await self._post_to_guild(guild, _build_snag_embed())
+            if not was_ready:
+                await self._post_to_guild(guild, _build_snag_embed())
         except Exception as exc:  # noqa: BLE001 — background-task supervisor boundary
             log.exception("guild_seed_unexpected", tenant_id=str(tenant_id))
             # This branch's message body may carry anything (an unclassified bug,
@@ -463,7 +466,8 @@ class DaimonBot(commands.Bot):
             await self._flip_failed_best_effort(
                 tenant_id, reason=f"unexpected error: {type(exc).__name__}", was_ready=was_ready
             )
-            await self._post_to_guild(guild, _build_snag_embed())
+            if not was_ready:
+                await self._post_to_guild(guild, _build_snag_embed())
         finally:
             self._seeding.discard(tenant_id)
 
