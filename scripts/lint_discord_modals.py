@@ -19,6 +19,7 @@ from pathlib import Path
 MAX_LABEL_CHARS = 45  # codepoints
 MAX_LABEL_BYTES = 45  # defensive — some validators count bytes
 MAX_COMPONENTS_PER_MODAL = 5
+MAX_TEXT_INPUT_LENGTH = 4000  # Discord rejects the whole modal with 50035 above this
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,47 @@ def _literal_str(node: ast.expr) -> str | None:
     return None
 
 
-def _walk_modal_class(cls: ast.ClassDef, source_path: str) -> Iterator[Finding]:
+def _max_length_kwarg(call: ast.Call) -> ast.expr | None:
+    for kw in call.keywords:
+        if kw.arg == "max_length":
+            return kw.value
+    return None
+
+
+def _literal_int(node: ast.expr) -> int | None:
+    """Return the int value if ``node`` is a literal int, else None.
+
+    `bool` is an `int` subclass; exclude it so `max_length=True` is reported as
+    non-literal rather than silently read as 1.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        if isinstance(node.value, bool):
+            return None
+        return node.value
+    return None
+
+
+def _module_int_constants(tree: ast.Module) -> dict[str, int]:
+    """Module-level ``NAME = <int literal>`` bindings, for resolving a
+    ``max_length=_SOME_CAP`` that is defined in the same file. An *imported*
+    constant stays unresolvable on purpose — its value is not visible here, and
+    that invisibility is what let a byte cap pose as a character cap."""
+    constants: dict[str, int] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        value = _literal_int(node.value)
+        if value is None:
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                constants[target.id] = value
+    return constants
+
+
+def _walk_modal_class(
+    cls: ast.ClassDef, source_path: str, int_constants: dict[str, int]
+) -> Iterator[Finding]:
     """Yield findings for every TextInput / Select inside this Modal class.
 
     Counts components as ``TextInput(...)`` constructor calls that appear
@@ -157,6 +198,39 @@ def _walk_modal_class(cls: ast.ClassDef, source_path: str) -> Iterator[Finding]:
                 ),
             )
 
+    # max_length per TextInput. An imported byte-cap constant reads as a
+    # plausible character cap, which is how a 4096 reached send_modal and made
+    # the modal unopenable; a non-literal is therefore reported, not trusted.
+    for call, lineno in text_inputs:
+        max_length_node = _max_length_kwarg(call)
+        if max_length_node is None:
+            continue
+        max_length = _literal_int(max_length_node)
+        if max_length is None and isinstance(max_length_node, ast.Name):
+            max_length = int_constants.get(max_length_node.id)
+        if max_length is None:
+            yield Finding(
+                file=source_path,
+                line=lineno,
+                rule="discord/non-literal-max-length",
+                message=(
+                    f"{cls.name}: TextInput max_length is not an int literal; lint "
+                    f"cannot verify it against Discord's {MAX_TEXT_INPUT_LENGTH} cap. "
+                    f"Inline the number."
+                ),
+            )
+            continue
+        if max_length > MAX_TEXT_INPUT_LENGTH:
+            yield Finding(
+                file=source_path,
+                line=lineno,
+                rule="discord/max-length-too-large",
+                message=(
+                    f"{cls.name}: TextInput max_length={max_length}; Discord rejects "
+                    f"the whole modal with 50035 above {MAX_TEXT_INPUT_LENGTH}."
+                ),
+            )
+
 
 def lint_file(path: Path) -> list[Finding]:
     try:
@@ -175,9 +249,10 @@ def lint_file(path: Path) -> list[Finding]:
             )
         ]
     findings: list[Finding] = []
+    int_constants = _module_int_constants(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and any(_is_modal_base(b) for b in node.bases):
-            findings.extend(_walk_modal_class(node, str(path)))
+            findings.extend(_walk_modal_class(node, str(path), int_constants))
     return findings
 
 
@@ -205,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         "discord/too-many-components",
         "discord/no-select-in-modal",
         "discord/missing-label",
+        "discord/max-length-too-large",
+        "discord/non-literal-max-length",
         "syntax-error",
     }
     failures = [f for f in findings if f.rule in failing_rules]

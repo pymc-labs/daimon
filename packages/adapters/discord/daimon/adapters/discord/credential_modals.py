@@ -316,7 +316,11 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
         self.pat_in: discord.ui.TextInput[SkillRepoModal] = discord.ui.TextInput(
             label="GitHub token",
             required=True,
-            max_length=_MAX_SECRET_VALUE_BYTES,
+            # Discord rejects the whole modal with 50035 above 4000, so this is
+            # a UI character cap and NOT _MAX_SECRET_VALUE_BYTES (4096), which
+            # is a byte cap enforced on submit. EnvCredentialModal keeps the two
+            # separate for the same reason.
+            max_length=4000,
             placeholder=f"Needs read access to {normalize_owner_repo(url)}",
         )
         self.add_item(self.pat_in)
