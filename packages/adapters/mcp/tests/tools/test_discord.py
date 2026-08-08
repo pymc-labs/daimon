@@ -12,7 +12,7 @@ import importlib.util
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 from unittest.mock import MagicMock
 
 import aiohttp
@@ -22,13 +22,20 @@ import discord.http
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools.discord._credential_button import (  # pyright: ignore[reportPrivateUsage]
+    _build_message_body,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
     Settings,
 )
-from daimon.core.credential_requests import build_button_label, build_custom_id
+from daimon.core.credential_requests import (
+    CredentialRequestKind,
+    build_button_label,
+    build_custom_id,
+)
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError
@@ -696,6 +703,21 @@ async def test_post_credential_button_posts_one_button_with_the_core_custom_id(
     assert button["label"] == build_button_label("env", "OPENAI_API_KEY"), (
         "posted button label must be the core-owned build_button_label output"
     )
+
+
+async def test_build_message_body_renders_every_credential_request_kind() -> None:
+    """Every kind in CredentialRequestKind must render a body. _KIND_NOUN is a
+    plain dict, so pyright cannot prove it exhaustive — a kind added to the
+    Literal without a noun here raises KeyError at post time, not build time."""
+    for kind in get_args(CredentialRequestKind):
+        body = _build_message_body(
+            requester_platform_user_id="42",
+            agent_name="demo",
+            kind=kind,
+            target="some-target",
+            purpose="doing the thing",
+        )
+        assert "some-target" in body, f"body for kind {kind!r} must name the target"
 
 
 async def test_post_credential_button_body_mentions_requester_and_exposure(

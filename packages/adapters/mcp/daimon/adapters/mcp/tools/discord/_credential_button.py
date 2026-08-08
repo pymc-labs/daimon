@@ -44,6 +44,7 @@ _KIND_NOUN: dict[CredentialRequestKind, str] = {
     "env": "an environment secret",
     "mcp": "an MCP server credential",
     "repo": "a repo binding",
+    "skill_repo": "a GitHub token to import skills",
 }
 
 
