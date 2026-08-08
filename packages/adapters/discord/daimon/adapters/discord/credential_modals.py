@@ -45,14 +45,18 @@ opened.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
+import anthropic
 import httpx
 import structlog
+from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAgentsSkillParams
 from daimon.adapters.discord.agent_setup.credentials import (
     _MAX_SECRET_VALUE_BYTES,  # pyright: ignore[reportPrivateUsage]  # reusing PasteSecretModal's byte cap rather than inventing a second number
 )
-from daimon.adapters.discord.agent_setup.write import mask_tail, store_inline_pat
+from daimon.adapters.discord.agent_setup.write import mask_tail
 from daimon.adapters.discord.credential_repo_bind import (
     refuse_if_shared_and_not_admin_for_request,
     resolve_repo_binding_credential,
@@ -60,9 +64,12 @@ from daimon.adapters.discord.credential_repo_bind import (
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.credential_requests import split_skill_repo_target
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
+from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.github_visibility import pat_can_access_repo
+from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mcp_attach import attach_mcp_server_to_agent
 from daimon.core.mcp_vault import add_external_mcp_credential
 from daimon.core.skills.pipeline import run_skill_sync
@@ -368,12 +375,36 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
                         ephemeral=True,
                     )
                     return
-                await store_inline_pat(
+                # Reuse the repo kind's resolver rather than calling
+                # `store_inline_pat` directly: it returns the `ma_secret_ref`
+                # AND the access proof that `set_binding` requires, so the two
+                # writes cannot disagree about what was established.
+                ma_secret_ref, proof = await resolve_repo_binding_credential(
                     self._runtime,
-                    account_id=consumed_row.account_id,
+                    http_client,
                     agent_id=consumed_row.agent_id,
-                    plaintext_pat=pat,
+                    account_id=consumed_row.account_id,
+                    repo_url=url,
+                    pasted_pat=pat,
+                    now=now,
                 )
+                # Without this row the stored PAT is unreachable: the skill-sync
+                # resolver finds a per-agent token by walking this tenant's
+                # `agent_repo_binding` rows FOR THIS REPO, not by agent alone
+                # (the session JWT carries no agent_id claim). Storing the
+                # credential without binding the repo is what made a pasted
+                # token look ignored — every later sync resolved `token=None`,
+                # got GitHub's 404, and asked for the credential again.
+                async with self._runtime.sessionmaker.begin() as session:
+                    await set_binding(
+                        session,
+                        tenant_id=consumed_row.tenant_id,
+                        agent_id=consumed_row.agent_id,
+                        repo_url=url,
+                        default_branch=branch,
+                        ma_secret_ref=ma_secret_ref,
+                        proof=proof,
+                    )
                 outcomes = await run_skill_sync(
                     self._runtime.anthropic,
                     http_client,
@@ -408,11 +439,68 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
             )
             return
 
+        attach_note = await self._attach_to_requested_agent(
+            tenant_id=consumed_row.tenant_id,
+            agent_id=consumed_row.agent_id,
+            outcomes=outcomes,
+        )
         await interaction.followup.send(
             f"Imported {len(outcomes)} skill(s) from `{normalize_owner_repo(url)}`. "
-            "The token is stored, so future imports from repos it can read will not ask again.",
+            f"{attach_note} The token is stored and the repo is bound, so future "
+            "imports from it will not ask again.",
             ephemeral=True,
         )
+
+    async def _attach_to_requested_agent(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        agent_id: uuid.UUID,
+        outcomes: list[ResourceOutcome],
+    ) -> str:
+        """Attach the just-imported skills to the agent this request named.
+
+        Importing puts skills in the tenant's shared library; it does not put
+        them on an agent. The request row already names the agent, so doing
+        only the import leaves the user staring at an agent with no skills and
+        no way to tell that anything worked.
+
+        Returns prose rather than raising: the import has already succeeded by
+        the time this runs, so a failure here is partial and both halves must
+        be reported truthfully.
+        """
+        skill_ids = sorted(
+            outcome.anthropic_id
+            for outcome in outcomes
+            if outcome.anthropic_id is not None
+            and outcome.action in (Action.CREATED, Action.UPDATED)
+        )
+        if not skill_ids:
+            return "Nothing new to attach."
+        agent = await find_agent_by_derived_uuid(
+            self._runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+        )
+        if agent is None:
+            return "Could not attach: that agent no longer exists. The skills are in the library."
+        new_skills: list[BetaManagedAgentsSkillParams] = [
+            {"type": "custom", "skill_id": skill_id} for skill_id in skill_ids
+        ]
+
+        async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
+            return await self._runtime.anthropic.beta.agents.update(
+                fresh.id, version=fresh.version, skills=merge_skills_with_ma(new_skills, fresh)
+            )
+
+        try:
+            await update_agent_with_version_retry(self._runtime.anthropic, agent.id, _apply)
+        except (DaimonError, anthropic.APIStatusError) as err:
+            _log.warning(
+                "credential_modal.skill_repo_attach_failed",
+                agent_id=str(agent_id),
+                err_type=type(err).__name__,
+            )
+            return f"Imported, but attaching to `{agent.name}` failed ({type(err).__name__})."
+        return f"Attached {len(skill_ids)} to `{agent.name}`."
 
 
 class RepoBindModal(discord.ui.Modal, title="Bind repo"):

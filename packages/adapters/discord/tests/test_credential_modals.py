@@ -24,16 +24,23 @@ import pytest
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from cryptography.fernet import Fernet
+from daimon.adapters.discord import credential_modals as credential_modals_mod
 from daimon.adapters.discord import credential_repo_bind as credential_repo_bind_mod
 from daimon.adapters.discord.credential_modals import (
     EnvCredentialModal,
     McpCredentialModal,
     RepoBindModal,
+    SkillRepoModal,
 )
 from daimon.adapters.discord.credential_repo_bind import _SHARED_AGENT_MESSAGE
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.credential_requests import build_custom_id, mint_request_token
+from daimon.core.credential_requests import (
+    build_custom_id,
+    build_skill_repo_target,
+    mint_request_token,
+)
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -185,6 +192,38 @@ async def _seed_repo_request(
             session,
             token=token,
             kind="repo",
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=account.id,
+            target=target,
+            mcp_server_url=None,
+            requester_platform_user_id="100000000000000001",
+            channel_id="chan-1",
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        )
+    return row
+
+
+async def _seed_skill_repo_request(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    ma_agent_id: str,
+    target: str,
+    guild_id: int = _GUILD_ID,
+) -> CredentialRequestRow:
+    """Seed a `kind="skill_repo"` request row. Same real-tenant/real-account
+    reasoning as `_seed_repo_request`: `set_binding` writes a proof carrying an
+    FK to `accounts.id`."""
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+    token = mint_request_token()
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(guild_id))
+        account = await make_account(session, tenant=tenant)
+        row = await create_credential_request(
+            session,
+            token=token,
+            kind="skill_repo",
             tenant_id=tenant_id,
             agent_id=agent_id,
             account_id=account.id,
@@ -951,3 +990,112 @@ async def test_repo_modal_never_leaks_the_pasted_token(
             "a gate refusal must never reach the submit log line -- the gate must run before it "
             "(this is the mutation this test pins: moving the log line above the gate turns it red)"
         )
+
+
+# --- SkillRepoModal -----------------------------------------------------
+
+
+async def test_skill_repo_modal_binds_the_repo_so_a_later_sync_can_resolve_the_pat(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The pasted token must produce an agent_repo_binding row, not just a
+    credential. The skill-sync resolver walks this tenant's bindings FOR THIS
+    REPO to find a per-agent PAT, so without the row the stored token is
+    unreachable and every later sync falls back to an anonymous 404."""
+    ma_agent_id = "agent_skill_repo_bind"
+    monkeypatch.setattr(
+        credential_repo_bind_mod, "pat_can_access_repo", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(credential_modals_mod, "pat_can_access_repo", AsyncMock(return_value=True))
+    monkeypatch.setattr(credential_modals_mod, "run_skill_sync", AsyncMock(return_value=[]))
+
+    row = await _seed_skill_repo_request(
+        db_session_factory,
+        ma_agent_id=ma_agent_id,
+        target=build_skill_repo_target("https://github.com/o/skills-repo", "main", ""),
+    )
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID))
+    agent = _make_agent(ma_agent_id=ma_agent_id, tenant_id=tenant_id, name="daimon", managed=True)
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(_list_agents_handler([agent])),
+        crypto_keys=(Fernet.generate_key().decode(),),
+    )
+
+    modal = SkillRepoModal(runtime=runtime, request_row=row)
+    modal.pat_in._value = "ghp_skill_repo_token"  # pyright: ignore[reportPrivateUsage]
+    await modal.on_submit(_admin_interaction())
+
+    async with db_session_factory() as session:
+        binding = await get_binding(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert binding is not None, (
+        "a pasted skill-repo token must bind the repo -- without the binding the "
+        "credential is stored but unreachable, which is the loop this pins"
+    )
+    assert binding.ma_secret_ref == f"inline-pat:{row.agent_id}"
+    assert binding.proof_kind == "pat"
+
+
+async def test_skill_repo_modal_attaches_the_imported_skills_to_the_requested_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Importing puts skills in the tenant library; the request names an agent,
+    so the modal must also attach them. Import-without-attach leaves the user
+    with an agent that has no skills and a success message saying otherwise."""
+    ma_agent_id = "agent_skill_repo_attach"
+    monkeypatch.setattr(
+        credential_repo_bind_mod, "pat_can_access_repo", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(credential_modals_mod, "pat_can_access_repo", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        credential_modals_mod,
+        "run_skill_sync",
+        AsyncMock(
+            return_value=[
+                ResourceOutcome(
+                    kind="skill",
+                    name="imported-skill",
+                    action=Action.CREATED,
+                    anthropic_id="skill_01imported",
+                )
+            ]
+        ),
+    )
+
+    row = await _seed_skill_repo_request(
+        db_session_factory,
+        ma_agent_id=ma_agent_id,
+        target=build_skill_repo_target("https://github.com/o/attach-repo", "main", ""),
+    )
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID))
+    agent = _make_agent(ma_agent_id=ma_agent_id, tenant_id=tenant_id, name="daimon", managed=True)
+
+    updates: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(agent.id):
+            # Both the version-retry re-fetch and the update itself address the
+            # agent directly and must parse as ONE agent; only the list route
+            # gets the list envelope.
+            if request.method in ("POST", "PATCH"):
+                updates.append(json.loads(request.content))
+            return httpx.Response(200, json=agent.model_dump(mode="json"))
+        return list_response([agent.model_dump(mode="json")])
+
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(handler),
+        crypto_keys=(Fernet.generate_key().decode(),),
+    )
+
+    modal = SkillRepoModal(runtime=runtime, request_row=row)
+    modal.pat_in._value = "ghp_attach_token"  # pyright: ignore[reportPrivateUsage]
+    await modal.on_submit(_admin_interaction())
+
+    assert updates, "the modal must call agents.update to attach the imported skills"
+    attached_ids = {entry["skill_id"] for entry in updates[-1]["skills"]}
+    assert "skill_01imported" in attached_ids, (
+        "the newly imported skill must be attached to the agent the request named"
+    )
