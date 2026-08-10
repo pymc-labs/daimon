@@ -765,6 +765,7 @@ async def test_sync_impl_attaches_to_the_named_agent_and_preserves_its_existing_
             )
 
         router = MARouter()
+        router.add("GET", r"/v1/skills", lambda _req, _m: list_response([]))
         router.add("GET", r"/v1/agents$", on_agents_list)
         router.add("GET", r"/v1/agents/ag_1$", on_agent_get)
         router.add("POST", r"/v1/agents/ag_1$", on_agent_update)
@@ -850,4 +851,109 @@ async def test_sync_impl_404_with_a_token_does_not_blame_credentials() -> None:
 
     assert "request_skill_repo_credential" not in str(excinfo.value), (
         "a 404 on an authenticated fetch is a bad url/branch, not a missing credential"
+    )
+
+
+async def test_sync_impl_refuses_attach_when_registry_skill_collides_with_scoped_mount(
+    tmp_path: Path,
+) -> None:
+    """Attaching a registry skill to an agent owning a same-named scoped skill is refused.
+
+    The create guards stop new colliding skills, but a legacy pair can still be
+    joined at attach time — MA would accept the update and then fail every
+    session create for the agent. The tool must refuse the attach and say why,
+    while the upload half still lands in the registry.
+    """
+    from daimon.core.defaults.metadata import tenant_scoped_display_title
+
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+
+    outcomes = [
+        ResourceOutcome(
+            kind="skill", name="last30days", action=Action.UPDATED, anthropic_id="sk_reg"
+        ),
+    ]
+
+    with (
+        patch("daimon.core.skills.pipeline.fetch_repo") as mock_fetch,
+        patch("daimon.core.skills.pipeline.discover_skills"),
+        patch("daimon.core.skills.pipeline.sync_skills") as mock_sync,
+    ):
+        from daimon.core.skills.fetch import FetchResult
+
+        cleanup_dir = tmp_path / "cleanup"
+        cleanup_dir.mkdir()
+        mock_fetch.return_value = FetchResult(path=tmp_path, cleanup_dir=cleanup_dir)
+        mock_sync.return_value = outcomes
+
+        def on_skills_list(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+            return list_response(
+                [
+                    SkillListResponse(
+                        id="sk_reg",
+                        type="custom",
+                        display_title=tenant_scoped_display_title(
+                            tenant_id=tenant_id, name="last30days"
+                        ),
+                        latest_version="1",
+                        created_at="2026-04-21T00:00:00Z",
+                        updated_at="2026-04-21T00:00:00Z",
+                        source="custom",
+                    ).model_dump(mode="json"),
+                    SkillListResponse(
+                        id="sk_scoped",
+                        type="custom",
+                        display_title=tenant_scoped_display_title(
+                            tenant_id=tenant_id, name="last30days", agent_name="agent"
+                        ),
+                        latest_version="1",
+                        created_at="2026-04-21T00:00:00Z",
+                        updated_at="2026-04-21T00:00:00Z",
+                        source="custom",
+                    ).model_dump(mode="json"),
+                ]
+            )
+
+        updates: list[dict[str, Any]] = []
+
+        def on_agent_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+            updates.append(json.loads(req.content))
+            return httpx.Response(500, json={"error": "must not be called"})
+
+        router = MARouter()
+        router.add("GET", r"/v1/skills", on_skills_list)
+        router.add(
+            "GET",
+            r"/v1/agents$",
+            lambda _req, _m: list_response(
+                [_agent_json(agent_id="ag_1", tenant_id=tenant_id, skill_ids=["sk_scoped"])]
+            ),
+        )
+        router.add(
+            "GET",
+            r"/v1/agents/ag_1$",
+            lambda _req, _m: httpx.Response(
+                200, json=_agent_json(agent_id="ag_1", tenant_id=tenant_id, skill_ids=["sk_scoped"])
+            ),
+        )
+        router.add("POST", r"/v1/agents/ag_1$", on_agent_update)
+        client = build_fake_anthropic(router.dispatch)
+
+        auth = AuthIdentity(
+            account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        )
+        result = await _sync_impl(
+            _runtime(client),
+            auth,
+            url="https://github.com/org/repo",
+            branch="main",
+            path="",
+            agent_name="agent",
+        )
+
+    assert updates == [], "agents.update must not run when the merged list has a mount collision"
+    assert result.attached_count == 0, "nothing may count as attached when the attach was refused"
+    assert "mount" in result.summary, (
+        f"the summary must explain the mount collision so the caller can rename; got {result.summary!r}"
     )

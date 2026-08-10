@@ -137,6 +137,29 @@ def find_conflicting_skill_body(
     return None
 
 
+def find_mount_collision(
+    *, skill_ids: list[str], body_by_skill_id: dict[str, str]
+) -> tuple[str, list[str]] | None:
+    """Return ``(mount_name, bodies)`` for the first mount path that two or
+    more of ``skill_ids`` would share, else None.
+
+    ``body_by_skill_id`` maps a tenant's custom skill ids to their
+    tenant-stripped display_title bodies; ids absent from the map (anthropic
+    built-ins, foreign tenants) are skipped — their mounts cannot collide with
+    tenant-owned names. The mount name is the body's terminal path segment.
+    """
+    bodies_by_mount: dict[str, list[str]] = {}
+    for skill_id in skill_ids:
+        body = body_by_skill_id.get(skill_id)
+        if body is None:
+            continue
+        bodies_by_mount.setdefault(body.rsplit("/", 1)[-1], []).append(body)
+    for mount_name, bodies in bodies_by_mount.items():
+        if len(bodies) > 1:
+            return mount_name, bodies
+    return None
+
+
 def strip_tenant_prefix(*, tenant_id: uuid.UUID, display_title: str) -> str | None:
     """Strip the tenant id-8 prefix from a display_title and return the body.
 

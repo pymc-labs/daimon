@@ -26,6 +26,7 @@ from daimon.adapters.mcp.tools._ctx import (
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
+    find_attach_mount_collision,
     find_skill_by_display_title,
     list_agents_by_tenant,
     list_skills_lenient,
@@ -232,13 +233,18 @@ async def _attach_synced_skills(
                 f"Cannot attach: the merged skill set ({len(merged)}) exceeds this "
                 f"organization's per-agent skill limit ({AGENT_SKILL_CAP})."
             )
+        collision = await find_attach_mount_collision(
+            runtime.client, tenant_id=auth.tenant_id, skills=merged
+        )
+        if collision is not None:
+            raise ToolError(f"Cannot attach: {collision}")
         return await runtime.client.beta.agents.update(
             fresh.id, version=fresh.version, skills=merged
         )
 
     try:
         await update_agent_with_version_retry(runtime.client, agent.id, _apply)
-    except (ToolError, anthropic.APIStatusError) as exc:
+    except (ToolError, DaimonError, anthropic.APIStatusError) as exc:
         return f"Uploaded to the registry, but attaching to '{agent_name}' failed: {exc}"
     return f"Attached to '{agent_name}'."
 

@@ -52,6 +52,7 @@ from anthropic.types.beta import (
 from cryptography.fernet import MultiFernet
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
+    find_attach_mount_collision,
     find_conflicting_skill_mount,
     find_skill_by_display_title,
 )
@@ -744,6 +745,15 @@ async def sync_agent_skills(
             # unchanged (version bump already happened; no update needed).
             return fresh
 
+        # Mount-name guard, attach side: the union dedupes by skill_id, but MA
+        # mounts by internal name at session create — a legacy registry skill
+        # already on the agent plus a same-named scoped row would brick it.
+        collision = await find_attach_mount_collision(
+            anthropic_client, tenant_id=tenant_id, skills=union_list
+        )
+        if collision is not None:
+            raise DefaultsError(collision)
+
         # #141 guard: if the agent lacks a base agent_toolset, attach it now so
         # skills remain usable. MA rejects session creation on an agent with skills
         # but no agent_toolset_20260401 entry providing the read tool.
@@ -769,6 +779,19 @@ async def sync_agent_skills(
 
     try:
         updated = await update_agent_with_version_retry(anthropic_client, agent.id, _apply)
+    except DefaultsError as err:
+        # Mount-name collision (or truncated skills view) — uploads landed;
+        # only the attach binding is refused. Same partial-failure surface as
+        # the skill-cap branch below.
+        _log.warning(
+            "skill_sync.attach_mount_collision",
+            agent_name=agent_name,
+            agent_id=agent.id,
+            error=str(err),
+        )
+        async with report_lock:
+            report.attach_failures.append((agent_name, str(err)))
+        return report
     except anthropic.APIStatusError as err:
         if not _looks_like_skill_cap(err):
             raise

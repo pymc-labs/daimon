@@ -63,7 +63,7 @@ from daimon.adapters.discord.credential_repo_bind import (
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.credential_requests import split_skill_repo_target
-from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.errors import DaimonError
@@ -487,8 +487,14 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
         ]
 
         async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
+            merged = merge_skills_with_ma(new_skills, fresh)
+            collision = await find_attach_mount_collision(
+                self._runtime.anthropic, tenant_id=tenant_id, skills=merged
+            )
+            if collision is not None:
+                raise DaimonError(f"cannot attach: {collision}")
             return await self._runtime.anthropic.beta.agents.update(
-                fresh.id, version=fresh.version, skills=merge_skills_with_ma(new_skills, fresh)
+                fresh.id, version=fresh.version, skills=merged
             )
 
         try:

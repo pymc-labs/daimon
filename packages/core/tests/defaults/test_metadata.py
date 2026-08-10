@@ -9,6 +9,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_TENANT,
     build_metadata,
     find_conflicting_skill_body,
+    find_mount_collision,
     strip_tenant_prefix,
     tenant_scoped_display_title,
 )
@@ -216,3 +217,29 @@ def test_find_conflicting_skill_body_no_match_returns_none() -> None:
         agent_name=None,
     )
     assert result is None, "unrelated names must not conflict"
+
+
+def test_find_mount_collision_registry_and_scoped_same_name() -> None:
+    result = find_mount_collision(
+        skill_ids=["sk_registry", "sk_scoped"],
+        body_by_skill_id={
+            "sk_registry": "last30days",
+            "sk_scoped": "research daimon/last30days",
+        },
+    )
+    assert result is not None, "registry + scoped same-name must collide"
+    mount_name, bodies = result
+    assert mount_name == "last30days", "collision must name the shared mount"
+    assert sorted(bodies) == ["last30days", "research daimon/last30days"], (
+        "collision must list both colliding bodies"
+    )
+
+
+def test_find_mount_collision_unique_names_return_none() -> None:
+    result = find_mount_collision(
+        skill_ids=["sk_a", "sk_b", "sk_builtin"],
+        body_by_skill_id={"sk_a": "last30days", "sk_b": "agent/weekly"},
+    )
+    assert result is None, (
+        "unique mounts must not collide; ids missing from the map (built-ins) are skipped"
+    )

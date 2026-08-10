@@ -360,6 +360,11 @@ def make_fake_ma_handler() -> Callable[[httpx.Request], httpx.Response]:
         if method == "GET" and path == "/v1/agents":
             return httpx.Response(200, json={"data": list(store.values()), "has_more": False})
 
+        # GET /v1/skills — empty list (the mount-name guards list skills before
+        # create/attach; tests that need real rows layer their own handler on top)
+        if method == "GET" and path == "/v1/skills":
+            return httpx.Response(200, json={"data": [], "next_page": None})
+
         # POST /v1/agents — create
         if method == "POST" and path == "/v1/agents":
             body: dict[str, Any] = json.loads(request.content)
