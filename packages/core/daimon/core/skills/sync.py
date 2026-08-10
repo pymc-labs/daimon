@@ -22,9 +22,10 @@ import uuid
 
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.core.defaults.ma_index import find_skill_by_display_title
+from daimon.core.defaults.ma_index import find_conflicting_skill_mount, find_skill_by_display_title
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.errors import DaimonError
 from daimon.core.skill_zip import build_skill_zip
 from daimon.core.skills.discover import DiscoveredSkill
 
@@ -89,6 +90,16 @@ async def sync_skills(
                         )
                     )
                 else:
+                    conflict = await find_conflicting_skill_mount(
+                        client, tenant_id=tenant_id, name=skill.spec.name, agent_name=None
+                    )
+                    if conflict is not None:
+                        raise DaimonError(
+                            f"skill name {skill.spec.name!r} is already taken by "
+                            f"{conflict.display_title!r} — the two would mount at the same "
+                            f"path on an agent. Rename the skill (e.g. "
+                            f"{skill.spec.name}-2) and re-sync."
+                        )
                     with pkg.path.open("rb") as fh:
                         created = await client.beta.skills.create(
                             display_title=canonical,

@@ -321,3 +321,38 @@ async def test_sync_records_failed_outcome_when_list_is_truncated(tmp_path: Path
         "truncated list on lookup should produce FAILED outcome"
     )
     assert outcomes[0].error is not None, "FAILED outcome should carry error text"
+
+
+async def test_sync_fails_when_agent_scoped_skill_takes_the_mount_name(tmp_path: Path) -> None:
+    """An agent-scoped skill with the same terminal name → FAILED, no skills.create.
+
+    A registry skill and an agent-scoped skill sharing a mount name are both
+    accepted by MA at upload and only collide at session create once attached
+    to the same agent — so the create must be refused up front.
+    """
+    skill = _skill(tmp_path, name="last30days")
+    scoped_title = tenant_scoped_display_title(
+        tenant_id=_TENANT_A, name="last30days", agent_name="research daimon"
+    )
+    router = MARouter()
+    router.add(
+        "GET", r"/v1/skills", lambda req, _m: list_response([_skill_row("sk_scoped", scoped_title)])
+    )
+    create_called = False
+
+    def on_create(req: httpx.Request, _m: object) -> httpx.Response:
+        nonlocal create_called
+        create_called = True
+        return httpx.Response(500, json={"error": "should never be reached"})
+
+    router.add("POST", r"/v1/skills", on_create)
+    client = build_fake_anthropic_http(router.dispatch)
+
+    outcomes = await sync_skills(client, [skill], tenant_id=_TENANT_A)
+
+    assert len(outcomes) == 1, "should return one outcome"
+    assert outcomes[0].action is Action.FAILED, "colliding mount name must fail the sync"
+    assert outcomes[0].error is not None and "already taken" in outcomes[0].error, (
+        "error should tell the caller the name is taken so it can rename"
+    )
+    assert not create_called, "skills.create must not run for a colliding name"

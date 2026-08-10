@@ -52,6 +52,7 @@ from anthropic.types.beta import (
 from cryptography.fernet import MultiFernet
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
+    find_conflicting_skill_mount,
     find_skill_by_display_title,
 )
 from daimon.core.defaults.metadata import (
@@ -279,6 +280,18 @@ async def _process_one(
     anthropic_id: str
     latest_version: str | None
     if existing is None or existing.anthropic_id is None:
+        # Mount-name guard: MA accepts two skills with the same internal name
+        # and only fails at SESSION create when both are attached to one agent.
+        # Refuse to create the collider here instead.
+        conflict = await find_conflicting_skill_mount(
+            anthropic_client, tenant_id=tenant_id, name=pending.name, agent_name=agent_name
+        )
+        if conflict is not None:
+            raise DefaultsError(
+                f"skill name {pending.name!r} is already taken by "
+                f"{conflict.display_title!r} — the two would mount at the same path "
+                f"on this agent. Rename the skill (e.g. {pending.name}-2) and re-sync."
+            )
         try:
             created = await anthropic_client.beta.skills.create(
                 display_title=display_title,

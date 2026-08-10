@@ -1025,6 +1025,10 @@ def _make_skills_handler() -> Callable[[httpx.Request], httpx.Response]:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         method = request.method
+        if method == "GET" and path == "/v1/skills":
+            # Mount-name guard listing before create; the in-memory store's
+            # titles are unprefixed, so an empty view is equivalent.
+            return httpx.Response(200, json={"data": [], "next_page": None})
         if method == "POST" and path == "/v1/skills":
             counter["n"] += 1
             skill_id = f"sk_{counter['n']}"

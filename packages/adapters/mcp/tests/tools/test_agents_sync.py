@@ -270,6 +270,7 @@ async def test_create_agent_impl_syncs_skill_repos(
     router = MARouter()
     router.add("POST", r"/v1/agents$", on_agents_create)
     router.add("POST", r"/v1/skills$", on_skills_create)
+    router.add("GET", r"/v1/skills$", lambda req, _m: list_response([]))
     router.add("GET", r"/v1/agents$", on_agents_list)
     router.add("GET", r"/v1/agents/([^/]+)$", on_agents_retrieve)
     router.add("POST", r"/v1/agents/([^/]+)$", on_agents_update)

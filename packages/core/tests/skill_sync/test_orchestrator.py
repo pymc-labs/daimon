@@ -620,6 +620,7 @@ async def test_first_sync_creates_new_skill(
         )
 
     router = MARouter()
+    router.add("GET", r"/v1/skills", lambda req, _m: list_response([]))
     router.add("POST", r"/v1/skills", on_create)
     # Attach step lookup — empty list = no agent on MA → attach skipped.
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
@@ -856,6 +857,7 @@ async def test_re_run_no_changes_yields_zero_synced_zero_updated(
         )
 
     router = MARouter()
+    router.add("GET", r"/v1/skills", lambda req, _m: list_response([]))
     router.add("POST", r"/v1/skills", on_create)
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
     anthropic_client = _build_anthropic(router)
@@ -1320,8 +1322,9 @@ async def test_non_duplicate_api_status_error_re_raises_to_failed_uploads(
     assert len(report.failed_uploads) == 1, (
         f"non-duplicate error must be recorded as failed upload, got {report.failed_uploads}"
     )
-    assert list_calls == [], (
-        "recovery MUST NOT trigger find_skill_by_display_title for non-duplicate errors"
+    assert len(list_calls) == 1, (
+        "only the pre-create mount-name guard may list skills — recovery MUST NOT "
+        "trigger find_skill_by_display_title for non-duplicate errors"
     )
 
 
@@ -1387,7 +1390,10 @@ async def test_400_with_display_title_substring_does_not_trigger_recovery(
     assert len(report.failed_uploads) == 1, (
         "length-rejection must be recorded as failed_upload, not silently recovered"
     )
-    assert list_calls == [], "recovery MUST NOT trigger for 400s that aren't the dup-title phrase"
+    assert len(list_calls) == 1, (
+        "only the pre-create mount-name guard may list skills — recovery MUST NOT "
+        "trigger for 400s that aren't the dup-title phrase"
+    )
 
 
 async def test_orphan_delete_only_fires_for_successfully_fetched_repos(
@@ -2147,6 +2153,7 @@ async def test_sync_agent_skills_attaches_uploaded_skills_to_ma_agent(
         return httpx.Response(200, json=agent_payload)
 
     router = MARouter()
+    router.add("GET", r"/v1/skills", lambda req, _m: list_response([]))
     router.add("POST", r"/v1/skills", on_create)
     router.add("GET", r"/v1/agents", on_list_agents)
     router.add("GET", r"/v1/agents/ag_target", on_retrieve_agent)
@@ -2335,6 +2342,7 @@ async def test_sync_agent_skills_skips_attach_when_agent_not_found(
         return httpx.Response(500, json={"error": "must not be called"})
 
     router = MARouter()
+    router.add("GET", r"/v1/skills", lambda req, _m: list_response([]))
     router.add("POST", r"/v1/skills", on_create)
     router.add("GET", r"/v1/agents", on_list_agents)
     router.add("POST", r"/v1/agents/.*", on_update_agent)
@@ -2454,6 +2462,7 @@ async def test_bundled_sync_two_repos_same_trailing_segment_keeps_both_skills(
         return httpx.Response(204)
 
     router = MARouter()
+    router.add("GET", r"/v1/skills", lambda req, _m: list_response([]))
     router.add("POST", r"/v1/skills", on_create)
     router.add("DELETE", r"/v1/skills/.*", on_delete)
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
@@ -2606,6 +2615,7 @@ async def test_sync_creates_two_distinct_skills_when_two_tenants_sync_same_named
         return httpx.Response(500, json={"error": "must not be called in SC-4 test"})
 
     router = MARouter()
+    router.add("GET", r"/v1/skills", lambda req, _m: list_response([]))
     router.add("POST", r"/v1/skills", on_create)
     router.add("POST", r"/v1/skills/.*/versions", on_version)
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
@@ -2756,6 +2766,7 @@ async def test_recovery_refuses_to_push_version_onto_foreign_tenant_skill(
         return httpx.Response(500, json={"error": "must not be called"})
 
     router = MARouter()
+    router.add("GET", r"/v1/skills", lambda req, _m: list_response([]))
     router.add("POST", r"/v1/skills", on_create)
     router.add("POST", r"/v1/skills/sk_foreign/versions", on_version)
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
@@ -3288,3 +3299,68 @@ async def test_attach_over_cap_records_failure_instead_of_raising(
     failed_agent, reason = report.attach_failures[0]
     assert failed_agent == "agent", "attach_failures must carry the agent name"
     assert "exceeds maximum of 20" in reason, "the MA cap message must be preserved for the user"
+
+
+async def test_first_sync_refuses_create_when_registry_skill_takes_the_mount_name(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A registry skill with the same mount name → failed upload, no skills.create.
+
+    MA mounts by internal skill name at session create, not at skill create —
+    a registry skill and this agent-scoped skill would collide once both are
+    attached to the agent, so the create must be refused up front.
+    """
+    cli = await make_cli_principal(db_session, os_user="alice")
+    await db_session.commit()
+    fernet = _make_fernet()
+    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
+
+    tarball = _make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, content=tarball))
+    )
+
+    registry_title = tenant_scoped_display_title(tenant_id=cli.tenant_id, name="o-r")
+    registry_skill = SkillListResponse(
+        id="sk_registry",
+        type="custom",
+        display_title=registry_title,
+        latest_version="1",
+        created_at="2026-04-21T00:00:00Z",
+        updated_at="2026-04-21T00:00:00Z",
+        source="custom",
+    )
+
+    create_calls: list[httpx.Request] = []
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        create_calls.append(req)
+        return httpx.Response(500, json={"error": "must not be called"})
+
+    router = MARouter()
+    router.add("GET", r"/v1/skills", lambda req, _m: _list_envelope([registry_skill]))
+    router.add("POST", r"/v1/skills", on_create)
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    anthropic_client = _build_anthropic(router)
+
+    report = await sync_agent_skills(
+        principal_id=cli.id,
+        tenant_id=cli.tenant_id,
+        agent_name="agent",
+        repos=[SkillRepo(url="https://github.com/o/r", branch="main", split=False)],
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        http_client=http_client,
+        anthropic_client=anthropic_client,
+    )
+
+    assert create_calls == [], "skills.create must not run for a colliding mount name"
+    assert len(report.failed_uploads) == 1, (
+        f"mount-name refusal must land in failed_uploads; got {report.failed_uploads}"
+    )
+    failed_name, failed_msg = report.failed_uploads[0]
+    assert failed_name == "o-r", f"failed skill must be 'o-r', got {failed_name!r}"
+    assert "already taken" in failed_msg, (
+        f"failure message must say the name is taken so the caller can rename; got {failed_msg!r}"
+    )
