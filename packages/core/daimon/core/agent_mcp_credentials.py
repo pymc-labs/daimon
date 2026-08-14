@@ -17,6 +17,10 @@ caller has, exactly as the per-agent PAT reaches the Copilot credential.
 Encryption reuses the GitHub PAT's MultiFernet helpers; they are generic and
 key rotation is shared.
 
+A rotated token reaches every caller too: each credential this module writes
+carries a version stamp, and a vault whose stamp is stale (or missing) gets an
+in-place update on the next turn.
+
 No try/except — exceptions propagate. An empty tuple means "this agent has no
 external MCP credentials", never "something broke".
 """
@@ -34,6 +38,15 @@ from daimon.core.mcp_vault import ensure_agent_mcp_vault
 from daimon.core.stores import agent_mcp_credentials as cred_store
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+# Stamped on every credential this module writes, so a later turn can tell
+# whether a vault's credential carries the token currently in the DB. The value
+# is the DB row's ``updated_at``, so both sides of the comparison come from OUR
+# clock — no dependence on MA's, and nothing derived from the token itself.
+# An unstamped credential (written before this existed, or by
+# ``add_external_mcp_credential``) reads as "unknown version" and is refreshed
+# once, which self-heals vaults already holding a stale token.
+METADATA_VERSION_KEY = "daimon_token_version"
+
 
 @dataclass(frozen=True, slots=True)
 class ResolvedMcpCredential:
@@ -41,6 +54,7 @@ class ResolvedMcpCredential:
 
     mcp_server_url: str
     token: str
+    version: str
 
 
 async def save_agent_mcp_credential(
@@ -77,6 +91,7 @@ async def resolve_agent_mcp_credentials(
         ResolvedMcpCredential(
             mcp_server_url=row.mcp_server_url,
             token=decrypt_token(fernet, row.encrypted_token),
+            version=row.updated_at.isoformat(),
         )
         for row in rows
     )
@@ -88,19 +103,29 @@ async def mirror_credentials_into_vault(
     vault_id: str,
     credentials: tuple[ResolvedMcpCredential, ...],
 ) -> None:
-    """Create any credential ``vault_id`` is missing. Never deletes.
+    """Bring ``vault_id`` in line with the agent's stored credentials.
 
-    Create-if-missing, NOT delete-then-create. The vault is shared across every
-    thread of one (account, agent), and this runs on reused sessions too, so a
-    delete could yank a credential out from under a concurrent in-flight turn in
-    another thread — the A3 race that got the per-turn re-stamp limb removed from
-    ``ensure_agent_mcp_vault``. Skipping URLs that already have a credential is
-    both race-free and idempotent.
+    Three cases per stored credential, decided by the ``METADATA_VERSION_KEY``
+    stamp on the vault's credential at that URL:
 
-    Consequence: a ROTATED token does not reach a vault that already holds one at
-    that URL. Rotation needs its own fan-out (see #78) — this function's job is
-    to make an agent-level server reachable by callers who have no credential for
-    it at all, which is the failure in the wild.
+    - nothing at that URL → create it (the caller who never had one)
+    - stamp differs, or is absent → the token was rotated (or the credential
+      predates the stamp) → update it in place
+    - stamp matches → already current, no call
+
+    **Never deletes.** Rotation is an in-place ``credentials.update``: MA accepts
+    a token-only ``static_bearer`` auth body and keeps the URL, verified against
+    the live API on 2026-08-14 (a body carrying ``mcp_server_url`` is a 400 —
+    the URL is immutable, and a duplicate POST at the same URL is still a 409).
+    That matters because this vault is shared across every thread of one
+    (account, agent) and this runs on reused sessions: a delete could yank a
+    credential out from under a concurrent in-flight turn in another thread —
+    the A3 race that got the per-turn re-stamp limb removed from
+    ``ensure_agent_mcp_vault``. An update has no window where the credential is
+    absent, so that race does not exist here.
+
+    Note: ``mcp_vault.py`` still documents PATCH as 405-blocked. That was true
+    when it was written and is not any more.
 
     Deliberately NOT degrade-not-block: unlike the Copilot and memory mounts,
     a missing credential here means MA hard-fails the whole turn at MCP init.
@@ -110,22 +135,39 @@ async def mirror_credentials_into_vault(
     """
     if not credentials:
         return
-    present: set[str] = set()
+    # url -> (credential_id, stamped version or None)
+    existing_by_url: dict[str, tuple[str, str | None]] = {}
     async for existing in client.beta.vaults.credentials.list(vault_id=vault_id):
         if existing.auth.type != "static_bearer":
             continue
-        present.add(existing.auth.mcp_server_url)
+        metadata = existing.metadata or {}
+        existing_by_url[existing.auth.mcp_server_url] = (
+            existing.id,
+            metadata.get(METADATA_VERSION_KEY),
+        )
 
     for cred in credentials:
-        if cred.mcp_server_url in present:
+        found = existing_by_url.get(cred.mcp_server_url)
+        if found is None:
+            await client.beta.vaults.credentials.create(
+                vault_id=vault_id,
+                auth={
+                    "type": "static_bearer",
+                    "mcp_server_url": cred.mcp_server_url,
+                    "token": cred.token,
+                },
+                metadata={METADATA_VERSION_KEY: cred.version},
+            )
             continue
-        await client.beta.vaults.credentials.create(
+        credential_id, stamped_version = found
+        if stamped_version == cred.version:
+            continue
+        await client.beta.vaults.credentials.update(
+            credential_id,
             vault_id=vault_id,
-            auth={
-                "type": "static_bearer",
-                "mcp_server_url": cred.mcp_server_url,
-                "token": cred.token,
-            },
+            # Token only: MA rejects an update body carrying mcp_server_url.
+            auth={"type": "static_bearer", "token": cred.token},
+            metadata={METADATA_VERSION_KEY: cred.version},
         )
 
 
