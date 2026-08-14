@@ -62,6 +62,7 @@ from daimon.adapters.discord.credential_repo_bind import (
     resolve_repo_binding_credential,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.credential_requests import split_skill_repo_target
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
 from daimon.core.defaults.report import Action, ResourceOutcome
@@ -207,6 +208,24 @@ class McpCredentialModal(discord.ui.Modal, title="Add MCP credential"):
             token_masked=mask_tail(token_value),
         )
         try:
+            # Agent-scoped copy first: the server is attached to the AGENT, so
+            # every caller's session needs this credential mirrored in at
+            # create time. Without this row the server works only for whoever
+            # filled in this modal.
+            if self._runtime.turn_deps.fernet is not None:
+                await save_agent_mcp_credential(
+                    sessionmaker=self._runtime.sessionmaker,
+                    fernet=self._runtime.turn_deps.fernet,
+                    tenant_id=consumed_row.tenant_id,
+                    agent_id=consumed_row.agent_id,
+                    mcp_server_url=mcp_server_url,
+                    plaintext_token=token_value,
+                )
+            else:
+                _log.warning(
+                    "credential_modal.no_fernet_for_agent_scope",
+                    mcp_server_url=mcp_server_url,
+                )
             await add_external_mcp_credential(
                 self._runtime.anthropic,
                 account_id=consumed_row.account_id,

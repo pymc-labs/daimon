@@ -493,6 +493,51 @@ class AgentGoogleBinding(Base):
     )
 
 
+class AgentMcpCredential(Base):
+    """Agent-scoped bearer token for an external MCP server attached to an agent.
+
+    The MCP server itself is attached to the agent (`mcp_attach`), so every
+    caller who mentions the agent gets its toolset. MA resolves the credential
+    from the vault mounted on the session, and that vault is per
+    (account, agent) — so a token written into only the attacher's vault leaves
+    every other caller's turn failing at MCP init. Keeping the token here, at
+    (tenant, agent), lets `create_session` mirror it into whichever vault the
+    current caller has, the same way the per-agent PAT reaches the Copilot
+    credential. MA credentials are write-only, so this is the only place the
+    token can be re-read from.
+
+    Encrypted with the same MultiFernet as the GitHub PAT.
+    """
+
+    __tablename__ = "agent_mcp_credentials"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "agent_id",
+            "mcp_server_url",
+            name="uq_agent_mcp_credentials_tenant_agent_url",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    # No FK: agents live in MA, not the local DB (same rationale as UserSkill.agent_name).
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    mcp_server_url: Mapped[str] = mapped_column(Text, nullable=False)
+    encrypted_token: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class UsageEvent(Base):
     """Per-turn token row for billing/observability.
 

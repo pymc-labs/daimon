@@ -20,8 +20,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
+from cryptography.fernet import Fernet
+from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.github_credentials import build_multifernet
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import usage_events
@@ -34,6 +38,7 @@ from daimon.testing.ma import (
     build_fake_anthropic,
     make_fake_memory_store_handler,
 )
+from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from daimon.testing.factories import (  # isort: skip
@@ -359,3 +364,200 @@ def test_prepared_turn_public_fields_exclude_recorder() -> None:
         "reused",
         "session_account_id",
     }, "PreparedTurn must expose exactly the documented public fields"
+
+
+async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vault(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The regression that made an agent-level MCP server one person's private
+    tool: a reused session skips create_session, so a credential added to the
+    agent after that session existed never reached this caller and every one of
+    their turns died at MCP init. The admin adds it once; this caller does
+    nothing and their live session picks it up on the next turn."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-reuse-mcp",
+        ma_session_id="sess_live",
+        watermark_message_id="msg-1",
+    )
+    await db_session.commit()
+
+    public_url = "https://mcp.example.com/mcp"
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    agent = _agent(agent_id="ag_reuse", tenant_id=tenant.id)
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_reuse")
+
+    # Someone else (the admin) attached the server and stored the token.
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        tenant_id=tenant.id,
+        agent_id=agent_uuid,
+        mcp_server_url="https://internal.example.com/mcp",
+        plaintext_token="tok_internal",
+    )
+
+    display = f"daimon-mcp:{account.id}:{agent_uuid}"
+    created: list[dict[str, object]] = []
+    deleted: list[str] = []
+
+    router = MARouter()
+
+    def _explode(_request: httpx.Request, _match: object) -> httpx.Response:
+        raise AssertionError("create_session must not be called on a reuse hit")
+
+    def _vaults(_request: httpx.Request, _match: object) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "vlt_caller",
+                        "type": "vault",
+                        "display_name": display,
+                        "metadata": None,
+                        "archived_at": None,
+                        "created_at": "2026-04-01T00:00:00Z",
+                    }
+                ],
+                "has_more": False,
+            },
+        )
+
+    def _list_creds(_request: httpx.Request, _match: object) -> httpx.Response:
+        # Only this caller's own daimon-mcp credential — nothing for the
+        # external server, which is the state that used to fail the turn.
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "vcrd_daimon_mcp",
+                        "type": "credential",
+                        "vault_id": "vlt_caller",
+                        "auth": {"type": "static_bearer", "mcp_server_url": public_url},
+                    }
+                ],
+                "has_more": False,
+            },
+        )
+
+    def _create_cred(request: httpx.Request, _match: object) -> httpx.Response:
+        import json
+
+        body = json.loads(request.content)
+        created.append(body)
+        return httpx.Response(
+            200,
+            json={
+                "id": "vcrd_new",
+                "type": "credential",
+                "vault_id": "vlt_caller",
+                "auth": {
+                    "type": "static_bearer",
+                    "mcp_server_url": body["auth"]["mcp_server_url"],
+                },
+            },
+        )
+
+    def _delete_cred(request: httpx.Request, _match: object) -> httpx.Response:
+        deleted.append(request.url.path.rsplit("/", 1)[-1])
+        return httpx.Response(200, json={"id": "vcrd_gone", "type": "credential"})
+
+    router.add("POST", r"/v1/sessions", _explode)
+    router.add("GET", r"/v1/vaults$", _vaults)
+    router.add("GET", r"/v1/vaults/vlt_caller/credentials", _list_creds)
+    router.add("POST", r"/v1/vaults/vlt_caller/credentials", _create_cred)
+    router.add("DELETE", r"/v1/vaults/vlt_caller/credentials/.*", _delete_cred)
+
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        anthropic=build_fake_anthropic(router.dispatch),
+        fernet=fernet,
+        mcp=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
+    )
+    admission = _admission(
+        account_id=account.id, agent=agent, env=_env(env_id="env_reuse", tenant_id=tenant.id)
+    )
+
+    prepared = await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-not-the-admin",
+        thread_id="thread-reuse-mcp",
+        session_account_id=account.id,
+        reuse_existing=True,
+    )
+
+    assert prepared.reused is True, "this must still be the reuse path"
+    urls = [c["auth"]["mcp_server_url"] for c in created]  # pyright: ignore[reportIndexIssue]
+    assert urls == ["https://internal.example.com/mcp"], (
+        "the agent's external MCP credential must be created in this caller's vault"
+    )
+    assert created[0]["auth"]["token"] == "tok_internal"  # pyright: ignore[reportIndexIssue]
+    assert deleted == [], (
+        "the sync must never delete — the vault is shared across this caller's "
+        "threads and a concurrent turn may be using a credential"
+    )
+
+
+async def test_bind_session_reuse_skips_mcp_sync_when_agent_has_no_stored_credentials(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The common case pays one indexed query and touches MA not at all."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-reuse-plain",
+        ma_session_id="sess_live",
+        watermark_message_id="msg-1",
+    )
+    await db_session.commit()
+
+    router = MARouter()
+
+    def _explode(request: httpx.Request, _match: object) -> httpx.Response:
+        raise AssertionError(f"no MA call expected, got {request.method} {request.url.path}")
+
+    router.add("POST", r"/v1/sessions", _explode)
+    router.add("GET", r"/v1/vaults$", _explode)
+
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        anthropic=build_fake_anthropic(router.dispatch),
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        mcp=McpSettings(
+            jwt_secret=SecretStr("x" * 32), public_url=HttpUrl("https://mcp.example.com/mcp")
+        ),
+    )
+    admission = _admission(
+        account_id=account.id,
+        agent=_agent(agent_id="ag_plain", tenant_id=tenant.id),
+        env=_env(env_id="env_plain", tenant_id=tenant.id),
+    )
+
+    prepared = await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="thread-reuse-plain",
+        session_account_id=account.id,
+        reuse_existing=True,
+    )
+
+    assert prepared.reused is True, "reuse path unchanged for agents with no external MCP"

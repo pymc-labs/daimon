@@ -13,6 +13,7 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.agent_setup.write import call_reconcile_for_panel, mask_tail
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
 from daimon.core.ma_identity import derive_agent_uuid
@@ -166,6 +167,25 @@ class AddMcpModal(discord.ui.Modal, title="Add MCP server"):
         #    per-agent vault when it does not yet exist. Failures here are
         #    surfaced to the user but do not unwind reconcile.
         try:
+            # Agent-scoped copy first: the server is attached to the AGENT, so
+            # every caller's session needs this credential mirrored in at
+            # create time. Without this row the server works only for whoever
+            # filled in this modal.
+            if self.runtime.turn_deps.fernet is not None:
+                await save_agent_mcp_credential(
+                    sessionmaker=self.runtime.sessionmaker,
+                    fernet=self.runtime.turn_deps.fernet,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    mcp_server_url=url,
+                    plaintext_token=token,
+                )
+            else:
+                _log.warning(
+                    "mcp_add.no_fernet_for_agent_scope",
+                    mcp_name=name,
+                    agent_name=selected_name,
+                )
             await add_external_mcp_credential(
                 self.runtime.anthropic,
                 account_id=self.state.account_id,

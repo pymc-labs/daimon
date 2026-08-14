@@ -41,6 +41,7 @@ from daimon.core.credential_requests import (
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -95,7 +96,10 @@ def _runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # credential-modal tests never run a turn
+        # fernet is real: the MCP modal encrypts an agent-scoped copy of the token.
+        turn_deps=MagicMock(  # pyright: ignore[reportArgumentType]  # credential-modal tests never run a turn
+            fernet=build_multifernet((Fernet.generate_key().decode(),))
+        ),
     )
 
 

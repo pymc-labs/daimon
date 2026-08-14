@@ -17,6 +17,7 @@ from anthropic.types.beta import (
 from cryptography.fernet import Fernet, MultiFernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import McpSettings
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
@@ -1861,3 +1862,209 @@ async def test_create_session_degrades_when_memory_provisioning_fails(
     assert all(r.get("type") != "memory_store" for r in captured.get("resources", [])), (
         "failed memory provisioning must degrade to a memory-less session, not raise"
     )
+
+
+# --- Agent-scoped external MCP credentials mirror into the caller's vault ----
+
+
+def _warm_vault_mirror_handler(
+    *,
+    account_id: uuid.UUID,
+    agent_uuid: uuid.UUID,
+    public_url: str,
+    credential_post_bodies: list[dict[str, Any]],
+    credential_deletes: list[str],
+    session_create_bodies: list[dict[str, Any]],
+    session_id: str,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Warm vault holding only the caller's own daimon-mcp credential.
+
+    No credential for any external server yet — which is exactly the state a
+    caller who did not attach the server arrives in.
+    """
+    display = f"daimon-mcp:{account_id}:{agent_uuid}"
+    memory_handler = make_fake_memory_store_handler()
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        try:
+            return memory_handler(request)
+        except NotHandled:
+            pass
+        if request.method == "GET" and request.url.path == "/v1/vaults":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "vlt_caller",
+                            "type": "vault",
+                            "display_name": display,
+                            "metadata": None,
+                            "archived_at": None,
+                            "created_at": "2026-04-01T00:00:00Z",
+                        }
+                    ],
+                    "has_more": False,
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/vaults/vlt_caller/credentials":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "vcrd_daimon_mcp",
+                            "type": "credential",
+                            "vault_id": "vlt_caller",
+                            "auth": {"type": "static_bearer", "mcp_server_url": public_url},
+                        }
+                    ],
+                    "has_more": False,
+                },
+            )
+        if request.method == "DELETE" and "/credentials/" in request.url.path:
+            credential_deletes.append(request.url.path.rsplit("/", 1)[-1])
+            return httpx.Response(200, json={"id": "vcrd_gone", "type": "credential"})
+        if request.method == "POST" and request.url.path == "/v1/vaults/vlt_caller/credentials":
+            body = json.loads(request.content)
+            credential_post_bodies.append(body)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "vcrd_mirrored",
+                    "type": "credential",
+                    "vault_id": "vlt_caller",
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": body["auth"]["mcp_server_url"],
+                    },
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith("/v1/sessions"):
+            body = json.loads(request.content)
+            session_create_bodies.append(body)
+            return httpx.Response(
+                200,
+                json=_session_body(
+                    session_id=session_id,
+                    agent_id=body["agent"],
+                    environment_id=body["environment_id"],
+                ),
+            )
+        raise AssertionError(f"unexpected call: {request.method} {request.url.path}")
+
+    return _handler
+
+
+async def test_create_session_mirrors_agent_mcp_credential_for_a_caller_who_did_not_attach_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The regression: an external MCP server is attached to the agent, so a
+    second caller's session must carry its credential too. Before the fix the
+    token lived only in the attacher's vault and this caller's turn died with
+    mcp_authentication_failed_error."""
+    tenant = await make_tenant(db_session)
+    agent_uuid = uuid.uuid4()
+    attacher_account_id = uuid.UUID("00000000-0000-0000-0000-00000000aaaa")
+    other_account_id = uuid.UUID("00000000-0000-0000-0000-00000000bbbb")
+    public_url = "https://mcp.example.com/mcp"
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+
+    # The attacher stored the credential agent-scoped, as the setup panel does.
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        tenant_id=tenant.id,
+        agent_id=agent_uuid,
+        mcp_server_url="https://internal.example.com/mcp",
+        plaintext_token="tok_internal",
+    )
+    assert attacher_account_id != other_account_id
+
+    agent = _make_agent(anthropic_id="ag_mirror")
+    env = _make_env(anthropic_id="env_mirror")
+    cred_bodies: list[dict[str, Any]] = []
+    cred_deletes: list[str] = []
+    session_bodies: list[dict[str, Any]] = []
+    client = build_fake_anthropic_http(
+        _warm_vault_mirror_handler(
+            account_id=other_account_id,
+            agent_uuid=agent_uuid,
+            public_url=public_url,
+            credential_post_bodies=cred_bodies,
+            credential_deletes=cred_deletes,
+            session_create_bodies=session_bodies,
+            session_id="sess_mirror",
+        )
+    )
+
+    await create_session(
+        client,
+        agent=agent,
+        environment=env,
+        account_id=other_account_id,
+        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+        fernet=fernet,
+    )
+
+    mirrored = [
+        b for b in cred_bodies if b["auth"]["mcp_server_url"].startswith("https://internal")
+    ]
+    assert len(mirrored) == 1, (
+        "the agent's external MCP credential must be mirrored into this caller's vault"
+    )
+    assert mirrored[0]["auth"]["token"] == "tok_internal", "mirrored cred carries the stored token"
+    assert "vcrd_daimon_mcp" not in cred_deletes, (
+        "mirroring must not disturb the caller's own daimon-mcp credential"
+    )
+    assert session_bodies[0].get("vault_ids") == ["vlt_caller"], (
+        "the mirrored cred rides the caller's own vault"
+    )
+
+
+async def test_create_session_mirrors_nothing_when_agent_has_no_stored_mcp_credentials(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """No stored credentials means no credential POSTs — the mirror must not
+    invent work for the common case of an agent with only daimon-mcp."""
+    tenant = await make_tenant(db_session)
+    agent_uuid = uuid.uuid4()
+    account_id = uuid.UUID("00000000-0000-0000-0000-00000000cccc")
+    public_url = "https://mcp.example.com/mcp"
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+
+    cred_bodies: list[dict[str, Any]] = []
+    cred_deletes: list[str] = []
+    session_bodies: list[dict[str, Any]] = []
+    client = build_fake_anthropic_http(
+        _warm_vault_mirror_handler(
+            account_id=account_id,
+            agent_uuid=agent_uuid,
+            public_url=public_url,
+            credential_post_bodies=cred_bodies,
+            credential_deletes=cred_deletes,
+            session_create_bodies=session_bodies,
+            session_id="sess_nomirror",
+        )
+    )
+
+    await create_session(
+        client,
+        agent=_make_agent(anthropic_id="ag_nomirror"),
+        environment=_make_env(anthropic_id="env_nomirror"),
+        account_id=account_id,
+        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+        fernet=fernet,
+    )
+
+    assert cred_bodies == [], "no stored credentials means no credential POSTs"
+    assert cred_deletes == [], "and nothing deleted"
+    assert len(session_bodies) == 1, "the session is still created"

@@ -98,7 +98,10 @@ def _runtime_for_view(
         if deployment_default is not None
         else DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        # fernet is real: the MCP modal encrypts an agent-scoped copy of the token.
+        turn_deps=MagicMock(  # pyright: ignore[reportArgumentType]  # never runs a turn
+            fernet=build_multifernet((Fernet.generate_key().decode(),))
+        ),
     )
 
 
@@ -242,7 +245,10 @@ async def test_inline_pat_persisted_encrypted(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        # fernet is real: the MCP modal encrypts an agent-scoped copy of the token.
+        turn_deps=MagicMock(  # pyright: ignore[reportArgumentType]  # never runs a turn
+            fernet=build_multifernet((Fernet.generate_key().decode(),))
+        ),
     )
 
     # The credential is stored under agent_id (per-agent principal), not account_id.
@@ -304,7 +310,10 @@ async def test_store_inline_pat_writes_per_agent_overlay(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        # fernet is real: the MCP modal encrypts an agent-scoped copy of the token.
+        turn_deps=MagicMock(  # pyright: ignore[reportArgumentType]  # never runs a turn
+            fernet=build_multifernet((Fernet.generate_key().decode(),))
+        ),
     )
 
     agent_a = uuid.uuid4()
@@ -742,6 +751,10 @@ async def test_add_mcp_modal_writes_vault_credential_after_reconcile(
     Reconcile signal observed BEFORE the credential POST."""
     from daimon.core.defaults.report import Action, ResourceOutcome
 
+    # The modal now persists an agent-scoped copy of the token, which FKs to
+    # tenants — seed the row the tenant_id fixture names.
+    async with db_session_factory() as _session, _session.begin():
+        await make_tenant(_session, id=tenant_id, workspace_id="guild-mcp-modal-write")
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_VAULT_MA_AGENT_ID)
 
     reconcile_order: list[str] = []
@@ -854,6 +867,10 @@ async def test_add_mcp_modal_resubmit_replaces_prior_vault_credential(
     across both submissions; one DELETE on the second."""
     from daimon.core.defaults.report import Action, ResourceOutcome
 
+    # The modal now persists an agent-scoped copy of the token, which FKs to
+    # tenants — seed the row the tenant_id fixture names.
+    async with db_session_factory() as _session, _session.begin():
+        await make_tenant(_session, id=tenant_id, workspace_id="guild-mcp-modal-resubmit")
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_VAULT_MA_AGENT_ID)
 
     async def spy_reconcile(runtime: Any, state: PanelState, *, tenant_id: uuid.UUID) -> Any:

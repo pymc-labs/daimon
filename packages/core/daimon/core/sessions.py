@@ -18,6 +18,10 @@ from anthropic import AsyncAnthropic, omit
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.session_create_params import Resource
 from cryptography.fernet import MultiFernet
+from daimon.core.agent_mcp_credentials import (
+    mirror_credentials_into_vault,
+    resolve_agent_mcp_credentials,
+)
 from daimon.core.config import McpSettings
 from daimon.core.credential_env import upload_env_and_mount
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
@@ -69,6 +73,15 @@ async def create_session(
     ``anthropic.APIError`` on that call is logged and swallowed rather than
     propagated (SYNC-04) — the session still gets created, just without the
     Copilot credential mounted that turn.
+
+    The agent's stored external-MCP credentials are mirrored into the same
+    vault on every session create (``resolve_agent_mcp_credentials`` +
+    ``mirror_credentials_into_vault``). The servers themselves live on the agent
+    spec, so a credential held only in the vault of whoever attached one leaves
+    every other caller's turn failing at MCP init; mirroring per session is what
+    makes an agent-level server work for an agent-level audience. Unlike the
+    Copilot and memory mounts this is NOT degrade-not-block — a missing
+    credential hard-fails the turn at MA, so ``anthropic.APIError`` propagates.
 
     When ``tenant_id``, ``agent_uuid``, and ``session_factory`` are all
     provided, the agent's tenant-scoped secrets are assembled into a ``.env``
@@ -155,6 +168,31 @@ async def create_session(
                 agent_uuid=str(agent_uuid) if agent_uuid is not None else None,
                 error=str(exc),
             )
+
+    # External MCP servers are attached to the AGENT, so every caller who
+    # mentions it gets the toolset — but MA resolves each server's credential
+    # from the vault mounted here, which is the CALLER's. Mirror the agent's
+    # stored credentials in on every session create (same shape as the Copilot
+    # mirror above) or callers who did not personally attach a server fail the
+    # whole turn at MCP init. Not degrade-not-block: see
+    # mirror_credentials_into_vault.
+    if (
+        vault_id is not None
+        and tenant_id is not None
+        and agent_uuid is not None
+        and session_factory is not None
+        and fernet is not None
+    ):
+        await mirror_credentials_into_vault(
+            anthropic,
+            vault_id=vault_id,
+            credentials=await resolve_agent_mcp_credentials(
+                sessionmaker=session_factory,
+                fernet=fernet,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+            ),
+        )
 
     resources: list[Resource] = []
     if tenant_id is not None and agent_uuid is not None and session_factory is not None:

@@ -1222,10 +1222,31 @@ async def run_add_mcp_submission(
             if mcp.public_url is not None and mcp.jwt_secret is not None:
                 import datetime as dt
 
+                from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
                 from daimon.core.mcp_vault import add_external_mcp_credential
 
                 agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(ma_agent.id))
                 jwt_secret = mcp.jwt_secret.get_secret_value().encode()
+                # Agent-scoped copy first: the server is attached to the AGENT,
+                # so every caller's session needs this credential mirrored in
+                # at create time. Without this row the server works only for
+                # whoever submitted this panel.
+                if runtime.turn_deps.fernet is not None:
+                    await save_agent_mcp_credential(
+                        sessionmaker=runtime.sessionmaker,
+                        fernet=runtime.turn_deps.fernet,
+                        tenant_id=tenant_id,
+                        agent_id=agent_uuid,
+                        mcp_server_url=mcp_url,
+                        plaintext_token=token,
+                    )
+                else:
+                    log.warning(
+                        "slack.agent_setup.add_mcp.no_fernet_for_agent_scope",
+                        team_id=team_id,
+                        agent_name=agent_name,
+                        mcp_name=mcp_name,
+                    )
                 await add_external_mcp_credential(
                     runtime.anthropic,
                     account_id=account_id,

@@ -12,10 +12,12 @@ a non-public field. Adapters never see or construct billing wiring.
 
 from __future__ import annotations
 
+import datetime as dt
 import functools
 import uuid
 from dataclasses import dataclass
 
+from daimon.core.agent_mcp_credentials import sync_agent_mcp_credentials
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.sessions import create_session
@@ -172,6 +174,30 @@ async def bind_session(
             mapping_id = existing.id
             watermark = existing.watermark_message_id
             reused = True
+            # A reused session skips create_session, so it would never pick up
+            # an external MCP credential added to the agent after it was
+            # created — the caller would keep failing at MCP init until their
+            # session happened to be recreated. The vault this session already
+            # mounts is read at each turn's MCP init, so writing into it here
+            # reaches this session on this turn.
+            if (
+                deps.fernet is not None
+                and deps.mcp.public_url is not None
+                and deps.mcp.jwt_secret is not None
+            ):
+                await sync_agent_mcp_credentials(
+                    deps.anthropic,
+                    sessionmaker=deps.sessionmaker,
+                    fernet=deps.fernet,
+                    tenant_id=tenant_id,
+                    agent_id=derive_agent_uuid(
+                        tenant_id=tenant_id, ma_agent_id=str(admission.agent.id)
+                    ),
+                    account_id=admission.account_id,
+                    jwt_secret=deps.mcp.jwt_secret.get_secret_value().encode(),
+                    public_url=str(deps.mcp.public_url),
+                    now=dt.datetime.now(dt.UTC),
+                )
 
     if not reused:
         ma_session_id, mapping_id = await create_fresh_session(

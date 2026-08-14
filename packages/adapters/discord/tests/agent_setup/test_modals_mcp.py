@@ -20,15 +20,19 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_model_config import (
     BetaManagedAgentsModelConfig,
 )
+from cryptography.fernet import Fernet
 from daimon.adapters.discord.agent_setup import modals_mcp as modals_mcp_mod
 from daimon.adapters.discord.agent_setup.modals import AddMcpModal
 from daimon.adapters.discord.agent_setup.state import PanelState, RosterEntry
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
+from daimon.core.stores import agent_mcp_credentials as cred_store
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_stub_anthropic
 from pydantic import HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -95,7 +99,10 @@ def _runtime(
         if deployment_default is not None
         else DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        # fernet is real: the MCP modal encrypts an agent-scoped copy of the token.
+        turn_deps=MagicMock(  # pyright: ignore[reportArgumentType]  # never runs a turn
+            fernet=build_multifernet((Fernet.generate_key().decode(),))
+        ),
     )
 
 
@@ -161,6 +168,10 @@ async def test_add_mcp_modal_resolves_agent_uuid_and_writes_per_agent_vault(
     The vault handler checks the display_name so this assertion verifies that
     agent_uuid is derived correctly and the vault is looked up by the right key.
     """
+    # The modal now persists an agent-scoped copy of the token, which FKs to
+    # tenants — seed the row the tenant_id fixture names.
+    async with db_session_factory() as _session, _session.begin():
+        await make_tenant(_session, id=tenant_id, workspace_id="guild-mcp-modal-vault")
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_MA_AGENT_ID)
     per_agent_display = f"daimon-mcp:{account_id}:{agent_uuid}"
 
@@ -240,6 +251,15 @@ async def test_add_mcp_modal_resolves_agent_uuid_and_writes_per_agent_vault(
     )
     assert creds_created[0]["auth"]["token"] == "tok_xxxx_1234", (
         "credential token must be the user-submitted value"
+    )
+    # The vault write alone only serves the submitter. The agent-scoped row is
+    # what lets every OTHER caller's session mount the same credential.
+    async with db_session_factory() as session:
+        stored = await cred_store.list_credentials(
+            session, tenant_id=tenant_id, agent_id=agent_uuid
+        )
+    assert [row.mcp_server_url for row in stored] == ["https://ext.example.com/mcp"], (
+        "the modal must persist an agent-scoped copy for other callers' sessions"
     )
 
 

@@ -204,6 +204,18 @@ class GitHubCredentialRow(BaseModel):
     updated_at: datetime
 
 
+class AgentMcpCredentialRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    mcp_server_url: str
+    encrypted_token: bytes
+    created_at: datetime
+    updated_at: datetime
+
+
 class SlackBotTokenRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
