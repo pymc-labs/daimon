@@ -18,7 +18,6 @@ _SLACK_API_BASE = "https://slack.com/api"
 # Slack API methods that use POST with JSON body (params in body, not query string).
 # Exact URL match works for these since params are not in the URL.
 _SLACK_POST_JSON_METHODS: tuple[str, ...] = (
-    "auth.test",
     "chat.postMessage",
     "chat.update",
     "chat.postEphemeral",
@@ -87,6 +86,13 @@ def _register_slack_defaults(mock: AioResponsesMock) -> None:
             payload={"ok": True, "ts": "1000000000.000001", "channel": "C_TEST"},
             repeat=True,
         )
+    # auth.test carries the bot's own user id, mirroring the real API — the
+    # mention gate resolves it once per workspace.
+    mock.post(  # pyright: ignore[reportUnknownMemberType]
+        f"{_SLACK_API_BASE}/auth.test",
+        payload={"ok": True, "user_id": "U_BOT"},
+        repeat=True,
+    )
     # views methods return a view object so handlers can read resp["view"]["id"].
     for method in _SLACK_VIEWS_METHODS:
         mock.post(  # pyright: ignore[reportUnknownMemberType]

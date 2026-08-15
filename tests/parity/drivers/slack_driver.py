@@ -46,7 +46,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _SLACK_API_BASE = "https://slack.com/api"
 _POST_JSON_METHODS: tuple[str, ...] = (
-    "auth.test",
     "chat.postMessage",
     "chat.update",
     "chat.postEphemeral",
@@ -77,6 +76,13 @@ def _register_slack_defaults(mock: AioResponsesMock) -> None:
             payload={"ok": True, "ts": "1000000000.000001", "channel": "C_PARITY"},
             repeat=True,
         )
+    # auth.test carries the bot's own user id (the mention gate resolves it once
+    # per workspace); the driver's events mention <@U_BOT> accordingly.
+    mock.post(  # pyright: ignore[reportUnknownMemberType]
+        f"{_SLACK_API_BASE}/auth.test",
+        payload={"ok": True, "user_id": "U_BOT"},
+        repeat=True,
+    )
     mock.post(_REACTIONS_ADD_PATTERN, payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
     mock.get(  # pyright: ignore[reportUnknownMemberType]
         _CONVERSATIONS_REPLIES_PATTERN,

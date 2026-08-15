@@ -5,6 +5,7 @@ from __future__ import annotations
 from daimon.adapters.slack.gating import (
     is_external_interactive,
     is_slack_connect_external,
+    mentions_bot,
 )
 
 
@@ -59,3 +60,42 @@ async def test_fake_slack_web_client_intercepts_registered_method(
     assert resp["ok"] is True, (
         "transport-level fake should intercept auth.test and return canned ok=True"
     )
+
+
+class TestMentionsBot:
+    """Explicit-mention gate: the event text must contain <@bot_user_id>.
+
+    Slack has been observed delivering app_mention events for un-mentioned
+    thread replies; this belt-and-braces check is the Discord-parity gate
+    (discord/bot.py checks message.mentions explicitly on every message).
+    """
+
+    def test_returns_true_when_text_contains_bot_mention_token(self) -> None:
+        event = {"text": "<@U_BOT> what's our rejection rate?"}
+        assert mentions_bot(event, bot_user_id="U_BOT") is True, (
+            "text containing <@bot_user_id> must pass the mention gate"
+        )
+
+    def test_returns_false_when_text_has_no_mention(self) -> None:
+        event = {"text": "make a marimo notebook about our most recent fails"}
+        assert mentions_bot(event, bot_user_id="U_BOT") is False, (
+            "an un-mentioned thread reply must be gated out even if Slack "
+            "delivered it as app_mention"
+        )
+
+    def test_returns_false_when_other_user_is_mentioned(self) -> None:
+        event = {"text": "<@U_OTHER> can you look at this?"}
+        assert mentions_bot(event, bot_user_id="U_BOT") is False, (
+            "a mention of a different user must not pass the gate"
+        )
+
+    def test_returns_false_when_text_missing(self) -> None:
+        assert mentions_bot({}, bot_user_id="U_BOT") is False, (
+            "an event with no text field must not pass the gate"
+        )
+
+    def test_returns_false_when_bot_user_id_empty(self) -> None:
+        event = {"text": "<@> hello"}
+        assert mentions_bot(event, bot_user_id="") is False, (
+            "an unresolved (empty) bot_user_id must fail closed"
+        )

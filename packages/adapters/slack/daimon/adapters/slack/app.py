@@ -52,7 +52,11 @@ from daimon.adapters.slack.attachments import (
 )
 from daimon.adapters.slack.billing_panel.actions import handle_billing_command, handle_topup_select
 from daimon.adapters.slack.context import build_context_xml, build_delta_xml
-from daimon.adapters.slack.gating import is_external_interactive, is_slack_connect_external
+from daimon.adapters.slack.gating import (
+    is_external_interactive,
+    is_slack_connect_external,
+    mentions_bot,
+)
 from daimon.adapters.slack.help import handle_help_command
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
@@ -171,6 +175,9 @@ class SlackApp:
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # Cancel registry: status_ts -> (cancel Event, author_id).
         self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
+        # Bot user id per workspace, resolved lazily via auth.test. The id is
+        # immutable for a given app+workspace, so the cache never invalidates.
+        self._bot_user_ids: dict[str, str] = {}
         # Drain flag — set on SIGTERM; blocks new mention handling.
         self.draining: bool = False
 
@@ -623,8 +630,9 @@ class SlackApp:
         3. TOKEN RESOLVE: get_slack_bot_token; drop on None.
         4. PER-EVENT CLIENT: decrypt + AsyncWebClient(token=...) — never cached.
         5. SLACK CONNECT GATE: ephemeral rejection for external-workspace senders.
-        6. TENANT RESOLVE: derive_tenant_uuid.
-        7. Handoff to _orchestrate.
+        6. EXPLICIT MENTION GATE: drop events whose text lacks <@bot_user_id>.
+        7. TENANT RESOLVE: derive_tenant_uuid.
+        8. Handoff to _orchestrate.
 
         The full handler body is wrapped in the listener-boundary catch
         (DaimonError | anthropic.APIError | SlackApiError).  Core helpers
@@ -675,10 +683,29 @@ class SlackApp:
                 )
                 return
 
-            # (5) TENANT RESOLVE.
+            # (5) EXPLICIT MENTION GATE — Slack has been observed delivering
+            # app_mention events for un-mentioned thread replies; require the
+            # <@bot_user_id> token in the text (Discord parity). The bot user id
+            # is resolved once per workspace via auth.test and cached.
+            bot_user_id = self._bot_user_ids.get(team_id)
+            if bot_user_id is None:
+                auth_resp = await client.auth_test()  # pyright: ignore[reportUnknownMemberType]
+                bot_user_id = str(auth_resp.get("user_id") or "")
+                if bot_user_id:
+                    self._bot_user_ids[team_id] = bot_user_id
+            if not mentions_bot(event, bot_user_id=bot_user_id):
+                log.info(
+                    "slack.event_dropped.no_explicit_mention",
+                    team_id=team_id,
+                    channel=channel,
+                    event_ts=event_ts,
+                )
+                return
+
+            # (6) TENANT RESOLVE.
             tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-            # (6) Orchestration seam — turn body is delegated here.
+            # (7) Orchestration seam — turn body is delegated here.
             await self._orchestrate(
                 event,
                 team_id=team_id,
