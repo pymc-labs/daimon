@@ -629,8 +629,10 @@ class SlackApp:
         2. DEDUP: insert_if_new before any other work.
         3. TOKEN RESOLVE: get_slack_bot_token; drop on None.
         4. PER-EVENT CLIENT: decrypt + AsyncWebClient(token=...) — never cached.
-        5. SLACK CONNECT GATE: ephemeral rejection for external-workspace senders.
-        6. EXPLICIT MENTION GATE: drop events whose text lacks <@bot_user_id>.
+        5. EXPLICIT MENTION GATE: drop events whose text lacks <@bot_user_id>;
+           runs before the Connect gate so un-mentioned external senders are
+           dropped silently rather than sent a rejection ephemeral.
+        6. SLACK CONNECT GATE: ephemeral rejection for external-workspace senders.
         7. TENANT RESOLVE: derive_tenant_uuid.
         8. Handoff to _orchestrate.
 
@@ -671,22 +673,15 @@ class SlackApp:
             token = decrypt_token(fernet, row.encrypted_token)
             client = AsyncWebClient(token=token)  # per-event only
 
-            # (4) SLACK CONNECT GATE — reject external-workspace senders.
-            if is_slack_connect_external(event, team_id=team_id):
-                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                    channel=channel,
-                    user=event.get("user") or "",
-                    text=(
-                        "Sorry, I can only respond to members of this workspace. "
-                        "Please ask a workspace member to mention me instead."
-                    ),
-                )
-                return
-
-            # (5) EXPLICIT MENTION GATE — Slack has been observed delivering
+            # (4) EXPLICIT MENTION GATE — Slack has been observed delivering
             # app_mention events for un-mentioned thread replies; require the
-            # <@bot_user_id> token in the text (Discord parity). The bot user id
-            # is resolved once per workspace via auth.test and cached.
+            # <@bot_user_id> token in the text (Discord parity). Runs BEFORE the
+            # Slack Connect gate so external senders who never addressed the bot
+            # are dropped silently instead of receiving a rejection ephemeral.
+            # The bot user id is resolved once per workspace via auth.test and
+            # cached; a failed resolution propagates to the listener boundary
+            # and drops the event (dedup already recorded it, so a Slack retry
+            # will not re-deliver — accepted for this once-per-process call).
             bot_user_id = self._bot_user_ids.get(team_id)
             if bot_user_id is None:
                 auth_resp = await client.auth_test()  # pyright: ignore[reportUnknownMemberType]
@@ -699,6 +694,18 @@ class SlackApp:
                     team_id=team_id,
                     channel=channel,
                     event_ts=event_ts,
+                )
+                return
+
+            # (5) SLACK CONNECT GATE — reject external-workspace senders.
+            if is_slack_connect_external(event, team_id=team_id):
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                    channel=channel,
+                    user=event.get("user") or "",
+                    text=(
+                        "Sorry, I can only respond to members of this workspace. "
+                        "Please ask a workspace member to mention me instead."
+                    ),
                 )
                 return
 

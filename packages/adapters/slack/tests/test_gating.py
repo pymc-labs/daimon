@@ -99,3 +99,16 @@ class TestMentionsBot:
         assert mentions_bot(event, bot_user_id="") is False, (
             "an unresolved (empty) bot_user_id must fail closed"
         )
+
+    def test_returns_true_for_pipe_labelled_mention_token(self) -> None:
+        event = {"text": "<@U_BOT|daimon> hello"}
+        assert mentions_bot(event, bot_user_id="U_BOT") is True, (
+            "the legacy pipe-labelled mention encoding <@id|label> is a real "
+            "mention and must pass the gate"
+        )
+
+    def test_returns_false_when_bot_id_is_prefix_of_another_id(self) -> None:
+        event = {"text": "<@U_BOT2> hello"}
+        assert mentions_bot(event, bot_user_id="U_BOT") is False, (
+            "a mention of a user whose id merely starts with the bot's id must not pass the gate"
+        )

@@ -2520,3 +2520,113 @@ async def test_handle_app_mention_resolves_bot_user_id_via_auth_test(
     assert app._bot_user_ids[team_id] == "U_BOT", (  # pyright: ignore[reportPrivateUsage]
         "the resolved bot user id must be cached per team to avoid repeated auth.test calls"
     )
+
+
+async def test_handle_app_mention_external_without_mention_gets_no_ephemeral(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An un-mentioned event from an external (Slack Connect) sender is dropped
+    silently: the mention gate runs BEFORE the Connect rejection, so external
+    users are not spammed with rejection ephemerals for messages that never
+    addressed the bot."""
+    team_id = "T_APP_GATE_BEFORE_CONNECT"
+    fernet_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((fernet_key,))
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(fernet, "xoxb-gate-order-test"),
+    )
+    await db_session.flush()
+
+    app = _make_app(db_session_factory, crypto_key=fernet_key)
+    app._bot_user_ids[team_id] = "U_BOT"  # pyright: ignore[reportPrivateUsage]
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "channel": "C_TEST",
+        "event_ts": "1000000012.000001",
+        "ts": "1000000012.000001",
+        "user": "U_EXTERNAL",
+        "user_team": "T_EXTERNAL",
+        "text": "just chatting in the thread",
+    }
+
+    with aioresponses() as mock:
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+        ephemeral_calls = [
+            req
+            for (_, url), reqs in mock.requests.items()
+            if url == URL("https://slack.com/api/chat.postEphemeral")
+            for req in reqs
+        ]
+
+    assert ephemeral_calls == [], (
+        "an external sender who never mentioned the bot must not receive the "
+        "Slack Connect rejection ephemeral"
+    )
+
+
+async def test_handle_app_mention_auth_test_failure_drops_without_raising(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A failing auth.test on cold-cache resolution is absorbed by the listener
+    boundary: the event is dropped, nothing raises, and no turn runs. (Dedup has
+    already recorded the event, so a Slack retry will not re-deliver it — the
+    mention is lost for this process; acceptable once per workspace lifetime.)"""
+    team_id = "T_APP_AUTH_FAIL"
+    fernet_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((fernet_key,))
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(fernet, "xoxb-auth-fail-test"),
+    )
+    await db_session.flush()
+
+    app = _make_app(db_session_factory, crypto_key=fernet_key)
+
+    orchestrate_calls: list[dict[str, Any]] = []
+
+    async def _spy_orchestrate(
+        event: dict[str, Any],
+        *,
+        team_id: str,
+        channel: str,
+        event_ts: str,
+        web_client: Any,
+        tenant_id: uuid.UUID,
+    ) -> None:
+        orchestrate_calls.append({"event_ts": event_ts})
+
+    app._orchestrate = _spy_orchestrate  # type: ignore[method-assign]
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "channel": "C_TEST",
+        "event_ts": "1000000013.000001",
+        "ts": "1000000013.000001",
+        "user": "U_TEST",
+        "text": "<@U_BOT> hello",
+    }
+
+    with aioresponses() as mock:
+        mock.post(
+            "https://slack.com/api/auth.test",
+            payload={"ok": False, "error": "invalid_auth"},
+            repeat=True,
+        )
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+
+    assert orchestrate_calls == [], (
+        "a failed auth.test must drop the event at the listener boundary, not run a turn"
+    )
+    assert team_id not in app._bot_user_ids, (  # pyright: ignore[reportPrivateUsage]
+        "a failed resolution must not poison the bot-user-id cache"
+    )
