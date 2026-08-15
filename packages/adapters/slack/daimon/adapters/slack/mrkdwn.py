@@ -47,6 +47,25 @@ def escape_mrkdwn(text: str) -> str:
 _ESCAPED_MENTION = re.compile(r"&lt;([@#][A-Z0-9]+(?:\|[^&<>]*)?)&gt;")
 
 
+# A bare http(s) URL whose very next characters are 1-3 asterisks followed by
+# whitespace/punctuation/end — i.e. an emphasis closer, not part of the URL.
+# The URL charset excludes ()[]<> and whitespace so URLs already inside
+# [label](url) links (which end at the ')') never match.
+_EMPHASIZED_URL = re.compile(r"(https?://[^\s<>()\[\]]+?)(?=\*{1,3}(?:[\s.,;:!?]|$))")
+
+
+def linkify_emphasized_urls(text: str) -> str:
+    """Rewrite bare URLs that sit against an emphasis closer to ``[url](url)``.
+
+    In Slack's native ``markdown`` block the bare-URL autolinker is greedy and
+    ``*`` is a valid URL character, so ``**https://x**`` renders with the
+    closing asterisks absorbed into the link target (broken link with a
+    trailing ``*``, unclosed bold). Making the link explicit removes the
+    ambiguity while leaving the surrounding emphasis intact.
+    """
+    return _EMPHASIZED_URL.sub(lambda m: f"[{m.group(1)}]({m.group(1)})", text)
+
+
 def escape_mrkdwn_preserving_mentions(text: str) -> str:
     """Escape mrkdwn control chars but keep live ``<@user>`` / ``<#channel>`` links.
 

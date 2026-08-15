@@ -440,3 +440,22 @@ async def test_lifecycle_satisfies_turn_lifecycle_protocol(fake_slack_web_client
     assert callable(bound.on_reconnect), "on_reconnect must be callable"
     assert callable(bound.on_rate_limited), "on_rate_limited must be callable"
     assert callable(bound.on_interrupt_sent), "on_interrupt_sent must be callable"
+
+
+async def test_terminal_success_linkifies_emphasized_urls(fake_slack_web_client: Any) -> None:
+    """A final answer wrapping a bare URL in ** must be normalized to an explicit
+    markdown link before posting, so Slack's autolinker cannot absorb the closing
+    asterisks into the URL (reported: notebook URL rendered with a trailing '*')."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.on_sse_event(_thinking_event())
+
+    state = TurnState(
+        content=[TextBlock(kind="text", text="Here: **🔗 https://x.up.railway.app/n/abc**")]
+    )
+    await lc.on_terminal_success(state)
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    assert blocks[0]["type"] == "markdown"
+    assert (
+        "[https://x.up.railway.app/n/abc](https://x.up.railway.app/n/abc)" in blocks[0]["text"]
+    ), "the emphasized bare URL must be rewritten to an explicit [url](url) link"

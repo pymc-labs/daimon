@@ -32,7 +32,10 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
 from daimon.adapters.slack.blockkit import EmbedEvent, State, TurnPhase, to_blocks, update
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
+from daimon.adapters.slack.mrkdwn import (
+    escape_mrkdwn_preserving_mentions,
+    linkify_emphasized_urls,
+)
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
@@ -241,7 +244,11 @@ class SlackTurnLifecycle:
                 self.final_ts = self._status_ts
                 return
 
-            chunks = split_for_slack_safe(escape_mrkdwn_preserving_mentions(final_text))
+            # Linkify BEFORE escaping — linkify reads raw markdown; escaping
+            # introduces no new URLs or asterisks.
+            chunks = split_for_slack_safe(
+                escape_mrkdwn_preserving_mentions(linkify_emphasized_urls(final_text))
+            )
             first_chunk = chunks[0]
             # First chunk + the cost/usage footer replace the status message
             # in place; the terminal footer carries elapsed/tokens/cost and drops
