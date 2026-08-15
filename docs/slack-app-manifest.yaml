@@ -1,0 +1,89 @@
+# Slack app manifest for a daimon deployment.
+#
+# 1. https://api.slack.com/apps → Create New App → From a manifest → paste this.
+# 2. Replace DAIMON_HOST with the host of your DAIMON_MCP__PUBLIC_URL (must be
+#    a public HTTPS host — Slack will not redirect to localhost).
+# 3. Basic Information → App-Level Tokens → generate one with `connections:write`
+#    → DAIMON_SLACK__APP_TOKEN. Signing secret and OAuth client id/secret are on
+#    the same page → DAIMON_SLACK__SIGNING_SECRET / __CLIENT_ID / __CLIENT_SECRET.
+# 4. Manage Distribution → activate public distribution (the install flow needs it).
+# 5. Visit https://DAIMON_HOST/oauth/slack/install and install to your workspace.
+#    The bot token is stored encrypted in daimon's database by that callback —
+#    there is no env var for it.
+#
+# The scope lists mirror SLACK_BOT_SCOPES / SLACK_USER_SCOPES in
+# packages/core/daimon/core/slack_oauth.py. They are code constants, not config:
+# if you edit them here, edit them there too or the install will fail.
+
+display_information:
+  name: daimon
+  description: Data-science agent that writes and runs code, fits models, and delivers charts and notebooks in-thread.
+  background_color: "#0b110e"
+
+features:
+  bot_user:
+    display_name: daimon
+    always_online: true
+  slash_commands:
+    - command: /help
+      description: List commands and the @mention entrypoint
+      should_escape: false
+    - command: /agent-setup
+      description: Manage this workspace's agents
+      should_escape: false
+    - command: /routines
+      description: Show scheduled routines for this workspace
+      should_escape: false
+    - command: /memory
+      description: Read what daimon remembers for an agent
+      should_escape: false
+    - command: /billing
+      description: Show your billing usage (admins see per-member breakdown)
+      should_escape: false
+    - command: /privacy
+      description: See, export, or delete what daimon stores about you
+      should_escape: false
+
+oauth_config:
+  redirect_urls:
+    - https://DAIMON_HOST/oauth/slack/callback
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - commands
+      - users:read
+      - channels:history
+      - groups:history
+      - reactions:write
+      - files:read
+      - channels:read
+      - groups:read
+    # Requested only when a member opts in via "Connect Slack"; reads then run
+    # with that member's own permissions. See docs/slack.md for the trust model.
+    user:
+      - users:read
+      - channels:history
+      - groups:history
+      - channels:read
+      - groups:read
+      - im:history
+      - mpim:history
+      - im:read
+      - mpim:read
+      - search:read
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - app_uninstalled
+      - tokens_revoked
+  interactivity:
+    is_enabled: true
+  socket_mode_enabled: true
+  # Enterprise Grid org installs are rejected by the OAuth callback.
+  org_deploy_enabled: false
+  # Leave off: daimon stores the refresh token but never exchanges it, so a
+  # rotating bot token would expire and stay expired.
+  token_rotation_enabled: false

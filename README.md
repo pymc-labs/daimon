@@ -22,10 +22,11 @@ or self-host it from this repo.
 
 Most chat bots are one agent shared across a workspace. daimon is
 many-to-many: you deploy it once, on your own Anthropic API key, and any
-number of Discord servers install it from that single deployment. Every
-server is isolated: one tenant, its own data, scoped to that server. Adding
-a server takes about two minutes: invite the bot, `@mention` it, and it sets
-itself up. From there, everyone in the server can just ask it for things.
+number of Discord servers and Slack workspaces install it from that single
+deployment. Every install is isolated: one tenant, its own data, scoped to
+that server or workspace. Adding one takes about two minutes: invite the bot,
+`@mention` it, and it sets itself up. From there, everyone there can just ask
+it for things.
 
 Built on [Anthropic Managed Agents](https://platform.claude.com/docs/en/managed-agents/quickstart)
 by [PyMC Labs](https://www.pymc-labs.com), the team behind the PyMC project.
@@ -190,6 +191,26 @@ The `export` is required because the `alembic` CLI reads the shell
 environment and does not auto-load `.env`.
 
 </details>
+
+## Run it on Slack too (optional)
+
+Slack needs a publicly reachable `DAIMON_MCP__PUBLIC_URL` — the bot token is
+issued by an OAuth install callback served by the `mcp` process, not read from
+an env var, and Slack won't redirect to `localhost`.
+
+1. Create the Slack app from
+   [`docs/slack-app-manifest.yaml`](docs/slack-app-manifest.yaml) and follow the
+   steps in its header comment. It fills in the scopes, slash commands, events,
+   and Socket Mode toggles for you.
+2. Put the resulting `DAIMON_SLACK__SIGNING_SECRET`, `DAIMON_SLACK__APP_TOKEN`,
+   `DAIMON_SLACK__CLIENT_ID`, and `DAIMON_SLACK__CLIENT_SECRET` in `.env`, plus
+   `DAIMON_CRYPTO__KEYS` (a Fernet key — the adapter refuses to start without
+   one, since it stores workspace tokens encrypted).
+3. `docker compose --profile slack up --build -d`
+4. Open `https://<your-host>/oauth/slack/install` and install to a workspace.
+
+[`docs/slack.md`](docs/slack.md) covers the trust model for per-user Slack
+access, which operators should read before enabling it.
 
 ## Layout
 

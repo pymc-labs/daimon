@@ -72,6 +72,26 @@ services:
     entrypoint: ["python", "-m", "daimon.adapters.discord"]
     restart: unless-stopped
 
+  # Opt-in: `docker compose --profile slack up -d`. Needs DAIMON_SLACK__* and
+  # DAIMON_CRYPTO__KEYS in .env — no `:?` guards here, or Discord-only
+  # deployments would fail to interpolate the file.
+  # Setup: docs/slack-app-manifest.yaml.
+  slack:
+    build: .
+    profiles: ["slack"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env.example)}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
+      DAIMON_MCP__PUBLIC_URL: ${DAIMON_MCP__PUBLIC_URL:?DAIMON_MCP__PUBLIC_URL is required}
+    entrypoint: ["python", "-m", "daimon.adapters.slack"]
+    restart: unless-stopped
+
   scheduler:
     build: .
     depends_on:
