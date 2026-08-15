@@ -48,10 +48,17 @@ _ESCAPED_MENTION = re.compile(r"&lt;([@#][A-Z0-9]+(?:\|[^&<>]*)?)&gt;")
 
 
 # A bare http(s) URL whose very next characters are 1-3 asterisks followed by
-# whitespace/punctuation/end — i.e. an emphasis closer, not part of the URL.
+# anything that cannot continue a URL or the asterisk run — i.e. an emphasis
+# closer, not part of the URL. The URL must not itself end in an asterisk, so
+# a 4+ asterisk run (not a valid closer) never donates its head to the URL.
 # The URL charset excludes ()[]<> and whitespace so URLs already inside
 # [label](url) links (which end at the ')') never match.
-_EMPHASIZED_URL = re.compile(r"(https?://[^\s<>()\[\]]+?)(?=\*{1,3}(?:[\s.,;:!?]|$))")
+_EMPHASIZED_URL = re.compile(r"(https?://[^\s<>()\[\]]*?[^\s<>()\[\]*])(?=\*{1,3}(?:[^\w*]|$))")
+
+# Code segments the linkifier must never touch: a fenced block (closed, or
+# open-to-end — Slack renders an unterminated fence as code), or an inline
+# single-backtick span.
+_CODE_SEGMENT = re.compile(r"```[\s\S]*?(?:```|$)|`[^`\n]*`")
 
 
 def linkify_emphasized_urls(text: str) -> str:
@@ -62,8 +69,23 @@ def linkify_emphasized_urls(text: str) -> str:
     closing asterisks absorbed into the link target (broken link with a
     trailing ``*``, unclosed bold). Making the link explicit removes the
     ambiguity while leaving the surrounding emphasis intact.
+
+    Fenced code blocks and inline code spans are passed through verbatim —
+    emphasis has no meaning there and the content must render exactly as
+    written.
     """
-    return _EMPHASIZED_URL.sub(lambda m: f"[{m.group(1)}]({m.group(1)})", text)
+
+    def _rewrite(segment: str) -> str:
+        return _EMPHASIZED_URL.sub(lambda m: f"[{m.group(1)}]({m.group(1)})", segment)
+
+    parts: list[str] = []
+    last = 0
+    for code in _CODE_SEGMENT.finditer(text):
+        parts.append(_rewrite(text[last : code.start()]))
+        parts.append(code.group(0))
+        last = code.end()
+    parts.append(_rewrite(text[last:]))
+    return "".join(parts)
 
 
 def escape_mrkdwn_preserving_mentions(text: str) -> str:
