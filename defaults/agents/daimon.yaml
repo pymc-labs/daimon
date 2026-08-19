@@ -87,6 +87,16 @@ skills:
     skill_id: workspace-setup
   - type: custom
     skill_id: pymc-artifact-style
+  - type: custom
+    skill_id: data-ingestion
+  - type: custom
+    skill_id: data-validation
+  - type: custom
+    skill_id: data-cleaning
+  - type: custom
+    skill_id: exploratory-data-analysis
+  - type: custom
+    skill_id: eda-storytelling
 tools:
   - type: agent_toolset_20260401
     configs:
