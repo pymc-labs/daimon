@@ -49,9 +49,15 @@ def test_display_filename_does_not_double_a_matching_extension() -> None:
         ("notes.md", "text/plain"),
         ("clean.sql", "application/octet-stream"),
         ("changelog.jsonl", "application/json; charset=utf-8"),
+        # Types mimetypes has never heard of. Agents invent these -- every one
+        # below was observed on staging or is its obvious sibling -- and an
+        # invented type is no more informative than octet-stream.
+        ("changelog.jsonl", "application/jsonl"),
+        ("findings.jsonl", "application/x-ndjson"),
+        ("orders.parquet", "application/vnd.apache.parquet"),
     ],
 )
-def test_display_filename_keeps_the_title_extension_when_the_mime_is_generic(
+def test_display_filename_keeps_the_title_extension_when_the_mime_is_uninformative(
     title: str, mime_type: str
 ) -> None:
     assert display_filename_for(title, mime_type) == title, (
