@@ -140,8 +140,8 @@ week. Ask when the source will not say. Name the ordering column too: validation
 and EDA bucket along the axis you name, and a composite grain has more than one.
 
 Hand the manifest to `data-validation`; you asserted only that the data is
-loaded and counted, so if the answer ships from here, name the stages nobody
-ran. A 40-row paste needs no `run/`; the manifest is one sentence in your reply.
+loaded and counted, so if the answer ships from here, end the reply with the
+literal `Stages: … · skipped: …` line `eda-storytelling` defines. A 40-row paste needs no `run/`; the manifest is one sentence in your reply.
 
 ## Common failure modes
 

@@ -52,6 +52,13 @@ print(verdict, [(c["check"], c["n_failing"]) for c in failed])
 example ids, and the treatments available. Dedup changes the revenue number you
 are about to report, so the user picks it. On `warn`, say it inline.
 
+**That includes the conditional.** "If you confirm dedup, the total would be
+$260" is the number shipping with a hedge attached — the reader keeps the figure
+and forgets the condition, and you have pre-committed them to a treatment they
+never chose. Name the treatments and what each would change about the shape of
+the answer, not the value it would produce. Compute it on the next turn, after
+they pick.
+
 **When you cannot load it, check it in place** — aggregates where the data lives,
 duckdb over a file or the warehouse's own SQL, one `count(*) FILTER (WHERE …)` per
 check plus a `LIMIT`ed sample of ids, into the same `run/validation.json`.
@@ -112,7 +119,8 @@ You may be the first stage here and you may be the last. On `fail`, or a `warn`
 the user accepted, name the treatment, hand to `data-cleaning`, then re-run this
 stage on what it wrote — a cleaned frame not re-validated is unproven. On `pass`
 with nothing to treat, cleaning is ceremony: say so, hand the source on with the
-dtypes the manifest recorded, and name any stage you skipped that mattered.
+dtypes the manifest recorded. If the answer ships from here, end the reply with
+the literal `Stages: … · skipped: …` line `eda-storytelling` defines.
 
 ## Common failure modes
 

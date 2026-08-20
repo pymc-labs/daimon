@@ -15,6 +15,24 @@ _TITLE_SLUG = re.compile(r"[^A-Za-z0-9._-]+")
 # Used when mimetypes cannot decide — better an opaque extension than a wrong one.
 _FALLBACK_EXT = ".bin"
 
+# Mime types that carry no real format information. An agent uploading a parquet
+# file or a JSONL log has no better mime to declare than octet-stream or
+# application/json, and deriving from those is how `orders.parquet` became
+# `orders.parquet.bin` and `changelog.jsonl` became `changelog.jsonl.json`. When
+# the mime is this vague the title's own extension is the more specific fact, so
+# it wins. A SPECIFIC mime still overrides the title, which is the point of
+# deriving at all: a PNG titled `report.pdf` must not preview as a PDF.
+_GENERIC_MIMES = frozenset(
+    {
+        "application/octet-stream",
+        "application/json",
+        "text/plain",
+        "binary/octet-stream",
+    }
+)
+
+_HAS_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+
 
 def extension_for_mime(mime_type: str) -> str:
     """Return the file extension a chat client should see for ``mime_type``."""
@@ -44,10 +62,14 @@ def display_filename_for(title: str, mime_type: str) -> str:
     """Build the user-visible filename for an agent-supplied title.
 
     The extension is appended only when the title does not already end in it —
-    an agent that helpfully passes "chart.jpg" should not get "chart.jpg.jpg".
+    an agent that helpfully passes "chart.jpg" should not get "chart.jpg.jpg" —
+    and never when the mime type is too generic to know better than the title
+    (see :data:`_GENERIC_MIMES`).
     """
     cleaned = sanitize_title(title)
     ext = extension_for_mime(mime_type)
     if cleaned.lower().endswith(ext.lower()):
+        return cleaned
+    if mime_type.split(";")[0].strip().lower() in _GENERIC_MIMES and _HAS_EXTENSION.search(cleaned):
         return cleaned
     return f"{cleaned}{ext}"

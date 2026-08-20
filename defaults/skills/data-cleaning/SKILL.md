@@ -33,10 +33,15 @@ df = pd.read_csv("run/raw/orders.csv", dtype="str", keep_default_na=False, na_va
 df["qty"] = pd.to_numeric(df["qty"], errors="coerce").astype("Int64")
 
 def log_change(op, column, rows_affected, rule, before, after):
+    """The ONLY writer for run/changelog.jsonl. Copy it verbatim; these six keys
+    are the contract, not a suggested shape. Renaming one to `detail`, `rows_in`
+    or `rows_out` breaks eda-storytelling's citation check, which keys on `op`."""
     os.makedirs("run", exist_ok=True)
+    row = {"op": op, "column": column, "rule": rule, "rows_affected": int(rows_affected),
+           "before": int(before), "after": int(after)}
+    assert set(row) == {"op", "column", "rule", "rows_affected", "before", "after"}
     with open("run/changelog.jsonl", "a") as fh:
-        fh.write(json.dumps({"op": op, "column": column, "rule": rule,
-            "rows_affected": int(rows_affected), "before": int(before), "after": int(after)}) + "\n")
+        fh.write(json.dumps(row) + "\n")
 ```
 
 ## Write every edit through `.loc`
@@ -78,8 +83,25 @@ df["ordered_at"] = parsed
 log_change("to_datetime", "ordered_at", lost.sum(), "ISO8601, bad -> NaT", len(df), len(df))
 ```
 
-Then deduplicate, where the grain admits it — a repeated sensor reading is data,
-not a duplicate. Where it is one, a tiebreaker, then `df.drop_duplicates(`.
+Then deduplicate — but only where the grain admits it, and the grain says so far
+more often than the data does.
+
+**No key, no dedup. This is a gate, not a preference.** You may deduplicate only
+on a key the user stated or `run/manifest.json` recorded as the grain. Where the
+grain is an index — a sensor stream, an event log, a survey — identical rows are
+*data*: one device reporting twice in the same second is two readings, and
+`df.drop_duplicates(` deletes the second one along with the sampling rate. That
+the rows are byte-identical is not evidence they are copies; it is what a
+repeated measurement looks like.
+
+Deciding they were "re-ingested duplicates rather than genuine repeat readings"
+is not a call available from the data — it needs a key, or the user. Without one:
+do not drop them, report the count as a finding, and lead with the number
+computed over every row. Offering both a raw and a deduplicated figure is not a
+substitute for asking; the headline is the raw one until someone says otherwise.
+
+Where a key does exist, take a tiebreaker, then `df.drop_duplicates(`, and log
+the key you used in the `rule`.
 
 ## Leave a gap rather than invent a value
 
@@ -125,8 +147,8 @@ you take from the user and log as the `rule`.
 
 Re-run `data-validation` on what you wrote; one treatment routinely breaks another
 check. Then hand it to `exploratory-data-analysis` or to modeling, the log going
-with it for `eda-storytelling`. You may be the last stage: name any stage you
-skipped that could have changed the answer — and on a `pass` with nothing to
+with it for `eda-storytelling`. You may be the last stage: then end the reply
+with the literal `Stages: … · skipped: …` line that skill defines — and on a `pass` with nothing to
 treat, say so and pass the source on with the manifest's dtypes.
 
 ## Common failure modes

@@ -102,13 +102,36 @@ One row per finding, appended as you go; `how` is the expression that re-derives
 the number — pandas, SQL or a shell one-liner. When `n` cannot carry a claim,
 the finding is the plot, the direction and the size, and the `caveat` says so.
 
-```json
-{"id": "missing-email-rate", "claim": "40% of rows have no email", "value": 0.404, "n": 12043, "how": "df['email'].isna().mean()", "caveat": "concentrated in the east region"}
+```python
+import json, os
+
+def record_finding(id, claim, value, n, how, caveat=None):
+    """The ONLY writer for run/findings.jsonl. Copy it verbatim; these six keys are
+    the contract. `id` is what eda-storytelling cites a claim by, and `how` is what
+    lets someone re-derive the number — a row named {"finding": ...} instead has
+    neither, and the citation check rejects it."""
+    os.makedirs("run", exist_ok=True)
+    row = {"id": id, "claim": claim, "value": value, "n": int(n), "how": how,
+           "caveat": caveat}
+    assert set(row) == {"id", "claim", "value", "n", "how", "caveat"}
+    with open("run/findings.jsonl", "a") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+record_finding("missing-email-rate", "40% of rows have no email", 0.404, 12043,
+               "df['email'].isna().mean()", "concentrated in the east region")
 ```
+
+`id` is a stable kebab-case slug you choose; `value` may be a number, a string or
+a small dict when one number cannot carry the claim. Everything else is required
+even when it feels obvious — a finding with no `n` cannot be rounded honestly,
+and one with no `how` cannot be checked.
 
 Charts stay under `run/`; a notebook to poke at is `marimo_notebooks`'s. You may
 be the whole answer or one step in it: run this stage, skip what nobody asked
-for, and name a skipped stage that could change the answer.
+for, and if the answer ships from here end the reply with the literal
+`Stages: … · skipped: …` line `eda-storytelling` defines. Entering here on an
+export someone called clean does not make validation run: it is `skipped` unless
+you wrote `run/validation.json` this turn.
 
 Hand `run/findings.jsonl` to `eda-storytelling`, which picks what the reader
 sees, a posterior included — and to modeling when a fit was asked: a

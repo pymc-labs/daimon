@@ -85,8 +85,18 @@ does not ship. Cite change-log rows as "312 duplicates dropped, earliest kept".
 | dedup removing more than 1% of rows | yes, once in the caveats | it moves every denominator |
 | dtype coercion, whitespace strip, rename, the terminal write-clean row | no | it cannot change a reported number |
 
-**A stage nobody ran is a caveat too** — "no validation was asked for, so these
-totals are unvetted"; write up what ran, do not run the rest to tidy that away.
+**A stage nobody ran is a caveat too, and it is a required line, not a mood.**
+Every writeup ends with one literal line naming both sides:
+
+```
+Stages: ingestion, validation (pass) · skipped: cleaning (nothing to treat), EDA (not asked)
+```
+
+Write it even when nothing was skipped — then it reads `skipped: none`, and the
+reader learns the chain ran rather than guessing. Interrogating a claim that the
+data is already clean is not the same as validating it: if you did not write
+`run/validation.json` this turn, validation is skipped, however clean the data
+looked. Write up what ran; do not run the rest to tidy the line away.
 
 ## The same numbers, twice
 
