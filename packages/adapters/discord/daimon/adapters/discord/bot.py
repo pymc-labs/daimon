@@ -75,8 +75,14 @@ _EMBED_COLOR = theme.COLOR_BLURPLE  # Blurple — repo standard (help.py D-FORMA
 # mid-stream.
 _DRAIN_GRACE_S: float = 60.0
 
-# Bounded concurrency for the on_ready re-seed sweep.
-_SWEEP_CONCURRENCY = 4
+# Bounded concurrency for the on_ready re-seed sweep. Each tenant reconcile
+# issues roughly two dozen Skills API calls (a read per seeded skill, plus an
+# upload per skill that changed), and that API is rate limited per ORG at 100
+# requests/minute -- shared across every deployment on the operator's key. At 4
+# a cold sweep of 16 tenants exceeded it and the promote of 2026-08-20 landed
+# only 5 of 16 tenants' skills before 429ing; the agent reconcile then failed
+# attaching skills the sweep had never created.
+_SWEEP_CONCURRENCY = 2
 
 # Wall-clock ceiling on a single turn. Not a latency target -- legitimate
 # agentic turns run many minutes (notebooks, model fits), so this is set well

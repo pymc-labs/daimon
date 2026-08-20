@@ -35,3 +35,12 @@ DEFAULT_AGENT_MODEL: str = "claude-sonnet-5"
 # value here, because that number has moved before.
 AGENT_SKILL_CAP: int = 20
 AGENT_MCP_CAP: int = 20
+
+# How many times the SDK retries a request before giving up. The SDK's own
+# default is 2, which retries a 429 twice honouring `retry-after` and then
+# raises. That is enough for a burst and not enough for a sustained overage:
+# the Skills API is capped per ORG at 100 requests/minute, so a cold defaults
+# sweep across every tenant can sit over the line for longer than two retries
+# can wait out. Every adapter runtime passes this when constructing its
+# client, so a boot-time sweep paces itself instead of failing half-applied.
+MA_MAX_RETRIES: int = 8

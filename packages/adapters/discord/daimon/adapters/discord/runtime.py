@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from anthropic import AsyncAnthropic
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings
+from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.github_credentials import build_multifernet
@@ -85,6 +86,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[DiscordRuntime]:
     async with AsyncAnthropic(
         api_key=settings.anthropic.api_key.get_secret_value(),
         base_url=str(settings.anthropic.base_url),
+        max_retries=MA_MAX_RETRIES,
     ) as anthropic:
         notebook_rate_limiter = RateLimiter(
             max_requests=settings.notebook.publish_rate_per_hour,
