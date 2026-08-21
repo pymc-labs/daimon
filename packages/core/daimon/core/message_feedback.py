@@ -23,18 +23,20 @@ actually keyed on -- the row id is the only handle that is self-sufficient
 there. It is a random UUID, so it is not enumerable, and the write path that
 consumes it additionally gates on the clicking user's own platform id.
 
-Message feedback is deliberately Discord-only. A reaction event on either
-platform carries no interaction handle of its own, so both platforms would
-need the same button-in-DM bridge to turn a down-vote into private feedback
--- the actual blocker is that Slack's bot token lacks the two scopes that
-bridge would need: `reactions:read` (observe the reaction at all) and
-`im:write` (open the direct message to collect feedback). Adding either
-scope forces every installed workspace through a re-authorization flow, so
-the Discord-only scope is a deliberate, not accidental, exemption.
-`tests/parity/test_message_feedback_discord_only.py` is the executable
-record of that exemption -- it fails the day Slack's bot scopes grow either
-`reactions:read` or `im:write` without a Slack feedback path landing
-alongside them.
+Capture differs per platform. Discord seeds thumbs reactions and listens for
+them; a reaction event carries no interaction handle, so Discord bridges a
+down-vote into private feedback via a button delivered in a direct message
+(the `custom_id` grammar above). Slack deliberately does NOT use reactions:
+observing them would need the `reactions:read` bot scope and the DM bridge
+would need `im:write`, and adding either scope forces every installed
+workspace through a re-authorization flow. Slack instead renders vote
+buttons on the final answer message itself
+(`daimon.adapters.slack.feedback`) -- a button click is a block_actions
+payload whose `trigger_id` opens the feedback modal directly, so neither
+scope is needed and `vote_for_reaction`/`is_bot_authored` below have no
+Slack callers. `tests/parity/test_message_feedback_discord_only.py` is the
+executable record of that split -- it fails if either scope quietly appears
+or the Slack button surface disappears.
 """
 
 from __future__ import annotations

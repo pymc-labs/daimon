@@ -149,6 +149,28 @@
             ]),
             'type': 'context',
           }),
+          dict({
+            'block_id': 'feedback_vote',
+            'elements': list([
+              dict({
+                'action_id': 'feedback_vote:up',
+                'text': dict({
+                  'text': '👍',
+                  'type': 'plain_text',
+                }),
+                'type': 'button',
+              }),
+              dict({
+                'action_id': 'feedback_vote:down',
+                'text': dict({
+                  'text': '👎',
+                  'type': 'plain_text',
+                }),
+                'type': 'button',
+              }),
+            ]),
+            'type': 'actions',
+          }),
         ]),
         'text': 'Here is the answer.',
       }),

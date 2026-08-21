@@ -34,6 +34,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
 from daimon.adapters.slack.blockkit import EmbedEvent, State, TurnPhase, to_blocks, update
+from daimon.adapters.slack.feedback import build_feedback_actions_block
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.core.observability import capture_exception_with_scope
@@ -310,23 +311,30 @@ class SlackTurnLifecycle:
             first_chunk = chunks[0]
             # First chunk + the cost/usage footer replace the status message
             # in place; the terminal footer carries elapsed/tokens/cost and drops
-            # the cancel button.
+            # the cancel button. The feedback vote buttons ride the LAST chunk
+            # only, so a vote's message_id keys the same message final_ts (and
+            # the watermark) point at.
             self._terminal = True
             first_blocks: list[dict[str, Any]] = [
                 {"type": "markdown", "text": first_chunk},
                 *to_blocks(self._state, now=self._clock()),
             ]
+            if len(chunks) == 1:
+                first_blocks.append(build_feedback_actions_block())
             await self._post_or_update(first_blocks, _notification_text(first_chunk))
             surface_replaced = True
             assert self._status_ts is not None  # narrowing — _post_or_update always sets it
             current_ts = self._status_ts
 
             # Overflow chunks posted as new thread replies.
-            for chunk in chunks[1:]:
+            for i, chunk in enumerate(chunks[1:], start=2):
+                chunk_blocks: list[dict[str, Any]] = [{"type": "markdown", "text": chunk}]
+                if i == len(chunks):
+                    chunk_blocks.append(build_feedback_actions_block())
                 resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=self._channel,
                     thread_ts=self._thread_ts,
-                    blocks=[{"type": "markdown", "text": chunk}],
+                    blocks=chunk_blocks,
                     text=_notification_text(chunk),
                 )
                 current_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]

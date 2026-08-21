@@ -62,6 +62,11 @@ from daimon.adapters.slack.credential_requests import (
     run_repo_bind_credential_submission,
     run_skill_repo_credential_submission,
 )
+from daimon.adapters.slack.feedback import (
+    evaluate_feedback_text_submission,
+    handle_feedback_vote,
+    run_feedback_text_submission,
+)
 from daimon.adapters.slack.gating import is_external_interactive, is_slack_connect_external
 from daimon.adapters.slack.help import handle_help_command
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
@@ -581,6 +586,39 @@ class SlackApp:
                             log.info("slack.on_request.unknown_credential_kind", kind=_d.kind)
 
                     self._spawn(_run_credential_submission())
+            elif cb_id == "feedback_text":
+                # Pure evaluate (no I/O) — must run before the single ack.
+                _fb_decision = evaluate_feedback_text_submission(payload)
+                await (
+                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
+                        SocketModeResponse(
+                            envelope_id=req.envelope_id,
+                            payload=_fb_decision.response_payload,
+                        )
+                    )
+                )
+                if _fb_decision.proceed:
+                    _fb_team_info: dict[str, Any] = payload.get("team") or {}
+                    _fb_user_info: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_feedback_text(
+                        *,
+                        _t: str = str(_fb_team_info.get("id") or ""),
+                        _u: str = str(_fb_user_info.get("id") or ""),
+                        _c: str = _fb_decision.channel_id,
+                        _f: str = _fb_decision.feedback_id,
+                        _x: str = _fb_decision.text,
+                    ) -> None:
+                        await run_feedback_text_submission(
+                            self.runtime,
+                            team_id=_t,
+                            user_id=_u,
+                            channel_id=_c,
+                            feedback_id=_f,
+                            text=_x,
+                        )
+
+                    self._spawn(_run_feedback_text())
             else:
                 # Unknown view_submission callback_id — log and ack empty (T-82-20).
                 log.info("slack.on_request.unknown_view_submission_callback", callback_id=cb_id)
@@ -657,6 +695,8 @@ class SlackApp:
                     self._spawn(handle_agent_setup_action(self.runtime, payload))
                 elif action_id == SLACK_CREDENTIAL_ACTION_ID:
                     self._spawn(handle_credential_request_click(self.runtime, payload))
+                elif action_id.startswith("feedback_vote:"):
+                    self._spawn(handle_feedback_vote(self.runtime, payload))
         else:
             # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs (T-82-20).

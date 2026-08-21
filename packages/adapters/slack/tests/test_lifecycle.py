@@ -93,6 +93,16 @@ def _has_actions_block(blocks: list[dict[str, Any]]) -> bool:
     return any(b.get("type") == "actions" for b in blocks)
 
 
+def _action_ids(blocks: list[dict[str, Any]]) -> list[str]:
+    """All action_ids across every actions block, in render order."""
+    return [
+        el["action_id"]
+        for b in blocks
+        if b.get("type") == "actions"
+        for el in b.get("elements", [])
+    ]
+
+
 def _block_text(blocks: list[dict[str, Any]]) -> str:
     """Flatten all rendered text in a block list for substring assertions."""
     parts: list[str] = []
@@ -307,7 +317,9 @@ async def test_terminal_success_replaces_status_in_place(fake_slack_web_client: 
     assert any(b["type"] == "context" for b in blocks), (
         "terminal message must include the cost/usage footer context block"
     )
-    assert not _has_actions_block(blocks), "cancel button must be removed on terminal success"
+    assert "cancel_turn" not in _action_ids(blocks), (
+        "cancel button must be removed on terminal success"
+    )
 
 
 async def test_terminal_success_overflow_posts_and_widens_final_ts(
@@ -803,3 +815,69 @@ async def test_lifecycle_satisfies_turn_lifecycle_protocol(fake_slack_web_client
     assert callable(bound.on_reconnect), "on_reconnect must be callable"
     assert callable(bound.on_rate_limited), "on_rate_limited must be callable"
     assert callable(bound.on_interrupt_sent), "on_interrupt_sent must be callable"
+
+
+# ---------------------------------------------------------------------------
+# Task 3: Feedback vote buttons on the final answer
+# ---------------------------------------------------------------------------
+
+
+async def test_terminal_success_appends_feedback_buttons(fake_slack_web_client: Any) -> None:
+    """An answered turn carries the 👍/👎 vote buttons on the final message."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.on_sse_event(_thinking_event())
+
+    state = TurnState(content=[TextBlock(kind="text", text="The answer is 42.")])
+    await lc.on_terminal_success(state)
+
+    ids = _action_ids(_last_update_blocks(fake_slack_web_client))
+    assert "feedback_vote:up" in ids and "feedback_vote:down" in ids, (
+        "answered turn must render the two feedback vote buttons"
+    )
+
+
+async def test_overflow_puts_feedback_buttons_on_last_chunk_only(
+    fake_slack_web_client: Any,
+) -> None:
+    """With overflow, only the LAST posted chunk carries the vote buttons.
+
+    The buttons must sit on the message final_ts points at, so a vote's
+    message_id keys the same message the watermark does.
+    """
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.on_sse_event(_thinking_event())
+
+    long_text = "x" * 24000  # three chunks at _SLACK_LIMIT=11800
+    state = TurnState(content=[TextBlock(kind="text", text=long_text)])
+    await lc.on_terminal_success(state)
+
+    assert "feedback_vote:up" not in _action_ids(_last_update_blocks(fake_slack_web_client)), (
+        "the in-place first chunk must NOT carry vote buttons when overflow follows"
+    )
+    posts = fake_slack_web_client.mock.requests.get(("POST", _POST_URL), [])
+    overflow_bodies = [c.kwargs["json"] for c in posts[1:]]  # posts[0] is the status message
+    assert len(overflow_bodies) >= 2, "expected at least two overflow chunks"
+    for body in overflow_bodies[:-1]:
+        assert "feedback_vote:up" not in _action_ids(body["blocks"]), (
+            "intermediate overflow chunks must not carry vote buttons"
+        )
+    assert "feedback_vote:up" in _action_ids(overflow_bodies[-1]["blocks"]), (
+        "the last overflow chunk must carry the vote buttons"
+    )
+
+
+async def test_tool_only_turn_gets_no_feedback_buttons(fake_slack_web_client: Any) -> None:
+    """A turn with no final answer text must not invite feedback on it."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.on_sse_event(_thinking_event())
+
+    state = TurnState(
+        content=[
+            ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}),
+        ]
+    )
+    await lc.on_terminal_success(state)
+
+    assert "feedback_vote:up" not in _action_ids(_last_update_blocks(fake_slack_web_client)), (
+        "tool-only turn has no answer to vote on"
+    )
