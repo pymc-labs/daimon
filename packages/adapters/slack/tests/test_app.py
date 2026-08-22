@@ -2399,3 +2399,108 @@ async def test_on_request_view_submission_match_acks_update_and_spawns_purge() -
         "matching username must ack with response_action=update (Deleting… view)"
     )
     mock_purge.assert_called_once()  # pyright: ignore[reportUnknownMemberType]
+
+
+async def test_handle_app_mention_slack_connect_external_when_in_thread_rejects_in_thread(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """An in-thread Slack Connect rejection must carry the event's thread_ts.
+
+    Without it the notice posts at channel root while the sender is watching
+    the thread, and a refused mention is indistinguishable from a dead bot.
+    """
+    team_id = "T_APP_CONNECT_THREAD"
+    parent_ts = "1000000009.000001"
+    fernet_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((fernet_key,))
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(fernet, "xoxb-connect-thread"),
+    )
+    await db_session.flush()
+
+    app = _make_app(db_session_factory, crypto_key=fernet_key)
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "channel": "C_TEST",
+        "event_ts": "1000000009.000002",
+        "ts": "1000000009.000002",
+        "thread_ts": parent_ts,
+        "user": "U_EXTERNAL",
+        "user_team": "T_EXTERNAL",
+        "text": "<@U_BOT> hello",
+    }
+
+    await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+
+    ephemeral_calls = [
+        req
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == URL("https://slack.com/api/chat.postEphemeral")
+        for req in reqs
+    ]
+    assert len(ephemeral_calls) == 1, "the Connect rejection must be posted exactly once"
+    assert ephemeral_calls[0].kwargs["json"]["thread_ts"] == parent_ts, (
+        "an in-thread rejection must be posted into that thread, not at channel root"
+    )
+
+
+async def test_orchestrate_tenant_cap_when_in_thread_sheds_in_thread(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """An in-thread over-cap load shed must carry the event's thread_ts.
+
+    A shed turn posts nothing else, so a notice at channel root leaves the
+    thread looking exactly like a dropped turn.
+    """
+    team_id = "T_ORCH_CAP_THREAD"
+    channel = "C_TEST"
+    event_ts = "9000000009.000002"
+    parent_ts = "9000000009.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    cap = 1
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+
+    app, _ = _make_orchestrate_app(db_session_factory, max_concurrent_turns_per_tenant=cap)
+    app._inflight[tenant_id] = cap  # pyright: ignore[reportPrivateUsage]
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": event_ts,
+        "event_ts": event_ts,
+        "thread_ts": parent_ts,
+        "channel": channel,
+        "user": "U_TEST_CAP_THREAD",
+        "text": "<@U_BOT> hello",
+    }
+
+    with patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn:
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event,
+            team_id=team_id,
+            channel=channel,
+            event_ts=event_ts,
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+    ephemeral_calls = [
+        req
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == URL("https://slack.com/api/chat.postEphemeral")
+        for req in reqs
+    ]
+    assert len(ephemeral_calls) == 1, "the load shed must be announced exactly once"
+    assert ephemeral_calls[0].kwargs["json"]["thread_ts"] == parent_ts, (
+        "an in-thread shed must be announced in that thread, not at channel root"
+    )
+    mock_run_turn.assert_not_called()  # pyright: ignore[reportUnknownMemberType]

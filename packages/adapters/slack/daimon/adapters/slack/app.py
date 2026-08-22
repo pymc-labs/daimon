@@ -670,6 +670,11 @@ class SlackApp:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=channel,
                     user=event.get("user") or "",
+                    # Without thread_ts an in-thread mention's rejection lands at
+                    # channel root while the sender watches the thread. Only the real
+                    # thread_ts — never a ts fallback, which would tuck the notice
+                    # into a thread that does not exist yet. None is dropped by the SDK.
+                    thread_ts=event.get("thread_ts"),
                     text=(
                         "Sorry, I can only respond to members of this workspace. "
                         "Please ask a workspace member to mention me instead."
@@ -809,6 +814,8 @@ class SlackApp:
             await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 user=str(event.get("user") or ""),
+                # Real thread only — a shed root mention has no thread yet.
+                thread_ts=event.get("thread_ts"),
                 text=(
                     "This workspace has too many chats in flight right now — try again in a moment."
                 ),
