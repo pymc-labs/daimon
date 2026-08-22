@@ -2,7 +2,27 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, cast
+
+
+def mentions_bot(event: dict[str, Any], *, bot_user_id: str) -> bool:
+    """Return True when the event text explicitly mentions the bot user.
+
+    Slack has been observed delivering ``app_mention`` events for thread
+    replies that never mention the bot (official docs say the event fires only
+    on direct mentions). This is the Discord-parity belt-and-braces gate — the
+    Discord adapter checks ``message.mentions`` explicitly on every message.
+
+    Accepts both mention encodings: canonical ``<@U123>`` and the legacy
+    pipe-labelled ``<@U123|display-name>``. Fails closed on an
+    empty/unresolved ``bot_user_id``. Pure: no I/O.
+    """
+    if not bot_user_id:
+        return False
+    text = str(event.get("text") or "")
+    pattern = rf"<@{re.escape(bot_user_id)}(?:\|[^>]*)?>"
+    return re.search(pattern, text) is not None
 
 
 def is_slack_connect_external(event: dict[str, Any], *, team_id: str) -> bool:
