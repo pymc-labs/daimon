@@ -23,6 +23,10 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from pydantic import SecretStr
+from slack_sdk.http_retry.builtin_async_handlers import (
+    AsyncConnectionErrorRetryHandler,
+    AsyncRateLimitErrorRetryHandler,
+)
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -87,4 +91,48 @@ async def test_resolve_web_client_returns_async_web_client_with_decrypted_token(
     assert isinstance(result, AsyncWebClient), "resolve_web_client should return an AsyncWebClient"
     assert result.token == plaintext_token, (
         "resolve_web_client should decrypt and use the stored token"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_web_client_registers_rate_limit_retry_handler(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The resolved client must retry 429s, not raise on the first one.
+
+    slack_sdk's default handler set is connection-error only, so without this
+    every rate-limited call raises SlackApiError into a boundary that posts
+    nothing. The connection-error default must survive alongside it.
+    """
+    fernet_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((fernet_key,))
+    await upsert_slack_bot_token(
+        db_session,
+        team_id="T_RETRY",
+        encrypted_token=encrypt_token(fernet, "xoxb-retry-handlers"),
+    )
+    await db_session.flush()
+
+    settings = MagicMock()
+    settings.crypto.keys = (SecretStr(fernet_key),)
+    runtime = SlackRuntime(
+        settings=settings,
+        anthropic=MagicMock(spec=AsyncAnthropic),
+        sessionmaker=db_session_factory,
+        billing_config=None,
+        http_client=MagicMock(spec=httpx.AsyncClient),
+        resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+    )
+
+    client = await resolve_web_client(runtime, team_id="T_RETRY")
+
+    assert client is not None, "a seeded token row must yield a client"
+    handler_types = {type(handler) for handler in client.retry_handlers}
+    assert AsyncRateLimitErrorRetryHandler in handler_types, (
+        "a 429 must be retried, not raised on the first response"
+    )
+    assert AsyncConnectionErrorRetryHandler in handler_types, (
+        "the SDK's default connection-error retry must survive the override"
     )

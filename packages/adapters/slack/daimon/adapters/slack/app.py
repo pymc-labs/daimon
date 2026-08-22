@@ -54,7 +54,7 @@ from daimon.adapters.slack.billing_panel.actions import handle_billing_command, 
 from daimon.adapters.slack.context import build_context_xml, build_delta_xml
 from daimon.adapters.slack.gating import is_external_interactive, is_slack_connect_external
 from daimon.adapters.slack.help import handle_help_command
-from daimon.adapters.slack.interactions import resolve_web_client
+from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.memory import handle_memory_command
 from daimon.adapters.slack.privacy_panel.actions import (
@@ -661,7 +661,9 @@ class SlackApp:
                 tuple(k.get_secret_value() for k in self.runtime.settings.crypto.keys)
             )
             token = decrypt_token(fernet, row.encrypted_token)
-            client = AsyncWebClient(token=token)  # per-event only
+            client = AsyncWebClient(  # per-event only
+                token=token, retry_handlers=build_retry_handlers()
+            )
 
             # (4) SLACK CONNECT GATE — reject external-workspace senders.
             if is_slack_connect_external(event, team_id=team_id):

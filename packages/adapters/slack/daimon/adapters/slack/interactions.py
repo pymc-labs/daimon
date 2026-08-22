@@ -12,7 +12,25 @@ from __future__ import annotations
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
+from slack_sdk.http_retry.async_handler import AsyncRetryHandler
+from slack_sdk.http_retry.builtin_async_handlers import (
+    AsyncRateLimitErrorRetryHandler,
+    async_default_handlers,
+)
 from slack_sdk.web.async_client import AsyncWebClient
+
+
+def build_retry_handlers() -> list[AsyncRetryHandler]:
+    """Retry handlers for every AsyncWebClient we construct.
+
+    slack_sdk's default is connection-error retries only, so a 429 surfaces
+    immediately as ``SlackApiError``. Slack caps non-Marketplace apps at one
+    ``conversations.history``/``conversations.replies`` call per minute, and
+    the listener boundary posts nothing on failure, so an unretried 429 reads
+    as a dead bot. ``AsyncRateLimitErrorRetryHandler`` honours ``Retry-After``;
+    its default single retry is deliberate, since that wait can be 60s.
+    """
+    return [*async_default_handlers(), AsyncRateLimitErrorRetryHandler()]
 
 
 async def resolve_web_client(runtime: SlackRuntime, *, team_id: str) -> AsyncWebClient | None:
@@ -38,4 +56,6 @@ async def resolve_web_client(runtime: SlackRuntime, *, team_id: str) -> AsyncWeb
         return None
     fernet = build_multifernet(tuple(k.get_secret_value() for k in runtime.settings.crypto.keys))
     token = decrypt_token(fernet, row.encrypted_token)
-    return AsyncWebClient(token=token)  # per-event only — never cache
+    return AsyncWebClient(  # per-event only — never cache
+        token=token, retry_handlers=build_retry_handlers()
+    )

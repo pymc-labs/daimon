@@ -17,6 +17,11 @@ from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.slack_user_tokens import get_slack_user_token
 from fastmcp.exceptions import ToolError
+from slack_sdk.http_retry.async_handler import AsyncRetryHandler
+from slack_sdk.http_retry.builtin_async_handlers import (
+    AsyncRateLimitErrorRetryHandler,
+    async_default_handlers,
+)
 from slack_sdk.web.async_client import AsyncWebClient
 
 
@@ -30,6 +35,18 @@ def _require_team_id(auth: AuthIdentity) -> str:  # pyright: ignore[reportUnused
     if auth.external_id is None:
         raise ToolError("slack tools require a workspace context")
     return auth.external_id
+
+
+def _build_retry_handlers() -> list[AsyncRetryHandler]:
+    """Retry handlers for every AsyncWebClient built here.
+
+    slack_sdk defaults to connection-error retries only, so a 429 reaches the
+    tool caller as a bare error. Slack caps non-Marketplace apps at one
+    ``conversations.history``/``conversations.replies`` call per minute, which
+    the model-facing read tools trip easily. Duplicated from the Slack
+    adapter's ``build_retry_handlers`` — adapters must not import each other.
+    """
+    return [*async_default_handlers(), AsyncRateLimitErrorRetryHandler()]
 
 
 async def slack_web_client(runtime: McpRuntime, *, team_id: str) -> AsyncWebClient:
@@ -48,7 +65,7 @@ async def slack_web_client(runtime: McpRuntime, *, team_id: str) -> AsyncWebClie
         token = decrypt_token(runtime.fernet, row.encrypted_token)
     except InvalidToken as err:
         raise ToolError("workspace bot token could not be decrypted") from err
-    return AsyncWebClient(token=token)
+    return AsyncWebClient(token=token, retry_handlers=_build_retry_handlers())
 
 
 @dataclass(frozen=True)
@@ -85,7 +102,10 @@ async def slack_read_client(
                 "your connected Slack token could not be decrypted — "
                 "disconnect and reconnect via /privacy"
             ) from err
-        return SlackReadClient(client=AsyncWebClient(token=user_token), runs_as_user=True)
+        return SlackReadClient(
+            client=AsyncWebClient(token=user_token, retry_handlers=_build_retry_handlers()),
+            runs_as_user=True,
+        )
     return SlackReadClient(
         client=await slack_web_client(runtime, team_id=team_id), runs_as_user=False
     )

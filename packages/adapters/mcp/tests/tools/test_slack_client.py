@@ -33,6 +33,10 @@ from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
+from slack_sdk.http_retry.builtin_async_handlers import (
+    AsyncConnectionErrorRetryHandler,
+    AsyncRateLimitErrorRetryHandler,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -258,3 +262,50 @@ def test_build_connect_hint_contains_signed_connect_url() -> None:
         "hint must carry the per-user signed connect URL"
     )
     assert "admin" in hint, "hint must warn about admin-approval workspaces"
+
+
+@pytest.mark.asyncio
+async def test_slack_clients_register_rate_limit_retry_handler(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Both the bot-token and user-token read clients must retry 429s.
+
+    Slack caps non-Marketplace apps at one conversations.history /
+    conversations.replies call per minute, and these are the clients the
+    model-facing Slack read tools run on. slack_sdk's default handler set is
+    connection-error only, which must survive alongside the addition.
+    """
+    fernet_key = SecretStr(Fernet.generate_key().decode("ascii"))
+    fernet = build_multifernet((fernet_key.get_secret_value(),))
+    async with committing_sessionmaker() as session:
+        await upsert_slack_bot_token(
+            session, team_id="T_RETRY", encrypted_token=encrypt_token(fernet, "xoxb-bot")
+        )
+        await upsert_slack_user_token(
+            session,
+            team_id="T_RETRY",
+            slack_user_id="U_RETRY",
+            encrypted_token=encrypt_token(fernet, "xoxp-user"),
+            scopes="channels:history",
+        )
+        await session.commit()
+
+    runtime = McpRuntime(
+        session_factory=committing_sessionmaker,
+        client=MagicMock(spec=AsyncAnthropic),
+        settings=_build_settings(fernet_key=fernet_key),
+        deployment_default=DeploymentDefault(),
+        fernet=fernet,
+    )
+
+    bot_client = await slack_web_client(runtime, team_id="T_RETRY")
+    read = await slack_read_client(runtime, team_id="T_RETRY", slack_user_id="U_RETRY")
+
+    for label, client in (("bot", bot_client), ("user", read.client)):
+        handler_types = {type(handler) for handler in client.retry_handlers}
+        assert AsyncRateLimitErrorRetryHandler in handler_types, (
+            f"the {label} client must retry a 429 rather than raise on the first one"
+        )
+        assert AsyncConnectionErrorRetryHandler in handler_types, (
+            f"the {label} client must keep the SDK's default connection-error retry"
+        )
