@@ -432,3 +432,41 @@ def _dead_proc() -> subprocess.Popen[bytes]:
     proc.poll.return_value = 0  # dead
     proc.pid = 9999
     return proc  # type: ignore[return-value]
+
+
+async def test_failed_blog_respawn_clears_slug_uv_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A respawn that never becomes ready must clear the slug's uv cache.
+
+    Every failed sandboxed spawn leaves a fresh ephemeral uv environment in
+    the slug's ``home/.cache/uv``; a blog stuck in the kill/retry loop grows
+    that cache without bound until the data volume fills and every upload
+    fails. A retry may pay a cold install; it must not leak disk.
+    """
+    import notebook_host.main as main_mod
+    from notebook_host.blogs_store import BlogRecord, register_blog
+    from notebook_host.main import _spawn_blog_process  # pyright: ignore[reportPrivateUsage]
+
+    state, _calls = _make_state(tmp_path, monkeypatch, alive=False)
+
+    async def _never_ready(port: int, slug: str, timeout_s: float) -> bool:
+        return False
+
+    monkeypatch.setattr(main_mod, "wait_for_port", _never_ready)
+    paths = get_slug_paths(tmp_path, "pre-heavy")
+    paths.notebook.parent.mkdir(parents=True, exist_ok=True)
+    paths.notebook.write_text("import marimo as mo\napp = mo.App()", encoding="utf-8")
+    register_blog(tmp_path / "blogs.json", BlogRecord(slug="pre-heavy", created_at=1.0))
+    leaked_env = paths.home / ".cache" / "uv" / "environments-v2" / "leaked"
+    leaked_env.mkdir(parents=True)
+    (leaked_env / "pyvenv.cfg").write_text("home = /nowhere", encoding="utf-8")
+
+    spawned = await _spawn_blog_process(state, "pre-heavy")
+
+    assert spawned is False, "a spawn that never binds its port must report failure"
+    assert not (paths.home / ".cache" / "uv").exists(), (
+        "a failed respawn must remove the slug's uv cache so the retry loop cannot "
+        "accumulate leaked ephemeral environments"
+    )
+    assert paths.notebook.exists(), "clearing the cache must not touch the blog source"
