@@ -73,6 +73,7 @@ PROD_SEARCH_PATHS=(
   "packages/adapters/discord/daimon"
   "packages/adapters/mcp/daimon"
   "packages/adapters/scheduler/daimon"
+  "packages/adapters/slack/daimon"
 )
 
 # Files where each rule's match is acceptable (e.g. the fixture file itself
@@ -89,6 +90,7 @@ ALLOWLIST_T5=(
   "mcp/tools/agents.py"
   "cli/commands/agents.py"
   "discord/agent_setup/write.py"
+  "slack/agent_setup/write.py"
   # preflight probe agents are archived immediately — never host sessions/skills.
   "core/defaults/preflight.py"
 )
