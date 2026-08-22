@@ -5,6 +5,7 @@ from io import StringIO
 from typing import cast
 
 import pytest
+import typer
 from anthropic import AsyncAnthropic
 from daimon.adapters.cli.commands.tenants import tenants_delete, tenants_list
 from daimon.adapters.cli.runtime import CliRuntime
@@ -213,3 +214,45 @@ async def test_tenants_list_filters_by_platform(
     assert platforms == {"discord"}, "should only return discord tenants when filtered"
     cli_ids = [d["external_id"] for d in data if d["platform"] == "cli"]
     assert len(cli_ids) == 0, "cli tenants should be excluded when filtered to discord"
+
+
+@pytest.mark.asyncio
+async def test_tenants_list_filters_by_slack_platform(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    """`--platform slack` must be accepted — slack is a real Platform value.
+
+    The validator previously allowed only discord and cli, so every Slack
+    install was unreachable from `daimon tenants list` and `tenants delete`.
+    """
+    rt = _build_rt(db_session_factory, stub_anthropic)
+    console = _make_console()
+
+    async with db_session_factory() as s, s.begin():
+        await make_tenant(s, platform="slack", workspace_id="T_FILTER_SLACK")
+        await make_tenant(s, platform="discord", workspace_id="filter-guild-2")
+
+    await tenants_list(rt=rt, console=console, platform="slack", as_json=True)
+
+    out = cast(StringIO, console.file).getvalue()
+    data = json.loads(out)
+    assert {d["platform"] for d in data} == {"slack"}, (
+        "should only return slack tenants when filtered to slack"
+    )
+    assert "T_FILTER_SLACK" in {d["external_id"] for d in data}, (
+        "the seeded slack tenant must be listed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tenants_list_rejects_unknown_platform(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    """An unrecognized platform still fails loudly rather than deriving a wrong UUID."""
+    rt = _build_rt(db_session_factory, stub_anthropic)
+    console = _make_console()
+
+    with pytest.raises(typer.BadParameter, match="discord, cli, slack"):
+        await tenants_list(rt=rt, console=console, platform="teams", as_json=True)

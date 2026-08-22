@@ -24,10 +24,15 @@ from rich.console import Console
 tenants_app = typer.Typer(help="Tenants: list and delete.")
 
 
+_VALID_PLATFORMS = ("discord", "cli", "slack")
+
+
 def _validate_platform(value: str) -> Platform:
-    if value in ("discord", "cli"):
+    if value in _VALID_PLATFORMS:
         return value  # type: ignore[return-value]
-    raise typer.BadParameter(f"unsupported platform {value!r}; valid: discord, cli")
+    raise typer.BadParameter(
+        f"unsupported platform {value!r}; valid: {', '.join(_VALID_PLATFORMS)}"
+    )
 
 
 @tenants_app.command("list")

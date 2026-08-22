@@ -644,3 +644,60 @@ async def test_rekey_suffix_never_collides_with_later_bare_name(
     assert len(final_names) == 3, (
         f"post-rekey names must be unique within the tenant, got {sorted(final_names)}"
     )
+
+
+@pytest.mark.asyncio
+async def test_rekey_updates_slack_tenant_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A Slack tenant's user-owned agent is re-keyed too.
+
+    Slack stamps the same derived guild account on create/fork/edit, but the
+    command enumerated `platform="discord"` only, so Slack agents were left
+    pointing at a per-user account forever.
+    """
+    workspace_id = "T_REKEY_SLACK"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=workspace_id)
+    guild_account = derive_guild_account_uuid(tenant_id)
+    user_account = _user_account_id()
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=workspace_id)
+
+    agent_id = "agent_slack_rekey_001"
+    agent_data = _agent_json(
+        agent_id=agent_id,
+        name="slack-agent",
+        version=4,
+        metadata={
+            "daimon_tenant": str(tenant_id),
+            "daimon_name": "slack-agent",
+            "daimon_account": str(user_account),
+        },
+    )
+
+    update_bodies: list[dict[str, object]] = []
+
+    def on_update(req: httpx.Request, _m: object) -> httpx.Response:
+        update_bodies.append(json.loads(req.content))
+        return httpx.Response(200, json=agent_data)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([agent_data]))
+    router.add(
+        "GET", rf"/v1/agents/{agent_id}", lambda req, m: httpx.Response(200, json=agent_data)
+    )
+    router.add("POST", rf"/v1/agents/{agent_id}", on_update)
+
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = _build_rt(db_session_factory, router)
+
+    await agents_rekey(rt=rt, console=console, yes=True, dry_run=False)
+
+    assert len(update_bodies) == 1, (
+        "a slack tenant's user-owned agent must be re-keyed, not skipped by a platform filter"
+    )
+    raw_meta = update_bodies[0].get("metadata")
+    assert isinstance(raw_meta, dict), "update body must include metadata dict"
+    assert cast(dict[str, object], raw_meta).get("daimon_account") == str(guild_account), (
+        "daimon_account must be re-keyed to the derived guild account"
+    )

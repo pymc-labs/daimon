@@ -332,3 +332,49 @@ async def test_backfill_second_run_selects_zero_agents(
         "second run against already-patched agents must select zero agents "
         "and issue zero agents.update calls (structural idempotence)"
     )
+
+
+@pytest.mark.asyncio
+async def test_backfill_patches_slack_tenant_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A Slack tenant's toolless agent is patched too.
+
+    The command enumerated `platform="discord"` only, so every Slack install's
+    agents were silently skipped by this maintenance sweep.
+    """
+    workspace_id = "T_BACKFILL_SLACK"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=workspace_id)
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=workspace_id)
+
+    agent_id = "agent_toolless_slack_001"
+    agent_data = _agent_json(
+        agent_id=agent_id,
+        name="toolless-slack-agent",
+        version=2,
+        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "toolless-slack-agent"},
+        tools=[],
+    )
+
+    update_bodies: list[dict[str, object]] = []
+
+    def on_update(req: httpx.Request, _m: object) -> httpx.Response:
+        update_bodies.append(json.loads(req.content))
+        return httpx.Response(200, json=agent_data)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([agent_data]))
+    router.add(
+        "GET", rf"/v1/agents/{agent_id}", lambda req, m: httpx.Response(200, json=agent_data)
+    )
+    router.add("POST", rf"/v1/agents/{agent_id}", on_update)
+
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = _build_rt(db_session_factory, router)
+
+    await agents_backfill_toolset(rt=rt, console=console, yes=True, dry_run=False)
+
+    assert len(update_bodies) == 1, (
+        "a slack tenant's toolless agent must be patched, not skipped by a platform filter"
+    )

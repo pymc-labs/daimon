@@ -443,7 +443,7 @@ def agents_backfill_toolset_command(
 ) -> None:
     """Patch every tenant-tagged agent missing the base agent_toolset_20260401.
 
-    Enumerates every registered discord workspace, lists non-archived agents
+    Enumerates every registered Discord and Slack workspace, lists non-archived agents
     per tenant, and adds the base agent toolset to any agent that lacks it.
     Agents that already carry the toolset are skipped. Re-running selects zero
     agents (idempotent by construction).
@@ -466,7 +466,10 @@ async def agents_backfill_toolset(
     dry_run: bool,
 ) -> None:
     """Async implementation of backfill-toolset."""
+    # Chat platforms only: a Slack tenant's agents need the base toolset just as
+    # much as a Discord tenant's. The operator's own `cli` tenant is left alone.
     tenant_rows = await list_tenants_by_platform(rt.sessionmaker, platform="discord")
+    tenant_rows += await list_tenants_by_platform(rt.sessionmaker, platform="slack")
 
     report_rows: list[_BackfillRow] = []
     for tenant_row in tenant_rows:
@@ -549,11 +552,13 @@ def agents_rekey_command(
 ) -> None:
     """Re-key existing guild-tenant agents' daimon_account to the derived guild account.
 
-    Enumerates every registered discord workspace, compares each agent's current
-    daimon_account against the deterministically-derived guild account for that
-    tenant, and updates any agent still pointing at a per-user account.
+    Enumerates every registered Discord and Slack workspace, compares each
+    agent's current daimon_account against the deterministically-derived guild
+    account for that tenant, and updates any agent still pointing at a per-user
+    account. Slack stamps the same derived account on create/fork/edit
+    (slack/agent_setup/submit.py), so its agents belong in this sweep.
 
-    Pre-48 operator-tenant agents (no discord workspace) are never enumerated.
+    Operator-tenant agents (no chat workspace) are never enumerated.
     Already-guild-owned and system agents (no daimon_account) are skipped.
     """
     settings = load_settings()
@@ -574,8 +579,11 @@ async def agents_rekey(
     dry_run: bool,
 ) -> None:
     """Async implementation of rekey-guild-ownership."""
-    # Enumerate all registered discord tenants (no raw .list() — ISO-01).
+    # Enumerate registered chat tenants (no raw .list() — ISO-01). Filtering to
+    # discord silently left every Slack tenant's agents un-rekeyed; the operator's
+    # own `cli` tenant stays excluded, as the docstring promises.
     tenant_rows = await list_tenants_by_platform(rt.sessionmaker, platform="discord")
+    tenant_rows += await list_tenants_by_platform(rt.sessionmaker, platform="slack")
 
     # Collect items that need re-keying — (tenant_id, guild_account, agent_id,
     # name, current_acct) — plus the names already claimed by guild-owned agents
