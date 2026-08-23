@@ -440,26 +440,26 @@ async def test_request_env_credential_succeeds_for_non_admin_caller(
 # ---------------------------------------------------------------------------
 
 
-async def test_request_env_credential_rejects_slack_caller(
+async def test_request_env_credential_rejects_slack_caller_without_workspace(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(platform="slack", external_id=None, platform_user_id="U123")
-    with pytest.raises(ToolError, match="not supported on Slack"):
+    with pytest.raises(ToolError, match="workspace context"):
         await _request_env_credential_impl(
             runtime, auth, agent_name="daimon", key="OPENAI_API_KEY", purpose="x", channel_id="222"
         )
     assert await _row_count(db_session) == 0, "a rejected slack call must create no row"
 
 
-async def test_request_mcp_credential_rejects_slack_caller(
+async def test_request_mcp_credential_rejects_slack_caller_without_workspace(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(platform="slack", external_id=None, platform_user_id="U123")
-    with pytest.raises(ToolError, match="not supported on Slack"):
+    with pytest.raises(ToolError, match="workspace context"):
         await _request_mcp_credential_impl(
             runtime,
             auth,
@@ -720,3 +720,163 @@ async def test_request_env_credential_raises_when_button_post_fails(
     assert await _row_count(db_session) == 1, (
         "the credential request row is created before the button post is attempted"
     )
+
+
+# ---------------------------------------------------------------------------
+# Slack callers: the same mint, a Slack button post
+# ---------------------------------------------------------------------------
+
+_SLACK_TEAM_ID = "T_TEST"
+_SLACK_USER_ID = "U_CALLER"
+
+
+def _slack_runtime(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    client: AsyncAnthropic | None = None,
+    fernet: Any = None,
+) -> McpRuntime:
+    settings = Settings(
+        database=DatabaseSettings(url="postgresql+asyncpg://x/y"),  # pyright: ignore[reportArgumentType]
+        anthropic=AnthropicSettings(api_key=SecretStr("k")),
+    )
+    return McpRuntime(
+        session_factory=sessionmaker,
+        client=client if client is not None else MagicMock(),  # type: ignore[arg-type]
+        settings=settings,
+        deployment_default=DeploymentDefault(),
+        fernet=fernet,
+    )
+
+
+async def _seed_slack_bot_token(sessionmaker: async_sessionmaker[AsyncSession]) -> Any:
+    from cryptography.fernet import Fernet
+    from daimon.core.github_credentials import build_multifernet, encrypt_token
+    from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+
+    fernet = build_multifernet((Fernet.generate_key().decode("ascii"),))
+    async with sessionmaker() as session:
+        await upsert_slack_bot_token(
+            session,
+            team_id=_SLACK_TEAM_ID,
+            encrypted_token=encrypt_token(fernet, "xoxb-secret"),
+        )
+        await session.commit()
+    return fernet
+
+
+def _register_slack_post_defaults(m: Any, *, channel_id: str = "C_CRED") -> None:
+    import re as _re
+
+    channel_payload = {
+        "ok": True,
+        "channel": {"id": channel_id, "is_private": False, "is_im": False, "is_mpim": False},
+    }
+    m.post("https://slack.com/api/conversations.info", payload=channel_payload, repeat=True)
+    m.get(
+        _re.compile(r"https://slack\.com/api/conversations\.info.*"),
+        payload=channel_payload,
+        repeat=True,
+    )
+    m.post(
+        _re.compile(r"https://slack\.com/api/users\.info.*"),
+        payload={"ok": True, "user": {"id": _SLACK_USER_ID, "is_restricted": False}},
+        repeat=True,
+    )
+    m.get(
+        _re.compile(r"https://slack\.com/api/users\.info.*"),
+        payload={"ok": True, "user": {"id": _SLACK_USER_ID, "is_restricted": False}},
+        repeat=True,
+    )
+    m.post(
+        "https://slack.com/api/chat.postMessage",
+        payload={"ok": True, "ts": "1700000009.000900", "channel": channel_id},
+        repeat=True,
+    )
+
+
+async def test_request_env_credential_posts_slack_button_carrying_the_token(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    from aioresponses import aioresponses
+    from daimon.core.credential_requests import SLACK_ACTION_ID
+
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=_SLACK_TEAM_ID)
+    await db_session.commit()
+    fernet = await _seed_slack_bot_token(committing_sessionmaker)
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_env_slack", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _slack_runtime(committing_sessionmaker, client=client, fernet=fernet)
+    auth = _auth_identity(
+        platform="slack",
+        external_id=_SLACK_TEAM_ID,
+        platform_user_id=_SLACK_USER_ID,
+        tenant_id=tenant.id,
+    )
+
+    with aioresponses() as m:
+        _register_slack_post_defaults(m)
+        result = await _request_env_credential_impl(
+            runtime,
+            auth,
+            agent_name="daimon",
+            key="OPENAI_API_KEY",
+            purpose="calling the OpenAI API",
+            channel_id="C_CRED",
+        )
+        import yarl
+
+        posts = m.requests[("POST", yarl.URL("https://slack.com/api/chat.postMessage"))]
+
+    assert result.kind == "env" and result.message_id == "1700000009.000900"
+    assert await _row_count(db_session) == 1
+
+    body = posts[0].kwargs["json"]
+    actions = [b for b in body["blocks"] if b["type"] == "actions"]
+    assert len(actions) == 1, "the posted message must carry exactly one actions block"
+    button = actions[0]["elements"][0]
+    assert button["action_id"] == SLACK_ACTION_ID
+    row = await peek_credential_request(db_session, token=button["value"])
+    assert row is not None and row.kind == "env", (
+        "the button's value must be the minted single-use token"
+    )
+    assert row.requester_platform_user_id == _SLACK_USER_ID
+    assert "OPENAI_API_KEY" in button["text"]["text"]
+    assert len(button["text"]["text"]) <= 75, "Slack caps button text at 75 characters"
+
+
+async def test_request_repo_binding_posts_slack_button(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    from aioresponses import aioresponses
+
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=_SLACK_TEAM_ID)
+    await db_session.commit()
+    fernet = await _seed_slack_bot_token(committing_sessionmaker)
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_repo_slack", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _slack_runtime(committing_sessionmaker, client=client, fernet=fernet)
+    auth = _auth_identity(
+        platform="slack",
+        external_id=_SLACK_TEAM_ID,
+        platform_user_id=_SLACK_USER_ID,
+        tenant_id=tenant.id,
+    )
+
+    with aioresponses() as m:
+        _register_slack_post_defaults(m)
+        result = await _request_repo_binding_impl(
+            runtime,
+            auth,
+            agent_name="daimon",
+            repo_url="https://github.com/owner/repo",
+            purpose="cloning the project",
+            channel_id="C_CRED",
+        )
+
+    assert result.kind == "repo"
+    assert await _row_count(db_session) == 1

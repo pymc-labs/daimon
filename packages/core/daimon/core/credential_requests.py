@@ -55,6 +55,17 @@ DEFAULT_TTL: Final[dt.timedelta] = dt.timedelta(minutes=30)
 # Discord's documented Button.label limit.
 MAX_BUTTON_LABEL_CHARS: Final[int] = 80
 
+# Slack's documented button-element text limit (plain_text, 75 characters).
+MAX_SLACK_BUTTON_LABEL_CHARS: Final[int] = 75
+
+# Slack routes block_actions by action_id, and a button element carries the
+# opaque request token in its `value` field instead of the id itself — the
+# Slack counterpart of Discord's `custom_id` encoding above. Both processes
+# (the MCP server posts the button, the Slack bot dispatches the click) read
+# this one constant, for the same divergent-copy reason the custom_id
+# builders live here.
+SLACK_ACTION_ID: Final[str] = "credential_request"
+
 # The full label prefix for each kind. "env" and "mcp" reproduce the
 # pre-repo-kind wording byte-for-byte. "repo" cannot reuse the "Add {X}
 # credential: " interpolation — a repo binding is not a credential.
@@ -108,15 +119,22 @@ def build_custom_id(token: str) -> str:
     return f"{CUSTOM_ID_PREFIX}{token}"
 
 
-def build_button_label(kind: CredentialRequestKind, target: str) -> str:
+def build_button_label(
+    kind: CredentialRequestKind,
+    target: str,
+    *,
+    max_chars: int = MAX_BUTTON_LABEL_CHARS,
+) -> str:
     """Return the human-readable button label naming the exact target.
 
-    Truncates `target` (with a trailing "…") when it would overflow Discord's
-    80-character button label limit — the label, not the custom_id, is what
-    names the exact target, so it must fit on its own.
+    Truncates `target` (with a trailing "…") when it would overflow the
+    platform's button label limit — the label, not the custom_id, is what
+    names the exact target, so it must fit on its own. Discord callers use
+    the 80-character default; Slack callers pass
+    `MAX_SLACK_BUTTON_LABEL_CHARS` (75).
     """
     prefix = _KIND_LABEL_PREFIX[kind]
-    available = MAX_BUTTON_LABEL_CHARS - len(prefix)
+    available = max_chars - len(prefix)
     if len(target) <= available:
         return f"{prefix}{target}"
     truncated = target[: available - 1] + "…"

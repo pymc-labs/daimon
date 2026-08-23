@@ -4,17 +4,18 @@ request_repo_binding.
 These three tools replace the "go open /agent-setup" redirect for a task that
 needs an env secret, an auth-required MCP server, or a repo bound to an
 agent: the agent mints a single-use, TTL-bounded ``credential_requests`` row
-and posts a target-naming button in the thread
-(``tools/discord/_credential_button.py``). Clicking the button opens a
-native Discord modal in a different process (the Discord bot, worker VM) —
-the secret itself never travels through either process's tool arguments, so
+and posts a target-naming button in the thread (``tools/discord/`` or
+``tools/slack/_credential_button.py``, by the caller's platform). Clicking
+the button opens a native modal in a different process (the platform bot,
+worker VM) — the secret itself never travels through either process's tool
+arguments, so
 none of the three tools below has a token/secret/value parameter, and none
 should ever be added.
 
 Deliberately NOT admin-gated — the chat-mutation admin check other tools call
 at the top of their impl is intentionally absent here. Authorization for the
-actual credential write happens at click time instead, when the Discord
-button's ``interaction_check`` compares the clicking user against
+actual credential write happens at click time instead, when the button's
+click gate compares the clicking user against
 ``requester_platform_user_id`` on the minted row. This widens today's
 admin-only credential writes (``/agent-setup``'s mutation buttons are
 ``is_admin``-only) in exchange for one-click UX — a deliberate, accepted
@@ -34,6 +35,9 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.discord import (
     _post_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.slack._credential_button import (
+    _post_slack_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.credential_requests import (
     DEFAULT_TTL,
@@ -73,6 +77,21 @@ class RequestCredentialResult(BaseModel):
     target: str
     expires_at: datetime
     message_id: str
+
+
+def _require_requestable_platform(auth: AuthIdentity) -> str:
+    """Refuse before the mint when the click could never be dispatched.
+
+    The row is minted before the button is posted, so a caller whose platform
+    context cannot carry a button (no bound identity, or a Slack caller with
+    no workspace) must be refused here — after the mint the failure surfaces
+    as "created but posting failed", leaving a dead row behind.
+    """
+    if auth.platform_user_id is None:
+        raise ToolError("credential requests require a platform-bound identity")
+    if auth.platform == "slack" and auth.external_id is None:
+        raise ToolError("credential requests require a workspace context")
+    return auth.platform_user_id
 
 
 async def _resolve_agent_uuid(
@@ -117,8 +136,13 @@ async def _mint_and_post(
             channel_id=channel_id,
             expires_at=expires_at,
         )
+    post = (
+        _post_slack_credential_button_impl
+        if auth.platform == "slack"
+        else _post_credential_button_impl
+    )
     try:
-        message_id = await _post_credential_button_impl(
+        message_id = await post(
             runtime,
             auth,
             channel_id=channel_id,
@@ -149,10 +173,7 @@ async def _request_env_credential_impl(
     purpose: str,
     channel_id: str,
 ) -> RequestCredentialResult:
-    if auth.platform == "slack":
-        raise ToolError("request_env_credential is not supported on Slack yet")
-    if auth.platform_user_id is None:
-        raise ToolError("credential requests require a platform-bound identity")
+    requester = _require_requestable_platform(auth)
     if not _POSIX_KEY_RE.match(key):
         raise ToolError(
             "env key must match [A-Za-z_][A-Za-z0-9_]* "
@@ -166,7 +187,7 @@ async def _request_env_credential_impl(
         target=key,
         mcp_server_url=None,
         agent_id=agent_id,
-        requester_platform_user_id=auth.platform_user_id,
+        requester_platform_user_id=requester,
         agent_name=agent_name,
         purpose=purpose,
         channel_id=channel_id,
@@ -182,10 +203,7 @@ async def _request_mcp_credential_impl(
     url: str,
     channel_id: str,
 ) -> RequestCredentialResult:
-    if auth.platform == "slack":
-        raise ToolError("request_mcp_credential is not supported on Slack yet")
-    if auth.platform_user_id is None:
-        raise ToolError("credential requests require a platform-bound identity")
+    requester = _require_requestable_platform(auth)
     if urlparse(url).scheme not in ("http", "https"):
         raise ToolError("mcp server url must be http or https")
     # Normalise the trailing slash once, here, before the URL is persisted.
@@ -203,7 +221,7 @@ async def _request_mcp_credential_impl(
         target=server_name,
         mcp_server_url=url,
         agent_id=agent_id,
-        requester_platform_user_id=auth.platform_user_id,
+        requester_platform_user_id=requester,
         agent_name=agent_name,
         purpose=f"connecting the MCP server '{server_name}'",
         channel_id=channel_id,
@@ -226,10 +244,7 @@ async def _request_skill_repo_credential_impl(
     purpose: str,
     channel_id: str,
 ) -> RequestCredentialResult:
-    if auth.platform == "slack":
-        raise ToolError("request_skill_repo_credential is not supported on Slack yet")
-    if auth.platform_user_id is None:
-        raise ToolError("credential requests require a platform-bound identity")
+    requester = _require_requestable_platform(auth)
     if urlparse(repo_url).scheme not in ("http", "https"):
         raise ToolError("repo url must be http or https, e.g. https://github.com/owner/repo")
     if not _OWNER_REPO_RE.fullmatch(normalize_owner_repo(repo_url)):
@@ -250,7 +265,7 @@ async def _request_skill_repo_credential_impl(
         target=build_skill_repo_target(repo_url, branch, path),
         mcp_server_url=None,
         agent_id=agent_id,
-        requester_platform_user_id=auth.platform_user_id,
+        requester_platform_user_id=requester,
         agent_name=agent_name,
         purpose=purpose,
         channel_id=channel_id,
@@ -266,10 +281,7 @@ async def _request_repo_binding_impl(
     purpose: str,
     channel_id: str,
 ) -> RequestCredentialResult:
-    if auth.platform == "slack":
-        raise ToolError("request_repo_binding is not supported on Slack yet")
-    if auth.platform_user_id is None:
-        raise ToolError("credential requests require a platform-bound identity")
+    requester = _require_requestable_platform(auth)
     if urlparse(repo_url).scheme not in ("http", "https"):
         raise ToolError("repo url must be http or https, e.g. https://github.com/owner/repo")
     if not _OWNER_REPO_RE.fullmatch(normalize_owner_repo(repo_url)):
@@ -284,7 +296,7 @@ async def _request_repo_binding_impl(
         target=repo_url,
         mcp_server_url=None,
         agent_id=agent_id,
-        requester_platform_user_id=auth.platform_user_id,
+        requester_platform_user_id=requester,
         agent_name=agent_name,
         purpose=purpose,
         channel_id=channel_id,
@@ -304,7 +316,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
 
         Call this INSTEAD of ever accepting a secret value in chat. Posts a
         button in the thread naming the exact env key; clicking it opens a
-        native Discord modal where the user enters the value privately — it
+        private form where the user enters the value — it
         never appears in this channel or in your context. Once added, the
         credential becomes usable by everyone who talks to ``agent_name``.
         """
@@ -330,8 +342,8 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         Call this INSTEAD of ever accepting a token value in chat, and instead
         of ``attach_mcp_server`` when the server requires authentication.
         Posts a button in the thread naming the exact server; clicking it
-        opens a native Discord modal where the user enters the token
-        privately — it never appears in this channel or in your context.
+        opens a private form where the user enters the token —
+        it never appears in this channel or in your context.
         Once added, the credential becomes usable by everyone who talks to
         ``agent_name``.
         """
@@ -401,7 +413,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
 
         Call this INSTEAD of ever telling the user to open ``/agent-setup``
         to bind a repository. Posts a button in the thread naming the exact
-        repo and agent; clicking it opens a native Discord modal where the
+        repo and agent; clicking it opens a private form where the
         user confirms the branch and, only if the repo is private and not
         otherwise readable, pastes a GitHub token that never appears in this
         channel or in your context.

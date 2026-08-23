@@ -52,6 +52,15 @@ from daimon.adapters.slack.attachments import (
 )
 from daimon.adapters.slack.billing_panel.actions import handle_billing_command, handle_topup_select
 from daimon.adapters.slack.context import build_context_xml, build_delta_xml
+from daimon.adapters.slack.credential_requests import (
+    CredentialSubmissionDecision,
+    evaluate_credential_submission,
+    handle_credential_request_click,
+    run_env_credential_submission,
+    run_mcp_credential_submission,
+    run_repo_bind_credential_submission,
+    run_skill_repo_credential_submission,
+)
 from daimon.adapters.slack.gating import is_external_interactive, is_slack_connect_external
 from daimon.adapters.slack.help import handle_help_command
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
@@ -80,6 +89,7 @@ from daimon.adapters.slack.vision import (
     download_as_image_blocks,
     is_vision_image,
 )
+from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
@@ -478,6 +488,46 @@ class SlackApp:
                             )
 
                     self._spawn(_run_agent_setup_submission())
+            elif cb_id.startswith("credential_request__"):
+                # Pure pre-ack evaluation (Pattern 2, as feedback/agent_setup).
+                _cred_decision = evaluate_credential_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(
+                        envelope_id=req.envelope_id,
+                        payload=_cred_decision.response_payload,
+                    )
+                )
+                if _cred_decision.proceed:
+                    cred_team: dict[str, Any] = payload.get("team") or {}
+                    cred_user: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_credential_submission(
+                        _d: CredentialSubmissionDecision = _cred_decision,
+                        _team: str = str(cred_team.get("id") or ""),
+                        _user: str = str(cred_user.get("id") or ""),
+                    ) -> None:
+                        common: dict[str, Any] = {
+                            "team_id": _team,
+                            "user_id": _user,
+                            "channel_id": _d.channel_id,
+                            "message_ts": _d.message_ts,
+                            "token": _d.token,
+                            "value": _d.value,
+                        }
+                        if _d.kind == "env":
+                            await run_env_credential_submission(self.runtime, **common)
+                        elif _d.kind == "mcp":
+                            await run_mcp_credential_submission(self.runtime, **common)
+                        elif _d.kind == "skill_repo":
+                            await run_skill_repo_credential_submission(self.runtime, **common)
+                        elif _d.kind == "repo":
+                            await run_repo_bind_credential_submission(
+                                self.runtime, branch=_d.branch, **common
+                            )
+                        else:
+                            log.info("slack.on_request.unknown_credential_kind", kind=_d.kind)
+
+                    self._spawn(_run_credential_submission())
             else:
                 # Unknown view_submission callback_id — log and ack empty (T-82-20).
                 log.info("slack.on_request.unknown_view_submission_callback", callback_id=cb_id)
@@ -552,6 +602,8 @@ class SlackApp:
                     self._spawn(handle_privacy_block_action(self.runtime, payload))
                 elif action_id.startswith("agent_setup__"):
                     self._spawn(handle_agent_setup_action(self.runtime, payload))
+                elif action_id == SLACK_CREDENTIAL_ACTION_ID:
+                    self._spawn(handle_credential_request_click(self.runtime, payload))
         else:
             # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs (T-82-20).

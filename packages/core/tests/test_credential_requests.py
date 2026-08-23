@@ -123,3 +123,23 @@ def test_split_skill_repo_target_defaults_match_sync_skills_defaults() -> None:
         "main",
         "",
     )
+
+
+def test_slack_action_id_is_stable() -> None:
+    from daimon.core.credential_requests import SLACK_ACTION_ID
+
+    assert SLACK_ACTION_ID == "credential_request"
+
+
+def test_build_button_label_honours_slack_label_limit() -> None:
+    from daimon.core.credential_requests import MAX_SLACK_BUTTON_LABEL_CHARS
+
+    label = build_button_label("mcp", "x" * 200, max_chars=MAX_SLACK_BUTTON_LABEL_CHARS)
+    assert len(label) == MAX_SLACK_BUTTON_LABEL_CHARS == 75
+    assert label.startswith("Add MCP credential: ")
+    assert label.endswith("…")
+
+
+def test_build_button_label_default_limit_unchanged() -> None:
+    label = build_button_label("mcp", "x" * 200)
+    assert len(label) == MAX_BUTTON_LABEL_CHARS == 80

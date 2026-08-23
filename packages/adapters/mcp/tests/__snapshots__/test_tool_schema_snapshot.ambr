@@ -2131,7 +2131,7 @@
         
         Call this INSTEAD of ever accepting a secret value in chat. Posts a
         button in the thread naming the exact env key; clicking it opens a
-        native Discord modal where the user enters the value privately — it
+        private form where the user enters the value — it
         never appears in this channel or in your context. Once added, the
         credential becomes usable by everyone who talks to ``agent_name``.
       ''',
@@ -2167,8 +2167,8 @@
         Call this INSTEAD of ever accepting a token value in chat, and instead
         of ``attach_mcp_server`` when the server requires authentication.
         Posts a button in the thread naming the exact server; clicking it
-        opens a native Discord modal where the user enters the token
-        privately — it never appears in this channel or in your context.
+        opens a private form where the user enters the token —
+        it never appears in this channel or in your context.
         Once added, the credential becomes usable by everyone who talks to
         ``agent_name``.
       ''',
@@ -2203,7 +2203,7 @@
         
         Call this INSTEAD of ever telling the user to open ``/agent-setup``
         to bind a repository. Posts a button in the thread naming the exact
-        repo and agent; clicking it opens a native Discord modal where the
+        repo and agent; clicking it opens a private form where the
         user confirms the branch and, only if the repo is private and not
         otherwise readable, pastes a GitHub token that never appears in this
         channel or in your context.
