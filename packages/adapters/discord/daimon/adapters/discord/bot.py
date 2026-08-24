@@ -843,6 +843,17 @@ class DaimonBot(commands.Bot):
             cap = self.runtime.settings.discord.max_concurrent_turns_per_tenant
             count = self._inflight.get(tenant_id, 0)
             if not should_admit_turn(current_in_flight=count, cap=cap):
+                # Mirror of the Slack shed log — here the notice is a visible
+                # channel message, but the log keeps shed counts greppable
+                # across both adapters.
+                log.info(
+                    "turn.skipped.concurrency_shed",
+                    tenant_id=str(tenant_id),
+                    guild_id=str(message.guild.id) if message.guild else None,
+                    channel_id=str(message.channel.id),
+                    in_flight=count,
+                    cap=cap,
+                )
                 await message.channel.send(
                     "This server has too many chats in flight right now — try again in a moment."
                 )
