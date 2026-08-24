@@ -86,6 +86,11 @@ class SkillSyncResult(BaseModel):
     The counts stayed permanently lopsided while the tool had no way to
     attach: ``attached_count`` was structurally 0 and the summary could only
     describe the gap it could not close. ``agent_name`` closes it.
+
+    ``attached_count`` is tenant-wide, not per-call: re-importing a skill that
+    some agent already mounts counts it, even with no ``agent_name``. Only
+    ``summary`` distinguishes "this call attached it" from "it was already
+    attached", so do not read the count as this call's effect.
     """
 
     source_url: str
@@ -308,20 +313,24 @@ async def _sync_impl(
             runtime, auth, agent_name=agent_name, skill_ids=registry_ids
         )
 
-    # Recounted AFTER any attach, so attached_count reflects this call's own
-    # effect rather than the state it observed on the way in.
+    # Recounted AFTER any attach so this call's own attach is included. Note the
+    # count is tenant-wide -- "of what I imported, how much is attached to some
+    # agent" -- so it can be non-zero on an import that attached nothing. The
+    # summary has to say which of the two it is, or the caller reads a re-import
+    # of already-attached skills as an attach it just performed.
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     attached_ids = {skill.skill_id for agent in agents for skill in agent.skills}
     attached = registry_ids & attached_ids
 
-    summary = (
-        f"{len(registry_ids)} skill(s) imported into the workspace's shared skill "
-        f"library; {len(attached)} attached to an agent."
-        + (
-            attach_note
-            or " Importing and attaching are separate steps — pass agent_name to do both."
+    library = f"{len(registry_ids)} skill(s) imported into the workspace's shared skill library"
+    if agent_name is not None:
+        summary = f"{library}; {len(attached)} now attached to an agent." + attach_note
+    else:
+        summary = (
+            f"{library}. This call attached nothing: {len(attached)} of the "
+            f"{len(registry_ids)} are already attached to an agent. Pass agent_name "
+            "to import and attach in one step."
         )
-    )
     return SkillSyncResult(
         source_url=url,
         branch=branch,

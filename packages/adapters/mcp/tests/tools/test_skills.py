@@ -541,6 +541,13 @@ async def test_sync_impl_reports_one_attached_when_an_existing_agent_already_has
 
     assert result.registry_count == 1
     assert result.attached_count == 1, "the already-attached synced skill must be counted"
+    assert "attached nothing" in result.summary, (
+        "an import with no agent_name attaches nothing, so the summary must say so -- "
+        "the tenant-wide count alone reads as an attach this call performed"
+    )
+    assert "already attached" in result.summary, (
+        "the summary must attribute the count to prior state, not to this call"
+    )
 
 
 async def test_sync_impl_excludes_failed_outcome_from_both_counts(tmp_path: Path) -> None:
@@ -793,6 +800,9 @@ async def test_sync_impl_attaches_to_the_named_agent_and_preserves_its_existing_
         "attached_count must reflect this call's own attach, not the state it saw on the way in"
     )
     assert "agent" in result.summary, "the summary must name the agent it attached to"
+    assert "attached nothing" not in result.summary, (
+        "an attach did happen here, so the no-agent_name disclaimer must not fire"
+    )
 
 
 async def test_sync_impl_anonymous_404_names_the_credential_remedy() -> None:
