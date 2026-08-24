@@ -37,7 +37,7 @@ from daimon.adapters.discord.vision import (
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
-from daimon.core.defaults.report import Action, ApplyReport
+from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
@@ -190,24 +190,6 @@ def _build_snag_embed() -> discord.Embed:
         description="Setup hit a snag — still working on it. Mention me to nudge it along.",
         color=_EMBED_COLOR,
     )
-
-
-def _compose_failure_reason(report: ApplyReport) -> str | None:
-    """Compose a persisted reason from a report's failed outcomes only, one
-    line per failure naming the resource kind, name, and its recorded error.
-    Pure -- no I/O. Returns None when the report has no failures.
-
-    Composed ONLY from the outcome's own recorded fields -- never a raw
-    exception repr of a credentialed request -- so a provider secret or
-    request body can never land in this operator-visible column."""
-    failures = [
-        o
-        for o in (*report.agents, *report.environments, *report.skills, *report.system_config)
-        if o.action is Action.FAILED
-    ]
-    if not failures:
-        return None
-    return "\n".join(f"{o.kind} {o.name!r}: {o.error}" for o in failures)
 
 
 def _pick_post_channel(guild: discord.Guild) -> discord.abc.Messageable | None:
@@ -452,7 +434,7 @@ class DaimonBot(commands.Bot):
                 if not was_ready:
                     await self._post_to_guild(guild, _build_ready_embed())
             else:
-                reason = roster_failure_reason or _compose_failure_reason(report)
+                reason = roster_failure_reason or compose_failure_reason(report)
                 if was_ready:
                     # A previously-ready install stays ready: a transient reconcile
                     # failure must not take a working guild's turns offline. Record

@@ -14,6 +14,7 @@ import sys
 
 import structlog
 from daimon.adapters.slack.app import SlackApp
+from daimon.adapters.slack.boot_sweep import run_boot_sweep
 from daimon.adapters.slack.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.health import start_liveness_responder
@@ -80,6 +81,30 @@ async def main() -> None:
         log.info("starting_slack_listener", health_port=settings.slack.health_port)
         try:
             await client.connect()
+            # Boot-time reconcile sweep, in the background so a slow provider
+            # cannot delay mention handling. A crash is logged, never raised —
+            # the listener must outlive its sweep.
+            sweep_task: asyncio.Task[None] = asyncio.create_task(
+                run_boot_sweep(
+                    anthropic=runtime.anthropic,
+                    sessionmaker=runtime.sessionmaker,
+                    defaults_root=settings.defaults_root,
+                    deployment_default=runtime.deployment_default,
+                    public_url=(
+                        str(settings.mcp.public_url)
+                        if settings.mcp.public_url is not None
+                        else None
+                    ),
+                )
+            )
+            _bg_tasks.add(sweep_task)
+
+            def _on_sweep_done(task: asyncio.Task[None]) -> None:
+                _bg_tasks.discard(task)
+                if not task.cancelled() and task.exception() is not None:
+                    log.error("slack.boot_sweep_crashed", exc_info=task.exception())
+
+            sweep_task.add_done_callback(_on_sweep_done)
             await stop.wait()  # released by _shutdown after drain completes
         finally:
             health_server.close()
