@@ -36,9 +36,15 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Final, cast
 
+import anthropic
 import httpx
 import structlog
-from daimon.adapters.slack.admin import resolve_is_admin
+from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAgentsSkillParams
+from daimon.adapters.slack.admin import (
+    _dev_allow_all_admin,  # pyright: ignore[reportPrivateUsage]
+    resolve_is_admin,
+)
 from daimon.adapters.slack.agent_setup.write import (
     load_agent_inline_pat,
     mask_tail,
@@ -53,11 +59,14 @@ from daimon.core.credential_requests import (
     build_button_label,
     split_skill_repo_target,
 )
-from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.defaults.report import Action, ResourceOutcome
+from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.github_visibility import is_public_repo, pat_can_access_repo
+from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.mcp_attach import attach_mcp_server_to_agent
 from daimon.core.mcp_vault import add_external_mcp_credential
@@ -340,7 +349,7 @@ async def _refuse_if_shared_and_not_admin_for_request(
 
     Returns True when the caller must return immediately (refused).
     """
-    if await resolve_is_admin(client, user_id=user_id):
+    if await resolve_is_admin(client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)):
         return False
     agent = await find_agent_by_derived_uuid(
         runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
@@ -419,10 +428,10 @@ async def handle_credential_request_click(runtime: SlackRuntime, payload: dict[s
         refusal = _WRONG_WORKSPACE
     elif user_id != row.requester_platform_user_id:
         refusal = _WRONG_REQUESTER
-    elif row.used_at is not None:
-        refusal = _ALREADY_USED
     elif row.expires_at < datetime.now(UTC):
         refusal = _EXPIRED
+    elif row.used_at is not None:
+        refusal = _ALREADY_USED
     if refusal is not None or row is None:
         await _post_ephemeral(
             client, channel_id=channel_id, user_id=user_id, text=refusal or _NO_LONGER_VALID
@@ -785,6 +794,63 @@ async def _resolve_repo_binding_credential(
     return "anon:", RepoAccessProof(kind="public", at=now, account_id=account_id)
 
 
+async def _attach_skills_to_requested_agent(
+    runtime: SlackRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    outcomes: list[ResourceOutcome],
+) -> str:
+    """Attach the just-imported skills to the agent this request named.
+
+    Importing puts skills in the tenant's shared library; it does not put
+    them on an agent. The request row already names the agent, so doing
+    only the import leaves the user staring at an agent with no skills and
+    no way to tell that anything worked.
+
+    Returns prose rather than raising: the import has already succeeded by
+    the time this runs, so a failure here is partial and both halves must
+    be reported truthfully.
+    """
+    skill_ids = sorted(
+        outcome.anthropic_id
+        for outcome in outcomes
+        if outcome.anthropic_id is not None and outcome.action in (Action.CREATED, Action.UPDATED)
+    )
+    if not skill_ids:
+        return "Nothing new to attach."
+    agent = await find_agent_by_derived_uuid(
+        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+    )
+    if agent is None:
+        return "Could not attach: that agent no longer exists. The skills are in the library."
+    new_skills: list[BetaManagedAgentsSkillParams] = [
+        {"type": "custom", "skill_id": skill_id} for skill_id in skill_ids
+    ]
+
+    async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
+        merged = merge_skills_with_ma(new_skills, fresh)
+        collision = await find_attach_mount_collision(
+            runtime.anthropic, tenant_id=tenant_id, skills=merged
+        )
+        if collision is not None:
+            raise DaimonError(f"cannot attach: {collision}")
+        return await runtime.anthropic.beta.agents.update(
+            fresh.id, version=fresh.version, skills=merged
+        )
+
+    try:
+        await update_agent_with_version_retry(runtime.anthropic, agent.id, _apply)
+    except (DaimonError, anthropic.APIStatusError) as err:
+        log.warning(
+            "credential_request.skill_repo_attach_failed",
+            agent_id=str(agent_id),
+            err_type=type(err).__name__,
+        )
+        return f"Imported, but attaching to `{agent.name}` failed ({type(err).__name__})."
+    return f"Attached {len(skill_ids)} to `{agent.name}`."
+
+
 async def run_skill_repo_credential_submission(
     runtime: SlackRuntime,
     *,
@@ -796,7 +862,7 @@ async def run_skill_repo_credential_submission(
     value: str,
 ) -> None:
     """Post-ack: consume, verify the token against the SKILL repo, store,
-    bind, and re-run the import.
+    bind, re-run the import, and attach the imported skills to the agent.
 
     Mirrors Discord's `SkillRepoModal` — no `set_binding`-free variant here
     either: the skill-sync resolver finds a per-agent token by walking the
@@ -906,14 +972,17 @@ async def run_skill_repo_credential_submission(
         )
         return
 
+    attach_note = await _attach_skills_to_requested_agent(
+        runtime, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id, outcomes=outcomes
+    )
     await _post_ephemeral(
         client,
         channel_id=channel_id,
         user_id=user_id,
         text=(
             f"Imported {len(outcomes)} skill(s) from `{normalize_owner_repo(url)}`. "
-            "The token is stored and the repo is bound, so future imports from it "
-            "will not ask again."
+            f"{attach_note} The token is stored and the repo is bound, so future "
+            "imports from it will not ask again."
         ),
     )
 

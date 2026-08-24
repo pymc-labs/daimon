@@ -15,6 +15,13 @@ single-use token rides in `value` under the fixed `SLACK_ACTION_ID`.
 Reuses the read tools' channel-visibility discipline (`conversations.info` →
 `check_channel_access`) so posting a credential button proves the requester
 may see the channel before anything lands in it.
+
+The button posts at the channel's top level, never in a thread. On Discord a
+thread IS a channel, so `channel_id` alone lands the button where the
+conversation is; a Slack thread is a (channel, ts) pair and the four request
+tools' shared contract carries no `thread_ts`. Threading the button means
+widening that cross-platform tool schema — until then, a request made
+mid-thread posts its button to the channel root.
 """
 
 from __future__ import annotations
