@@ -45,6 +45,22 @@ log = structlog.get_logger()
 
 _DEBOUNCE_S = 5.0
 
+# Ceiling for the `text` notification fallback that accompanies `blocks`.
+# The rendered content lives in the blocks (a markdown block holds 11 800
+# safely); `text` only feeds notifications and previews. chat.update rejects
+# a message whose `text` is block-sized with msg_too_long even though
+# chat.postMessage accepts the identical payload — probed live 2026-08-24:
+# update with text=11 800 fails, text=4 000 passes, and the block length is
+# irrelevant to the error. Stay well under the observed pass point.
+_NOTIFICATION_TEXT_MAX = 3000
+
+
+def _notification_text(chunk: str) -> str:
+    """Bound a content chunk for use as the `text` notification fallback."""
+    if len(chunk) <= _NOTIFICATION_TEXT_MAX:
+        return chunk
+    return chunk[: _NOTIFICATION_TEXT_MAX - 1] + "…"
+
 
 def _map_sse_event(event: RawMessageStreamEvent) -> EmbedEvent | None:
     """Map a Managed Agents session SSE event to an EmbedEvent, or None if irrelevant."""
@@ -251,7 +267,7 @@ class SlackTurnLifecycle:
                 {"type": "markdown", "text": first_chunk},
                 *to_blocks(self._state, now=self._clock()),
             ]
-            await self._post_or_update(first_blocks, first_chunk)
+            await self._post_or_update(first_blocks, _notification_text(first_chunk))
             assert self._status_ts is not None  # narrowing — _post_or_update always sets it
             current_ts = self._status_ts
 
@@ -261,7 +277,7 @@ class SlackTurnLifecycle:
                     channel=self._channel,
                     thread_ts=self._thread_ts,
                     blocks=[{"type": "markdown", "text": chunk}],
-                    text=chunk,
+                    text=_notification_text(chunk),
                 )
                 current_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
 
