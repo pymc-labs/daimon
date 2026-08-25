@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
+from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.errors import DaimonError
@@ -92,4 +93,14 @@ async def handle_help_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
             blocks=build_help_blocks(),
         )
     except (DaimonError, SlackApiError) as exc:
-        log.error("slack.help_command.failed", team_id=team_id, exc_info=exc)
+        request_id = generate_request_id()
+        log.error("slack.help_command.failed", team_id=team_id, request_id=request_id, exc_info=exc)
+        await surface_command_error(
+            client,
+            exc,
+            request_id=request_id,
+            title="Help",
+            view_id="",
+            channel_id=channel_id,
+            user_id=user_id,
+        )

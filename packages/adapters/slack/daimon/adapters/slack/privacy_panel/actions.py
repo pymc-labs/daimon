@@ -23,8 +23,10 @@ import time
 from typing import Any
 
 import aiohttp
+import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
+from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.privacy_panel.read import load_purge_preview, resolve_privacy_account
 from daimon.adapters.slack.privacy_panel.views import (
@@ -36,8 +38,10 @@ from daimon.adapters.slack.privacy_panel.views import (
     summary_line,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.observability import capture_exception_with_scope
 from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.slack_user_tokens import delete_slack_user_token, get_slack_user_token
 from slack_sdk.errors import SlackApiError
@@ -95,8 +99,11 @@ async def handle_privacy_command(
     """
     team_id: str = str(payload.get("team_id") or "")
     user_id: str = str(payload.get("user_id") or "")
+    channel_id: str = str(payload.get("channel_id") or "")
     trigger_id: str = str(payload.get("trigger_id") or "")
 
+    web_client: AsyncWebClient | None = None
+    view_id: str = ""
     try:
         web_client = await resolve_web_client(runtime, team_id=team_id)
         if web_client is None:
@@ -109,7 +116,7 @@ async def handle_privacy_command(
             view=build_loading_view(),
         )
         opened_view: dict[str, Any] = resp.get("view") or {}  # pyright: ignore[reportUnknownMemberType]  # slack_sdk SlackResponse.data is a union type
-        view_id: str = str(opened_view.get("id") or "")
+        view_id = str(opened_view.get("id") or "")
 
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
@@ -147,8 +154,21 @@ async def handle_privacy_command(
                 policy_url=str(runtime.settings.privacy_policy_url),
             ),
         )
-    except (SlackApiError, SQLAlchemyError) as exc:
-        log.error("privacy.command.failed", team_id=team_id, exc_info=exc)
+    except (DaimonError, anthropic.APIError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:
+        request_id = generate_request_id()
+        log.error("privacy.command.failed", team_id=team_id, request_id=request_id, exc_info=exc)
+        capture_exception_with_scope(exc)
+        # A token-resolve failure leaves no client to notify with.
+        if web_client is not None:
+            await surface_command_error(
+                web_client,
+                exc,
+                request_id=request_id,
+                title="Privacy",
+                view_id=view_id,
+                channel_id=channel_id,
+                user_id=user_id,
+            )
 
 
 async def handle_privacy_block_action(

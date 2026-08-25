@@ -297,3 +297,45 @@ async def test_handle_routine_action_delete_by_non_admin_non_creator_is_refused(
         ("POST", yarl.URL("https://slack.com/api/views.push"))
     )
     assert not views_push_calls, "non-admin non-creator delete must not push a confirm modal"
+
+
+async def test_handle_routines_command_replaces_loading_modal_with_error_on_failure(
+    fake_slack_web_client: Any,
+) -> None:
+    """A failed routine fetch must not leave the Loading… modal spinning."""
+    from unittest.mock import AsyncMock, patch
+
+    from daimon.adapters.slack.routines_panel.actions import handle_routines_command
+    from daimon.core.errors import DaimonError
+
+    runtime = MagicMock()
+    payload: dict[str, Any] = {
+        "team_id": "T_ROUTINES_ERR",
+        "user_id": "U_ROUTINES_ERR",
+        "channel_id": "C_ROUTINES_ERR",
+        "trigger_id": "TRIGGER_TEST",
+    }
+
+    with (
+        patch(
+            "daimon.adapters.slack.routines_panel.actions.resolve_web_client",
+            new_callable=AsyncMock,
+            return_value=fake_slack_web_client.client,
+        ),
+        patch(
+            "daimon.adapters.slack.routines_panel.actions.load_routines",
+            new_callable=AsyncMock,
+            side_effect=DaimonError("routine store unavailable"),
+        ),
+    ):
+        await handle_routines_command(runtime, payload)
+
+    update_key = ("POST", yarl.URL("https://slack.com/api/views.update"))
+    update_calls = fake_slack_web_client.mock.requests.get(update_key)
+    assert update_calls, "the Loading… modal must be replaced after the fetch fails"
+    body: dict[str, Any] = update_calls[-1].kwargs["json"]
+    assert body["view_id"] == "V_TEST"
+    assert body["view"]["title"]["text"] == "Routines"
+    text = body["view"]["blocks"][0]["text"]["text"]
+    assert "routine store unavailable" in text
+    assert "rid:" in text

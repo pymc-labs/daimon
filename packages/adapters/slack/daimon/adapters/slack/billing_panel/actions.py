@@ -32,10 +32,12 @@ from typing import Any
 
 import httpx
 import structlog
+from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.billing_panel.checkout import create_checkout
 from daimon.adapters.slack.billing_panel.read import load_billing_snapshot
 from daimon.adapters.slack.billing_panel.views import build_billing_container, build_loading_view
+from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.errors import DaimonError
@@ -43,6 +45,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
+from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
 
@@ -66,12 +69,14 @@ async def handle_billing_command(
     team_id: str = payload.get("team_id") or payload.get("team", {}).get("id") or ""
     user_id: str = payload.get("user_id") or payload.get("user", {}).get("id") or ""
     trigger_id: str = payload.get("trigger_id") or ""
+    channel_id: str = payload.get("channel_id") or ""
 
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         log.warning("slack.billing_command.no_token", team_id=team_id)
         return
 
+    view_id: str = ""
     try:
         # Open loading modal immediately
         open_resp = await client.views_open(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs
@@ -80,7 +85,7 @@ async def handle_billing_command(
         )
         # SlackResponse subscript is untyped — extract the view dict explicitly
         open_view: dict[str, str] = open_resp["view"]  # pyright: ignore[reportUnknownVariableType, reportAssignmentType, reportUnknownMemberType]  # SlackResponse untyped
-        view_id: str = open_view.get("id") or ""
+        view_id = open_view.get("id") or ""
 
         # Resolve admin status (fail-closed)
         is_admin = await resolve_is_admin(client, user_id=user_id)
@@ -109,14 +114,25 @@ async def handle_billing_command(
             view=billing_view,
         )
 
-    except (DaimonError, SlackApiError) as exc:
+    except (DaimonError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:
+        request_id = generate_request_id()
         log.error(
             "slack.billing_command_failed",
             team_id=team_id,
             user_id=user_id,
+            request_id=request_id,
             exc_info=exc,
         )
         capture_exception_with_scope(exc)
+        await surface_command_error(
+            client,
+            exc,
+            request_id=request_id,
+            title="Billing",
+            view_id=view_id,
+            channel_id=channel_id,
+            user_id=user_id,
+        )
 
 
 async def handle_topup_select(

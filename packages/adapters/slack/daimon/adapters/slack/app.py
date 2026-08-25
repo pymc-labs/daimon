@@ -62,6 +62,7 @@ from daimon.adapters.slack.credential_requests import (
     run_repo_bind_credential_submission,
     run_skill_repo_credential_submission,
 )
+from daimon.adapters.slack.errors import generate_request_id, render_error
 from daimon.adapters.slack.feedback import (
     evaluate_feedback_text_submission,
     handle_feedback_vote,
@@ -132,6 +133,9 @@ log = structlog.get_logger()
 # than the deployment's 60s kill timeout to leave headroom for client.close()
 # and health-server cleanup after the drain completes.
 _DRAIN_GRACE_S: float = 50.0
+
+_CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
+_CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
 
 
 def _log_bg_task_exception(task: asyncio.Task[None]) -> None:
@@ -736,8 +740,11 @@ class SlackApp:
 
         Looks up the action's status_ts in _cancel_registry; if the clicker is
         the turn's original author, sets the cancel Event so the driver
-        cancel-race loop picks it up.  Non-author clicks and missing registry
-        entries are silent no-ops.
+        cancel-race loop picks it up.  A refused click — non-author, or a
+        status_ts no longer in the registry — is answered with an ephemeral,
+        because a button that does nothing is indistinguishable from a dead
+        bot. The missing-entry case is the same symptom as a turn orphaned by
+        a deploy, so the notice is what lets the user tell the two apart.
         """
         actions: list[dict[str, Any]] = payload.get("actions") or []
         if not actions or actions[0].get("action_id") != "cancel_turn":
@@ -748,11 +755,39 @@ class SlackApp:
         clicker: str = (user_info.get("id") if user_info is not None else "") or ""
         entry = self._cancel_registry.get(status_ts)
         if entry is None:
-            return  # turn already ended / deregistered (Pitfall 6/7)
+            await self._refuse_cancel(payload, clicker=clicker, text=_CANCEL_TURN_ENDED)
+            return
         cancel, author_id = entry
         if clicker != author_id:
-            return  # author gate — silent no-op
+            await self._refuse_cancel(payload, clicker=clicker, text=_CANCEL_NOT_AUTHOR)
+            return
         cancel.set()
+
+    async def _refuse_cancel(self, payload: dict[str, Any], *, clicker: str, text: str) -> None:
+        """Best-effort ephemeral explaining a refused Cancel click.
+
+        Resolving the client hits the token store; a workspace whose token is
+        gone or unreadable has nothing to notify with, so those failures are
+        logged and dropped rather than raised into the background task.
+        """
+        team: dict[str, Any] = payload.get("team") or {}
+        team_id = str(team.get("id") or "")
+        channel_info: dict[str, Any] = payload.get("channel") or {}
+        container: dict[str, Any] = payload.get("container") or {}
+        channel = str(channel_info.get("id") or container.get("channel_id") or "")
+        if not (team_id and channel and clicker):
+            return
+        try:
+            client = await resolve_web_client(self.runtime, team_id=team_id)
+            if client is None:
+                return
+            await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                channel=channel,
+                user=clicker,
+                text=text,
+            )
+        except (SlackApiError, InvalidToken, SQLAlchemyError) as exc:
+            log.warning("slack.cancel_refusal_notice_failed", team_id=team_id, exc_info=exc)
 
     async def _handle_app_mention(
         self,
@@ -784,6 +819,7 @@ class SlackApp:
 
         channel: str = event.get("channel") or ""
         event_ts: str = event.get("event_ts") or event.get("ts") or ""
+        client: AsyncWebClient | None = None
 
         try:
             # (1) DEDUP — insert_if_new before any other work.
@@ -847,14 +883,25 @@ class SlackApp:
             InvalidToken,
             SQLAlchemyError,
         ) as exc:
+            request_id = generate_request_id()
             log.error(
                 "slack.handle_app_mention_failed",
                 team_id=team_id,
                 channel=channel,
                 event_ts=event_ts,
+                request_id=request_id,
                 exc_info=exc,
             )
             capture_exception_with_scope(exc)
+            # Before the per-event client exists there is no token to post
+            # with, so the log line is all that can be done.
+            if client is not None:
+                with contextlib.suppress(SlackApiError):
+                    await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                        channel=channel,
+                        thread_ts=event.get("thread_ts") or event_ts,
+                        text=render_error(exc, request_id=request_id),
+                    )
 
     async def _maybe_post_connect_nudge(
         self,

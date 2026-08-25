@@ -122,3 +122,38 @@ async def test_handle_help_command_drops_silently_when_no_token(
     assert not any(
         url == URL("https://slack.com/api/chat.postEphemeral") for (_, url), _ in all_calls
     ), "handle_help_command must not call chat.postEphemeral when no token (silent drop)"
+
+
+async def test_handle_help_command_reports_failure_ephemerally() -> None:
+    """When the help post fails, the invoker gets an error notice with a rid
+    instead of silence."""
+    from daimon.adapters.slack.help import handle_help_command
+    from slack_sdk.errors import SlackApiError
+    from slack_sdk.web.async_client import AsyncWebClient
+
+    client = MagicMock(spec=AsyncWebClient)
+    client.chat_postEphemeral = AsyncMock(
+        side_effect=[SlackApiError("down", MagicMock()), MagicMock()]
+    )
+    payload: dict[str, Any] = {
+        "command": "/help",
+        "team_id": "T_HELP_TEST",
+        "user_id": "U_HELP_TEST",
+        "channel_id": "C_HELP_TEST",
+    }
+    runtime = MagicMock(spec=SlackRuntime)
+
+    with patch(
+        "daimon.adapters.slack.help.resolve_web_client",
+        new_callable=AsyncMock,
+        return_value=client,
+    ):
+        await handle_help_command(runtime, payload)
+
+    assert client.chat_postEphemeral.await_count == 2, (
+        "a failed help post must be followed by an ephemeral error notice"
+    )
+    notice = client.chat_postEphemeral.await_args_list[1].kwargs
+    assert notice["channel"] == "C_HELP_TEST"
+    assert notice["user"] == "U_HELP_TEST"
+    assert "rid:" in notice["text"], "the notice must carry a rid for log lookup"

@@ -433,3 +433,46 @@ def test_build_billing_container_admin_empty_period_renders_cleanly() -> None:
     )
     blocks = build_billing_container(state, now=_NOW, since=_SINCE)
     assert len(blocks) > 0, "empty-period admin render must produce blocks without crashing"
+
+
+async def test_handle_billing_command_replaces_loading_modal_with_error_on_failure(
+    fake_slack_web_client: Any,
+) -> None:
+    """A failed snapshot load must not leave the Loading… modal spinning."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from daimon.adapters.slack.billing_panel.actions import handle_billing_command
+    from sqlalchemy.exc import OperationalError
+    from yarl import URL
+
+    runtime = MagicMock()
+    payload: dict[str, Any] = {
+        "team_id": "T_BILLING_ERR",
+        "user_id": "U_BILLING_ERR",
+        "channel_id": "C_BILLING_ERR",
+        "trigger_id": "TRIGGER_TEST",
+    }
+
+    with (
+        patch(
+            "daimon.adapters.slack.billing_panel.actions.resolve_web_client",
+            new_callable=AsyncMock,
+            return_value=fake_slack_web_client.client,
+        ),
+        patch(
+            "daimon.adapters.slack.billing_panel.actions.load_billing_snapshot",
+            new_callable=AsyncMock,
+            side_effect=OperationalError("SELECT secret", {"p": "xoxb-leak"}, Exception("x")),
+        ),
+    ):
+        await handle_billing_command(runtime, payload)
+
+    update_key = ("POST", URL("https://slack.com/api/views.update"))
+    update_calls = fake_slack_web_client.mock.requests.get(update_key)
+    assert update_calls, "the Loading… modal must be replaced after the load fails"
+    body: dict[str, Any] = update_calls[-1].kwargs["json"]
+    assert body["view"]["title"]["text"] == "Billing"
+    text = body["view"]["blocks"][0]["text"]["text"]
+    assert "Database error" in text
+    assert "xoxb-leak" not in text, "bound parameters must never reach the modal"
+    assert "rid:" in text

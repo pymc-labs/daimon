@@ -473,3 +473,44 @@ async def test_disconnect_with_no_row_reports_nothing_connected(
     assert "Nothing to disconnect" in view_text, (
         "views.update body must report that nothing was connected"
     )
+
+
+async def test_privacy_command_replaces_loading_modal_with_error_on_failure(
+    fake_slack_web_client: Any,
+) -> None:
+    """A DaimonError from account resolution must reach the boundary and
+    replace the Loading… modal, not escape to the background-task logger."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.errors import DaimonError
+
+    runtime = MagicMock()
+    payload: dict[str, Any] = {
+        "team_id": "T_PRIVACY_ERR",
+        "user_id": "U_PRIVACY_ERR",
+        "channel_id": "C_PRIVACY_ERR",
+        "trigger_id": "TRIGGER_TEST",
+    }
+
+    with (
+        patch(
+            "daimon.adapters.slack.privacy_panel.actions.resolve_web_client",
+            new_callable=AsyncMock,
+            return_value=fake_slack_web_client.client,
+        ),
+        patch(
+            "daimon.adapters.slack.privacy_panel.actions.resolve_privacy_account",
+            new_callable=AsyncMock,
+            side_effect=DaimonError("identity store unavailable"),
+        ),
+    ):
+        await handle_privacy_command(runtime, payload)
+
+    update_key = ("POST", yarl.URL("https://slack.com/api/views.update"))
+    update_calls = fake_slack_web_client.mock.requests.get(update_key)
+    assert update_calls, "the Loading… modal must be replaced after account resolution fails"
+    body: dict[str, Any] = update_calls[-1].kwargs["json"]
+    assert body["view"]["title"]["text"] == "Privacy"
+    text = body["view"]["blocks"][0]["text"]["text"]
+    assert "identity store unavailable" in text
+    assert "rid:" in text

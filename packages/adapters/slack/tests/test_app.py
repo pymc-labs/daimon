@@ -38,6 +38,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
 from daimon.core.defaults.provisioning import provision_tenant
+from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -482,6 +483,112 @@ async def test_handle_app_mention_slack_connect_external_when_external_user_post
     assert len(ephemeral_calls) == 1, (
         "chat_postEphemeral must be called exactly once for a Slack Connect external event"
     )
+
+
+async def test_handle_app_mention_failure_posts_error_into_thread(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """When the turn body raises at the listener boundary, the thread gets a
+    rendered error with a rid instead of nothing."""
+    team_id = "T_APP_MENTION_ERR"
+    fernet_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((fernet_key,))
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(fernet, "xoxb-mention-err"),
+    )
+    await db_session.flush()
+
+    app = _make_app(db_session_factory, crypto_key=fernet_key)
+
+    async def _failing_orchestrate(
+        event: dict[str, Any],
+        *,
+        team_id: str,
+        channel: str,
+        event_ts: str,
+        web_client: Any,
+        tenant_id: uuid.UUID,
+    ) -> None:
+        raise DaimonError("agent config is broken")
+
+    app._orchestrate = _failing_orchestrate  # type: ignore[method-assign]
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "channel": "C_TEST",
+        "event_ts": "1000000004.000001",
+        "ts": "1000000004.000001",
+        "thread_ts": "1000000000.000001",
+        "user": "U_AUTHOR",
+        "text": "<@U_BOT> hello",
+    }
+
+    await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+
+    posts = [
+        req
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == URL("https://slack.com/api/chat.postMessage")
+        for req in reqs
+    ]
+    assert len(posts) == 1, "a failed turn must post exactly one error message"
+    body = posts[0].kwargs["json"]
+    assert body["channel"] == "C_TEST"
+    assert body["thread_ts"] == "1000000000.000001", "the error must land in the mention's thread"
+    assert "agent config is broken" in body["text"]
+    assert "rid:" in body["text"]
+
+
+async def test_handle_app_mention_failure_uses_event_ts_as_thread_for_root_mention(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A channel-root mention has no thread_ts; the error starts a thread under it."""
+    team_id = "T_APP_MENTION_ERR_ROOT"
+    fernet_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((fernet_key,))
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(fernet, "xoxb-mention-err"),
+    )
+    await db_session.flush()
+
+    app = _make_app(db_session_factory, crypto_key=fernet_key)
+
+    async def _failing_orchestrate(*args: Any, **kwargs: Any) -> None:
+        raise DaimonError("boom")
+
+    app._orchestrate = _failing_orchestrate  # type: ignore[method-assign]
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "channel": "C_TEST",
+        "event_ts": "1000000005.000001",
+        "ts": "1000000005.000001",
+        "user": "U_AUTHOR",
+        "text": "<@U_BOT> hello",
+    }
+
+    await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+
+    posts = [
+        req
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == URL("https://slack.com/api/chat.postMessage")
+        for req in reqs
+    ]
+    assert len(posts) == 1
+    assert posts[0].kwargs["json"]["thread_ts"] == "1000000005.000001"
 
 
 def test_per_event_client_never_assigned_to_self_or_runtime() -> None:
@@ -2537,8 +2644,11 @@ async def test_handle_block_action_when_author_clicks_cancel_sets_event() -> Non
     assert cancel.is_set(), "cancel Event must be set when the turn author clicks cancel"
 
 
-async def test_handle_block_action_when_non_author_clicks_cancel_event_unset() -> None:
-    """cancel click from a non-author leaves the cancel Event unset (author gate)."""
+async def test_handle_block_action_when_non_author_clicks_cancel_event_unset(
+    fake_slack_web_client: Any,
+) -> None:
+    """cancel click from a non-author leaves the cancel Event unset and tells
+    the clicker why nothing happened."""
     app = _make_app()
     cancel = asyncio.Event()
     app._cancel_registry["1000000000.000001"] = (cancel, "U_AUTHOR")  # pyright: ignore[reportPrivateUsage]
@@ -2548,13 +2658,32 @@ async def test_handle_block_action_when_non_author_clicks_cancel_event_unset() -
         message_ts="1000000000.000001",
         user_id="U_OTHER",  # not the author
     )
-    await app._handle_block_action(payload)  # pyright: ignore[reportPrivateUsage]
+    with patch(
+        "daimon.adapters.slack.app.resolve_web_client",
+        new_callable=AsyncMock,
+        return_value=fake_slack_web_client.client,
+    ):
+        await app._handle_block_action(payload)  # pyright: ignore[reportPrivateUsage]
 
     assert not cancel.is_set(), "cancel Event must NOT be set for a non-author click (author gate)"
+    notices = [
+        req
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == URL("https://slack.com/api/chat.postEphemeral")
+        for req in reqs
+    ]
+    assert len(notices) == 1, "a refused cancel must be explained to the clicker"
+    body = notices[0].kwargs["json"]
+    assert body["channel"] == "C_TEST"
+    assert body["user"] == "U_OTHER"
+    assert "started this turn" in body["text"]
 
 
-async def test_handle_block_action_when_status_ts_not_in_registry_is_noop() -> None:
-    """block_actions with a status_ts absent from the registry is a silent no-op."""
+async def test_handle_block_action_when_status_ts_not_in_registry_tells_clicker_turn_ended(
+    fake_slack_web_client: Any,
+) -> None:
+    """A cancel click on a finished (or orphaned) turn is answered, so the
+    user can tell 'already done' from 'bot is dead'."""
     app = _make_app()
 
     payload = _make_block_actions_payload(
@@ -2562,8 +2691,41 @@ async def test_handle_block_action_when_status_ts_not_in_registry_is_noop() -> N
         message_ts="9999999999.000001",  # not in registry
         user_id="U_AUTHOR",
     )
-    # Must not raise — turn already ended/deregistered
-    await app._handle_block_action(payload)  # pyright: ignore[reportPrivateUsage]
+    with patch(
+        "daimon.adapters.slack.app.resolve_web_client",
+        new_callable=AsyncMock,
+        return_value=fake_slack_web_client.client,
+    ):
+        await app._handle_block_action(payload)  # pyright: ignore[reportPrivateUsage]
+
+    notices = [
+        req
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == URL("https://slack.com/api/chat.postEphemeral")
+        for req in reqs
+    ]
+    assert len(notices) == 1
+    body = notices[0].kwargs["json"]
+    assert body["user"] == "U_AUTHOR"
+    assert "already finished" in body["text"]
+
+
+async def test_handle_block_action_refusal_notice_failure_does_not_raise() -> None:
+    """The refusal notice is best-effort: a workspace with no token must not
+    turn a refused click into a background-task exception."""
+    app = _make_app()
+
+    payload = _make_block_actions_payload(
+        action_id="cancel_turn",
+        message_ts="9999999999.000001",
+        user_id="U_AUTHOR",
+    )
+    with patch(
+        "daimon.adapters.slack.app.resolve_web_client",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        await app._handle_block_action(payload)  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_handle_block_action_when_wrong_action_id_is_ignored() -> None:
