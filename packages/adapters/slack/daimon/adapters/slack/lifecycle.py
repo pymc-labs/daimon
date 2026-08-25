@@ -20,6 +20,7 @@ Design decisions:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import time
 from collections.abc import Callable
@@ -37,6 +38,7 @@ from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
 from daimon.core.turn.state import ToolUseBlock, TurnState, extract_final_response
+from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 __all__ = ["SlackTurnLifecycle"]
@@ -232,11 +234,41 @@ class SlackTurnLifecycle:
             "Turn cancelled.",
         )
 
+    async def _repair_terminal_flush(self) -> None:
+        """Best-effort collapse of the status message after a failed terminal flush.
+
+        Replaces whatever the last debounced flush wrote — phase title, tool
+        trail, cancel actions — with a plain failure notice. The cancel Event
+        is deregistered on every terminal path, so a status message left on the
+        live surface shows a running turn with a dead cancel button forever.
+        The repair can fail for the same reason as the flush (revoked token,
+        archived channel); there is nothing further to do then, so it is
+        suppressed rather than retried.
+        """
+        if self._status_ts is None:
+            return
+        text = "⚠️ Something went wrong posting the answer."
+        with contextlib.suppress(SlackApiError):
+            await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+                channel=self._channel,
+                ts=self._status_ts,
+                blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
+                text=text,
+            )
+
     async def on_terminal_success(self, state: TurnState) -> None:
         """Replace status message with final answer; post overflow chunks; widen final_ts.
 
         If no final text (tool-only or cancelled), collapses to the done footer
         in place. Always deregisters the cancel Event in finally.
+
+        Does not re-raise on SlackApiError — the lifecycle boundary absorbs
+        render failures (same contract as on_terminal_failure). If the flush
+        fails before the status message is replaced, a best-effort repair
+        collapses it to a failure notice; if it fails during overflow, the
+        already-replaced answer is left standing. final_ts stays None on any
+        flush failure so the caller's watermark cannot advance past content
+        the user never saw.
         """
         # Transition to the DONE phase BEFORE rendering so to_blocks emits the
         # terminal collapse (cost/usage footer, no cancel button) — matches the
@@ -244,6 +276,10 @@ class SlackTurnLifecycle:
         # running and the footer would never appear.
         self._state = update(self._state, EmbedEvent(kind="done", label=""))
         self._apply_usage(state)
+        # Flipped after the status message is successfully replaced with final
+        # content — past that point a repair would overwrite answer text the
+        # user can already read, so the except branch skips it.
+        surface_replaced = False
         try:
             final_text = extract_final_response(state.content)
             if not final_text:
@@ -268,6 +304,7 @@ class SlackTurnLifecycle:
                 *to_blocks(self._state, now=self._clock()),
             ]
             await self._post_or_update(first_blocks, _notification_text(first_chunk))
+            surface_replaced = True
             assert self._status_ts is not None  # narrowing — _post_or_update always sets it
             current_ts = self._status_ts
 
@@ -282,6 +319,10 @@ class SlackTurnLifecycle:
                 current_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
 
             self.final_ts = current_ts
+        except SlackApiError:
+            log.warning("turn.terminal_success.flush_failed", exc_info=True)
+            if not surface_replaced:
+                await self._repair_terminal_flush()
         finally:
             if self._status_ts is not None:
                 self._deregister(self._status_ts)
@@ -301,6 +342,7 @@ class SlackTurnLifecycle:
             self.final_ts = self._status_ts
         except Exception:  # noqa: BLE001
             log.warning("turn.terminal_failure.flush_failed", exc_info=True)
+            await self._repair_terminal_flush()
         finally:
             if self._status_ts is not None:
                 self._deregister(self._status_ts)
