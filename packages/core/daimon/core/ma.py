@@ -20,6 +20,7 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Literal
 
 import structlog
 from anthropic import APIStatusError, AsyncAnthropic
@@ -47,6 +48,23 @@ class SessionDeletionReport:
     deleted: int = 0
     failed: int = 0
     upstream_error: bool = False
+
+
+@dataclass(frozen=True)
+class CancelTurnResult:
+    """Result of a session-scoped cancellation request.
+
+    ``cancelled`` means this call posted ``user.interrupt``, observed its idle
+    acknowledgement, and then re-retrieved an idle session. ``already_terminal``
+    is the idempotent no-op path, including a turn that completed between the
+    initial retrieve and the interrupt send. ``cancel_requested`` means the
+    interrupt was posted but terminal idle was not observed before the bounded
+    wait ended; callers must not present it as completed cancellation.
+    """
+
+    session_id: str
+    outcome: Literal["cancelled", "already_terminal", "cancel_requested"]
+    status: str
 
 
 # Local alias for SDK ergonomics — short import for call sites. No
@@ -156,25 +174,164 @@ async def send_interrupt_and_wait(
         events=[{"type": "user.interrupt"}],
     )
 
-    async def _wait_for_terminal_idle() -> None:
-        stream = await anthropic.beta.sessions.events.stream(session_id=session_id)
-        async for event in stream:
-            if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
-                continue
-            if event.stop_reason.type in _INTERRUPT_TERMINAL:
-                return
-        raise TurnError(
-            kind="interrupt_timeout",
-            message=f"MA SSE stream closed without terminal idle (timeout {timeout_s}s)",
-        )
-
     try:
-        await asyncio.wait_for(_wait_for_terminal_idle(), timeout=timeout_s)
+        await asyncio.wait_for(
+            _wait_for_interrupt_idle(anthropic, session_id=session_id, timeout_s=timeout_s),
+            timeout=timeout_s,
+        )
     except TimeoutError as err:
         raise TurnError(
             kind="interrupt_timeout",
             message=f"MA did not acknowledge interrupt within {timeout_s}s",
         ) from err
+
+
+async def _wait_for_interrupt_idle(
+    anthropic: AsyncAnthropic,
+    *,
+    session_id: str,
+    timeout_s: float,
+) -> None:
+    """Wait for a terminal idle event after an interrupt has been posted."""
+    stream = await anthropic.beta.sessions.events.stream(session_id=session_id)
+    async for event in stream:
+        if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
+            continue
+        if event.stop_reason.type in _INTERRUPT_TERMINAL:
+            return
+    raise TurnError(
+        kind="interrupt_timeout",
+        message=f"MA SSE stream closed without terminal idle (timeout {timeout_s}s)",
+    )
+
+
+async def cancel_turn(
+    anthropic: AsyncAnthropic,
+    *,
+    session_id: str,
+    requested_by: str,
+    timeout_s: float = 120.0,
+) -> CancelTurnResult:
+    """Cancel the active turn in ``session_id`` and await terminal idle.
+
+    Cancellation is cooperative at the Managed Agents interrupt boundary: an
+    in-flight provider/tool operation may finish before ``user.interrupt`` is
+    applied. The provider records that interrupt and a terminal
+    ``session.status_idle`` event, so transcript readers converge and the
+    session remains readable and continuable.
+
+    Idle and terminated sessions are terminal already, so cancellation is an
+    idempotent no-op. If the bounded acknowledgement wait ends first, the
+    result is ``cancel_requested`` and the session stays recoverable. Billing
+    remains event based: completed ``span.model_request_end`` charges stand;
+    no reserve or refund exists, and cancellation adds no usage event.
+    """
+    session = await anthropic.beta.sessions.retrieve(session_id)
+    if session.status == "idle" or session.status == "terminated":
+        log.info(
+            "turn.cancel.already_terminal",
+            session_id=session_id,
+            requested_by=requested_by,
+            status=session.status,
+        )
+        return CancelTurnResult(
+            session_id=session_id,
+            outcome="already_terminal",
+            status=session.status,
+        )
+
+    log.info(
+        "turn.cancel.requested",
+        session_id=session_id,
+        requested_by=requested_by,
+    )
+    try:
+        await anthropic.beta.sessions.events.send(
+            session_id,
+            events=[{"type": "user.interrupt"}],
+        )
+    except APIStatusError:
+        # Normal completion can win the retrieve-then-send race. Confirm that
+        # state before surfacing the provider's rejected interrupt.
+        observed = await anthropic.beta.sessions.retrieve(session_id)
+        if observed.status in {"idle", "terminated"}:
+            log.info(
+                "turn.cancel.already_terminal",
+                session_id=session_id,
+                requested_by=requested_by,
+                status=observed.status,
+                raced_interrupt=True,
+            )
+            return CancelTurnResult(
+                session_id=session_id,
+                outcome="already_terminal",
+                status=observed.status,
+            )
+        raise
+
+    # Close the retrieve-then-act race before opening another stream. If the
+    # original turn completed around the send, there may be no future idle
+    # event for a waiter to observe.
+    observed = await anthropic.beta.sessions.retrieve(session_id)
+    if observed.status in {"idle", "terminated"}:
+        log.info(
+            "turn.cancel.already_terminal",
+            session_id=session_id,
+            requested_by=requested_by,
+            status=observed.status,
+            raced_interrupt=True,
+        )
+        return CancelTurnResult(
+            session_id=session_id,
+            outcome="already_terminal",
+            status=observed.status,
+        )
+
+    try:
+        await asyncio.wait_for(
+            _wait_for_interrupt_idle(anthropic, session_id=session_id, timeout_s=timeout_s),
+            timeout=timeout_s,
+        )
+    except (TimeoutError, TurnError):
+        observed = await anthropic.beta.sessions.retrieve(session_id)
+        log.warning(
+            "turn.cancel.request_unconfirmed",
+            session_id=session_id,
+            requested_by=requested_by,
+            status=observed.status,
+            timeout_s=timeout_s,
+        )
+        return CancelTurnResult(
+            session_id=session_id,
+            outcome="cancel_requested",
+            status=observed.status,
+        )
+
+    observed = await anthropic.beta.sessions.retrieve(session_id)
+    if observed.status != "idle":
+        log.warning(
+            "turn.cancel.request_unconfirmed",
+            session_id=session_id,
+            requested_by=requested_by,
+            status=observed.status,
+            timeout_s=timeout_s,
+        )
+        return CancelTurnResult(
+            session_id=session_id,
+            outcome="cancel_requested",
+            status=observed.status,
+        )
+    log.info(
+        "turn.cancel.acknowledged",
+        session_id=session_id,
+        requested_by=requested_by,
+        status=observed.status,
+    )
+    return CancelTurnResult(
+        session_id=session_id,
+        outcome="cancelled",
+        status=observed.status,
+    )
 
 
 # HTTP status codes that indicate a stale-version conflict on agents.update.
