@@ -72,7 +72,7 @@ carrying the attachment. Do not report a file as sent on any weaker signal.
 
 ROUTINES RUN HEADLESS — the exception to the rule above. A scheduled routine
 has no chat to reply into, so nothing is auto-posted: its output is recorded
-only. To make a routine post to Discord it must explicitly call the
+only. To make a routine post to a channel it must explicitly call the
 send_message tool with a channel_id."""
 
 # The full sentinel-wrapped block. Re-applying detects this by sentinel and

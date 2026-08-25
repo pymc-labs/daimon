@@ -45,3 +45,10 @@ class SlackSearchResult(BaseModel):
 
     matches: list[SlackSearchMatch]
     total: int
+
+
+class SlackParsedLink(BaseModel):
+    channel_id: str
+    message_ts: str  # dotted, e.g. "1717171717.123456"
+    thread_ts: str | None = None  # parent ts, when the link is a reply
+    hint: str

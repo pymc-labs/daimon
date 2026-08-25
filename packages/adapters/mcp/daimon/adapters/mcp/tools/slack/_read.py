@@ -301,10 +301,25 @@ async def _fetch_thread_replies(
     )
     raw = cast(list[dict[str, Any]], resp["messages"])  # already oldest-first
     has_more = bool(resp.get("has_more"))
+    result_thread_ts = thread_ts
+
+    # A reply's ts identifies its thread, matching how send treats a thread
+    # target: if the first message's own thread_ts differs from what was
+    # requested, the caller passed a reply's ts — refetch by the parent.
+    if raw:
+        parent_ts = raw[0].get("thread_ts")
+        if parent_ts and str(parent_ts) != thread_ts:
+            result_thread_ts = str(parent_ts)
+            resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                channel=channel_id, ts=result_thread_ts, limit=min(limit, _HISTORY_LIMIT_CAP)
+            )
+            raw = cast(list[dict[str, Any]], resp["messages"])
+            has_more = bool(resp.get("has_more"))
+
     usernames = await _resolve_usernames(client, _author_ids(raw))
     return SlackThreadResult(
         channel_id=channel_id,
-        thread_ts=thread_ts,
+        thread_ts=result_thread_ts,
         messages=_to_message_rows(raw, usernames),
         has_more=has_more,
     )

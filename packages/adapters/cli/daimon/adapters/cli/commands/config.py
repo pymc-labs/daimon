@@ -20,6 +20,7 @@ from daimon.core.scope import (
     TenantScopeRef,
     UserScopeRef,
 )
+from daimon.core.stores.domain import Platform
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope, resolve
 from daimon.core.stores.scoped_config_write import (
@@ -63,6 +64,19 @@ def _validate_key(key: str) -> ConfigField:
     return result
 
 
+# Chat platforms addressable in a scope string. "cli" is deliberately absent:
+# the local CLI tenant is what the bare `tenant` / `channel:<id>` forms already
+# target, so a `tenant:cli/local` spelling would be a second name for it.
+_SCOPE_PLATFORMS: dict[str, Platform] = {"discord": "discord", "slack": "slack"}
+
+_SCOPE_HELP = (
+    "user, tenant, tenant:<platform>/<workspace_id>, channel:<channel_id>, "
+    "channel:<platform>/<workspace_id>/<channel_id> (platform: discord|slack; "
+    "a Discord workspace id is the guild id, a Slack one the team id), "
+    "deployment (read-only)"
+)
+
+
 def _parse_scope(
     raw: str,
     *,
@@ -74,10 +88,16 @@ def _parse_scope(
         return UserScopeRef(account_id=account_id)
     if raw == "tenant":
         return TenantScopeRef(tenant_id=tenant_id)
-    if raw.startswith("tenant:discord/"):
-        guild_id = raw[len("tenant:discord/") :]
-        return TenantScopeRef(
-            tenant_id=derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+    if raw.startswith("tenant:"):
+        parts = raw[len("tenant:") :].split("/")
+        platform = _SCOPE_PLATFORMS.get(parts[0])
+        if len(parts) == 2 and platform is not None and parts[1]:
+            return TenantScopeRef(
+                tenant_id=derive_tenant_uuid(platform=platform, workspace_id=parts[1])
+            )
+        raise typer.BadParameter(
+            f"invalid tenant scope {raw!r}; expected tenant:<platform>/<workspace_id> "
+            f"(platform: {'|'.join(_SCOPE_PLATFORMS)})"
         )
     if raw.startswith("channel:"):
         rest = raw[len("channel:") :]
@@ -85,20 +105,18 @@ def _parse_scope(
             # bare channel:<channel_id> — local tenant
             return ChannelScopeRef(tenant_id=tenant_id, channel_id=rest)
         parts = rest.split("/")
-        if len(parts) == 3 and parts[0] == "discord":
-            # channel:discord/<guild_id>/<channel_id>
+        platform = _SCOPE_PLATFORMS.get(parts[0])
+        if len(parts) == 3 and platform is not None and parts[1] and parts[2]:
             return ChannelScopeRef(
-                tenant_id=derive_tenant_uuid(platform="discord", workspace_id=parts[1]),
+                tenant_id=derive_tenant_uuid(platform=platform, workspace_id=parts[1]),
                 channel_id=parts[2],
             )
         raise typer.BadParameter(
             f"invalid channel scope {raw!r}; expected channel:<channel_id> "
-            "or channel:discord/<guild_id>/<channel_id>"
+            "or channel:<platform>/<workspace_id>/<channel_id> "
+            f"(platform: {'|'.join(_SCOPE_PLATFORMS)})"
         )
-    raise typer.BadParameter(
-        "unknown scope; valid: user, tenant, tenant:discord/<guild_id>, "
-        "channel:<channel_id>, channel:discord/<guild_id>/<channel_id>, deployment (read-only)"
-    )
+    raise typer.BadParameter(f"unknown scope; valid: {_SCOPE_HELP}")
 
 
 # -- get -------------------------------------------------------------------
@@ -123,8 +141,7 @@ def config_get_command(
         str | None,
         typer.Option(
             "--scope",
-            help="Raw scope: user, tenant, tenant:discord/<guild_id>, channel:<channel_id>, "
-            "channel:discord/<guild_id>/<channel_id>, deployment (read-only)",
+            help=f"Raw scope: {_SCOPE_HELP}",
         ),
     ] = None,
     channel: Annotated[

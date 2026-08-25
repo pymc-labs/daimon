@@ -307,6 +307,49 @@ async def test_terminal_success_overflow_posts_and_widens_final_ts(
     assert lc.final_ts is not None, "final_ts must be set after overflow"
 
 
+async def test_terminal_success_bounds_notification_text_on_long_answers(
+    fake_slack_web_client: Any,
+) -> None:
+    """The `text` notification fallback stays bounded while blocks carry the full chunk.
+
+    chat.update rejects a message whose `text` is block-sized with msg_too_long
+    (probed live: update with text=11800 fails where chat.postMessage accepts the
+    identical payload), which lost a completed 28k-char answer entirely — the
+    status message stayed stuck at thinking with a dead cancel button. The
+    rendered content lives in the markdown block; `text` only feeds
+    notifications, so it must never grow with the answer.
+    """
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.on_sse_event(_thinking_event())
+
+    long_text = "y" * 24000  # forces chunks at the 11800 block limit
+    state = TurnState(content=[TextBlock(kind="text", text=long_text)])
+    await lc.on_terminal_success(state)
+
+    update_calls = fake_slack_web_client.mock.requests.get(("POST", _UPDATE_URL), [])
+    assert update_calls, "the first chunk must replace the status message via chat.update"
+    update_body = update_calls[-1].kwargs["json"]
+    assert len(update_body["text"]) <= 3000, (
+        "chat.update's notification fallback must stay under the update text limit "
+        "(msg_too_long above ~4000)"
+    )
+    assert len(update_body["blocks"][0]["text"]) > 3000, (
+        "the markdown block must still carry the full first chunk — only the "
+        "notification fallback is bounded"
+    )
+
+    post_calls = fake_slack_web_client.mock.requests.get(("POST", _POST_URL), [])
+    overflow_bodies = [
+        c.kwargs["json"]
+        for c in post_calls
+        if c.kwargs.get("json", {}).get("blocks", [{}])[0].get("type") == "markdown"
+    ]
+    assert overflow_bodies, "overflow chunks must exist for a 24k answer"
+    assert all(len(b["text"]) <= 3000 for b in overflow_bodies), (
+        "overflow chunks' notification fallbacks must be bounded too"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Task 2: Terminal — collapse paths (tool-only / cancelled)
 # ---------------------------------------------------------------------------

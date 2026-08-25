@@ -53,7 +53,7 @@
         
         For MCP servers that REQUIRE an auth token, do NOT collect the
         token in chat — direct the user to ``/agent-setup`` -> MCPs modal.
-        Tokens sent in chat end up in Discord channel history and MA's
+        Tokens sent in chat end up in channel history and MA's
         tenant-wide session event log; the modal flow is the only
         supported path for auth-required servers.
       ''',
@@ -86,10 +86,11 @@
         omit it to clear the workspace-wide default.  If the scope had no
         default the call is a no-op (idempotent).  Requires Manage Server (admin).
         
-        ``channel_id`` MUST be the parent channel's id
-        (``<channel role="parent_channel" id="...">``), never the current
-        thread's id — clearing a thread id is a silent no-op that leaves the
-        channel's real default in place.
+        Discord: ``channel_id`` MUST be the parent channel's id
+        (``<channel platform="discord" id="..." role="parent_channel">``),
+        never the current thread's id. Slack: use the id from
+        ``<channel platform="slack" id="...">``. Clearing a thread id is a
+        silent no-op that leaves the channel's real default in place.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1076,7 +1077,7 @@
         ``"research-bot"``). It is NOT:
         
         - a free-text description of the routine
-        - a Discord mention, tag fragment, or user handle
+        - a mention, tag fragment, or user handle
         - a routine label or trigger phrase
         - the name of a tool, MCP, or skill
         
@@ -1236,12 +1237,14 @@
         Not admin-gated: this is a read of routing any member can already infer
         from a reply's footer.
         
-        ``channel_id`` MUST be the parent channel's id
-        (``<channel role="parent_channel" id="...">``), never the current
-        thread's id. Asking about a thread id reports that thread's own
-        (almost always empty) scope, which reads as a confident answer about
-        the channel and is not one — and if the same wrong id was just passed
-        to ``set_agent_default``, this tool will agree with it.
+        Discord: ``channel_id`` MUST be the parent channel's id
+        (``<channel platform="discord" id="..." role="parent_channel">``),
+        never the current thread's id. Slack: use the id from
+        ``<channel platform="slack" id="...">``. Asking about a thread id
+        reports that thread's own (almost always empty) scope, which reads
+        as a confident answer about the channel and is not one — and if the
+        same wrong id was just passed to ``set_agent_default``, this tool
+        will agree with it.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1777,14 +1780,19 @@
     }),
     'parse_link': dict({
       'description': '''
-        Extract IDs from a Discord URL.
+        Extract IDs from a channel or message link.
         
-        Supports discord.com, ptb.discord.com, and canary.discord.com URLs.
-        
-        After parsing:
+        Discord: supports discord.com, ptb.discord.com, and
+        canary.discord.com URLs.
         - If link_type is "channel": use read_channel(channel_id)
         - If link_type is "message_or_thread": try read_thread(thread_id) first;
           if read_thread fails, it is a message: use get_message(channel_id, message_id)
+        
+        Slack: supports a workspace permalink
+        (.../archives/<channel>/p<digits>). Returns channel_id, the dotted
+        message ts, and thread_ts when the link is a reply. Try
+        read_thread(thread_id=f"{channel_id}:{thread_ts or message_ts}")
+        first; if that fails, use get_message(channel_id, message_ts).
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2291,7 +2299,7 @@
         scoped to channel_ids, total_results is the exact count for those
         channels (you must be able to view them; they are rejected before
         searching). Unscoped searches report only the visible rows — the
-        guild-wide count is withheld because it includes channels you cannot
+        server-wide count is withheld because it includes channels you cannot
         view. Slack: only content + limit are supported (other filters are
         Discord-only), and 1:1 DM hits are only returned in a DM with daimon.
       ''',
@@ -2455,11 +2463,11 @@
     }),
     'send_message': dict({
       'description': '''
-        Post a message to a Discord channel.
+        Post a message to a channel.
         
         For TEXT: only call this when the user explicitly asks you to send or
-        post something to Discord. Do NOT call it to share results, summaries,
-        or outputs unless the user specifically requested a Discord post.
+        post something to a channel. Do NOT call it to share results,
+        summaries, or outputs unless the user specifically requested a post.
         Deliver text output in your reply instead.
         
         For FILES that rule does not apply, because a reply cannot carry an
@@ -2479,7 +2487,15 @@
         To post a file you made in your sandbox, call
         ``create_file_upload_url`` first and PUT the bytes to the URL it
         returns — never base64 a file into a tool argument. Combined
-        cap of 10 attachments per message.
+        cap of 10 attachments per message. Both FILES paragraphs are
+        Discord-only for now — Slack file posting needs a scope this
+        install does not have.
+        
+        Slack: ``channel_id`` may be ``channel_id:thread_ts`` (e.g.
+        ``C0123456789:1717171717.123456``) to post into a thread. Content is
+        sent as-is — nothing is escaped, so ``<@U…>`` mentions work — and is
+        capped at 12,000 characters. daimon must already be in the channel
+        (a member can run ``/invite @daimon``).
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2538,12 +2554,16 @@
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
         core).  Requires Manage Server (admin).
         
-        ``channel_id`` MUST be the parent channel's id — the one your context
-        gives as ``<channel role="parent_channel" id="...">``. Never pass the
-        current thread's id here. A turn always resolves its agent from the
-        parent channel, so a default written against a thread id is a scope
-        nothing ever reads: the write succeeds, this tool reports success, and
-        the channel keeps answering with the old agent.
+        Discord: ``channel_id`` MUST be the parent channel's id — the one
+        your context gives as
+        ``<channel platform="discord" id="..." role="parent_channel">``.
+        Never pass the current thread's id here. Slack: use the id from
+        ``<channel platform="slack" id="...">`` — Slack's context always
+        names the current channel, with no thread-vs-parent split. A turn
+        always resolves its agent from the parent channel, so a default
+        written against a thread id is a scope nothing ever reads: the write
+        succeeds, this tool reports success, and the channel keeps answering
+        with the old agent.
       ''',
       'parameters': dict({
         'additionalProperties': False,

@@ -122,6 +122,30 @@ async def _call_tool(
     return result.get("result", result)  # type: ignore[return-value]
 
 
+async def _list_tool_names(app: ASGIApp, *, token: str) -> list[str]:
+    """Initialize an MCP HTTP session and call tools/list; return tool names."""
+    headers = dict(_INIT_HEADERS)
+    headers["Authorization"] = f"Bearer {token}"
+    transport = httpx.ASGITransport(app=app)  # pyright: ignore[reportArgumentType]
+    async with _lifespan(app), httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        init_resp = await c.post("/mcp", json=_INIT_BODY, headers=headers)
+        assert init_resp.status_code == 200, f"initialize failed: {init_resp.text}"
+        session_id = init_resp.headers.get("mcp-session-id")
+        if session_id:
+            headers["Mcp-Session-Id"] = session_id
+        body: dict[str, object] = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {},
+        }
+        resp = await c.post("/mcp", json=body, headers=headers)
+        assert resp.status_code == 200, f"tools/list failed: {resp.text}"
+        result = _parse_jsonrpc_response(resp)
+    tools_payload = result.get("result", result)
+    return [t["name"] for t in tools_payload.get("tools", [])]  # type: ignore[union-attr]
+
+
 def _make_app(sessionmaker: async_sessionmaker[AsyncSession]) -> ASGIApp:
     return create_mcp_app(
         settings=Settings(
@@ -197,37 +221,76 @@ async def _seed_slack_bound_account(db_session: AsyncSession, *, workspace_id: s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("tool_name", "arguments"),
-    [
-        ("list_threads", {"channel_id": "C_TEST"}),
-        ("parse_link", {"url": "https://discord.com/channels/1/2"}),
-        ("send_message", {"channel_id": "C_TEST", "content": "hi"}),
-    ],
-)
-async def test_slack_caller_calling_unsupported_tool_raises_own_name(
+async def test_slack_caller_tools_list_omits_list_threads(
     db_session: AsyncSession,
     sessionmaker: async_sessionmaker[AsyncSession],
-    tool_name: str,
-    arguments: dict[str, object],
 ) -> None:
-    """A Slack caller invoking a Slack-unsupported registered tool gets a ToolError
-    naming that exact tool ("<tool_name> is not supported on Slack yet"), pinning
-    the per-site name literal in ``daimon.adapters.mcp.tools.channels``."""
-    account_id = await _seed_slack_bound_account(
-        db_session, workspace_id=f"slack-unsupported-{tool_name}"
-    )
+    """A Slack caller's tools/list no longer contains list_threads (tagged
+    {"discord"} — see the tool-visibility quick task). ``parse_link`` is NOT
+    covered here any more: it is now dual-tagged {"discord","slack"} and
+    routes to a real Slack branch (see the dispatch test below). The tool's
+    runtime gate (channels.py's ``_slack_unsupported("list_threads")``
+    branch) survives as defense-in-depth against a transform regression, but
+    a Slack caller can no longer reach it through the registered surface at
+    all: the tool is both unlisted and uncallable, and a direct
+    ``tools/call`` returns the registry's own unknown-tool error, not the
+    gate copy."""
+    account_id = await _seed_slack_bound_account(db_session, workspace_id="slack-list-threads")
     token = mint_jwt(account_id=account_id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
     app = _make_app(sessionmaker)
 
-    call_result = await _call_tool(app, token=token, tool_name=tool_name, arguments=arguments)
+    tool_names = await _list_tool_names(app, token=token)
+
+    assert "list_threads" not in tool_names, (
+        "list_threads is discord-only tagged; a Slack caller must not see it"
+    )
+
+    call_result = await _call_tool(
+        app, token=token, tool_name="list_threads", arguments={"channel_id": "C_TEST"}
+    )
 
     assert call_result.get("isError") is True, (
-        f"{tool_name} must raise a ToolError for a Slack caller; got {call_result!r}"
+        f"a hidden tool must be uncallable, not just unlisted; got {call_result!r}"
     )
     output_text = _output_text(call_result)
-    assert f"{tool_name} is not supported on Slack yet" in output_text, (
-        f"expected {tool_name}'s own name in the Slack-unsupported message; got {output_text!r}"
+    assert "list_threads is not supported on Slack yet" not in output_text, (
+        "a Slack caller calling a hidden tool must hit the registry's unknown-tool "
+        f"error, not the runtime gate copy (unreachable through the registered "
+        f"surface); got {output_text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_parse_link_slack_caller_routes_to_slack_branch(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A Slack-token caller reaches the Slack branch through the registered
+    parse_link tool: a Slack permalink in, a SlackParsedLink-shaped result
+    out (channel_id + message_ts, no guild_id)."""
+    account_id = await _seed_slack_bound_account(db_session, workspace_id="slack-parse-link")
+    token = mint_jwt(account_id=account_id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    app = _make_app(sessionmaker)
+
+    call_result = await _call_tool(
+        app,
+        token=token,
+        tool_name="parse_link",
+        arguments={"url": "https://acme.slack.com/archives/C0123456789/p1717171717000100"},
+    )
+
+    assert call_result.get("isError") is not True, (
+        f"a Slack caller's parse_link call must succeed; got {call_result!r}"
+    )
+    output_text = _output_text(call_result)
+    assert '"channel_id":"C0123456789"' in output_text.replace(" ", ""), (
+        f"the Slack branch's result must carry the parsed channel_id; got {output_text!r}"
+    )
+    assert '"message_ts":"1717171717.000100"' in output_text.replace(" ", ""), (
+        f"the Slack branch's result must carry the dotted message_ts; got {output_text!r}"
+    )
+    assert "guild_id" not in output_text, (
+        "a Slack parse_link result must not carry Discord's guild_id field"
     )
 
 
@@ -268,6 +331,49 @@ async def test_search_messages_slack_caller_no_longer_hits_unsupported_branch(
     )
     assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
         f"Slack caller's search_messages must hit the Slack-only crypto-keys error; "
+        f"got {output_text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_slack_caller_no_longer_hits_unsupported_branch(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """send_message used to be Slack-unsupported; it now routes to the Slack send
+    impl. With no DAIMON_CRYPTO__KEYS configured on the runtime, the Slack impl's
+    ``slack_web_client`` fails with a Slack-specific error the old "not supported
+    on Slack yet" branch could never produce — pinning that the dispatch now
+    reaches ``_slack_send_message_impl`` instead. Needs a linked PlatformPrincipal
+    (platform_user_id) since the send impl resolves slack identity before
+    touching crypto."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="slack-send-message")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session,
+        platform="slack",
+        external_id="U_SLACK_CALLER",
+        tenant=tenant,
+        account=account,
+    )
+    await db_session.commit()
+    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    app = _make_app(sessionmaker)
+
+    call_result = await _call_tool(
+        app,
+        token=token,
+        tool_name="send_message",
+        arguments={"channel_id": "C_TEST", "content": "hi"},
+    )
+
+    assert call_result.get("isError") is True
+    output_text = _output_text(call_result)
+    assert "send_message is not supported on Slack yet" not in output_text, (
+        "send_message must no longer hit the Slack-unsupported branch"
+    )
+    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
+        f"Slack caller's send_message must hit the Slack-only crypto-keys error; "
         f"got {output_text!r}"
     )
 

@@ -376,6 +376,203 @@ async def test_read_thread_malformed_id_explains_format(
 
 
 @pytest.mark.asyncio
+async def test_read_thread_reply_ts_resolves_to_parent_thread(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A read_thread call given a reply's ts must return the whole parent
+    thread (oldest-first), not a one-message thread — the second
+    conversations.replies call answers with the full thread."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    reply_ts = "1.5"
+    parent_ts = "1.0"
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={
+                "ok": True,
+                "has_more": False,
+                "messages": [
+                    {"ts": reply_ts, "user": "U_B", "text": "reply-only", "thread_ts": parent_ts}
+                ],
+            },
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={
+                "ok": True,
+                "has_more": False,
+                "messages": [
+                    {
+                        "ts": parent_ts,
+                        "user": "U_A",
+                        "text": "root",
+                        "thread_ts": parent_ts,
+                        "reply_count": 1,
+                    },
+                    {"ts": reply_ts, "user": "U_B", "text": "reply-only", "thread_ts": parent_ts},
+                ],
+            },
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO,
+            payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO,
+            payload={"ok": True, "user": {"id": "U_B", "profile": {"display_name": "bob"}}},
+        )
+        result = await _slack_read_thread_impl(runtime, auth, thread_id=f"C1:{reply_ts}", limit=50)
+    assert result.thread_ts == parent_ts, "the result must report the parent ts, not the reply ts"
+    assert [msg.text for msg in result.messages] == ["root", "reply-only"], (
+        "a version that returns only the single reply must fail this assertion"
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_thread_parent_ts_makes_exactly_one_replies_call(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Reading a thread by its own parent ts (the shipped case) must not
+    double every existing read with a second conversations.replies call."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    parent_ts = "1.0"
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={
+                "ok": True,
+                "has_more": False,
+                "messages": [
+                    {
+                        "ts": parent_ts,
+                        "user": "U_A",
+                        "text": "root",
+                        "thread_ts": parent_ts,
+                        "reply_count": 1,
+                    },
+                    {"ts": "2.0", "user": "U_B", "text": "reply", "thread_ts": parent_ts},
+                ],
+            },
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO,
+            payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO,
+            payload={"ok": True, "user": {"id": "U_B", "profile": {"display_name": "bob"}}},
+        )
+        result = await _slack_read_thread_impl(runtime, auth, thread_id=f"C1:{parent_ts}", limit=50)
+        replies_calls = [
+            reqs
+            for (method, url), reqs in m.requests.items()
+            if method == "GET" and "conversations.replies" in str(url)
+        ]
+    assert sum(len(reqs) for reqs in replies_calls) == 1, (
+        "reading a thread by its own parent ts must make exactly one conversations.replies call"
+    )
+    assert result.thread_ts == parent_ts
+
+
+@pytest.mark.asyncio
+async def test_read_thread_untreaded_message_returns_as_is_no_crash(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A ts with no thread_ts at all (an untreaded message fetched by ts) must
+    be returned as-is, with no second conversations.replies call and no crash."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    ts = "9.0"
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={"ok": True, "has_more": False, "messages": [{"ts": ts, "text": "lone"}]},
+        )
+        result = await _slack_read_thread_impl(runtime, auth, thread_id=f"C1:{ts}", limit=50)
+        replies_calls = [
+            reqs
+            for (method, url), reqs in m.requests.items()
+            if method == "GET" and "conversations.replies" in str(url)
+        ]
+    assert sum(len(reqs) for reqs in replies_calls) == 1
+    assert result.thread_ts == ts
+    assert [msg.text for msg in result.messages] == ["lone"]
+
+
+@pytest.mark.asyncio
+async def test_read_thread_reply_ts_resolves_to_parent_on_user_token_path(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The user-token branch of _slack_read_thread_impl shares
+    _fetch_thread_replies, so the same reply-ts parent resolution applies."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    await _seed_user_token(runtime, committing_sessionmaker)
+    reply_ts = "1.5"
+    parent_ts = "1.0"
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={
+                "ok": True,
+                "has_more": False,
+                "messages": [
+                    {"ts": reply_ts, "user": "U_B", "text": "reply-only", "thread_ts": parent_ts}
+                ],
+            },
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={
+                "ok": True,
+                "has_more": False,
+                "messages": [
+                    {
+                        "ts": parent_ts,
+                        "user": "U_A",
+                        "text": "root",
+                        "thread_ts": parent_ts,
+                        "reply_count": 1,
+                    },
+                    {"ts": reply_ts, "user": "U_B", "text": "reply-only", "thread_ts": parent_ts},
+                ],
+            },
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO,
+            payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO,
+            payload={"ok": True, "user": {"id": "U_B", "profile": {"display_name": "bob"}}},
+        )
+        result = await _slack_read_thread_impl(runtime, auth, thread_id=f"C1:{reply_ts}", limit=50)
+    assert result.thread_ts == parent_ts
+    assert [msg.text for msg in result.messages] == ["root", "reply-only"]
+
+
+@pytest.mark.asyncio
 async def test_get_message_top_level_found_via_history(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

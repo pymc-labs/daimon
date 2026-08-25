@@ -74,7 +74,7 @@ async def _post_app_install_link_impl(
 
 
 def register_github_app_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool
+    @mcp.tool(tags={"discord"})  # pyright: ignore[reportArgumentType]
     async def post_github_app_install_link(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,

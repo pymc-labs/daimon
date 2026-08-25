@@ -304,7 +304,7 @@ async def _request_repo_binding_impl(
 
 
 def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def request_env_credential(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -329,7 +329,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             channel_id=channel_id,
         )
 
-    @mcp.tool
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def request_mcp_credential(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -365,7 +365,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
     # rather than a docstring paragraph because the docstring IS prompt
     # context: it is rendered into every model's tool list, where an internal
     # rationale is noise.
-    @mcp.tool
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def request_skill_repo_credential(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -401,7 +401,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             channel_id=channel_id,
         )
 
-    @mcp.tool
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def request_repo_binding(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,

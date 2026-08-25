@@ -181,6 +181,12 @@ class IdentityMiddleware(Middleware):
         await fastmcp_ctx.set_state("auth", identity, serializable=False)
         if is_admin:
             await enable_components(fastmcp_ctx, tags={"admin"})
+        # Enable the caller's platform tag (deny-by-default baselines live in
+        # server.py). A CLI token's platform="cli" matches no baseline tag,
+        # so this enable is a no-op for CLI — the intended outcome: CLI loses
+        # the discord/slack-tagged tools without any special-casing here.
+        if platform is not None:
+            await enable_components(fastmcp_ctx, tags={platform})
         # when agent_id is present (a verified
         # derived per-agent UUID), narrow the session to agent-chat-tagged
         # tools only. disable_components(match_all=True) then

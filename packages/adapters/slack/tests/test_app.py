@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import httpx
+import structlog.testing
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     BetaManagedAgentsModelConfig,
@@ -1256,7 +1257,10 @@ async def test_orchestrate_tenant_cap_when_exhausted_sends_ephemeral_and_skips_t
         "text": "<@U_BOT> hello",
     }
 
-    with patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn:
+    with (
+        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+        structlog.testing.capture_logs() as captured,
+    ):
         await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
             event,
             team_id=team_id,
@@ -1280,6 +1284,15 @@ async def test_orchestrate_tenant_cap_when_exhausted_sends_ephemeral_and_skips_t
 
     # Assert run_turn was NOT called.
     mock_run_turn.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+
+    # The ephemeral leaves no transcript or history trace, so this log line is
+    # the only server-side evidence a shed happened — its absence made a shed
+    # turn indistinguishable from a dropped event.
+    shed_logs = [c for c in captured if c.get("event") == "turn.skipped.concurrency_shed"]
+    assert len(shed_logs) == 1, "the concurrency shed must log exactly one skip event"
+    assert shed_logs[0]["in_flight"] == cap and shed_logs[0]["cap"] == cap, (
+        "the shed log must carry the in-flight count and cap for the operator"
+    )
 
 
 async def test_orchestrate_first_turn_when_channel_agent_propagated_resolves_channel_agent_tag(

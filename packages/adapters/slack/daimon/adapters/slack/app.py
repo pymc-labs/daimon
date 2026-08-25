@@ -863,6 +863,19 @@ class SlackApp:
         cap = self.runtime.settings.slack.max_concurrent_turns_per_tenant
         count = self._inflight.get(tenant_id, 0)
         if not should_admit_turn(current_in_flight=count, cap=cap):
+            # The rejection below is an ephemeral — it appears in no channel
+            # history and no API read. This log line is the ONLY server-side
+            # trace a shed turn leaves; without it a shed mention is
+            # indistinguishable from a dropped event.
+            log.info(
+                "turn.skipped.concurrency_shed",
+                tenant_id=str(tenant_id),
+                team_id=team_id,
+                channel_id=channel,
+                thread_id=thread_id,
+                in_flight=count,
+                cap=cap,
+            )
             await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 user=str(event.get("user") or ""),

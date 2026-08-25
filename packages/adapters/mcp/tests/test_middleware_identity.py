@@ -28,6 +28,7 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
 from fastmcp import Client, FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.server.context import Context
+from fastmcp.server.transforms import Visibility
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp, Message
 
@@ -1041,3 +1042,271 @@ async def test_internal_token_is_admin_claim_still_grants_admin(
         "an internal token (is_admin=True AND internal=True) must still grant admin "
         "(ADMIN-02 — CLI/scheduler/headless admin must not be stripped)"
     )
+
+
+# ---------------------------------------------------------------------------
+# platform-tagged visibility (re-derives a prior throwaway spike's findings —
+# see the tool-visibility quick-task RESEARCH.md; nothing here was ported
+# from committed source, since the spike was never committed)
+# ---------------------------------------------------------------------------
+
+
+async def _call_platform_tool(
+    app: ASGIApp, *, token: str, tool_name: str, arguments: dict[str, object]
+) -> dict[str, object]:
+    """Initialize an MCP HTTP session and call a tool; return the JSON-RPC result.
+
+    Duplicated locally rather than shared with test_channels_dispatch.py's
+    ``_call_tool`` — the testing guideline forbids sharing private setup
+    across test files.
+    """
+    headers = dict(_INIT_HEADERS)
+    headers["Authorization"] = f"Bearer {token}"
+    transport = httpx.ASGITransport(app=app)  # pyright: ignore[reportArgumentType]
+    async with _lifespan(app), httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        init_resp = await c.post("/mcp", json=_INIT_BODY, headers=headers)
+        assert init_resp.status_code == 200, f"initialize failed: {init_resp.text}"
+        session_id = init_resp.headers.get("mcp-session-id")
+        if session_id:
+            headers["Mcp-Session-Id"] = session_id
+        body: dict[str, object] = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+        }
+        resp = await c.post("/mcp", json=body, headers=headers)
+        assert resp.status_code == 200, f"tools/call failed: {resp.text}"
+        result = _parse_jsonrpc_response(resp)
+    return result.get("result", result)  # type: ignore[return-value]
+
+
+def _make_platform_app(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    token_map: dict[str, dict[str, str]],
+) -> ASGIApp:
+    """Build a minimal FastMCP app with the discord/slack Visibility baselines.
+
+    Unlike ``_make_narrowing_app`` (no baseline transforms), this app carries
+    ``Visibility(False, tags={"discord"})`` and ``Visibility(False,
+    tags={"slack"})`` — the same deny-by-default baselines ``server.py``
+    registers — so a token's ``platform`` claim is what makes a
+    platform-tagged tool visible at all.
+
+    Tools:
+      - ``discord_tool`` tagged {"discord"}
+      - ``slack_tool`` tagged {"slack"}
+      - ``shared_tool`` tagged {"discord", "slack"}
+      - ``untagged_tool`` — no tags, always visible by default
+      - ``agent_tool`` tagged {"agent-chat"}
+    """
+    mcp = FastMCP(name="platform-test", auth=StaticTokenVerifier(tokens=token_map))
+    mcp.add_middleware(
+        IdentityMiddleware(
+            subject_resolver=production_subject_resolver,
+            tenant_resolver=production_tenant_resolver,
+            role_resolver=production_role_resolver,
+            agent_id_resolver=production_agent_id_resolver,
+            is_admin_resolver=production_is_admin_resolver,
+            internal_resolver=production_internal_resolver,
+            sessionmaker=sessionmaker,
+        )
+    )
+    mcp.add_transform(Visibility(False, tags={"discord"}))
+    mcp.add_transform(Visibility(False, tags={"slack"}))
+
+    @mcp.tool(tags={"discord"})  # pyright: ignore[reportArgumentType]
+    async def discord_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+        return "discord"
+
+    @mcp.tool(tags={"slack"})  # pyright: ignore[reportArgumentType]
+    async def slack_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+        return "slack"
+
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    async def shared_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+        return "shared"
+
+    @mcp.tool
+    async def untagged_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+        return "untagged"
+
+    @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
+    async def agent_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+        return "agent"
+
+    return mcp.http_app()  # pyright: ignore[reportReturnType]
+
+
+async def test_platform_visibility_discord_token_sees_discord_and_shared_and_untagged(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    token = "discord-token"
+    token_map = {
+        token: {
+            "sub": str(uuid.uuid4()),
+            "tenant_id": str(uuid.uuid4()),
+            "role": "user",
+            "client_id": "test",
+            "platform": "discord",
+        }
+    }
+    app = _make_platform_app(sessionmaker, token_map)
+
+    tool_names = await _list_tools(app, token=token)
+
+    assert "discord_tool" in tool_names, "a discord caller must see discord-tagged tools"
+    assert "shared_tool" in tool_names, "a discord caller must see dual-tagged tools"
+    assert "untagged_tool" in tool_names, "an untagged tool must stay visible to every platform"
+    assert "slack_tool" not in tool_names, "a discord caller must not see slack-only tools"
+
+
+async def test_platform_visibility_slack_token_sees_slack_and_shared_and_untagged(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    token = "slack-token"
+    token_map = {
+        token: {
+            "sub": str(uuid.uuid4()),
+            "tenant_id": str(uuid.uuid4()),
+            "role": "user",
+            "client_id": "test",
+            "platform": "slack",
+        }
+    }
+    app = _make_platform_app(sessionmaker, token_map)
+
+    tool_names = await _list_tools(app, token=token)
+
+    assert "slack_tool" in tool_names, "a slack caller must see slack-tagged tools"
+    assert "shared_tool" in tool_names, "a slack caller must see dual-tagged tools"
+    assert "untagged_tool" in tool_names, "an untagged tool must stay visible to every platform"
+    assert "discord_tool" not in tool_names, "a slack caller must not see discord-only tools"
+
+
+async def test_platform_visibility_cli_token_sees_neither_platform_tag(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A CLI token's platform="cli" matches no baseline tag — CLI loses the
+    platform-tagged tools by construction, not by special-casing."""
+    token = "cli-token"
+    token_map = {
+        token: {
+            "sub": str(uuid.uuid4()),
+            "tenant_id": str(uuid.uuid4()),
+            "role": "user",
+            "client_id": "test",
+            "platform": "cli",
+        }
+    }
+    app = _make_platform_app(sessionmaker, token_map)
+
+    tool_names = await _list_tools(app, token=token)
+
+    assert "untagged_tool" in tool_names, "an untagged tool must stay visible to a cli caller"
+    assert "discord_tool" not in tool_names, "a cli caller must not see discord-only tools"
+    assert "slack_tool" not in tool_names, "a cli caller must not see slack-only tools"
+
+
+async def test_platform_visibility_slack_token_can_call_shared_tool(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A dual-tagged tool is callable when the middleware enabled only one of
+    its two tags — enabling {"slack"} is enough to clear a {"discord","slack"}
+    tool's Visibility(False, tags={...}) baseline on either tag alone."""
+    token = "slack-token"
+    token_map = {
+        token: {
+            "sub": str(uuid.uuid4()),
+            "tenant_id": str(uuid.uuid4()),
+            "role": "user",
+            "client_id": "test",
+            "platform": "slack",
+        }
+    }
+    app = _make_platform_app(sessionmaker, token_map)
+
+    result = await _call_platform_tool(app, token=token, tool_name="shared_tool", arguments={})
+
+    assert result.get("isError") is not True, f"shared_tool call must succeed; got {result!r}"
+
+
+async def test_platform_visibility_slack_token_calling_discord_tool_is_unknown_tool(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A slack caller directly calling a discord-only tool gets a generic
+    unknown-tool error, not any daimon gate copy — this is the error-UX
+    trade the decision to keep runtime gates was made against."""
+    token = "slack-token"
+    token_map = {
+        token: {
+            "sub": str(uuid.uuid4()),
+            "tenant_id": str(uuid.uuid4()),
+            "role": "user",
+            "client_id": "test",
+            "platform": "slack",
+        }
+    }
+    app = _make_platform_app(sessionmaker, token_map)
+
+    result = await _call_platform_tool(app, token=token, tool_name="discord_tool", arguments={})
+
+    assert result.get("isError") is True, (
+        f"a hidden tool must be uncallable, not just unlisted; got {result!r}"
+    )
+
+
+async def test_platform_visibility_agent_narrowing_overrides_platform_enable(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A discord token that ALSO carries a valid agent_id narrows to
+    agent-chat tools only — the platform enable must sit before
+    disable_components(match_all=True) so narrowing still wins."""
+    agent_id = uuid.uuid4()
+    token = "discord-agent-token"
+    token_map = {
+        token: {
+            "sub": str(uuid.uuid4()),
+            "tenant_id": str(uuid.uuid4()),
+            "role": "user",
+            "client_id": "test",
+            "platform": "discord",
+            "agent_id": str(agent_id),
+        }
+    }
+    app = _make_platform_app(sessionmaker, token_map)
+
+    tool_names = await _list_tools(app, token=token)
+
+    assert "agent_tool" in tool_names, "an agent-narrowed session must see agent-chat tools"
+    assert "discord_tool" not in tool_names, (
+        "agent-chat narrowing must override the earlier platform enable"
+    )
+    assert "shared_tool" not in tool_names, (
+        "agent-chat narrowing must override the earlier platform enable"
+    )
+
+
+async def test_platform_visibility_no_platform_claim_sees_neither_tag(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Fail-closed: a token with no platform claim at all enables neither
+    baseline tag — untagged_tool stays visible, discord_tool/slack_tool do
+    not."""
+    token = "no-platform-token"
+    token_map = {
+        token: {
+            "sub": str(uuid.uuid4()),
+            "tenant_id": str(uuid.uuid4()),
+            "role": "user",
+            "client_id": "test",
+            # No platform claim.
+        }
+    }
+    app = _make_platform_app(sessionmaker, token_map)
+
+    tool_names = await _list_tools(app, token=token)
+
+    assert "untagged_tool" in tool_names, "an untagged tool must stay visible with no platform"
+    assert "discord_tool" not in tool_names, "no platform claim must not enable discord tools"
+    assert "slack_tool" not in tool_names, "no platform claim must not enable slack tools"

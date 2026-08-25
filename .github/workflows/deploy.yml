@@ -148,6 +148,27 @@ jobs:
               cd /etc/daimon
               sudo -E docker compose -f compose.worker.yml pull
               sudo -E docker compose -f compose.worker.yml up -d --remove-orphans
+              # Gate: the slack worker must come up and stay up. Its liveness
+              # responder binds only after the boot defaults sweep (~75s), and
+              # a bad Slack config crash-loops the container rather than
+              # failing `up -d` — so require a running container with zero
+              # restarts that answers on its liveness port before calling the
+              # refresh done. Discord fails loudly on its own (bad token kills
+              # the gateway handshake); Slack is the one that dies silently.
+              for i in $(seq 1 20); do
+                sleep 6
+                running=$(sudo docker inspect --format "{{.State.Running}}" daimon-slack-1)
+                restarts=$(sudo docker inspect --format "{{.RestartCount}}" daimon-slack-1)
+                if [ "$running" = "true" ] && [ "$restarts" = "0" ] \
+                  && sudo docker exec daimon-slack-1 python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8083/\", timeout=3)" 2>/dev/null; then
+                  echo "slack worker healthy (attempt $i)"
+                  break
+                fi
+                if [ "$i" = "20" ]; then
+                  echo "slack worker not healthy after 120s (running=$running restarts=$restarts)" >&2
+                  exit 1
+                fi
+              done
               # Prune superseded image tags after the new ones are in use —
               # each deploy leaves a ~1GB tag behind, and a full root disk
               # breaks IAP SSH key writes (breaking this very refresh step).

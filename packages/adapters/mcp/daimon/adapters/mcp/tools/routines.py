@@ -236,7 +236,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``"research-bot"``). It is NOT:
 
         - a free-text description of the routine
-        - a Discord mention, tag fragment, or user handle
+        - a mention, tag fragment, or user handle
         - a routine label or trigger phrase
         - the name of a tool, MCP, or skill
 

@@ -213,6 +213,8 @@ def create_mcp_app(
 
     mcp.add_transform(Visibility(False, tags={"admin"}))
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
+    mcp.add_transform(Visibility(False, tags={"discord"}))
+    mcp.add_transform(Visibility(False, tags={"slack"}))
     mcp.add_transform(
         AgentChatAwareBM25SearchTransform(
             max_results=5,

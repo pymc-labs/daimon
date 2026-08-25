@@ -110,7 +110,7 @@ async def _post_wizard_impl(
 
 
 def register_wizard_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool
+    @mcp.tool(tags={"discord"})  # pyright: ignore[reportArgumentType]
     async def post_wizard(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         prompt: str,

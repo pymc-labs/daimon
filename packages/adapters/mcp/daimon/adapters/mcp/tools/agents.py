@@ -857,7 +857,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         For MCP servers that REQUIRE an auth token, do NOT collect the
         token in chat — direct the user to ``/agent-setup`` -> MCPs modal.
-        Tokens sent in chat end up in Discord channel history and MA's
+        Tokens sent in chat end up in channel history and MA's
         tenant-wide session event log; the modal flow is the only
         supported path for auth-required servers.
         """
