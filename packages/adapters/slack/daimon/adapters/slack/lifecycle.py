@@ -27,6 +27,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, cast
 
+import aiohttp
 import structlog
 from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
@@ -35,6 +36,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 from daimon.adapters.slack.blockkit import EmbedEvent, State, TurnPhase, to_blocks, update
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.split import split_for_slack_safe
+from daimon.core.observability import capture_exception_with_scope
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
 from daimon.core.turn.state import ToolUseBlock, TurnState, extract_final_response
@@ -46,6 +48,13 @@ __all__ = ["SlackTurnLifecycle"]
 log = structlog.get_logger()
 
 _DEBOUNCE_S = 5.0
+
+# Everything a chat.postMessage/chat.update can raise. slack_sdk wraps ok:false
+# responses in SlackApiError but re-raises transport failures unwrapped
+# (async_internal_utils re-raises the original aiohttp/timeout error), so any
+# catch or suppress around a send must cover all three or the transport case
+# escapes.
+_SLACK_SEND_ERRORS = (SlackApiError, aiohttp.ClientError, asyncio.TimeoutError)
 
 # Ceiling for the `text` notification fallback that accompanies `blocks`.
 # The rendered content lives in the blocks (a markdown block holds 11 800
@@ -234,7 +243,7 @@ class SlackTurnLifecycle:
             "Turn cancelled.",
         )
 
-    async def _repair_terminal_flush(self) -> None:
+    async def _repair_terminal_flush(self, text: str) -> None:
         """Best-effort collapse of the status message after a failed terminal flush.
 
         Replaces whatever the last debounced flush wrote — phase title, tool
@@ -242,18 +251,16 @@ class SlackTurnLifecycle:
         is deregistered on every terminal path, so a status message left on the
         live surface shows a running turn with a dead cancel button forever.
         The repair can fail for the same reason as the flush (revoked token,
-        archived channel); there is nothing further to do then, so it is
-        suppressed rather than retried.
+        archived channel, network outage); there is nothing further to do then,
+        so it is suppressed rather than retried.
         """
         if self._status_ts is None:
             return
-        text = "⚠️ Something went wrong posting the answer."
-        with contextlib.suppress(SlackApiError):
-            await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
-                channel=self._channel,
-                ts=self._status_ts,
-                blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
-                text=text,
+        with contextlib.suppress(*_SLACK_SEND_ERRORS):
+            # The status_ts guard above pins _post_or_update to its update branch.
+            await self._post_or_update(
+                [{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
+                text,
             )
 
     async def on_terminal_success(self, state: TurnState) -> None:
@@ -262,9 +269,11 @@ class SlackTurnLifecycle:
         If no final text (tool-only or cancelled), collapses to the done footer
         in place. Always deregisters the cancel Event in finally.
 
-        Does not re-raise on SlackApiError — the lifecycle boundary absorbs
-        render failures (same contract as on_terminal_failure). If the flush
-        fails before the status message is replaced, a best-effort repair
+        Does not re-raise on Slack send errors — the lifecycle boundary absorbs
+        render failures (same contract as on_terminal_failure), logging at
+        error level and capturing to Sentry since the swallowed exception is an
+        answer-delivery outage the listener boundary can no longer see. If the
+        flush fails before the status message is replaced, a best-effort repair
         collapses it to a failure notice; if it fails during overflow, the
         already-replaced answer is left standing. final_ts stays None on any
         flush failure so the caller's watermark cannot advance past content
@@ -280,6 +289,9 @@ class SlackTurnLifecycle:
         # content — past that point a repair would overwrite answer text the
         # user can already read, so the except branch skips it.
         surface_replaced = False
+        # A no-answer collapse (tool-only done footer, "Turn cancelled.") must
+        # not be repaired with copy that claims an answer existed.
+        repair_notice = "⚠️ Something went wrong finishing this turn."
         try:
             final_text = extract_final_response(state.content)
             if not final_text:
@@ -293,6 +305,7 @@ class SlackTurnLifecycle:
                 self.final_ts = self._status_ts
                 return
 
+            repair_notice = "⚠️ Something went wrong posting the answer."
             chunks = split_for_slack_safe(escape_mrkdwn_preserving_mentions(final_text))
             first_chunk = chunks[0]
             # First chunk + the cost/usage footer replace the status message
@@ -319,10 +332,14 @@ class SlackTurnLifecycle:
                 current_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
 
             self.final_ts = current_ts
-        except SlackApiError:
-            log.warning("turn.terminal_success.flush_failed", exc_info=True)
+        except _SLACK_SEND_ERRORS as exc:
+            # error + Sentry, not warning: pre-repair this exception reached the
+            # listener boundary's log.error/capture path, and it means a billed
+            # turn whose answer the user never received.
+            log.error("turn.terminal_success.flush_failed", exc_info=True)
+            capture_exception_with_scope(exc)
             if not surface_replaced:
-                await self._repair_terminal_flush()
+                await self._repair_terminal_flush(repair_notice)
         finally:
             if self._status_ts is not None:
                 self._deregister(self._status_ts)
@@ -342,7 +359,7 @@ class SlackTurnLifecycle:
             self.final_ts = self._status_ts
         except Exception:  # noqa: BLE001
             log.warning("turn.terminal_failure.flush_failed", exc_info=True)
-            await self._repair_terminal_flush()
+            await self._repair_terminal_flush("⚠️ Something went wrong finishing this turn.")
         finally:
             if self._status_ts is not None:
                 self._deregister(self._status_ts)

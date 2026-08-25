@@ -15,6 +15,15 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 _SLACK_API_BASE = "https://slack.com/api"
 
+# Default ok payload for the POST-JSON chat methods. Exported so tests that
+# clear the defaults to stage failures can re-register the identical shape —
+# the ts value is load-bearing (tests assert on it as status_ts).
+CHAT_OK_PAYLOAD: dict[str, object] = {
+    "ok": True,
+    "ts": "1000000000.000001",
+    "channel": "C_TEST",
+}
+
 # Slack API methods that use POST with JSON body (params in body, not query string).
 # Exact URL match works for these since params are not in the URL.
 _SLACK_POST_JSON_METHODS: tuple[str, ...] = (
@@ -84,7 +93,7 @@ def _register_slack_defaults(mock: AioResponsesMock) -> None:
     for method in _SLACK_POST_JSON_METHODS:
         mock.post(  # pyright: ignore[reportUnknownMemberType]  # aioresponses url param is Pattern[Unknown]
             f"{_SLACK_API_BASE}/{method}",
-            payload={"ok": True, "ts": "1000000000.000001", "channel": "C_TEST"},
+            payload=CHAT_OK_PAYLOAD,
             repeat=True,
         )
     # views methods return a view object so handlers can read resp["view"]["id"].

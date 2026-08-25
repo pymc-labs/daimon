@@ -27,6 +27,10 @@ Terminal flush failure — best-effort repair (#107):
   - final_ts stays None on every flush failure so the watermark cannot advance
     past an answer the user never saw.
   - on_terminal_failure's own flush failure gets the same repair.
+  - Transport errors (aiohttp, not SlackApiError) get the same repair, and
+    neither terminal hook raises when flush AND repair both hit them.
+  - A no-answer collapse is repaired with copy that does not claim an answer.
+  - The swallowed flush failure is captured to Sentry (answer-delivery outage).
 
 Transport-level fake via aioresponses (guideline:testing) — transport-level fakes only.
 """
@@ -39,10 +43,13 @@ import time
 import types
 from typing import Any
 
+import aiohttp
+import pytest
 import yarl
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
+from daimon.adapters.slack import lifecycle as lifecycle_mod
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.lifecycle import TurnLifecycle
@@ -52,6 +59,9 @@ from daimon.core.turn.state import (
     TurnState,
     UsageTotals,
 )
+from slack_sdk.errors import SlackApiError
+
+from .conftest import CHAT_OK_PAYLOAD
 
 # ---------------------------------------------------------------------------
 # URL constants for mock.requests inspection
@@ -491,6 +501,29 @@ def _reset_slack_responses(fake: Any) -> None:
     fake.mock.clear()
 
 
+def _stage_flush_failure_then_repair_ok(fake: Any, *, error: str) -> None:
+    """Posts succeed; the FIRST chat.update fails with ``error``; later updates succeed.
+
+    The shape shared by every repair test: the initial SSE flush posts fine,
+    the terminal flush's update raises, and the repair update lands.
+    """
+    _reset_slack_responses(fake)
+    fake.mock.post(  # pyright: ignore[reportUnknownMemberType]
+        str(_POST_URL),
+        payload=CHAT_OK_PAYLOAD,
+        repeat=True,
+    )
+    fake.mock.post(  # pyright: ignore[reportUnknownMemberType]
+        str(_UPDATE_URL),
+        payload={"ok": False, "error": error},
+    )
+    fake.mock.post(  # pyright: ignore[reportUnknownMemberType]
+        str(_UPDATE_URL),
+        payload=CHAT_OK_PAYLOAD,
+        repeat=True,
+    )
+
+
 async def test_terminal_success_flush_failure_repairs_status_message(
     fake_slack_web_client: Any,
 ) -> None:
@@ -501,22 +534,7 @@ async def test_terminal_success_flush_failure_repairs_status_message(
     Event is deregistered in finally, so the turn looks alive forever with a
     dead control.
     """
-    _reset_slack_responses(fake_slack_web_client)
-    fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
-        str(_POST_URL),
-        payload={"ok": True, "ts": "1000000000.000001", "channel": "C_TEST"},
-        repeat=True,
-    )
-    # First chat.update (the answer replace) fails; the repair update succeeds.
-    fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
-        str(_UPDATE_URL),
-        payload={"ok": False, "error": "msg_too_long"},
-    )
-    fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
-        str(_UPDATE_URL),
-        payload={"ok": True, "ts": "1000000000.000001"},
-        repeat=True,
-    )
+    _stage_flush_failure_then_repair_ok(fake_slack_web_client, error="msg_too_long")
     lc, _, _registered, deregistered = _make_lifecycle(fake_slack_web_client)
     await lc.on_sse_event(_thinking_event())
 
@@ -547,7 +565,7 @@ async def test_terminal_success_swallows_repair_failure(
     _reset_slack_responses(fake_slack_web_client)
     fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
         str(_POST_URL),
-        payload={"ok": True, "ts": "1000000000.000001", "channel": "C_TEST"},
+        payload=CHAT_OK_PAYLOAD,
         repeat=True,
     )
     fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
@@ -608,7 +626,7 @@ async def test_terminal_success_overflow_failure_keeps_replaced_answer(
     # Initial SSE flush posts fine; every later post (the overflow chunks) fails.
     fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
         str(_POST_URL),
-        payload={"ok": True, "ts": "1000000000.000001", "channel": "C_TEST"},
+        payload=CHAT_OK_PAYLOAD,
     )
     fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
         str(_POST_URL),
@@ -617,7 +635,7 @@ async def test_terminal_success_overflow_failure_keeps_replaced_answer(
     )
     fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
         str(_UPDATE_URL),
-        payload={"ok": True, "ts": "1000000000.000001"},
+        payload=CHAT_OK_PAYLOAD,
         repeat=True,
     )
     lc, _, _registered, deregistered = _make_lifecycle(fake_slack_web_client)
@@ -642,21 +660,7 @@ async def test_terminal_failure_flush_failure_repairs_status_message(
     fake_slack_web_client: Any,
 ) -> None:
     """on_terminal_failure's own flush failure gets the same repair treatment."""
-    _reset_slack_responses(fake_slack_web_client)
-    fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
-        str(_POST_URL),
-        payload={"ok": True, "ts": "1000000000.000001", "channel": "C_TEST"},
-        repeat=True,
-    )
-    fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
-        str(_UPDATE_URL),
-        payload={"ok": False, "error": "msg_too_long"},
-    )
-    fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
-        str(_UPDATE_URL),
-        payload={"ok": True, "ts": "1000000000.000001"},
-        repeat=True,
-    )
+    _stage_flush_failure_then_repair_ok(fake_slack_web_client, error="msg_too_long")
     lc, _, _registered, deregistered = _make_lifecycle(fake_slack_web_client)
     await lc.on_sse_event(_thinking_event())
 
@@ -671,6 +675,116 @@ async def test_terminal_failure_flush_failure_repairs_status_message(
     )
     assert not _has_actions_block(blocks), "the repair must not keep the dead cancel button"
     assert deregistered == ["1000000000.000001"], "deregister must still run in finally"
+
+
+async def test_terminal_success_transport_error_repairs_and_does_not_raise(
+    fake_slack_web_client: Any,
+) -> None:
+    """A transport error during the answer replace gets the same repair as ok:false.
+
+    slack_sdk re-raises aiohttp errors unwrapped — they never become
+    SlackApiError — and the mention boundary's catch tuple does not include
+    them, so an escape here surfaces as an unhandled task error while the
+    status message stays stranded on the live surface.
+    """
+    _reset_slack_responses(fake_slack_web_client)
+    fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
+        str(_POST_URL),
+        payload=CHAT_OK_PAYLOAD,
+        repeat=True,
+    )
+    fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
+        str(_UPDATE_URL),
+        exception=aiohttp.ClientConnectionError("network down"),
+    )
+    fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
+        str(_UPDATE_URL),
+        payload=CHAT_OK_PAYLOAD,
+        repeat=True,
+    )
+    lc, _, _registered, deregistered = _make_lifecycle(fake_slack_web_client)
+    await lc.on_sse_event(_thinking_event())
+
+    state = TurnState(content=[TextBlock(kind="text", text="Hello.")])
+    await lc.on_terminal_success(state)  # must not raise
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    assert "went wrong" in _block_text(blocks), (
+        "a transport error must produce the same repair notice as an ok:false response"
+    )
+    assert lc.final_ts is None, "final_ts must stay unset when the answer never posted"
+    assert deregistered == ["1000000000.000001"], "deregister must still run in finally"
+
+
+async def test_terminal_failure_transport_error_in_flush_and_repair_does_not_raise(
+    fake_slack_web_client: Any,
+) -> None:
+    """on_terminal_failure never raises, even when flush AND repair hit transport errors.
+
+    The driver awaits this hook unguarded on every failure path; an escape
+    aborts run_prepared_turn before its outcome bookkeeping.
+    """
+    _reset_slack_responses(fake_slack_web_client)
+    fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
+        str(_POST_URL),
+        payload=CHAT_OK_PAYLOAD,
+        repeat=True,
+    )
+    fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
+        str(_UPDATE_URL),
+        exception=aiohttp.ClientConnectionError("network down"),
+        repeat=True,
+    )
+    lc, _, _registered, deregistered = _make_lifecycle(fake_slack_web_client)
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_failure(TurnState(), RuntimeError("upstream blew up"))
+
+    assert deregistered == ["1000000000.000001"], "deregister must still run in finally"
+
+
+async def test_terminal_success_cancelled_collapse_repair_does_not_claim_an_answer(
+    fake_slack_web_client: Any,
+) -> None:
+    """The repair after a failed 'Turn cancelled.' collapse must not mention an answer.
+
+    A user who cancelled their own turn would otherwise read
+    'Something went wrong posting the answer.' for a turn that produced none.
+    """
+    _stage_flush_failure_then_repair_ok(fake_slack_web_client, error="ratelimited")
+    lc, _, _registered, deregistered = _make_lifecycle(fake_slack_web_client)
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_success(TurnState())  # empty content — cancelled path
+
+    text = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "went wrong" in text, "the failed collapse must still be repaired"
+    assert "answer" not in text, "a turn with no answer must not be described as one"
+    assert deregistered == ["1000000000.000001"], "deregister must still run in finally"
+
+
+async def test_terminal_success_flush_failure_reaches_sentry(
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A swallowed terminal-flush failure still produces an ops signal.
+
+    Before the repair existed, the exception reached the listener boundary's
+    log.error + capture_exception_with_scope. Absorbing it in the lifecycle
+    must not trade the stuck spinner for a silent answer-delivery outage —
+    a tenant can bill tokens on every turn while every answer is dropped.
+    """
+    captured: list[BaseException] = []
+    monkeypatch.setattr(lifecycle_mod, "capture_exception_with_scope", captured.append)
+    _stage_flush_failure_then_repair_ok(fake_slack_web_client, error="msg_too_long")
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.on_sse_event(_thinking_event())
+
+    state = TurnState(content=[TextBlock(kind="text", text="Hello.")])
+    await lc.on_terminal_success(state)
+
+    assert len(captured) == 1, "the flush failure must be captured exactly once"
+    assert isinstance(captured[0], SlackApiError), "the captured exception is the flush failure"
 
 
 # ---------------------------------------------------------------------------
