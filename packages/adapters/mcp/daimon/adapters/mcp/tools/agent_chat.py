@@ -86,7 +86,7 @@ _MAX_EVENT_PAGES = 20
 _CANCEL_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=False,
     destructiveHint=True,
-    idempotentHint=True,
+    idempotentHint=False,
     openWorldHint=False,
 )
 

@@ -1372,7 +1372,7 @@ async def test_cancel_turn_stops_running_turn() -> None:
     assert tool.annotations.model_dump(exclude_none=True) == {
         "readOnlyHint": False,
         "destructiveHint": True,
-        "idempotentHint": True,
+        "idempotentHint": False,
         "openWorldHint": False,
     }
 
