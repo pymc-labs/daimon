@@ -179,6 +179,7 @@ async def test_driver_calls_on_interrupt_sent_when_sigint() -> None:
         [YieldEvent(pre), BlockForever()],
         [YieldEvent(make_status_idle(event_id="ack", stop_reason=make_end_turn()))],
     ]
+    fa.beta.sessions.retrieve_statuses = ["running", "running", "idle"]
     cancel = asyncio.Event()
     lc = RecordingLifecycle()
 

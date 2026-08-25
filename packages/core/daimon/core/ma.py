@@ -153,9 +153,11 @@ async def _wait_for_interrupt_idle(
     session_id: str,
     timeout_s: float,
 ) -> None:
-    """Wait for a terminal idle event after an interrupt has been posted."""
+    """Wait for a terminal idle or terminated event after an interrupt is posted."""
     stream = await anthropic.beta.sessions.events.stream(session_id=session_id)
     async for event in stream:
+        if event.type == "session.status_terminated":
+            return
         if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
             continue
         if event.stop_reason.type in _INTERRUPT_TERMINAL:

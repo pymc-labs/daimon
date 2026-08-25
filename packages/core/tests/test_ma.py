@@ -6,6 +6,7 @@ import re
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -26,6 +27,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionRequiresAction,
     BetaManagedAgentsSessionRetriesExhausted,
     BetaManagedAgentsSessionStatusIdleEvent,
+    BetaManagedAgentsSessionStatusTerminatedEvent,
     BetaManagedAgentsTextBlock,
     BetaManagedAgentsUserMessageEvent,
 )
@@ -38,6 +40,7 @@ from daimon.core.ma import (
     _INTERRUPT_TERMINAL,
     _TERMINAL_STOP_REASONS,
     WORKSPACE_SENTINEL_AGENT_NAME,
+    _wait_for_interrupt_idle,
     cancel_turn,
     delete_entire_workspace_for_testing,
     delete_sessions_for_account,
@@ -99,6 +102,21 @@ def _make_list_client(events: Sequence[BetaManagedAgentsSessionEvent]) -> Any:
 
     router.add("GET", r"/v1/sessions/[^/]+/events", handle_list)
     return build_fake_anthropic(router.dispatch)
+
+
+def _stream_client_yielding(events: Sequence[Any]) -> Any:
+    """Build a client whose session stream yields the supplied events."""
+    client = build_fake_anthropic(MARouter().dispatch)
+
+    async def _aiter() -> Any:
+        for event in events:
+            yield event
+
+    async def _stream(*, session_id: str) -> Any:
+        return _aiter()
+
+    client.beta.sessions.events.stream = _stream  # type: ignore[assignment]
+    return client
 
 
 async def test_replay_events_returns_all_events_in_order_when_paginator_yields_multiple() -> None:
@@ -166,10 +184,44 @@ def test_cancel_turn_interrupt_terminal_is_superset_of_terminal_stop_reasons() -
     )
 
 
+@pytest.mark.parametrize("stop_reason", ["end_turn", "retries_exhausted", "requires_action"])
+async def test_wait_for_interrupt_idle_returns_for_terminal_idle(stop_reason: str) -> None:
+    client = _stream_client_yielding(
+        [_user_message("sevt_running", "still running"), _idle("sevt_terminal", stop_reason)]
+    )
+
+    await _wait_for_interrupt_idle(client, session_id="sesn_cancel", timeout_s=1.0)
+
+
+async def test_wait_for_interrupt_idle_returns_for_session_terminated() -> None:
+    terminated = BetaManagedAgentsSessionStatusTerminatedEvent(
+        id="sevt_terminated",
+        type="session.status_terminated",
+        processed_at=datetime(2026, 4, 21, tzinfo=UTC),
+    )
+    client = _stream_client_yielding([terminated])
+
+    await _wait_for_interrupt_idle(client, session_id="sesn_cancel", timeout_s=1.0)
+
+
+async def test_wait_for_interrupt_idle_raises_for_non_terminal_idle() -> None:
+    # The current SDK union has no max_tokens variant, but the waiter must fail
+    # closed if MA adds or emits a non-terminal idle reason.
+    max_tokens = _idle("sevt_max_tokens")
+    object.__setattr__(max_tokens, "stop_reason", SimpleNamespace(type="max_tokens"))
+    client = _stream_client_yielding([max_tokens])
+
+    with pytest.raises(TurnError) as exc_info:
+        await _wait_for_interrupt_idle(client, session_id="sesn_cancel", timeout_s=1.0)
+
+    assert exc_info.value.kind == "interrupt_timeout"
+
+
 def _build_cancel_client(
     *,
     statuses: list[str],
     stream_events: Sequence[BetaManagedAgentsSessionEvent] = (),
+    send_status: int = 200,
 ) -> tuple[Any, list[dict[str, Any]], dict[str, int]]:
     """Build a fake MA client whose retrieve status advances per call."""
     remaining_statuses = list(statuses)
@@ -188,7 +240,15 @@ def _build_cancel_client(
     def handle_send(request: httpx.Request, match: Any) -> httpx.Response:
         body: dict[str, Any] = json.loads(request.content)
         sent_events.extend(body.get("events", []))
-        return httpx.Response(200, json={"data": None})
+        if send_status == 200:
+            return httpx.Response(200, json={"data": None})
+        return httpx.Response(
+            send_status,
+            json={
+                "type": "error",
+                "error": {"type": "api_error", "message": "interrupt send failed"},
+            },
+        )
 
     def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
         calls["stream"] += 1
@@ -197,7 +257,7 @@ def _build_cancel_client(
     router.add("GET", r"/v1/sessions/[^/]+", handle_retrieve)
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
-    return build_fake_anthropic(router.dispatch), sent_events, calls
+    return _build_no_retry_anthropic(router), sent_events, calls
 
 
 @pytest.mark.parametrize("stop_reason", ["end_turn", "retries_exhausted", "requires_action"])
@@ -263,7 +323,7 @@ async def test_cancel_turn_stream_closure_with_terminated_status_returns_cancell
     assert sent_events == [{"type": "user.interrupt"}]
 
 
-async def test_cancel_turn_timeout_returns_cancel_requested() -> None:
+async def test_cancel_turn_stream_closure_returns_cancel_requested() -> None:
     client, sent_events, calls = _build_cancel_client(
         statuses=["running", "running", "running"],
         stream_events=[_user_message("sevt_still_running", "still running")],
@@ -281,6 +341,44 @@ async def test_cancel_turn_timeout_returns_cancel_requested() -> None:
     )
     assert result.status == "running"
     assert calls == {"retrieve": 3, "stream": 1}
+    assert sent_events == [{"type": "user.interrupt"}]
+
+
+async def test_cancel_turn_send_conflict_reclassifies_terminal_race() -> None:
+    client, sent_events, calls = _build_cancel_client(
+        statuses=["running", "idle"],
+        send_status=409,
+    )
+
+    result = await cancel_turn(
+        client,
+        session_id="sesn_cancel",
+        requested_by="test",
+        timeout_s=0.05,
+    )
+
+    assert result.outcome == "already_terminal"
+    assert result.status == "idle"
+    assert calls == {"retrieve": 2, "stream": 0}
+    assert sent_events == [{"type": "user.interrupt"}]
+
+
+async def test_cancel_turn_send_server_error_propagates_for_running_session() -> None:
+    client, sent_events, calls = _build_cancel_client(
+        statuses=["running", "running"],
+        send_status=500,
+    )
+
+    with pytest.raises(APIStatusError) as exc_info:
+        await cancel_turn(
+            client,
+            session_id="sesn_cancel",
+            requested_by="test",
+            timeout_s=0.05,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert calls == {"retrieve": 2, "stream": 0}
     assert sent_events == [{"type": "user.interrupt"}]
 
 
@@ -585,10 +683,9 @@ def _conflict_response() -> httpx.Response:
 def _build_no_retry_anthropic(router: MARouter) -> AsyncAnthropic:
     """Build an AsyncAnthropic with max_retries=0 backed by the given MARouter.
 
-    The SDK auto-retries 409 by default (max_retries=2). Tests for
-    update_agent_with_version_retry must disable SDK retries so the helper's
-    own retry logic is exercised in isolation — otherwise the SDK consumes
-    the first conflict internally before our code can inspect it.
+    The SDK auto-retries selected status errors by default (max_retries=2).
+    Tests for local status-error recovery must disable SDK retries so the
+    helper's own branch is exercised in isolation.
     """
     return AsyncAnthropic(
         api_key="test",

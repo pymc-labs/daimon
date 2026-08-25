@@ -224,6 +224,7 @@ async def test_interrupt_mid_consume_still_posts_user_interrupt_regression() -> 
         [BlockForever()],
         [YieldEvent(make_status_idle(event_id="ack", stop_reason=make_end_turn()))],
     ]
+    fa.beta.sessions.retrieve_statuses = ["running", "running", "idle"]
     cancel = asyncio.Event()
     lc = RecordingLifecycle()
 
