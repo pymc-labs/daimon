@@ -11,6 +11,7 @@ import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import build_runtime
 from daimon.core.config import load_settings
+from daimon.core.db import ensure_database_migrated
 from daimon.core.health import start_liveness_responder
 from daimon.core.logging_setup import configure_log_level
 from daimon.core.observability import init_sentry
@@ -38,6 +39,7 @@ async def main() -> None:
         integrations=[AsyncioIntegration()],
     )
     async with build_runtime(settings) as runtime:
+        await ensure_database_migrated(runtime.sessionmaker)
         intents = discord.Intents.default()
         intents.message_content = True
         bot = DaimonBot(runtime=runtime, intents=intents)

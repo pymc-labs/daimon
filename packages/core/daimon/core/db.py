@@ -7,12 +7,39 @@ threads the `async_sessionmaker` into stores as an explicit parameter.
 
 from __future__ import annotations
 
+import asyncpg.exceptions  # type: ignore[reportMissingTypeStubs]
+from daimon.core.errors import DatabaseNotMigratedError
+from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+
+DATABASE_NOT_MIGRATED_MESSAGE = (
+    "database not migrated.\n"
+    "  run: uv run alembic upgrade head\n"
+    "  (with DAIMON_DATABASE_URL set to your target DB)"
+)
+
+
+async def ensure_database_migrated(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Fail fast with an actionable hint when the core schema is absent.
+
+    A connectivity-only ``SELECT 1`` succeeds against an empty database, so
+    probe a table created by daimon's initial migration instead. Connection,
+    authentication, and other operational failures deliberately propagate
+    unchanged; only an absent relation is translated into the migration hint.
+    """
+    try:
+        async with session_factory() as session:
+            await session.execute(text("SELECT 1 FROM tenants LIMIT 1"))
+    except (ProgrammingError, asyncpg.exceptions.UndefinedTableError) as err:
+        raise DatabaseNotMigratedError(DATABASE_NOT_MIGRATED_MESSAGE) from err
 
 
 def build_engine(url: str, *, echo: bool = False) -> AsyncEngine:

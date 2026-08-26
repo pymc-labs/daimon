@@ -36,7 +36,7 @@ from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
-from daimon.core.db import build_engine, build_session_factory
+from daimon.core.db import build_engine, build_session_factory, ensure_database_migrated
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.github_credentials import build_multifernet
@@ -381,6 +381,12 @@ async def run(
 
     engine = _engine_override or build_engine(str(settings.database.url))
     sm = build_session_factory(engine)
+    try:
+        await ensure_database_migrated(sm)
+    except Exception:
+        if _engine_override is None:
+            await engine.dispose()
+        raise
 
     client = (
         await _anthropic_factory(settings)
