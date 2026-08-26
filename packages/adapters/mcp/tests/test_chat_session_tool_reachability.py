@@ -338,7 +338,7 @@ async def test_agent_id_claim_session_discovers_agent_chat_and_self_edit_tools_o
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """A session narrowed to agent-chat-tagged tools (an agent_id claim)
-    discovers the six agent-chat tools plus the eight self-edit/vault tools
+    discovers the seven agent-chat tools plus the eight self-edit/vault tools
     tagged in this plan, and none of the tenant-wide roster tools."""
     async with sessionmaker() as s, s.begin():
         tenant = await make_tenant(s, platform="discord", workspace_id="agent-chat-reachability")
@@ -355,6 +355,7 @@ async def test_agent_id_claim_session_discovers_agent_chat_and_self_edit_tools_o
         "list_my_sessions",
         "start_turn",
         "continue_turn",
+        "cancel_turn",
         "get_my_session",
         "list_events",
         "self_write_file",

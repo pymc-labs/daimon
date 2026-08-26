@@ -6,6 +6,7 @@ import re
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -32,6 +33,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionRequiresAction,
     BetaManagedAgentsSessionRetriesExhausted,
     BetaManagedAgentsSessionStatusIdleEvent,
+    BetaManagedAgentsSessionStatusTerminatedEvent,
     BetaManagedAgentsTextBlock,
     BetaManagedAgentsUserMessageEvent,
 )
@@ -39,9 +41,10 @@ from daimon.core.errors import TurnError
 from daimon.core.ma import (
     _INTERRUPT_TERMINAL,
     _TERMINAL_STOP_REASONS,
+    _wait_for_interrupt_idle,
+    cancel_turn,
     delete_sessions_for_account,
     replay_events,
-    send_interrupt_and_wait,
     stream_events_with_dedup,
     terminal_stop_reason,
     update_agent_with_version_retry,
@@ -262,87 +265,15 @@ async def test_stream_events_with_dedup_skips_id_less_framing_events_from_0117_s
     assert seen == {"sevt_1", "sevt_2"}, "framing events must not enter the dedup ledger"
 
 
-async def test_send_interrupt_and_wait_sends_user_interrupt_when_invoked() -> None:
-    sent_events: list[dict[str, Any]] = []
-
-    router = MARouter()
-
-    def handle_send(request: httpx.Request, match: Any) -> httpx.Response:
-        body: dict[str, Any] = json.loads(request.content)
-        sent_events.extend(body.get("events", []))
-        return httpx.Response(200, json={"data": None})
-
-    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
-        idle = _idle("sevt_1", stop="end_turn")
-        return sse_response([idle.model_dump(mode="json")])
-
-    router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
-
-    client = build_fake_anthropic(router.dispatch)
-
-    await send_interrupt_and_wait(client, session_id="sesn_test", timeout_s=1.0)
-
-    assert len(sent_events) == 1, "must have sent exactly one event"
-    assert sent_events[0] == {"type": "user.interrupt"}, (
-        "SDK body carries a single `user.interrupt` event param"
-    )
-
-
-async def test_send_interrupt_and_wait_returns_when_terminal_idle_arrives() -> None:
-    router = MARouter()
-
-    def handle_send(request: httpx.Request, match: Any) -> httpx.Response:
-        return httpx.Response(200, json={"data": None})
-
-    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
-        events = [
-            _user_message("sevt_a", "hi"),  # not a terminal
-            _idle("sevt_b", stop="end_turn"),  # terminal
-        ]
-        return sse_response([e.model_dump(mode="json") for e in events])
-
-    router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
-    client = build_fake_anthropic(router.dispatch)
-
-    # Should not raise — idle arrives before timeout.
-    await send_interrupt_and_wait(client, session_id="sesn_test", timeout_s=1.0)
-
-
-async def test_send_interrupt_and_wait_treats_requires_action_as_terminal() -> None:
-    """`requires_action` means the session is idle (paused on tool approval) —
-    for interrupt purposes, this IS terminal. The cancel is complete: the turn
-    was running, user hit cancel, and MA confirmed idle (paused on a tool call
-    it will never execute now). Helper must return normally, not time out."""
-    router = MARouter()
-
-    def handle_send(request: httpx.Request, match: Any) -> httpx.Response:
-        return httpx.Response(200, json={"data": None})
-
-    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
-        idle = _idle("sevt_a", stop="requires_action")
-        return sse_response([idle.model_dump(mode="json")])
-
-    router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
-    client = build_fake_anthropic(router.dispatch)
-
-    # Should not raise — requires_action is now terminal for interrupt acks.
-    await send_interrupt_and_wait(client, session_id="sesn_test", timeout_s=1.0)
-
-
-def test_send_interrupt_and_wait_interrupt_terminal_is_superset_of_terminal_stop_reasons() -> None:
+def test_cancel_turn_interrupt_terminal_is_superset_of_terminal_stop_reasons() -> None:
     """_INTERRUPT_TERMINAL must be a strict superset of _TERMINAL_STOP_REASONS.
 
-    _TERMINAL_STOP_REASONS lists only the variants
-    `send_interrupt_and_wait` treats as terminal. `terminal_stop_reason()` (the
-    driver's broader helper) treats ANY status_idle, including requires_action,
-    as stream-terminal -- the driver has no approval/resume loop; it finalizes
-    requires_action as an actionable failure. _INTERRUPT_TERMINAL extends
-    _TERMINAL_STOP_REASONS with requires_action for the cancel-button path
-    only. This structural test ensures no one collapses the two constants
-    together.
+    The driver's broader helper treats ANY status_idle, including
+    requires_action, as stream-terminal -- the driver has no approval/resume
+    loop; it finalizes requires_action as an actionable failure.
+    _INTERRUPT_TERMINAL extends genuine completion reasons with
+    requires_action for the cancel path only. This structural test ensures no
+    one collapses the two constants together.
     """
     assert _TERMINAL_STOP_REASONS < _INTERRUPT_TERMINAL, (
         "_TERMINAL_STOP_REASONS must be a strict subset of _INTERRUPT_TERMINAL"
@@ -355,35 +286,236 @@ def test_send_interrupt_and_wait_interrupt_terminal_is_superset_of_terminal_stop
     )
 
 
-async def test_send_interrupt_and_wait_raises_turn_error_when_timeout_fires() -> None:
-    # Stream yields only non-terminal events, then ends; helper must time out.
-    # Transport-level: response body ends after yielding non-terminal events.
-    # The SDK's stream parser closes the iterator when the body ends.
-    # Since run_turn breaks on status_idle before reaching end, but here we
-    # only yield non-terminals, the stream closes without a terminal idle —
-    # the asyncio.wait_for fires.
-    router = MARouter()
+@pytest.mark.parametrize("stop_reason", ["end_turn", "retries_exhausted", "requires_action"])
+async def test_wait_for_interrupt_idle_returns_for_terminal_idle(stop_reason: str) -> None:
+    client = _stream_client_yielding(
+        [_user_message("sevt_running", "still running"), _idle("sevt_terminal", stop_reason)]
+    )
 
-    def handle_send(request: httpx.Request, match: Any) -> httpx.Response:
-        return httpx.Response(200, json={"data": None})
+    await _wait_for_interrupt_idle(client, session_id="sesn_cancel", timeout_s=1.0)
 
-    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
-        non_terminal = _user_message("sevt_a", "still going")
-        return sse_response([non_terminal.model_dump(mode="json")])
 
-    router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
-    client = build_fake_anthropic(router.dispatch)
+async def test_wait_for_interrupt_idle_returns_for_session_terminated() -> None:
+    terminated = BetaManagedAgentsSessionStatusTerminatedEvent(
+        id="sevt_terminated",
+        type="session.status_terminated",
+        processed_at=datetime(2026, 4, 21, tzinfo=UTC),
+    )
+    client = _stream_client_yielding([terminated])
+
+    await _wait_for_interrupt_idle(client, session_id="sesn_cancel", timeout_s=1.0)
+
+
+async def test_wait_for_interrupt_idle_raises_for_non_terminal_idle() -> None:
+    # The current SDK union has no max_tokens variant, but the waiter must fail
+    # closed if MA adds or emits a non-terminal idle reason.
+    max_tokens = _idle("sevt_max_tokens")
+    object.__setattr__(max_tokens, "stop_reason", SimpleNamespace(type="max_tokens"))
+    client = _stream_client_yielding([max_tokens])
 
     with pytest.raises(TurnError) as exc_info:
-        await send_interrupt_and_wait(client, session_id="sesn_test", timeout_s=0.05)
+        await _wait_for_interrupt_idle(client, session_id="sesn_cancel", timeout_s=1.0)
 
-    assert exc_info.value.kind == "interrupt_timeout", (
-        "timeout path must surface as TurnError(kind='interrupt_timeout')"
+    assert exc_info.value.kind == "interrupt_timeout"
+
+
+def _build_cancel_client(
+    *,
+    statuses: list[str],
+    stream_events: Sequence[BetaManagedAgentsSessionEvent] = (),
+    send_status: int = 200,
+) -> tuple[Any, list[dict[str, Any]], dict[str, int]]:
+    """Build a fake MA client whose retrieve status advances per call."""
+    remaining_statuses = list(statuses)
+    sent_events: list[dict[str, Any]] = []
+    calls = {"retrieve": 0, "stream": 0}
+    router = MARouter()
+
+    def handle_retrieve(request: httpx.Request, match: Any) -> httpx.Response:
+        calls["retrieve"] += 1
+        assert remaining_statuses, "test did not configure enough observed statuses"
+        session = _make_session("sesn_cancel", "agent_test", None)
+        payload = session.model_dump(mode="json")
+        payload["status"] = remaining_statuses.pop(0)
+        return httpx.Response(200, json=payload)
+
+    def handle_send(request: httpx.Request, match: Any) -> httpx.Response:
+        body: dict[str, Any] = json.loads(request.content)
+        sent_events.extend(body.get("events", []))
+        if send_status == 200:
+            return httpx.Response(200, json={"data": None})
+        return httpx.Response(
+            send_status,
+            json={
+                "type": "error",
+                "error": {"type": "api_error", "message": "interrupt send failed"},
+            },
+        )
+
+    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
+        calls["stream"] += 1
+        return sse_response([event.model_dump(mode="json") for event in stream_events])
+
+    router.add("GET", r"/v1/sessions/[^/]+", handle_retrieve)
+    router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
+    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
+    return _build_no_retry_anthropic(router), sent_events, calls
+
+
+@pytest.mark.parametrize("stop_reason", ["end_turn", "retries_exhausted", "requires_action"])
+async def test_cancel_turn_happy_path_returns_observed_idle(stop_reason: str) -> None:
+    client, sent_events, calls = _build_cancel_client(
+        statuses=["running", "running", "idle"],
+        stream_events=[
+            _user_message("sevt_still_running", "still running"),
+            _idle("sevt_cancel_ack", stop=stop_reason),
+        ],
     )
-    assert "0.05" in exc_info.value.message or "timeout" in exc_info.value.message.lower(), (
-        "message should indicate timeout duration for operator log context"
+
+    result = await cancel_turn(
+        client,
+        session_id="sesn_cancel",
+        requested_by="test",
+        timeout_s=1.0,
     )
+
+    assert result.outcome == "cancelled"
+    assert result.status == "idle"
+    assert calls == {"retrieve": 3, "stream": 1}, (
+        "cancelled requires a post-ack provider retrieve, not an asserted idle"
+    )
+    assert sent_events == [{"type": "user.interrupt"}]
+
+
+async def test_cancel_turn_post_ack_terminated_returns_cancelled() -> None:
+    client, sent_events, calls = _build_cancel_client(
+        statuses=["running", "running", "terminated"],
+        stream_events=[_idle("sevt_cancel_ack")],
+    )
+
+    result = await cancel_turn(
+        client,
+        session_id="sesn_cancel",
+        requested_by="test",
+        timeout_s=1.0,
+    )
+
+    assert result.outcome == "cancelled"
+    assert result.status == "terminated"
+    assert calls == {"retrieve": 3, "stream": 1}
+    assert sent_events == [{"type": "user.interrupt"}]
+
+
+async def test_cancel_turn_stream_closure_with_terminated_status_returns_cancelled() -> None:
+    client, sent_events, calls = _build_cancel_client(
+        statuses=["running", "running", "terminated"],
+        stream_events=[_user_message("sevt_still_running", "still running")],
+    )
+
+    result = await cancel_turn(
+        client,
+        session_id="sesn_cancel",
+        requested_by="test",
+        timeout_s=0.05,
+    )
+
+    assert result.outcome == "cancelled"
+    assert result.status == "terminated"
+    assert calls == {"retrieve": 3, "stream": 1}
+    assert sent_events == [{"type": "user.interrupt"}]
+
+
+async def test_cancel_turn_stream_closure_returns_cancel_requested() -> None:
+    client, sent_events, calls = _build_cancel_client(
+        statuses=["running", "running", "running"],
+        stream_events=[_user_message("sevt_still_running", "still running")],
+    )
+
+    result = await cancel_turn(
+        client,
+        session_id="sesn_cancel",
+        requested_by="test",
+        timeout_s=0.05,
+    )
+
+    assert result.outcome == "cancel_requested", (
+        "an unacknowledged interrupt must never be reported as cancelled"
+    )
+    assert result.status == "running"
+    assert calls == {"retrieve": 3, "stream": 1}
+    assert sent_events == [{"type": "user.interrupt"}]
+
+
+async def test_cancel_turn_send_conflict_reclassifies_terminal_race() -> None:
+    client, sent_events, calls = _build_cancel_client(
+        statuses=["running", "idle"],
+        send_status=409,
+    )
+
+    result = await cancel_turn(
+        client,
+        session_id="sesn_cancel",
+        requested_by="test",
+        timeout_s=0.05,
+    )
+
+    assert result.outcome == "already_terminal"
+    assert result.status == "idle"
+    assert calls == {"retrieve": 2, "stream": 0}
+    assert sent_events == [{"type": "user.interrupt"}]
+
+
+async def test_cancel_turn_send_server_error_propagates_for_running_session() -> None:
+    client, sent_events, calls = _build_cancel_client(
+        statuses=["running", "running"],
+        send_status=500,
+    )
+
+    with pytest.raises(APIStatusError) as exc_info:
+        await cancel_turn(
+            client,
+            session_id="sesn_cancel",
+            requested_by="test",
+            timeout_s=0.05,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert calls == {"retrieve": 2, "stream": 0}
+    assert sent_events == [{"type": "user.interrupt"}]
+
+
+async def test_cancel_turn_toctou_completion_returns_already_terminal() -> None:
+    client, sent_events, calls = _build_cancel_client(statuses=["running", "idle"])
+
+    result = await cancel_turn(
+        client,
+        session_id="sesn_cancel",
+        requested_by="test",
+        timeout_s=0.05,
+    )
+
+    assert result.outcome == "already_terminal"
+    assert result.status == "idle"
+    assert calls == {"retrieve": 2, "stream": 0}, (
+        "normal completion that wins the send race must not open a 120-second waiter"
+    )
+    assert sent_events == [{"type": "user.interrupt"}]
+
+
+async def test_cancel_turn_idempotent_on_terminal_session() -> None:
+    client, sent_events, calls = _build_cancel_client(statuses=["terminated"])
+
+    result = await cancel_turn(
+        client,
+        session_id="sesn_cancel",
+        requested_by="test",
+        timeout_s=0.05,
+    )
+
+    assert result.outcome == "already_terminal"
+    assert result.status == "terminated"
+    assert calls == {"retrieve": 1, "stream": 0}
+    assert sent_events == [], "terminal sessions must not receive user.interrupt"
 
 
 def test_terminal_stop_reason_returns_end_turn_on_idle_end_turn() -> None:
@@ -653,10 +785,9 @@ def _conflict_response() -> httpx.Response:
 def _build_no_retry_anthropic(router: MARouter) -> AsyncAnthropic:
     """Build an AsyncAnthropic with max_retries=0 backed by the given MARouter.
 
-    The SDK auto-retries 409 by default (max_retries=2). Tests for
-    update_agent_with_version_retry must disable SDK retries so the helper's
-    own retry logic is exercised in isolation — otherwise the SDK consumes
-    the first conflict internally before our code can inspect it.
+    The SDK auto-retries selected status errors by default (max_retries=2).
+    Tests for local status-error recovery must disable SDK retries so the
+    helper's own branch is exercised in isolation.
     """
     return AsyncAnthropic(
         api_key="test",

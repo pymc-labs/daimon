@@ -613,6 +613,7 @@ async def test_interrupt_mid_consume_timeout_surfaces_interrupt_timeout() -> Non
         [BlockForever()],
         [BlockForever()],  # ack-waiter never sees terminal idle
     ]
+    fa.beta.sessions.retrieve_statuses = ["running", "running", "running"]
     cancel = asyncio.Event()
     lc = RecordingLifecycle()
 

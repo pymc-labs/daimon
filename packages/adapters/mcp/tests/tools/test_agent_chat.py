@@ -1,7 +1,7 @@
 """Tests for the agent-chat tool group.
 
 Surface is primitives-only (scoped to the caller's agent): describe_agent,
-list_sessions, start_turn, continue_turn, get_session, list_events.
+list_sessions, start_turn, continue_turn, cancel_turn, get_session, list_events.
 
 Covers:
 1. Narrowing: with a derived-UUID agent_id claim, tools/list returns ONLY the
@@ -43,6 +43,7 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
 from daimon.adapters.mcp.tools.agent_chat import (
+    _cancel_turn_impl,
     _continue_turn_impl,
     _describe_agent_impl,
     _get_session_impl,
@@ -61,6 +62,7 @@ from daimon.testing.ma import (
     build_fake_anthropic,
     list_response,
     send_events_response,
+    sse_response,
 )
 from factories import make_ma_agent
 from fastmcp import FastMCP
@@ -321,6 +323,7 @@ async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools() -> None:
         "list_my_sessions",
         "start_turn",
         "continue_turn",
+        "cancel_turn",
         "get_my_session",
         "list_events",
     }
@@ -406,6 +409,7 @@ async def test_narrowing_lists_agent_chat_tools_through_bm25_search_transform() 
         "list_my_sessions",
         "start_turn",
         "continue_turn",
+        "cancel_turn",
         "get_my_session",
         "list_events",
     }
@@ -797,6 +801,105 @@ async def test_continue_turn_raises_session_not_found_for_same_tenant_other_agen
         await _continue_turn_impl(runtime, auth, "ses_sibling", "hi")
 
 
+async def test_cancel_turn_stops_running_turn() -> None:
+    """The registered tool owner-checks, interrupts, and awaits terminal idle."""
+    sent_events: list[dict[str, Any]] = []
+    observed_statuses = iter(["running", "running", "running", "idle"])
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=_make_fake_session(session_id="ses_running", status=next(observed_statuses)),
+        ),
+    )
+
+    def on_event_send(request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        sent_events.extend(json.loads(request.content).get("events", []))
+        return send_events_response(data=[])
+
+    router.add("POST", r"/v1/sessions/([^/]+)/events", on_event_send)
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)/events/stream",
+        lambda _r, _m: sse_response([_make_idle_event()]),
+    )
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+    mcp = FastMCP(name="cancel-registration")
+    register_agent_chat_tools(mcp, runtime, billing_config=None)
+
+    tool = await mcp.get_tool("cancel_turn")
+    assert tool is not None, "cancel_turn must be registered in the agent-chat tool set"
+    assert tool.annotations is not None
+    assert tool.annotations.model_dump(exclude_none=True) == {
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+
+    result = await _cancel_turn_impl(runtime, _auth(), "ses_running")
+
+    assert result == {
+        "session_id": "ses_running",
+        "outcome": "cancelled",
+        "status": "idle",
+    }
+    assert sent_events == [{"type": "user.interrupt"}]
+
+
+async def test_cancel_turn_idempotent_on_terminal() -> None:
+    """An already-idle turn returns distinctly without posting another interrupt."""
+    sent_requests: list[httpx.Request] = []
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=_make_fake_session(session_id="ses_idle", status="idle"),
+        ),
+    )
+
+    def unexpected_send(request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        sent_requests.append(request)
+        return send_events_response(data=[])
+
+    router.add("POST", r"/v1/sessions/([^/]+)/events", unexpected_send)
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+
+    result = await _cancel_turn_impl(runtime, _auth(), "ses_idle")
+
+    assert result == {
+        "session_id": "ses_idle",
+        "outcome": "already_terminal",
+        "status": "idle",
+    }
+    assert sent_requests == [], "terminal turns must not receive a duplicate interrupt"
+
+
+async def test_cancel_turn_rejects_same_tenant_sibling_agent_session() -> None:
+    """Cancellation preserves continue_turn's same-agent owner claim."""
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=_make_fake_session(
+                session_id="ses_sibling_cancel",
+                agent_id="ag_sibling",
+                status="running",
+            ),
+        ),
+    )
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+
+    with pytest.raises(ToolError, match="session not found"):
+        await _cancel_turn_impl(runtime, _auth(), "ses_sibling_cancel")
+
+
 # ---------------------------------------------------------------------------
 # Test 4: Confused-deputy — no tool accepts an agent_id parameter
 # ---------------------------------------------------------------------------
@@ -821,6 +924,7 @@ async def test_agent_chat_tools_have_no_agent_id_parameter() -> None:
         "list_my_sessions",
         "start_turn",
         "continue_turn",
+        "cancel_turn",
         "get_my_session",
         "list_events",
     }

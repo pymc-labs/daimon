@@ -14,11 +14,18 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import anthropic
 import httpx
 from anthropic.types import RawMessageStreamEvent
+from anthropic.types.beta import (
+    BetaManagedAgentsModelConfig,
+    BetaManagedAgentsSession,
+)
+from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
+from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
+from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.state import TurnState
 
@@ -84,6 +91,7 @@ class BlockForever:
 StreamAction = (
     YieldEvent | RaiseConnection | RaiseStreamDrop | RaiseStatus | RaiseRateLimit | BlockForever
 )
+SessionStatus = Literal["rescheduling", "running", "idle", "terminated"]
 
 
 @dataclass
@@ -158,6 +166,42 @@ class _FakeEventList:
 @dataclass
 class FakeSessionsBeta:
     events: FakeEventsResource = field(default_factory=FakeEventsResource)
+    retrieve_statuses: list[SessionStatus] = field(
+        default_factory=lambda: ["running", "running", "idle"]
+    )
+
+    async def retrieve(self, session_id: str) -> BetaManagedAgentsSession:
+        if not self.retrieve_statuses:
+            raise AssertionError("FakeSessionsBeta: no retrieve_statuses left")
+        now = datetime(2026, 1, 1)
+        return BetaManagedAgentsSession(
+            id=session_id,
+            agent=BetaManagedAgentsSessionAgent(
+                id="agent_test",
+                description=None,
+                mcp_servers=[],
+                model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
+                name="test-agent",
+                skills=[],
+                system=None,
+                tools=[],
+                type="agent",
+                version=1,
+            ),
+            archived_at=None,
+            created_at=now,
+            environment_id="env_test",
+            metadata={},
+            outcome_evaluations=[],
+            resources=[],
+            stats=BetaManagedAgentsSessionStats(),
+            status=self.retrieve_statuses.pop(0),
+            title=None,
+            type="session",
+            updated_at=now,
+            usage=BetaManagedAgentsSessionUsage(),
+            vault_ids=[],
+        )
 
 
 @dataclass

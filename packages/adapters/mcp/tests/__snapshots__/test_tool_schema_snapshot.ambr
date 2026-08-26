@@ -78,6 +78,30 @@
         'type': 'object',
       }),
     }),
+    'cancel_turn': dict({
+      'description': '''
+        Stop the active turn in a session owned by this caller's agent.
+        Cancellation is cooperative at the Managed Agents interrupt boundary,
+        so an in-flight tool operation may finish before the stop takes effect.
+        The call waits for observed terminal idle, leaves the session readable
+        and continuable, and is an idempotent no-op when the session is already
+        terminal. An unconfirmed timeout returns ``cancel_requested``. Charges
+        for completed ``span.model_request_end`` events stand; there is no
+        reserve or refund, and the cancel request itself adds no usage event.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'session_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'session_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'clear_agent_default': dict({
       'description': '''
         Remove the agent default from a channel or the whole workspace.

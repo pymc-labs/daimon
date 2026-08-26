@@ -27,7 +27,8 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsUserMessageEventParams,
 )
 from daimon.core.errors import TurnError
-from daimon.core.ma import replay_events, send_interrupt_and_wait, terminal_stop_reason
+from daimon.core.ma import cancel_turn as cancel_session_turn
+from daimon.core.ma import replay_events, terminal_stop_reason
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.posture import Billed, BillingExempt, BillingPosture
 from daimon.core.turn.reducers import apply
@@ -505,18 +506,29 @@ async def _handle_interrupt_in_consume(
     render_once: RenderOnce,
     interrupt_timeout_s: float,
 ) -> TurnState:
-    """Normal-flow interrupt: post user.interrupt, wait for terminal idle,
-    route to on_terminal_success on ack or on_terminal_failure on timeout.
+    """Normal-flow interrupt through the shared session cancellation primitive.
+
+    Route to on_terminal_success only for an observed terminal outcome, or to
+    on_terminal_failure when the interrupt remains merely requested.
     """
     try:
-        await send_interrupt_and_wait(
+        result = await cancel_session_turn(
             anthropic,
             session_id=session_id,
+            requested_by="turn_driver",
             timeout_s=interrupt_timeout_s,
         )
+        if result.outcome != "already_terminal":
+            await lifecycle.on_interrupt_sent("cancel_event")
+        if result.outcome == "cancel_requested":
+            raise TurnError(
+                kind="interrupt_timeout",
+                message=(
+                    "MA did not confirm terminal idle after the interrupt request; "
+                    f"observed session status is {result.status!r}"
+                ),
+            )
     except TurnError as err:
-        # send_interrupt_and_wait raises TurnError(kind="interrupt_timeout")
-        # on its timeout; propagate through the on_terminal_failure path.
         log.warning(
             "turn.interrupt.timeout",
             session_id=session_id,
@@ -533,9 +545,12 @@ async def _handle_interrupt_in_consume(
         await lifecycle.on_terminal_failure(state_cell[0], err)
         return state_cell[0]
 
-    log.info("turn.interrupt.sent", session_id=session_id)
-    await lifecycle.on_interrupt_sent("cancel_event")
-    log.info("turn.interrupt.acked", session_id=session_id)
+    log.info(
+        "turn.interrupt.acked",
+        session_id=session_id,
+        outcome=result.outcome,
+        status=result.status,
+    )
     # Ack arrived -- partial state is "clean" (refinements §5).
     await render_once(state_cell[0])
     log.info(
