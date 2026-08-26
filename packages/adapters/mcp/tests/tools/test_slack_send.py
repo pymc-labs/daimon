@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.slack._send import (  # pyright: ignore[reportPrivateUsage]
+    _slack_create_thread_impl,
     _slack_send_message_impl,
 )
 from daimon.adapters.mcp.tools.slack._visibility import (
@@ -448,3 +449,96 @@ async def test_send_message_malformed_composite_target_raises_format_error_no_ap
                 runtime, auth, channel_id="C1:", content="hi", attachments=None, file_handles=None
             )
         assert m.requests == {}
+
+
+# ---------------------------------------------------------------------------
+# _slack_create_thread_impl
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_thread_happy_path_posts_root_message_no_thread_ts(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            _CHAT_POST_MESSAGE, payload={"ok": True, "ts": "1700000010.000100"}
+        )
+        row = await _slack_create_thread_impl(
+            runtime, auth, channel_id="C1", content="new thread root"
+        )
+        body = _post_body(m)
+
+    assert row.ts == "1700000010.000100", "returned row must carry the posted ts"
+    assert row.text == "new thread root", "returned row's text must be the content as passed"
+    assert "thread_ts" not in body, "a thread-root post must not carry a thread_ts key"
+
+
+@pytest.mark.asyncio
+async def test_create_thread_composite_target_refused_before_any_api_call(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        with pytest.raises(ToolError, match="thread root"):
+            await _slack_create_thread_impl(
+                runtime,
+                auth,
+                channel_id="C1:1717171717.123456",
+                content="a root",
+            )
+        assert m.requests == {}, "a composite target must cost zero Slack API calls"
+
+
+@pytest.mark.asyncio
+async def test_create_thread_over_12000_chars_refused_with_zero_api_calls(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    content = "x" * 12_001
+    with aioresponses() as m:
+        with pytest.raises(ToolError, match="shorten"):
+            await _slack_create_thread_impl(runtime, auth, channel_id="C1", content=content)
+        assert m.requests == {}, "an over-length call must cost zero Slack API calls"
+
+
+@pytest.mark.asyncio
+async def test_create_thread_not_in_channel_from_post_yields_invite_instruction(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            _CHAT_POST_MESSAGE, payload={"ok": False, "error": "not_in_channel"}
+        )
+        with pytest.raises(ToolError, match="/invite"):
+            await _slack_create_thread_impl(runtime, auth, channel_id="C1", content="hi")
+
+
+@pytest.mark.asyncio
+async def test_create_thread_channel_access_validated_before_posting(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C_PRIV", "name": "sekret", "is_private": True}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_MEMBERS, payload={"ok": True, "members": ["U_SOMEONE_ELSE"]}
+        )
+        with pytest.raises(ToolError, match=MISSING_ACCESS):
+            await _slack_create_thread_impl(runtime, auth, channel_id="C_PRIV", content="hi")
+        assert _POST_KEY not in m.requests, (
+            "the deny path must raise before ever reaching chat.postMessage"
+        )

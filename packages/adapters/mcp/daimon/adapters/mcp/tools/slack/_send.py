@@ -1,5 +1,8 @@
 """Slack send_message implementation: post + composite thread targets.
 
+Also owns thread-root creation (``_slack_create_thread_impl``): posting a
+root message and returning its ``ts`` as the thread anchor.
+
 Bot-token only. Unlike the read tools, send never uses the caller's own
 xoxp token — there is no impersonation path and no hybrid client to fall
 back to; every post is authenticated as the workspace bot.
@@ -164,6 +167,49 @@ async def _slack_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
 
     resp = await _post_message(
         client, channel_id=target_channel_id, content=content, thread_ts=thread_ts
+    )
+    message = cast(dict[str, Any], resp.get("message") or {})
+    response_thread_ts = message.get("thread_ts")
+    response_user_id = message.get("user")
+    return SlackMessageRow(
+        ts=str(resp["ts"]),
+        user_id=str(response_user_id) if response_user_id else None,
+        text=content,
+        thread_ts=str(response_thread_ts) if response_thread_ts else None,
+    )
+
+
+async def _slack_create_thread_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    content: str,
+) -> SlackMessageRow:
+    """Post a root message and return its ``ts`` as the thread anchor.
+
+    No ``name`` parameter — Slack threads have no title. A composite
+    ``channel_id:thread_ts`` target is refused: a thread root goes to a
+    channel, not into an existing thread (use send_message for a reply).
+    """
+    if len(content) > _MAX_CONTENT_CHARS:
+        raise ToolError(_OVER_LENGTH_MSG)
+
+    target_channel_id, thread_ts = _split_send_target(channel_id)
+    if thread_ts is not None:
+        raise ToolError(
+            "a thread root is posted to a channel, not into an existing thread — "
+            "use send_message with the composite channel_id:thread_ts form to reply "
+            "into an existing thread"
+        )
+    requester_id = _require_slack_identity(auth)
+    team_id = _require_team_id(auth)
+    client = await slack_web_client(runtime, team_id=team_id)
+
+    await _validate_channel_access(client, channel_id=target_channel_id, requester_id=requester_id)
+
+    resp = await _post_message(
+        client, channel_id=target_channel_id, content=content, thread_ts=None
     )
     message = cast(dict[str, Any], resp.get("message") or {})
     response_thread_ts = message.get("thread_ts")
