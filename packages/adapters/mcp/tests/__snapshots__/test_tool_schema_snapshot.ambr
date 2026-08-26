@@ -1124,6 +1124,49 @@
         'type': 'object',
       }),
     }),
+    'create_thread': dict({
+      'description': '''
+        Create a new thread and post content as its first message.
+        
+        ``content`` is required on both platforms and becomes the thread's
+        first message — Slack cannot open a thread without a root message,
+        and a Discord forum post is rejected by the API without a starter
+        message.
+        
+        Discord: ``name`` is the thread's title (1-100 characters). On a text
+        channel this creates a PUBLIC thread; on a forum channel it creates a
+        post. ``name`` is ignored on Slack — Slack threads have no title.
+        
+        Slack: posts ``content`` as a channel-root message and returns its
+        ``ts``. Combine that ``ts`` with ``channel_id`` to address the new
+        thread afterward: ``send_message`` and ``read_thread`` both take the
+        composite ``channel_id:ts`` form (e.g. if this call returns
+        ``ts="1717171717.123456"`` for channel ``C0123456789``, reply with
+        ``send_message(channel_id="C0123456789:1717171717.123456", ...)``).
+        
+        Only create a thread when the user asked for one.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'content': dict({
+            'type': 'string',
+          }),
+          'name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'name',
+          'content',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'delete_notebook': dict({
       'description': '''
         Un-publish a notebook or blog you published (frees its host port).

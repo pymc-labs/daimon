@@ -17,6 +17,7 @@ from daimon.adapters.mcp.tools.discord import (
     ReadThreadResult,
     SearchResult,
     ThreadRow,
+    _create_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _get_message_impl,  # pyright: ignore[reportPrivateUsage]
     _list_channels_impl,  # pyright: ignore[reportPrivateUsage]
     _list_threads_impl,  # pyright: ignore[reportPrivateUsage]
@@ -46,6 +47,7 @@ from daimon.adapters.mcp.tools.slack._search import (
     _slack_search_messages_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.slack._send import (
+    _slack_create_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _slack_send_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from fastmcp import Context, FastMCP
@@ -129,6 +131,42 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         if auth.platform == "slack":
             raise _slack_unsupported("list_threads")
         return await _list_threads_impl(runtime, auth, channel_id=channel_id)
+
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    async def create_thread(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        channel_id: str,
+        name: str,
+        content: str,
+    ) -> ThreadRow | SlackMessageRow:
+        """Create a new thread and post content as its first message.
+
+        ``content`` is required on both platforms and becomes the thread's
+        first message — Slack cannot open a thread without a root message,
+        and a Discord forum post is rejected by the API without a starter
+        message.
+
+        Discord: ``name`` is the thread's title (1-100 characters). On a text
+        channel this creates a PUBLIC thread; on a forum channel it creates a
+        post. ``name`` is ignored on Slack — Slack threads have no title.
+
+        Slack: posts ``content`` as a channel-root message and returns its
+        ``ts``. Combine that ``ts`` with ``channel_id`` to address the new
+        thread afterward: ``send_message`` and ``read_thread`` both take the
+        composite ``channel_id:ts`` form (e.g. if this call returns
+        ``ts="1717171717.123456"`` for channel ``C0123456789``, reply with
+        ``send_message(channel_id="C0123456789:1717171717.123456", ...)``).
+
+        Only create a thread when the user asked for one.
+        """
+        auth = await _auth(ctx)
+        if auth.platform == "slack":
+            return await _slack_create_thread_impl(
+                runtime, auth, channel_id=channel_id, content=content
+            )
+        return await _create_thread_impl(
+            runtime, auth, channel_id=channel_id, name=name, content=content
+        )
 
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def parse_link(  # pyright: ignore[reportUnusedFunction]

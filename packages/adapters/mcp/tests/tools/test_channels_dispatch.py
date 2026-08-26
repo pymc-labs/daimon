@@ -204,6 +204,7 @@ async def test_register_channel_tools_registers_shared_names() -> None:
         "parse_link",
         "send_message",
         "search_messages",
+        "create_thread",
     } <= tool_names, "all shared channel tool names must be registered once"
 
 
@@ -445,4 +446,83 @@ async def test_read_channel_discord_caller_routes_to_discord_impl_and_fails_on_m
     output_text = _output_text(call_result)
     assert "discord tools require DAIMON_DISCORD__BOT_TOKEN" in output_text, (
         f"Discord caller's read_channel must hit the Discord-side bot-token error; got {output_text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_thread_slack_caller_routes_to_slack_impl_and_fails_on_missing_crypto(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A Slack-bound caller's create_thread call routes to the Slack impl.
+
+    With no DAIMON_CRYPTO__KEYS configured on the runtime, the Slack impl's
+    ``slack_web_client`` fails with a Slack-specific error the Discord impl
+    could never produce. Needs a linked PlatformPrincipal for the tenant's
+    platform since the Slack impl resolves identity before touching crypto.
+    """
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="slack-create-thread")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session,
+        platform="slack",
+        external_id="U_SLACK_CALLER",
+        tenant=tenant,
+        account=account,
+    )
+    await db_session.commit()
+    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    app = _make_app(sessionmaker)
+
+    call_result = await _call_tool(
+        app,
+        token=token,
+        tool_name="create_thread",
+        arguments={"channel_id": "C_TEST", "name": "t", "content": "hi"},
+    )
+
+    assert call_result.get("isError") is True
+    output_text = _output_text(call_result)
+    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
+        f"Slack caller's create_thread must hit the Slack-only crypto-keys error; got {output_text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_thread_discord_caller_routes_to_discord_impl_and_fails_on_missing_bot_token(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The same registered create_thread tool routes a Discord-bound caller to
+    the Discord impl, producing the Discord-side bot-token error instead — the
+    asymmetry with the Slack test above pins the platform-based dispatch.
+
+    A valid name ("t") is passed: ``_create_thread_impl`` validates ``name``
+    before ``_require_bot_token``, so an empty/invalid name would surface the
+    name-validation error instead of the bot-token error this test pins.
+    """
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="discord-create-thread")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session,
+        platform="discord",
+        external_id="U_DISCORD_CALLER",
+        tenant=tenant,
+        account=account,
+    )
+    await db_session.commit()
+    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    app = _make_app(sessionmaker)
+
+    call_result = await _call_tool(
+        app,
+        token=token,
+        tool_name="create_thread",
+        arguments={"channel_id": "C_TEST", "name": "t", "content": "hi"},
+    )
+
+    assert call_result.get("isError") is True
+    output_text = _output_text(call_result)
+    assert "discord tools require DAIMON_DISCORD__BOT_TOKEN" in output_text, (
+        f"Discord caller's create_thread must hit the Discord-side bot-token error; got {output_text!r}"
     )
