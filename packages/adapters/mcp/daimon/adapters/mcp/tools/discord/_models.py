@@ -56,6 +56,12 @@ class ReadThreadResult(BaseModel):
     hint: str | None = None
 
 
+class ReadChannelResult(BaseModel):
+    rows: list[MessageRow]
+    next_before: str | None = None
+    hint: str | None = None
+
+
 class SearchResult(BaseModel):
     total_results: int
     showing: int

@@ -22,6 +22,12 @@ class SlackMessageRow(BaseModel):
     reply_count: int | None = None
 
 
+class SlackChannelResult(BaseModel):
+    messages: list[SlackMessageRow]
+    next_cursor: str | None = None
+    hint: str | None = None
+
+
 class SlackThreadResult(BaseModel):
     channel_id: str
     thread_ts: str

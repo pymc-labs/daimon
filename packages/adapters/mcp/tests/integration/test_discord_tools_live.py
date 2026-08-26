@@ -134,13 +134,13 @@ async def test_read_channel_against_live_test_channel(
     bot_user_id = override or await _bot_user_id(token)
     auth = _make_auth(bot_user_id)
 
-    rows = await _read_channel_impl(
+    result = await _read_channel_impl(
         runtime,
         auth,
         channel_id=_TEST_CHANNEL_ID,
         limit=5,
     )
-    assert isinstance(rows, list), "read_channel must return a list"
+    assert isinstance(result.rows, list), "read_channel must return a message list"
 
 
 async def test_send_message_and_round_trip(
@@ -169,7 +169,7 @@ async def test_send_message_and_round_trip(
         channel_id=_TEST_CHANNEL_ID,
         limit=10,
     )
-    assert any(r.id == sent.id for r in recent), (
+    assert any(r.id == sent.id for r in recent.rows), (
         f"posted message {sent.id} must appear in read_channel"
     )
 

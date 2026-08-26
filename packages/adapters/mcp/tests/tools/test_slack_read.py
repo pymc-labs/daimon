@@ -173,7 +173,8 @@ async def test_read_channel_public_full_member_returns_oldest_first(
             _USERS_INFO,
             payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
         )
-        rows = await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=50)
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=50)
+    rows = result.messages
     assert [r.text for r in rows] == ["oldest", "mid", "newest"], (
         "read_channel must return oldest-first like the Discord tool"
     )
@@ -732,8 +733,8 @@ async def test_read_channel_user_path_private_same_channel_destination_returns_m
         )
         # No conversations.members mock registered: the user path never scans
         # membership, so an unregistered members URL would fail the test.
-        rows = await _slack_read_channel_impl(runtime, auth, channel_id="C_PRIV", limit=10)
-    assert [r.text for r in rows] == ["hi"], (
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="C_PRIV", limit=10)
+    assert [r.text for r in result.messages] == ["hi"], (
         "user-token path should return the private channel's messages"
     )
 
@@ -760,8 +761,10 @@ async def test_read_channel_user_path_private_dm_destination_returns_messages(
             _USERS_INFO,
             payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
         )
-        rows = await _slack_read_channel_impl(runtime, auth, channel_id="C_PRIV", limit=10)
-    assert [r.text for r in rows] == ["hi"], "DM destination should always be an allowed audience"
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="C_PRIV", limit=10)
+    assert [r.text for r in result.messages] == ["hi"], (
+        "DM destination should always be an allowed audience"
+    )
 
 
 @pytest.mark.asyncio
@@ -786,8 +789,8 @@ async def test_read_channel_user_path_private_cross_channel_destination_returns_
             _USERS_INFO,
             payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
         )
-        rows = await _slack_read_channel_impl(runtime, auth, channel_id="C_PRIV", limit=10)
-    assert [r.text for r in rows] == ["hi"], (
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="C_PRIV", limit=10)
+    assert [r.text for r in result.messages] == ["hi"], (
         "a private channel the user can see is answerable from any destination"
     )
 
@@ -832,8 +835,8 @@ async def test_read_channel_user_path_mpim_source_channel_destination_returns_me
             _USERS_INFO,
             payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
         )
-        rows = await _slack_read_channel_impl(runtime, auth, channel_id="G_MPIM", limit=10)
-    assert [r.text for r in rows] == ["group dm"], (
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="G_MPIM", limit=10)
+    assert [r.text for r in result.messages] == ["group dm"], (
         "a group DM the user belongs to is answerable from any destination"
     )
 
@@ -860,8 +863,8 @@ async def test_read_channel_user_path_dm_source_dm_destination_returns_messages(
             _USERS_INFO,
             payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
         )
-        rows = await _slack_read_channel_impl(runtime, auth, channel_id="D_SRC", limit=10)
-    assert [r.text for r in rows] == ["hi"], "a DM read in a DM destination is allowed"
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="D_SRC", limit=10)
+    assert [r.text for r in result.messages] == ["hi"], "a DM read in a DM destination is allowed"
 
 
 @pytest.mark.asyncio
@@ -889,8 +892,10 @@ async def test_read_channel_user_path_public_channel_any_destination_returns_mes
             _USERS_INFO,
             payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
         )
-        rows = await _slack_read_channel_impl(runtime, auth, channel_id="C_PUB", limit=10)
-    assert [r.text for r in rows] == ["hi"], "public channels bypass the leak gate entirely"
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="C_PUB", limit=10)
+    assert [r.text for r in result.messages] == ["hi"], (
+        "public channels bypass the leak gate entirely"
+    )
 
 
 @pytest.mark.asyncio
@@ -932,8 +937,8 @@ async def test_read_channel_user_path_public_not_in_channel_falls_back_to_bot_to
             _USERS_INFO,
             payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
         )
-        rows = await _slack_read_channel_impl(runtime, auth, channel_id="C_PUB", limit=10)
-    assert [r.text for r in rows] == ["bot-token hit"], (
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="C_PUB", limit=10)
+    assert [r.text for r in result.messages] == ["bot-token hit"], (
         "not_in_channel on the user token must retry silently on the bot token"
     )
 
@@ -1003,8 +1008,8 @@ async def test_read_channel_user_path_im_source_dm_destination_returns_messages(
             _USERS_INFO,
             payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
         )
-        rows = await _slack_read_channel_impl(runtime, auth, channel_id="D_IM_SOURCE", limit=10)
-    assert [r.text for r in rows] == ["dm content"], (
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="D_IM_SOURCE", limit=10)
+    assert [r.text for r in result.messages] == ["dm content"], (
         "user-token path should serve an im the bot path would reject"
     )
 
@@ -1149,6 +1154,42 @@ async def test_read_channel_clamps_limit_to_the_slack_page_cap(
         await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=50)
         limit = _recorded_limit(m, "/api/conversations.history")
     assert limit == "15"
+
+
+@pytest.mark.asyncio
+async def test_read_channel_returns_and_uses_slack_cursor(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Channel history exposes Slack's continuation cursor instead of truncating silently."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_HISTORY,
+            payload={
+                "ok": True,
+                "messages": [{"ts": "1", "text": "oldest"}],
+                "response_metadata": {"next_cursor": "CURSOR_3"},
+            },
+        )
+        result = await _slack_read_channel_impl(
+            runtime, auth, channel_id="C1", limit=50, cursor="CURSOR_2"
+        )
+        history_requests = [
+            url
+            for (method, url), _ in m.requests.items()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            if method == "GET" and url.path == "/api/conversations.history"
+        ]
+    assert [row.text for row in result.messages] == ["oldest"]
+    assert result.next_cursor == "CURSOR_3"
+    assert result.hint is not None and "cursor=CURSOR_3" in result.hint
+    assert len(history_requests) == 1
+    assert str(history_requests[0].query["cursor"]) == "CURSOR_2"
 
 
 @pytest.mark.asyncio

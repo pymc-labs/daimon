@@ -2062,17 +2062,38 @@
     }),
     'read_channel': dict({
       'description': '''
-        Read recent messages from a channel, oldest-first.
+        Read channel messages, oldest-first, with pagination metadata.
         
-        For threads use read_thread.
-        Slack: at most 15 messages per call (the newest 15); older history is
-        not reachable from this tool.
+        For threads use read_thread. Discord: use before to fetch older messages.
+        Slack: use cursor to fetch the next page; at most 15 messages are returned.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'before': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'channel_id': dict({
             'type': 'string',
+          }),
+          'cursor': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'limit': dict({
             'default': 50,

@@ -300,14 +300,71 @@ async def test_read_channel_happy_path_oldest_first(monkeypatch: pytest.MonkeyPa
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     patch_discord_http(monkeypatch, handler)
-    rows = await _read_channel_impl(
+    result = await _read_channel_impl(
         _runtime_with_discord_token(), _auth(), channel_id="222", limit=50
     )
+    rows = result.rows
     assert len(rows) == 2, "read_channel should return both seeded messages"
     assert rows[0].id == "1001", "first row must be the older message (oldest-first)"
     assert rows[1].id == "1002", "second row must be the newer message"
     assert rows[0].author_username == "caller", "row must carry author_username"
     assert rows[0].role == "user", "non-bot author must have role 'user'"
+
+
+async def test_read_channel_full_page_returns_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """read_channel exposes a cursor instead of silently truncating a full page."""
+    limit = 3
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload()
+        if route.path == "/channels/{channel_id}/messages":
+            return [
+                _message_payload(message_id="1003", channel_id="222"),
+                _message_payload(message_id="1002", channel_id="222"),
+                _message_payload(message_id="1001", channel_id="222"),
+            ]
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    result = await _read_channel_impl(
+        _runtime_with_discord_token(), _auth(), channel_id="222", limit=limit
+    )
+    assert [row.id for row in result.rows] == ["1001", "1002", "1003"]
+    assert result.next_before == "1001"
+    assert result.hint is not None and "before=1001" in result.hint
+
+
+async def test_read_channel_passes_before_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """read_channel forwards a continuation cursor to Discord history."""
+    seen_params: dict[str, Any] = {}
+
+    async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload()
+        if route.path == "/channels/{channel_id}/messages":
+            seen_params.update(kwargs.get("params", {}))
+            return [_message_payload(message_id="999", channel_id="222")]
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    result = await _read_channel_impl(
+        _runtime_with_discord_token(), _auth(), channel_id="222", limit=50, before="1000"
+    )
+    assert [row.id for row in result.rows] == ["999"]
+    assert str(seen_params.get("before")) == "1000"
 
 
 async def test_read_channel_bot_author_has_assistant_role(
@@ -331,12 +388,12 @@ async def test_read_channel_bot_author_has_assistant_role(
         raise AssertionError(f"unexpected route {route.method} {route.path}")
 
     patch_discord_http(monkeypatch, handler)
-    rows = await _read_channel_impl(
+    result = await _read_channel_impl(
         _runtime_with_discord_token(), _auth(), channel_id="222", limit=50
     )
-    assert len(rows) == 1
-    assert rows[0].role == "assistant", "bot author must have role 'assistant'"
-    assert rows[0].author_username == "caller"
+    assert len(result.rows) == 1
+    assert result.rows[0].role == "assistant", "bot author must have role 'assistant'"
+    assert result.rows[0].author_username == "caller"
 
 
 async def test_read_channel_rejects_thread_id(monkeypatch: pytest.MonkeyPatch) -> None:

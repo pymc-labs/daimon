@@ -30,6 +30,7 @@ from daimon.adapters.mcp.tools.discord._models import (
     ChannelRow,  # pyright: ignore[reportPrivateUsage]
     MessageRow,  # pyright: ignore[reportPrivateUsage]
     ParsedLink,  # pyright: ignore[reportPrivateUsage]
+    ReadChannelResult,  # noqa: F811  # pyright: ignore[reportPrivateUsage,reportUnusedImport]
     ReadThreadResult,  # noqa: F811  # pyright: ignore[reportPrivateUsage,reportUnusedImport]
     ThreadRow,  # noqa: F811  # pyright: ignore[reportPrivateUsage,reportUnusedImport]
     _to_message_row,  # pyright: ignore[reportPrivateUsage]
@@ -61,8 +62,9 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
     *,
     channel_id: str,
     limit: int = 50,
-) -> list[MessageRow]:
-    """Read recent messages from a channel, oldest-first.
+    before: str | None = None,
+) -> ReadChannelResult:
+    """Read channel messages, oldest-first, with before-cursor pagination.
 
     If the resolved channel is a thread, raises ToolError directing to
     read_thread (keeps parse_link routing unambiguous).
@@ -83,8 +85,16 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
         _check_view_permission(channel, member)
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support message history")
-        page = [m async for m in channel.history(limit=bounded_limit)]
-        return [_to_message_row(m) for m in reversed(page)]
+        before_obj = discord.Object(id=int(before)) if before is not None else None
+        page = [m async for m in channel.history(limit=bounded_limit, before=before_obj)]
+        rows = [_to_message_row(m) for m in reversed(page)]
+        next_before = str(page[-1].id) if len(page) == bounded_limit else None
+        hint = (
+            f"more messages available — pass before={next_before} to read older messages"
+            if next_before is not None
+            else None
+        )
+        return ReadChannelResult(rows=rows, next_before=next_before, hint=hint)
 
 
 # ---------------------------------------------------------------------------

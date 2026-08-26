@@ -34,6 +34,7 @@ from daimon.adapters.mcp.tools.slack._leak_policy import (
     is_dm_destination,
 )
 from daimon.adapters.mcp.tools.slack._models import (
+    SlackChannelResult,
     SlackChannelRow,
     SlackMessageRow,
     SlackThreadResult,
@@ -236,20 +237,36 @@ async def _slack_list_channels_impl(  # pyright: ignore[reportUnusedFunction]  #
 
 
 async def _fetch_channel_history(
-    client: AsyncWebClient, *, channel_id: str, limit: int
-) -> list[SlackMessageRow]:
+    client: AsyncWebClient, *, channel_id: str, limit: int, cursor: str | None
+) -> SlackChannelResult:
     resp = await client.conversations_history(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-        channel=channel_id, limit=min(limit, _HISTORY_LIMIT_CAP)
+        channel=channel_id, limit=min(limit, _HISTORY_LIMIT_CAP), cursor=cursor
     )
     raw = cast(list[dict[str, Any]], resp["messages"])
     raw.reverse()  # Slack returns newest-first; tools return oldest-first
     usernames = await _resolve_usernames(client, _author_ids(raw))
-    return _to_message_rows(raw, usernames)
+    next_cursor = (
+        str(cast(dict[str, Any], resp.get("response_metadata") or {}).get("next_cursor") or "")
+        or None
+    )
+    hint = (
+        f"more messages available — pass cursor={next_cursor} to read older messages"
+        if next_cursor is not None
+        else None
+    )
+    return SlackChannelResult(
+        messages=_to_message_rows(raw, usernames), next_cursor=next_cursor, hint=hint
+    )
 
 
 async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
-    runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str, limit: int
-) -> list[SlackMessageRow]:
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    limit: int,
+    cursor: str | None = None,
+) -> SlackChannelResult:
     user_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
     rc = await slack_read_client(runtime, team_id=team_id, slack_user_id=user_id)
@@ -258,7 +275,9 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
         try:
             channel = await _channel_info(rc.client, channel_id=channel_id)
             await _gate_user_source(runtime, auth, channel=channel)
-            return await _fetch_channel_history(rc.client, channel_id=channel_id, limit=limit)
+            return await _fetch_channel_history(
+                rc.client, channel_id=channel_id, limit=limit, cursor=cursor
+            )
         except SlackApiError as err:
             # Any not_in_channel from the user token (typically a public channel
             # the user never joined) falls back to the bot path, which
@@ -273,7 +292,9 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
     try:
         channel = await _channel_info(bot_client, channel_id=channel_id)
         await check_channel_access(bot_client, channel=channel, user_id=user_id)
-        return await _fetch_channel_history(bot_client, channel_id=channel_id, limit=limit)
+        return await _fetch_channel_history(
+            bot_client, channel_id=channel_id, limit=limit, cursor=cursor
+        )
     except ToolError as terr:
         if rc.runs_as_user:
             raise  # user already has a token — a connect hint would be noise

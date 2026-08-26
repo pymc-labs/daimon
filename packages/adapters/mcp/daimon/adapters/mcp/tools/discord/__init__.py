@@ -45,6 +45,9 @@ from daimon.adapters.mcp.tools.discord._models import (
     ParsedLink as ParsedLink,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._models import (
+    ReadChannelResult as ReadChannelResult,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.discord._models import (
     ReadThreadResult as ReadThreadResult,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._models import (

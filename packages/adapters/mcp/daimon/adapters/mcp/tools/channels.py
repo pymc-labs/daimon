@@ -14,6 +14,7 @@ from daimon.adapters.mcp.tools.discord import (
     ChannelRow,
     MessageRow,
     ParsedLink,
+    ReadChannelResult,
     ReadThreadResult,
     SearchResult,
     ThreadRow,
@@ -28,6 +29,7 @@ from daimon.adapters.mcp.tools.discord import (
     _send_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.slack._models import (
+    SlackChannelResult,
     SlackChannelRow,
     SlackMessageRow,
     SlackParsedLink,
@@ -74,17 +76,22 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         channel_id: str,
         limit: int = 50,
-    ) -> list[MessageRow] | list[SlackMessageRow]:
-        """Read recent messages from a channel, oldest-first.
+        before: str | None = None,
+        cursor: str | None = None,
+    ) -> ReadChannelResult | SlackChannelResult:
+        """Read channel messages, oldest-first, with pagination metadata.
 
-        For threads use read_thread.
-        Slack: at most 15 messages per call (the newest 15); older history is
-        not reachable from this tool.
+        For threads use read_thread. Discord: use before to fetch older messages.
+        Slack: use cursor to fetch the next page; at most 15 messages are returned.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
-            return await _slack_read_channel_impl(runtime, auth, channel_id=channel_id, limit=limit)
-        return await _read_channel_impl(runtime, auth, channel_id=channel_id, limit=limit)
+            return await _slack_read_channel_impl(
+                runtime, auth, channel_id=channel_id, limit=limit, cursor=cursor
+            )
+        return await _read_channel_impl(
+            runtime, auth, channel_id=channel_id, limit=limit, before=before
+        )
 
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def read_thread(  # pyright: ignore[reportUnusedFunction]
