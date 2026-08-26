@@ -5,8 +5,14 @@ Builds XML context from a Slack thread's message history via
 responding in an existing thread.
 
 Mirrors ``packages/adapters/discord/daimon/adapters/discord/context.py``:
-- ``build_context_xml``: first-turn fetch, capped at 100 messages.
+- ``build_context_xml``: first-turn fetch, one page from the thread root.
 - ``build_delta_xml``: continuation fetch, delta since the watermark timestamp.
+
+Both fetch a single page. Slack caps non-Marketplace apps at
+``THREAD_PAGE_LIMIT`` objects per ``conversations.replies`` call and one call
+per minute, so paginating inside a turn is not viable; when Slack reports
+``has_more`` the block is marked ``truncated="true"`` so the model knows the
+window is partial.
 
 All message text is escaped via ``xml.sax.saxutils`` (T-80-XML mitigation).
 No try/except — exceptions propagate to the listener boundary.
@@ -20,6 +26,16 @@ from xml.sax.saxutils import escape, quoteattr
 from daimon.adapters.slack.attachments import ProxyUrlContext, build_proxy_url
 from daimon.adapters.slack.vision import SlackFile
 from slack_sdk.web.async_client import AsyncWebClient
+
+# Slack's ceiling for non-Marketplace apps on conversations.replies (both the
+# default and the maximum accepted value of ``limit``; larger values are clamped
+# server-side). Socket Mode apps cannot list on the Marketplace, so daimon is
+# always in this class.
+THREAD_PAGE_LIMIT = 15
+
+
+def _open_tag(name: str, *, truncated: bool) -> str:
+    return f'<{name} truncated="true">' if truncated else f"<{name}>"
 
 
 def _render_message(msg: dict[str, Any], *, proxy: ProxyUrlContext | None) -> list[str]:
@@ -79,26 +95,28 @@ async def build_context_xml(
 ) -> str:
     """Build XML context from thread history for the first turn.
 
-    Fetches up to 100 messages via ``conversations.replies`` (cap
-    mirroring Discord ``build_context_xml(limit=100)``).  Returns a string
-    with a ``<context>/<thread_history>`` block containing the replayed
-    messages followed by a ``<user_query>`` element.
+    Fetches one page of ``THREAD_PAGE_LIMIT`` messages via
+    ``conversations.replies``. Returns a string with a
+    ``<context>/<thread_history>`` block containing the replayed messages
+    followed by a ``<user_query>`` element.
 
-    Truncation note: ``conversations.replies`` with no cursor returns
-    the *first* page — the oldest 100 messages ascending from the thread root.
-    For threads longer than 100 messages the model does not see recent messages.
-    This is deliberate (mirrors Discord's 100-message cap) and avoids the
-    latency of full pagination on the first turn.
+    Window: ``conversations.replies`` always returns oldest-first from the
+    thread root, and ``oldest``/``latest`` only filter, so the newest window
+    cannot be requested in one call. A thread longer than one page therefore
+    replays the root and the first replies, and the block carries
+    ``truncated="true"`` so the model knows the recent tail is missing.
+    Discord's equivalent replays 100 messages; the gap is Slack's rate policy.
     """
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
-        channel=channel, ts=thread_ts, limit=100
+        channel=channel, ts=thread_ts, limit=THREAD_PAGE_LIMIT
     )
     messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
+    truncated = bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]
 
     lines: list[str] = [
         "<context>",
         f"<channel platform={quoteattr('slack')} id={quoteattr(channel)}/>",
-        "<thread_history>",
+        _open_tag("thread_history", truncated=truncated),
     ]
     for msg in messages:
         lines.extend(_render_message(msg, proxy=proxy))
@@ -126,19 +144,24 @@ async def build_delta_xml(
     with ``oldest=watermark_ts, inclusive=False`` (mirroring Discord
     ``build_delta_xml``'s ``after_message_id`` path).  Returns a string with a
     ``<context>/<thread_delta>`` block and a ``<user_query>`` element.
+
+    One page of ``THREAD_PAGE_LIMIT`` messages, oldest-first from the
+    watermark; a delta longer than that is marked ``truncated="true"``.
     """
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
         channel=channel,
         ts=thread_ts,
         oldest=watermark_ts,
         inclusive=False,
+        limit=THREAD_PAGE_LIMIT,
     )
     messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
+    truncated = bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]
 
     lines: list[str] = [
         "<context>",
         f"<channel platform={quoteattr('slack')} id={quoteattr(channel)}/>",
-        "<thread_delta>",
+        _open_tag("thread_delta", truncated=truncated),
     ]
     for msg in messages:
         lines.extend(_render_message(msg, proxy=proxy))

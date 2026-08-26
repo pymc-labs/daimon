@@ -1115,3 +1115,59 @@ async def test_list_channels_user_path_dm_destination_shows_public_private_and_i
     assert {r.id for r in rows} == {"C_PUB", "C_PRIV", "D_IM", "G_MPIM"}, (
         "DM destination should permit listing all private-ish entries too"
     )
+
+
+def _recorded_limit(m: aioresponses, path: str) -> str:
+    """The limit query param of the single recorded call to a Slack read method."""
+    limits = [
+        str(url.query["limit"])
+        for (method, url), _ in m.requests.items()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        if method == "GET" and url.path == path
+    ]
+    assert len(limits) == 1, f"expected one {path} call, saw {len(limits)}"
+    return limits[0]
+
+
+@pytest.mark.asyncio
+async def test_read_channel_clamps_limit_to_the_slack_page_cap(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A caller asking for 50 gets a request Slack will honour, not silently clamp.
+
+    Non-Marketplace apps receive at most 15 objects per conversations.history
+    call; the shared tool default of 50 is meaningful on Discord only.
+    """
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(_CONVERSATIONS_HISTORY, payload={"ok": True, "messages": []})  # pyright: ignore[reportUnknownMemberType]
+        await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=50)
+        limit = _recorded_limit(m, "/api/conversations.history")
+    assert limit == "15"
+
+
+@pytest.mark.asyncio
+async def test_read_thread_clamps_limit_to_the_slack_page_cap(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={"ok": True, "has_more": True, "messages": []},
+        )
+        result = await _slack_read_thread_impl(runtime, auth, thread_id="C1:1.0", limit=50)
+        limit = _recorded_limit(m, "/api/conversations.replies")
+    assert limit == "15"
+    assert result.has_more is True, "truncation must reach the caller"

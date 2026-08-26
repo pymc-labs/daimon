@@ -26,30 +26,82 @@ def _make_client() -> AsyncWebClient:
     return AsyncWebClient(token="xoxb-test")
 
 
-async def test_build_context_xml_calls_conversations_replies_with_limit_100() -> None:
-    """build_context_xml should call conversations_replies with limit=100."""
+def _replies_request_params(mock: AioResponsesMock) -> dict[str, str]:
+    """Query params of the single recorded conversations.replies call."""
+    calls = [
+        dict(url.query)
+        for (method, url), _ in mock.requests.items()
+        if method == "GET" and url.path == "/api/conversations.replies"
+    ]
+    assert len(calls) == 1, f"expected one conversations.replies call, saw {len(calls)}"
+    return calls[0]
+
+
+def _fifteen_messages() -> list[dict[str, str]]:
+    return [{"user": "U1", "text": f"msg {i}", "ts": f"{100 + i}.0"} for i in range(15)]
+
+
+async def test_build_context_xml_requests_the_slack_page_cap() -> None:
+    """The first-turn replay asks for exactly the 15 messages Slack will return.
+
+    Non-Marketplace apps get at most 15 objects per conversations.replies call;
+    asking for more is silently clamped, so the request must state the real
+    ceiling rather than a number the API ignores.
+    """
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={"ok": True, "messages": _fifteen_messages(), "has_more": False},
+        )
+        client = _make_client()
+        xml = await build_context_xml(client, channel="C1", thread_ts="100.0", user_query="hi")
+        params = _replies_request_params(mock)
+
+    assert params["limit"] == "15"
+    assert xml.count("<message ") == 15, "every returned message reaches the model"
+    assert "<thread_history>" in xml, "a complete window carries no truncation marker"
+
+
+async def test_build_context_xml_marks_thread_history_truncated_when_slack_has_more() -> None:
+    """A thread longer than one page tells the model the window is partial.
+
+    Slack returns the oldest page first and cannot serve the newest window in
+    one call, so the model must be told that recent messages are missing rather
+    than reading a stale head as the whole thread.
+    """
     with AioResponsesMock() as mock:
         mock.get(
             _REPLIES_PATTERN,
             payload={
                 "ok": True,
-                "messages": [
-                    {"user": "U123", "text": "hello", "ts": "99.0"},
-                ],
-                "has_more": False,
+                "messages": _fifteen_messages(),
+                "has_more": True,
+                "response_metadata": {"next_cursor": "bmV4dF90czoxMTUuMA=="},
             },
         )
         client = _make_client()
         xml = await build_context_xml(client, channel="C1", thread_ts="100.0", user_query="hi")
 
-    # The XML output should contain the channel element, thread_history block, and user_query
-    assert '<channel platform="slack" id="C1"/>' in xml, (
-        "should contain channel element with platform and channel id"
-    )
-    assert "<thread_history>" in xml, "should contain thread_history block"
-    assert "</thread_history>" in xml, "should close thread_history block"
-    assert "<user_query>" in xml, "should contain user_query element"
-    assert "hi" in xml, "user_query content should be in output"
+    assert '<thread_history truncated="true">' in xml
+    assert "<thread_history>" not in xml
+    assert "</thread_history>" in xml
+
+
+async def test_build_delta_xml_marks_thread_delta_truncated_when_slack_has_more() -> None:
+    """A continuation delta longer than one page is flagged the same way."""
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={"ok": True, "messages": _fifteen_messages(), "has_more": True},
+        )
+        client = _make_client()
+        xml = await build_delta_xml(
+            client, channel="C1", thread_ts="100.0", watermark_ts="99.0", user_query="hi"
+        )
+
+    assert '<thread_delta truncated="true">' in xml
+    assert "<thread_delta>" not in xml
+    assert "</thread_delta>" in xml
 
 
 async def test_build_context_xml_channel_is_first_child_of_context() -> None:

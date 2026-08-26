@@ -76,6 +76,8 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Read recent messages from a channel, oldest-first.
 
         For threads use read_thread.
+        Slack: at most 15 messages per call (the newest 15); older history is
+        not reachable from this tool.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
@@ -93,7 +95,8 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Discord: thread_id is the thread's channel id; use before for older messages.
         Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456);
-        before is ignored.
+        before is ignored. At most 15 messages per call, from the thread root;
+        has_more=true means the newest replies were not returned.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":

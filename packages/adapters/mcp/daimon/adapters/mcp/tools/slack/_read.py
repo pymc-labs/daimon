@@ -49,7 +49,11 @@ from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
-_HISTORY_LIMIT_CAP = 100
+# Slack's ceiling for non-Marketplace apps on conversations.history and
+# conversations.replies: at most 15 objects per call and one call per minute.
+# Larger limits are clamped server-side, so asking for more only misleads the
+# caller about how much of the channel or thread they were shown.
+_HISTORY_LIMIT_CAP = 15
 
 
 def _reraise_mapped(err: SlackApiError, *, as_user: bool = False) -> ToolError:

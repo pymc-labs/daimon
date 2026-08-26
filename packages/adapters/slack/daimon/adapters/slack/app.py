@@ -1107,7 +1107,7 @@ class SlackApp:
         """Turn body: principal → MA session find-or-create → context build → turn → watermark.
 
         On first mention for a thread: creates a new MA session + ``thread_sessions``
-        row, replays full thread history via ``build_context_xml`` (limit 100).
+        row, replays thread history via ``build_context_xml`` (one Slack page).
         On follow-up mentions: reuses the existing MA session, replays only the
         delta since the watermark via ``build_delta_xml``.
 
@@ -1255,7 +1255,7 @@ class SlackApp:
         )
         author_id = str(event.get("user") or "")
         if not reused:
-            # First turn: replay full thread history (capped at 100 messages).
+            # First turn: replay thread history (one Slack page from the root).
             user_message = await build_context_xml(
                 web_client,
                 channel=channel,
