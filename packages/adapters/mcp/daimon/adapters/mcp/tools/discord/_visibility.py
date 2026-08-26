@@ -29,6 +29,29 @@ def _check_send_permission(  # pyright: ignore[reportUnusedFunction]
         raise ToolError("missing send_messages permission")
 
 
+def _check_create_thread_permission(  # pyright: ignore[reportUnusedFunction]
+    channel: discord.TextChannel | discord.ForumChannel, member: discord.Member
+) -> None:
+    """Discord gates thread creation differently by parent type. A forum post's
+    starter message IS the post, so only send_messages is required. A text
+    channel thread additionally needs send_messages_in_threads: the impl posts
+    the starter message into the new thread on the caller's behalf, so the
+    caller's reach into threads is what authorizes that."""
+    if member.guild_permissions.administrator:
+        return
+    perms = channel.permissions_for(member)
+    if not perms.view_channel:
+        raise ToolError("missing view_channel permission")
+    if isinstance(channel, discord.ForumChannel):
+        if not perms.send_messages:
+            raise ToolError("missing send_messages permission")
+        return
+    if not perms.create_public_threads:
+        raise ToolError("missing create_public_threads permission")
+    if not perms.send_messages_in_threads:
+        raise ToolError("missing send_messages_in_threads permission")
+
+
 async def _ensure_thread_parent_cached(  # pyright: ignore[reportUnusedFunction]
     thread: discord.Thread,
 ) -> discord.TextChannel | discord.ForumChannel:

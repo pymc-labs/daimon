@@ -22,7 +22,10 @@ from daimon.adapters.mcp.tools.discord._client import (
     _resolve_member,
     rest_client,
 )
-from daimon.adapters.mcp.tools.discord._visibility import _check_thread_view
+from daimon.adapters.mcp.tools.discord._visibility import (
+    _check_create_thread_permission,
+    _check_thread_view,
+)
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -51,6 +54,8 @@ pytestmark = pytest.mark.asyncio
 _VIEW_CHANNEL = 1 << 10  # 1024
 _SEND_MESSAGES = 1 << 11  # 2048
 _MANAGE_THREADS = 1 << 34
+_CREATE_PUBLIC_THREADS = 1 << 35
+_SEND_MESSAGES_IN_THREADS = 1 << 38
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +130,25 @@ def _text_channel_payload(
         "type": 0,
         "guild_id": guild_id,
         "name": "general",
+        "position": 0,
+        "permission_overwrites": permission_overwrites or [],
+        "nsfw": False,
+        "rate_limit_per_user": 0,
+        "parent_id": None,
+    }
+
+
+def _forum_channel_payload(
+    *,
+    channel_id: str = "333",
+    guild_id: str = "111",
+    permission_overwrites: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": channel_id,
+        "type": 15,
+        "guild_id": guild_id,
+        "name": "forum",
         "position": 0,
         "permission_overwrites": permission_overwrites or [],
         "nsfw": False,
@@ -208,6 +232,24 @@ async def _setup_thread_test(
             f"expected Thread, got {type(thread_raw).__name__}"
         )
         return c, thread_raw, member
+
+
+async def _setup_channel_test(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Any,
+    *,
+    channel_id: str,
+) -> tuple[discord.Client, discord.TextChannel | discord.ForumChannel, discord.Member]:
+    """Common plumbing for _check_create_thread_permission: patch HTTP, resolve
+    member + a text or forum channel, return (client, channel, member)."""
+    patch_discord_http(monkeypatch, handler)
+    async with rest_client("test-token") as c:
+        _, member = await _resolve_member(c, "111", "42")
+        channel_raw = await _resolve_channel(c, channel_id)
+        assert isinstance(channel_raw, (discord.TextChannel, discord.ForumChannel)), (
+            f"expected TextChannel or ForumChannel, got {type(channel_raw).__name__}"
+        )
+        return c, channel_raw, member
 
 
 # ---------------------------------------------------------------------------
@@ -441,3 +483,169 @@ async def test_admin_bypasses_all_checks(monkeypatch: pytest.MonkeyPatch) -> Non
 
     # Should pass without raising — admin bypasses everything
     await _check_thread_view(c, thread, member, "42")
+
+
+# ---------------------------------------------------------------------------
+# _check_create_thread_permission
+# ---------------------------------------------------------------------------
+
+
+async def test_create_thread_admin_bypasses_all_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Administrator short-circuits before any channel-side check."""
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", 1 << 3)]  # ADMINISTRATOR, no other perms
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload(channel_id="222")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    _c, channel, member = await _setup_channel_test(monkeypatch, handler, channel_id="222")
+
+    _check_create_thread_permission(channel, member)
+
+
+async def test_create_thread_text_channel_passes_with_full_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text channel: view_channel + create_public_threads + send_messages_in_threads -> passes."""
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [
+                _everyone_role(
+                    "111",
+                    _VIEW_CHANNEL | _CREATE_PUBLIC_THREADS | _SEND_MESSAGES_IN_THREADS,
+                )
+            ]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload(channel_id="222")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    _c, channel, member = await _setup_channel_test(monkeypatch, handler, channel_id="222")
+
+    _check_create_thread_permission(channel, member)
+
+
+async def test_create_thread_text_channel_denied_without_view_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text channel: caller lacks view_channel -> ToolError."""
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", 0)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload(
+                channel_id="222",
+                permission_overwrites=[
+                    {"id": "111", "type": 0, "allow": "0", "deny": str(_VIEW_CHANNEL)}
+                ],
+            )
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    _c, channel, member = await _setup_channel_test(monkeypatch, handler, channel_id="222")
+
+    with pytest.raises(ToolError, match="missing view_channel permission"):
+        _check_create_thread_permission(channel, member)
+
+
+async def test_create_thread_text_channel_denied_without_create_public_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text channel: caller has view_channel but not create_public_threads -> ToolError."""
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload(channel_id="222")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    _c, channel, member = await _setup_channel_test(monkeypatch, handler, channel_id="222")
+
+    with pytest.raises(ToolError, match="missing create_public_threads permission"):
+        _check_create_thread_permission(channel, member)
+
+
+async def test_create_thread_text_channel_denied_without_send_messages_in_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text channel: view_channel + create_public_threads but not
+    send_messages_in_threads -> ToolError."""
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | _CREATE_PUBLIC_THREADS)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload(channel_id="222")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    _c, channel, member = await _setup_channel_test(monkeypatch, handler, channel_id="222")
+
+    with pytest.raises(ToolError, match="missing send_messages_in_threads permission"):
+        _check_create_thread_permission(channel, member)
+
+
+async def test_create_thread_forum_channel_passes_without_create_public_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forum channel: view_channel + send_messages -> passes WITHOUT
+    create_public_threads (the C-2 regression guard)."""
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _forum_channel_payload(channel_id="333")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    _c, channel, member = await _setup_channel_test(monkeypatch, handler, channel_id="333")
+
+    _check_create_thread_permission(channel, member)
+
+
+async def test_create_thread_forum_channel_denied_without_send_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forum channel: caller lacks send_messages -> ToolError."""
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _forum_channel_payload(channel_id="333")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    _c, channel, member = await _setup_channel_test(monkeypatch, handler, channel_id="333")
+
+    with pytest.raises(ToolError, match="missing send_messages permission"):
+        _check_create_thread_permission(channel, member)
