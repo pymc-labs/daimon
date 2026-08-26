@@ -6,7 +6,14 @@
 # 3. Basic Information → App-Level Tokens → generate one with `connections:write`
 #    → DAIMON_SLACK__APP_TOKEN. Signing secret and OAuth client id/secret are on
 #    the same page → DAIMON_SLACK__SIGNING_SECRET / __CLIENT_ID / __CLIENT_SECRET.
-# 4. Manage Distribution → activate public distribution (the install flow needs it).
+# 4. Manage Distribution → activate public distribution ONLY if this deployment
+#    serves workspaces other than your own; the install flow in step 5 reaches
+#    your own workspace without it. Slack caps conversations.history and
+#    conversations.replies at 15 objects per call and one call per minute for
+#    apps distributed outside the Marketplace. A deployment that stays internal
+#    to one workspace is not capped: daimon requests 200 messages per page by
+#    default (DAIMON_SLACK__HISTORY_PAGE_LIMIT, up to 1000), and a capped
+#    workspace silently answers with 15.
 # 5. Visit https://DAIMON_HOST/oauth/slack/install and install to your workspace.
 #    The bot token is stored encrypted in daimon's database by that callback —
 #    there is no env var for it.

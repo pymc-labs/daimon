@@ -13,7 +13,12 @@ import re
 
 from aioresponses import aioresponses as AioResponsesMock
 from daimon.adapters.slack.attachments import ProxyUrlContext
-from daimon.adapters.slack.context import _render_message, build_context_xml, build_delta_xml
+from daimon.adapters.slack.context import (
+    DEFAULT_PAGE_LIMIT,
+    _render_message,
+    build_context_xml,
+    build_delta_xml,
+)
 from daimon.core.slack_file_token import verify_file_token
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -37,16 +42,34 @@ def _replies_request_params(mock: AioResponsesMock) -> dict[str, str]:
     return calls[0]
 
 
+def _messages(count: int) -> list[dict[str, str]]:
+    return [{"user": "U1", "text": f"msg {i}", "ts": f"{100 + i}.0"} for i in range(count)]
+
+
 def _fifteen_messages() -> list[dict[str, str]]:
-    return [{"user": "U1", "text": f"msg {i}", "ts": f"{100 + i}.0"} for i in range(15)]
+    return _messages(15)
 
 
-async def test_build_context_xml_requests_the_slack_page_cap() -> None:
-    """The first-turn replay asks for exactly the 15 messages Slack will return.
+def _clamped_to_fifteen(total: int) -> dict[str, object]:
+    """Response a capped workspace sends however large a limit it was asked for.
 
-    Non-Marketplace apps get at most 15 objects per conversations.replies call;
-    asking for more is silently clamped, so the request must state the real
-    ceiling rather than a number the API ignores.
+    Slack clamps ``limit`` server-side rather than erroring, which is why a
+    request for 100 returned 15 unnoticed before. Tests that echo back the
+    requested limit cannot tell the two workspace classes apart.
+    """
+    return {
+        "ok": True,
+        "messages": _messages(min(15, total)),
+        "has_more": total > 15,
+    }
+
+
+async def test_build_context_xml_requests_the_full_page_size() -> None:
+    """The first-turn replay asks for the page size the settings name.
+
+    Slack clamps the value server-side per workspace: a capped install gets 15
+    back whatever we ask for, an exempt one gets the full page. Hardcoding the
+    capped ceiling in the request denies exempt installs their depth.
     """
     with AioResponsesMock() as mock:
         mock.get(
@@ -54,12 +77,73 @@ async def test_build_context_xml_requests_the_slack_page_cap() -> None:
             payload={"ok": True, "messages": _fifteen_messages(), "has_more": False},
         )
         client = _make_client()
+        await build_context_xml(client, channel="C1", thread_ts="100.0", user_query="hi")
+        params = _replies_request_params(mock)
+
+    assert params["limit"] == str(DEFAULT_PAGE_LIMIT)
+
+
+async def test_build_context_xml_requests_an_explicit_page_limit() -> None:
+    """A caller-supplied page size reaches the API call."""
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={"ok": True, "messages": _fifteen_messages(), "has_more": False},
+        )
+        client = _make_client()
+        await build_context_xml(
+            client, channel="C1", thread_ts="100.0", user_query="hi", page_limit=50
+        )
+        params = _replies_request_params(mock)
+
+    assert params["limit"] == "50"
+
+
+async def test_build_delta_xml_requests_the_full_page_size() -> None:
+    """The continuation delta asks for the same page size as the first turn."""
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={"ok": True, "messages": _fifteen_messages(), "has_more": False},
+        )
+        client = _make_client()
+        await build_delta_xml(
+            client, channel="C1", thread_ts="100.0", watermark_ts="99.0", user_query="hi"
+        )
+        params = _replies_request_params(mock)
+
+    assert params["limit"] == str(DEFAULT_PAGE_LIMIT)
+
+
+async def test_build_context_xml_replays_a_page_wider_than_the_capped_ceiling() -> None:
+    """An unclamped workspace replays everything Slack returns, not the first 15."""
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={"ok": True, "messages": _messages(40), "has_more": False},
+        )
+        client = _make_client()
+        xml = await build_context_xml(client, channel="C1", thread_ts="100.0", user_query="hi")
+
+    assert xml.count("<message ") == 40, "every returned message reaches the model"
+    assert "<thread_history>" in xml, "a complete window carries no truncation marker"
+
+
+async def test_build_context_xml_flags_truncation_when_the_workspace_clamps() -> None:
+    """A capped workspace asked for a full page still reports a partial window.
+
+    The request states the full page size; the workspace returns 15 with
+    ``has_more``. The model must be told the tail is absent.
+    """
+    with AioResponsesMock() as mock:
+        mock.get(_REPLIES_PATTERN, payload=_clamped_to_fifteen(total=200))
+        client = _make_client()
         xml = await build_context_xml(client, channel="C1", thread_ts="100.0", user_query="hi")
         params = _replies_request_params(mock)
 
-    assert params["limit"] == "15"
-    assert xml.count("<message ") == 15, "every returned message reaches the model"
-    assert "<thread_history>" in xml, "a complete window carries no truncation marker"
+    assert params["limit"] == str(DEFAULT_PAGE_LIMIT), "we asked for the full page"
+    assert xml.count("<message ") == 15, "the workspace clamped the response"
+    assert '<thread_history truncated="true">' in xml
 
 
 async def test_build_context_xml_marks_thread_history_truncated_when_slack_has_more() -> None:
