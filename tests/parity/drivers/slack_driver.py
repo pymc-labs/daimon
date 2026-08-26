@@ -153,6 +153,7 @@ class SlackDriver:
         settings = MagicMock()
         settings.crypto.keys = (SecretStr(fernet_key),)
         settings.slack.max_concurrent_turns_per_tenant = 100
+        settings.slack.history_page_limit = 200
         settings.mcp.public_url = None
         settings.mcp.app_root_url = None
         settings.mcp.jwt_secret = None

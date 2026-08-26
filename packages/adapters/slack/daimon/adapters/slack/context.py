@@ -8,9 +8,9 @@ Mirrors ``packages/adapters/discord/daimon/adapters/discord/context.py``:
 - ``build_context_xml``: first-turn fetch, one page from the thread root.
 - ``build_delta_xml``: continuation fetch, delta since the watermark timestamp.
 
-Both fetch a single page. Slack caps non-Marketplace apps at
-``THREAD_PAGE_LIMIT`` objects per ``conversations.replies`` call and one call
-per minute, so paginating inside a turn is not viable; when Slack reports
+Both fetch a single page. A workspace whose app is commercially distributed
+outside the Marketplace answers with at most 15 objects and allows one call per
+minute, so paginating inside a turn is not viable there; when Slack reports
 ``has_more`` the block is marked ``truncated="true"`` so the model knows the
 window is partial.
 
@@ -27,11 +27,13 @@ from daimon.adapters.slack.attachments import ProxyUrlContext, build_proxy_url
 from daimon.adapters.slack.vision import SlackFile
 from slack_sdk.web.async_client import AsyncWebClient
 
-# Slack's ceiling for non-Marketplace apps on conversations.replies (both the
-# default and the maximum accepted value of ``limit``; larger values are clamped
-# server-side). Socket Mode apps cannot list on the Marketplace, so daimon is
-# always in this class.
-THREAD_PAGE_LIMIT = 15
+# Messages requested per ``conversations.replies`` call. Slack clamps ``limit``
+# server-side rather than erroring: a workspace whose app is commercially
+# distributed outside the Marketplace returns 15 however much we ask for, an
+# internal-app install returns the full page. Asking for the real page size is
+# what lets the second class replay a deep thread; ``has_more`` reports which
+# class answered.
+DEFAULT_PAGE_LIMIT = 200
 
 
 def _open_tag(name: str, *, truncated: bool) -> str:
@@ -92,23 +94,24 @@ async def build_context_xml(
     user_query: str,
     author_id: str = "",
     proxy: ProxyUrlContext | None = None,
+    page_limit: int = DEFAULT_PAGE_LIMIT,
 ) -> str:
     """Build XML context from thread history for the first turn.
 
-    Fetches one page of ``THREAD_PAGE_LIMIT`` messages via
+    Fetches one page of ``page_limit`` messages via
     ``conversations.replies``. Returns a string with a
     ``<context>/<thread_history>`` block containing the replayed messages
     followed by a ``<user_query>`` element.
 
     Window: ``conversations.replies`` always returns oldest-first from the
     thread root, and ``oldest``/``latest`` only filter, so the newest window
-    cannot be requested in one call. A thread longer than one page therefore
-    replays the root and the first replies, and the block carries
-    ``truncated="true"`` so the model knows the recent tail is missing.
-    Discord's equivalent replays 100 messages; the gap is Slack's rate policy.
+    cannot be requested in one call. A thread longer than the page the
+    workspace grants therefore replays the root and the first replies, and the
+    block carries ``truncated="true"`` so the model knows the recent tail is
+    missing.
     """
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
-        channel=channel, ts=thread_ts, limit=THREAD_PAGE_LIMIT
+        channel=channel, ts=thread_ts, limit=page_limit
     )
     messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
     truncated = bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]
@@ -137,6 +140,7 @@ async def build_delta_xml(
     user_query: str,
     author_id: str = "",
     proxy: ProxyUrlContext | None = None,
+    page_limit: int = DEFAULT_PAGE_LIMIT,
 ) -> str:
     """Build XML context for a continuation turn (delta since watermark).
 
@@ -145,15 +149,15 @@ async def build_delta_xml(
     ``build_delta_xml``'s ``after_message_id`` path).  Returns a string with a
     ``<context>/<thread_delta>`` block and a ``<user_query>`` element.
 
-    One page of ``THREAD_PAGE_LIMIT`` messages, oldest-first from the
-    watermark; a delta longer than that is marked ``truncated="true"``.
+    One page of ``page_limit`` messages, oldest-first from the watermark; a
+    delta longer than that is marked ``truncated="true"``.
     """
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
         channel=channel,
         ts=thread_ts,
         oldest=watermark_ts,
         inclusive=False,
-        limit=THREAD_PAGE_LIMIT,
+        limit=page_limit,
     )
     messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
     truncated = bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]

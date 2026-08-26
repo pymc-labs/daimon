@@ -1035,6 +1035,7 @@ class SlackApp:
             "SlackApp._orchestrate requires slack settings (entrypoint validates at boot)"
         )
         cap = self.runtime.settings.slack.max_concurrent_turns_per_tenant
+        page_limit = self.runtime.settings.slack.history_page_limit
         count = self._inflight.get(tenant_id, 0)
         if not should_admit_turn(current_in_flight=count, cap=cap):
             # The rejection below is an ephemeral — it appears in no channel
@@ -1092,6 +1093,7 @@ class SlackApp:
                 tenant_id=tenant_id,
                 thread_id=thread_id,
                 team_id=team_id,
+                page_limit=page_limit,
                 files=_collect_files([event]),
             )
             # Drain loop: new events may arrive during the drain turn; they land
@@ -1138,6 +1140,7 @@ class SlackApp:
                             thread_id=thread_id,
                             content_override=_compose_queued_content(user_events),
                             team_id=team_id,
+                            page_limit=page_limit,
                             # Merge files from ALL of this author's queued events,
                             # in first-seen order — user_events[0] alone would
                             # silently drop files on their later mentions.
@@ -1190,6 +1193,7 @@ class SlackApp:
         tenant_id: uuid.UUID,
         thread_id: str,
         team_id: str,
+        page_limit: int,
         content_override: str | None = None,
         files: list[SlackFile] | None = None,
     ) -> None:
@@ -1468,6 +1472,7 @@ class SlackApp:
                     user_query=user_text,
                     author_id=author_id,
                     proxy=proxy_ctx,
+                    page_limit=page_limit,
                 )
             elif watermark is not None:
                 # Continuation: replay only messages since the last watermark.
@@ -1479,6 +1484,7 @@ class SlackApp:
                     user_query=user_text,
                     author_id=author_id,
                     proxy=proxy_ctx,
+                    page_limit=page_limit,
                 )
             else:
                 # Reused session with no watermark (prior turn's final_ts was None).
@@ -1542,6 +1548,7 @@ class SlackApp:
                     user_query=user_text,
                     author_id=author_id,
                     proxy=proxy_ctx,
+                    page_limit=page_limit,
                 )
                 if synthetic_prefix:
                     full_message = synthetic_prefix + "\n" + full_message

@@ -1134,13 +1134,15 @@ def _recorded_limit(m: aioresponses, path: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_read_channel_clamps_limit_to_the_slack_page_cap(
+async def test_read_channel_passes_the_requested_limit_through(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A caller asking for 50 gets a request Slack will honour, not silently clamp.
+    """A caller asking for 50 has 50 requested of Slack.
 
-    Non-Marketplace apps receive at most 15 objects per conversations.history
-    call; the shared tool default of 50 is meaningful on Discord only.
+    Slack clamps the value per workspace — 15 for an app commercially
+    distributed outside the Marketplace, the full page for an internal-app
+    install. Clamping in our own code would hold the second class to the
+    first's ceiling.
     """
     runtime = await _make_runtime(committing_sessionmaker)
     auth = _auth()
@@ -1153,7 +1155,7 @@ async def test_read_channel_clamps_limit_to_the_slack_page_cap(
         m.get(_CONVERSATIONS_HISTORY, payload={"ok": True, "messages": []})  # pyright: ignore[reportUnknownMemberType]
         await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=50)
         limit = _recorded_limit(m, "/api/conversations.history")
-    assert limit == "15"
+    assert limit == "50"
 
 
 @pytest.mark.asyncio
@@ -1314,7 +1316,44 @@ async def test_read_channel_raises_limit_floor_to_one(
 
 
 @pytest.mark.asyncio
-async def test_read_thread_clamps_limit_to_the_slack_page_cap(
+async def test_read_channel_caps_limit_at_the_slack_maximum(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Above 999 Slack answers invalid_limit instead of clamping, so we clamp there."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(_CONVERSATIONS_HISTORY, payload={"ok": True, "messages": []})  # pyright: ignore[reportUnknownMemberType]
+        await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=5000)
+        limit = _recorded_limit(m, "/api/conversations.history")
+    assert limit == "999"
+
+
+@pytest.mark.asyncio
+async def test_read_thread_caps_limit_at_the_slack_maximum(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(_CONVERSATIONS_REPLIES, payload={"ok": True, "messages": []})  # pyright: ignore[reportUnknownMemberType]
+        await _slack_read_thread_impl(runtime, auth, thread_id="C1:1.0", limit=5000)
+        limit = _recorded_limit(m, "/api/conversations.replies")
+    assert limit == "999"
+
+
+@pytest.mark.asyncio
+async def test_read_thread_passes_the_requested_limit_through(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     runtime = await _make_runtime(committing_sessionmaker)
@@ -1331,5 +1370,5 @@ async def test_read_thread_clamps_limit_to_the_slack_page_cap(
         )
         result = await _slack_read_thread_impl(runtime, auth, thread_id="C1:1.0", limit=50)
         limit = _recorded_limit(m, "/api/conversations.replies")
-    assert limit == "15"
+    assert limit == "50"
     assert result.has_more is True, "truncation must reach the caller"
