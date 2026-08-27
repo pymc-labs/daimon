@@ -23,8 +23,6 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
-    get_live_thread_session,
-    get_thread_session_by_id,
     list_orphaned_turns,
     mark_turn_active,
 )
@@ -146,74 +144,98 @@ async def test_sweep_runs_once_per_process_not_once_per_reconnect(
     ], "a reconnect must not reap the turns this process is still rendering"
 
 
-async def test_deadlocked_turn_is_marked_dead_so_the_next_mention_gets_a_fresh_session(
+async def test_ceiling_outcome_still_clears_the_active_turn_marker(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A turn that blows the wall-clock deadline must retire its session mapping.
-
-    The MA session is wedged, not slow — it will never reach a terminal state.
-    If the mapping stays live, the next mention binds the same dead session and
-    hangs again, so the thread would come unstuck for exactly one message.
+    """A `run_prepared_turn` outcome carrying a `"ceiling"` error takes the
+    same `finally`-block path as any other outcome (T-19-04-A): the
+    active-turn marker is cleared and no watermark is written. Core already
+    marks the session mapping dead and renders the terminal-failure embed on
+    a ceiling breach (19-03) -- the adapter no longer does any of that
+    itself, it only owns clearing the marker.
     """
-    mapping_id = await _make_orphan(db_session, thread_id="900", message_id="901")
-    bot = _make_bot(db_session_factory)
-    message = MagicMock(spec=discord.Message)
-    message.edit = AsyncMock()
+    from decimal import Decimal
+    from unittest.mock import patch
 
-    await bot._retire_deadlocked_turn(  # pyright: ignore[reportPrivateUsage]
-        mapping_id=mapping_id,
-        thread_id="900",
-        session_id="sesn_test",
-        message_ref=message,
+    from daimon.core.errors import TurnError
+    from daimon.core.stores import tenant_ledger
+    from daimon.core.stores.thread_sessions import get_latest_thread_session
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TurnState
+    from daimon.testing.factories import make_tenant
+
+    from .test_orchestration import (
+        _make_bot as _make_full_bot,  # pyright: ignore[reportPrivateUsage]
+    )
+    from .test_orchestration import (
+        _make_channel_message,  # pyright: ignore[reportPrivateUsage]
+        _make_fake_session,  # pyright: ignore[reportPrivateUsage]
+        _make_runtime,  # pyright: ignore[reportPrivateUsage]
+        _stub_resolved_config,  # pyright: ignore[reportPrivateUsage]
     )
 
-    row = await get_thread_session_by_id(db_session, id=mapping_id)
-    assert row is not None, "the row must be retained as an audit trail, not deleted"
-    assert row.status == "dead", (
-        f"a deadlocked turn's mapping must be marked dead; got status={row.status!r}"
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("100.00"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
     )
-    assert row.account_id is not None, "the fixture seeds an account_id"
-    assert (
-        await get_live_thread_session(
-            db_session,
-            tenant_id=row.tenant_id,
-            platform="discord",
-            thread_id="900",
-            account_id=row.account_id,
+    await db_session.flush()
+    await db_session.commit()
+
+    runtime = _make_runtime(tenant.id, db_session_factory)
+    bot = _make_full_bot(runtime)
+    message = _make_channel_message()
+    mock_thread = MagicMock(spec=discord.Thread)
+    mock_thread.id = 9999
+    mock_thread.send = AsyncMock()
+    message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
+
+    ceiling_outcome = RunOutcome(
+        state=TurnState(error=TurnError(kind="ceiling", message="this turn stopped responding")),
+        ma_session_id="sess-ceiling",
+        mapping_id=None,
+        recovered=False,
+    )
+
+    with (
+        patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock) as mock_resolve,
+        patch(
+            "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
+        ) as mock_create_session,
+        patch(
+            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
+        ) as mock_find_agent,
+        patch(
+            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+        ) as mock_find_env,
+        patch(
+            "daimon.adapters.discord.bot.run_prepared_turn", new_callable=AsyncMock
+        ) as mock_run_prepared_turn,
+    ):
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.return_value = _make_fake_session("sess-ceiling")
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        mock_run_prepared_turn.return_value = ceiling_outcome
+
+        await bot.on_message(message)
+
+    mock_run_prepared_turn.assert_called_once()
+    call_kwargs = mock_run_prepared_turn.call_args.kwargs
+    assert "deadline" in call_kwargs, "run_prepared_turn must be given the shared core deadline"
+
+    async with db_session_factory() as session:
+        mapping = await get_latest_thread_session(
+            session, tenant_id=tenant.id, platform="discord", thread_id="9999"
         )
-        is None
-    ), "a dead mapping must drop out of the live lookup so the next turn binds a new session"
-
-    edited = message.edit.await_args.kwargs["embed"]  # pyright: ignore[reportAny]
-    assert edited.color.value == theme.COLOR_RED, "an abandoned turn must render as an error"
-    assert "abandoned" in edited.description, (
-        "the user must be told the turn was abandoned, not left on a frozen spinner"
+    assert mapping is not None, "bind_session must still have created the mapping row"
+    assert mapping.active_turn_message_id is None, (
+        "a ceiling outcome must still clear the active-turn marker via the finally block"
     )
-
-
-async def test_deadlocked_turn_still_marks_dead_when_the_embed_edit_fails(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A deleted spinner or archived thread must not stop the mapping being retired.
-
-    The embed is cosmetic; retiring the mapping is what stops the next mention
-    binding the wedged session.
-    """
-    mapping_id = await _make_orphan(db_session, thread_id="910", message_id="911")
-    bot = _make_bot(db_session_factory)
-    message = MagicMock(spec=discord.Message)
-    message.edit = AsyncMock(side_effect=discord.HTTPException(MagicMock(), "gone"))
-
-    await bot._retire_deadlocked_turn(  # pyright: ignore[reportPrivateUsage]
-        mapping_id=mapping_id,
-        thread_id="910",
-        session_id="sesn_test",
-        message_ref=message,
-    )
-
-    row = await get_thread_session_by_id(db_session, id=mapping_id)
-    assert row is not None and row.status == "dead", (
-        "an unreachable embed must not prevent the mapping being retired"
+    assert mapping.watermark_message_id is None, (
+        "a ceiling outcome carries state.error is not None, so the watermark must never be written"
     )
