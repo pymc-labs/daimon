@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime
 from typing import cast
 
 import pytest
 from anthropic.types import RawMessageStreamEvent
+from daimon.core.turn import driver as driver_module
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.state import TurnState
 
@@ -47,3 +49,28 @@ async def test_default_no_op_hooks_are_callable_without_override() -> None:
     await impl.on_rate_limited(datetime.now(UTC))
     await impl.on_rate_limited(None)
     await impl.on_interrupt_sent("sigint")
+
+
+def test_hook_contract_prose_is_present() -> None:
+    """Documentation-only guard.
+
+    The hook-cost contract (`on_render` is the sole delivery path,
+    `on_sse_event` et al. are cheap no-I/O taps, and the one inline-I/O
+    billing exemption in the driver) is prose, not code -- nothing else
+    fails if it silently gets deleted during some future edit. This test
+    exists purely to make that deletion visible: it goes red the moment
+    the load-bearing phrases disappear from either module's docstring.
+    """
+    lifecycle_doc = inspect.getdoc(inspect.getmodule(TurnLifecycle)) or ""
+    assert "no network I/O" in lifecycle_doc, (
+        "TurnLifecycle's module docstring must state that on_sse_event (and "
+        "the other cheap taps) forbid network I/O -- this contract is what "
+        "lets adapters safely move their flush I/O onto on_render"
+    )
+
+    driver_doc = inspect.getdoc(driver_module) or ""
+    assert "D-06" in driver_doc and "billing" in driver_doc, (
+        "driver.py's module docstring must document the D-06 billing "
+        "exemption -- the one piece of I/O the consume loop is allowed to "
+        "do inline, despite the no-I/O-in-the-pump rule"
+    )

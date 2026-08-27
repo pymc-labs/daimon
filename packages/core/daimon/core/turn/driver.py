@@ -20,6 +20,18 @@ single structured exempt-billing log line at turn start and meters nothing.
   `_CONNECTION_LOST` (a dropped connection, a genuinely different failure
   mode from silence). Each outer iteration gets a fresh `AsyncRetrying`, so
   this budget is per stream generation, not per turn.
+
+What the pump may do inline: the consume loop in `_consume_with_reconnect`
+awaits `lifecycle.on_sse_event(event)` synchronously, so per the hook
+contract in `turn/lifecycle.py` that hook must stay a cheap local tap — no
+network I/O. Exactly ONE piece of I/O is permitted inline in the consume
+loop itself, ahead of that hook call: the per-event billing `record()`
+call (D-06). Unlike chat-API flush I/O, billing is a local Postgres write,
+it is correctness rather than delivery (an unmetered
+`span.model_request_end` is revenue lost, and the recorder is fail-closed
+by design — exceptions propagate), and it carries no retry-after-style
+stall risk. Everything else that wants to talk to the network belongs on
+`on_render`, which runs on the separate, never-stalling render task.
 """
 
 from __future__ import annotations
@@ -563,8 +575,10 @@ async def _consume_with_reconnect(
                 # `_CONNECTION_LOST` retry budget).
                 await stream.close()
                 raise _EventlessCycle(reason="read_timeout") from None
-            # Per-event metering. Invoke the caller-bound recorder on
-            # span.model_request_end events. Exceptions propagate (fail-closed).
+            # D-06: the one inline I/O the consume loop is allowed to do.
+            # A local Postgres write, correctness not delivery -- unlike the
+            # chat-API flush I/O this hook contract forbids, an unmetered
+            # event is revenue lost. Exceptions propagate (fail-closed).
             match billing:
                 case Billed(record=record):
                     if event.type == "span.model_request_end":
