@@ -1193,6 +1193,29 @@ async def test_read_channel_returns_and_uses_slack_cursor(
 
 
 @pytest.mark.asyncio
+async def test_read_channel_last_page_has_no_cursor_or_hint(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A response without response_metadata must not invent a continuation."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_HISTORY,
+            payload={"ok": True, "messages": [{"ts": "1", "text": "only"}]},
+        )
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=50)
+    assert [row.text for row in result.messages] == ["only"]
+    assert result.next_cursor is None, "no response_metadata means the sweep is complete"
+    assert result.hint is None, "a hint on the last page would send the caller in a loop"
+
+
+@pytest.mark.asyncio
 async def test_read_thread_clamps_limit_to_the_slack_page_cap(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

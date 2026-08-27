@@ -30,9 +30,9 @@ from daimon.adapters.mcp.tools.discord._models import (
     ChannelRow,  # pyright: ignore[reportPrivateUsage]
     MessageRow,  # pyright: ignore[reportPrivateUsage]
     ParsedLink,  # pyright: ignore[reportPrivateUsage]
-    ReadChannelResult,  # noqa: F811  # pyright: ignore[reportPrivateUsage,reportUnusedImport]
-    ReadThreadResult,  # noqa: F811  # pyright: ignore[reportPrivateUsage,reportUnusedImport]
-    ThreadRow,  # noqa: F811  # pyright: ignore[reportPrivateUsage,reportUnusedImport]
+    ReadChannelResult,  # pyright: ignore[reportPrivateUsage]
+    ReadThreadResult,  # pyright: ignore[reportPrivateUsage]
+    ThreadRow,  # pyright: ignore[reportPrivateUsage]
     _to_message_row,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._visibility import (
@@ -49,6 +49,36 @@ _DISCORD_LINK_PATTERN = re.compile(
     r"https?://(?:ptb\.|canary\.)?discord(?:app)?\.com/channels/"
     r"(\d+)/(\d+)(?:/(\d+))?"
 )
+
+
+def _before_object(before: str | None) -> discord.Object | None:
+    if before is None:
+        return None
+    try:
+        return discord.Object(id=int(before))
+    except ValueError as e:
+        raise ToolError("before must be a numeric discord message id") from e
+
+
+async def _history_page(
+    channel: discord.abc.Messageable, *, limit: int, before: str | None
+) -> tuple[list[MessageRow], str | None, str | None]:
+    """Fetch one history page; return oldest-first rows, cursor, and hint.
+
+    Discord's history API reports no has_more, so a full page is the only
+    signal that older history may exist. A channel holding exactly ``limit``
+    messages therefore still advertises a cursor; the follow-up read comes
+    back empty and ends the sweep.
+    """
+    page = [m async for m in channel.history(limit=limit, before=_before_object(before))]
+    rows = [_to_message_row(m) for m in reversed(page)]
+    next_before = str(page[-1].id) if len(page) == limit else None
+    hint = (
+        f"more messages available — pass before={next_before} to read older messages"
+        if next_before is not None
+        else None
+    )
+    return rows, next_before, hint
 
 
 # ---------------------------------------------------------------------------
@@ -85,15 +115,7 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
         _check_view_permission(channel, member)
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support message history")
-        before_obj = discord.Object(id=int(before)) if before is not None else None
-        page = [m async for m in channel.history(limit=bounded_limit, before=before_obj)]
-        rows = [_to_message_row(m) for m in reversed(page)]
-        next_before = str(page[-1].id) if len(page) == bounded_limit else None
-        hint = (
-            f"more messages available — pass before={next_before} to read older messages"
-            if next_before is not None
-            else None
-        )
+        rows, next_before, hint = await _history_page(channel, limit=bounded_limit, before=before)
         return ReadChannelResult(rows=rows, next_before=next_before, hint=hint)
 
 
@@ -250,15 +272,7 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
 
         await _check_thread_view(c, channel, member, _require_discord_identity(auth))
 
-        before_obj = discord.Object(id=int(before)) if before is not None else None
-        page = [m async for m in channel.history(limit=bounded_limit, before=before_obj)]
-        rows = [_to_message_row(m) for m in reversed(page)]
-        next_before = str(page[-1].id) if len(page) == bounded_limit else None
-        hint = (
-            f"more messages available — pass before={next_before} to read older messages"
-            if next_before is not None
-            else None
-        )
+        rows, next_before, hint = await _history_page(channel, limit=bounded_limit, before=before)
         return ReadThreadResult(rows=rows, next_before=next_before, hint=hint)
 
 

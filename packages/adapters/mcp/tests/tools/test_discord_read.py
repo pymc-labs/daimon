@@ -365,6 +365,31 @@ async def test_read_channel_passes_before_cursor(monkeypatch: pytest.MonkeyPatch
     )
     assert [row.id for row in result.rows] == ["999"]
     assert str(seen_params.get("before")) == "1000"
+    assert result.next_before is None, "a short page means history is exhausted"
+    assert result.hint is None, "a hint on the last page would send the caller in a loop"
+
+
+async def test_read_channel_rejects_non_numeric_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed before value gets a ToolError, not a raw ValueError."""
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload()
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="before must be a numeric discord message id"):
+        await _read_channel_impl(
+            _runtime_with_discord_token(), _auth(), channel_id="222", limit=50, before="not-an-id"
+        )
 
 
 async def test_read_channel_bot_author_has_assistant_role(
