@@ -1,10 +1,10 @@
 """Thin helpers over the anthropic SDK's Managed Agents beta.
 
 Per refinements §6, this module holds ONLY operations whose logic extends
-beyond one SDK call: full-history replay (for SSE reconnect rebuilds),
-dedup-filtered live streaming, and interrupt-with-ack-wait. Everything else
-(create/list/retrieve/archive on agents, environments, sessions) stays a
-direct SDK call in its call site; no delegation layer to maintain.
+beyond one SDK call: full-history replay (for SSE reconnect rebuilds) and
+interrupt-with-ack-wait. Everything else (create/list/retrieve/archive on
+agents, environments, sessions) stays a direct SDK call in its call site;
+no delegation layer to maintain.
 
 Design rules:
 - Free async functions; no class (no cross-call state to own).
@@ -18,16 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import structlog
 from anthropic import APIStatusError, AsyncAnthropic
-from anthropic.types.beta import (
-    BetaManagedAgentsAgent,
-    BetaManagedAgentsDeltaEvent,
-    BetaManagedAgentsStartEvent,
-)
+from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionEvent,
     BetaManagedAgentsSessionStatusIdleEvent,
@@ -98,40 +94,6 @@ async def replay_events(
             kind="upstream",
             message=f"MA event replay did not complete within {timeout_s}s",
         ) from err
-
-
-async def stream_events_with_dedup(
-    anthropic: AsyncAnthropic,
-    *,
-    session_id: str,
-    seen: set[str],
-) -> AsyncGenerator[SessionEvent, None]:
-    """Yield live session events whose id is not in `seen`.
-
-    The caller owns `seen` as a running ledger of event ids already folded into
-    `TurnState.seen_event_ids`. This helper mutates `seen` in place by adding
-    each newly-yielded event id.
-
-    Per `docs/references/sse-streaming.md`:
-    - The stream does NOT close on `session.status_idle`. Callers must break
-      out of their `async for` on a terminal condition; the helper will loop
-      indefinitely otherwise.
-    - On reconnect, MA re-delivers events we've already folded. Dedup by id is
-      the only correctness mechanism — reducers stay pure and are not consulted
-      for "have we seen this before."
-    """
-    stream = await anthropic.beta.sessions.events.stream(session_id=session_id)
-    async for event in stream:
-        # SDK 0.117 widened the stream union with token-level framing events
-        # (event_start / event_delta) that carry no id and are not foldable
-        # session events. Daimon folds complete events only, so skip them —
-        # this also narrows `event` to BetaManagedAgentsSessionEvent.
-        if isinstance(event, BetaManagedAgentsStartEvent | BetaManagedAgentsDeltaEvent):
-            continue
-        if event.id in seen:
-            continue
-        seen.add(event.id)
-        yield event
 
 
 # `session.status_idle` stop_reason variants that represent a real terminal

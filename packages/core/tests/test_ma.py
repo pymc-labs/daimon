@@ -13,15 +13,9 @@ import pytest
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import (
     BetaManagedAgentsAgent,
-    BetaManagedAgentsDeltaEvent,
     BetaManagedAgentsModelConfig,
     BetaManagedAgentsSession,
-    BetaManagedAgentsStartEvent,
 )
-from anthropic.types.beta.beta_managed_agents_agent_message_preview import (
-    BetaManagedAgentsAgentMessagePreview,
-)
-from anthropic.types.beta.beta_managed_agents_delta_content import BetaManagedAgentsDeltaContent
 from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
 from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
 from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
@@ -42,7 +36,6 @@ from daimon.core.ma import (
     delete_sessions_for_account,
     replay_events,
     send_interrupt_and_wait,
-    stream_events_with_dedup,
     terminal_stop_reason,
     update_agent_with_version_retry,
 )
@@ -101,18 +94,6 @@ def _make_list_client(events: Sequence[BetaManagedAgentsSessionEvent]) -> Any:
     return build_fake_anthropic(router.dispatch)
 
 
-def _make_stream_client(events: Sequence[BetaManagedAgentsSessionEvent]) -> Any:
-    """Build a transport-level client for stream tests."""
-    router = MARouter()
-    event_dicts = [e.model_dump(mode="json") for e in events]
-
-    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
-        return sse_response(event_dicts)
-
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
-    return build_fake_anthropic(router.dispatch)
-
-
 async def test_replay_events_returns_all_events_in_order_when_paginator_yields_multiple() -> None:
     events = [
         _user_message("sevt_1", "hi"),
@@ -155,111 +136,6 @@ async def test_replay_events_raises_turn_error_when_paginator_stalls_past_timeou
     assert isinstance(exc_info.value.__cause__, TimeoutError), (
         "the original asyncio TimeoutError must be preserved as __cause__"
     )
-
-
-async def test_stream_events_with_dedup_skips_ids_already_in_seen_when_iterated() -> None:
-    events = [
-        _user_message("sevt_1", "a"),
-        _agent_message("sevt_2", "b"),
-        _idle("sevt_3"),
-    ]
-    client = _make_stream_client(events)
-    seen: set[str] = {"sevt_2"}
-
-    yielded = [
-        event async for event in stream_events_with_dedup(client, session_id="sesn_test", seen=seen)
-    ]
-
-    assert [e.id for e in yielded] == ["sevt_1", "sevt_3"], (
-        "dedup must drop events whose id was pre-populated in seen"
-    )
-
-
-async def test_stream_events_with_dedup_adds_ids_to_seen_when_yielded() -> None:
-    events = [_user_message("sevt_1", "a"), _agent_message("sevt_2", "b")]
-    client = _make_stream_client(events)
-    seen: set[str] = set()
-
-    async for _ in stream_events_with_dedup(client, session_id="sesn_test", seen=seen):
-        pass
-
-    assert seen == {"sevt_1", "sevt_2"}, (
-        "seen set is the caller's running ledger; helper must mutate it"
-    )
-
-
-async def test_stream_events_with_dedup_returns_empty_when_all_events_already_seen() -> None:
-    events = [_user_message("sevt_1", "a"), _agent_message("sevt_2", "b")]
-    client = _make_stream_client(events)
-    seen: set[str] = {"sevt_1", "sevt_2"}
-
-    yielded = [
-        event async for event in stream_events_with_dedup(client, session_id="sesn_test", seen=seen)
-    ]
-
-    assert yielded == [], "fully-deduped stream should yield nothing"
-
-
-def _stream_client_yielding(events: Sequence[Any]) -> Any:
-    """Fake client whose events.stream yields the given objects verbatim.
-
-    Bypasses the SSE parser so id-less framing events (event_start /
-    event_delta) can be exercised directly — building valid nested SSE
-    payloads for them would couple the test to SDK internals.
-    """
-    client = build_fake_anthropic(MARouter().dispatch)
-
-    async def _aiter() -> Any:
-        for event in events:
-            yield event
-
-    async def _stream(*, session_id: str) -> Any:
-        return _aiter()
-
-    client.beta.sessions.events.stream = _stream  # type: ignore[assignment]
-    return client
-
-
-def _start_event(event_id: str) -> BetaManagedAgentsStartEvent:
-    return BetaManagedAgentsStartEvent(
-        type="event_start",
-        event=BetaManagedAgentsAgentMessagePreview(type="agent.message", id=event_id),
-    )
-
-
-def _delta_event(event_id: str, text: str) -> BetaManagedAgentsDeltaEvent:
-    return BetaManagedAgentsDeltaEvent(
-        type="event_delta",
-        event_id=event_id,
-        delta=BetaManagedAgentsDeltaContent(
-            type="content_delta",
-            content=BetaManagedAgentsTextBlock(type="text", text=text),
-        ),
-    )
-
-
-async def test_stream_events_with_dedup_skips_id_less_framing_events_from_0117_stream() -> None:
-    """SDK 0.117 widened the stream union with event_start / event_delta framing
-    events that carry no `id`. The helper must skip them — reaching `event.id`
-    on one would raise — and yield only foldable session events."""
-    client = _stream_client_yielding(
-        [
-            _start_event("sevt_1"),
-            _agent_message("sevt_1", "hi"),
-            _delta_event("sevt_1", "h"),
-            _idle("sevt_2"),
-        ]
-    )
-    seen: set[str] = set()
-
-    yielded = [
-        event async for event in stream_events_with_dedup(client, session_id="sesn_test", seen=seen)
-    ]
-
-    assert [e.id for e in yielded] == ["sevt_1", "sevt_2"], (
-        "framing events must be dropped; only session events with ids flow through"
-    )
-    assert seen == {"sevt_1", "sevt_2"}, "framing events must not enter the dedup ledger"
 
 
 async def test_send_interrupt_and_wait_sends_user_interrupt_when_invoked() -> None:
