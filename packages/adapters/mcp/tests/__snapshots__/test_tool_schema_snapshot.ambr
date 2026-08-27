@@ -2064,8 +2064,10 @@
       'description': '''
         Read channel messages, oldest-first, with pagination metadata.
         
-        For threads use read_thread. Discord: use before to fetch older messages.
-        Slack: use cursor to fetch the next page; at most 15 messages are returned.
+        For threads use read_thread. Each platform takes only its own
+        pagination parameter — the other is rejected. Discord: at most 200
+        messages per call; use before to fetch older messages. Slack: use
+        cursor to fetch the next page; at most 15 messages are returned.
       ''',
       'parameters': dict({
         'additionalProperties': False,

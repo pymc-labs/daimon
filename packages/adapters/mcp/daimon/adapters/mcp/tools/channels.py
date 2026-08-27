@@ -81,14 +81,20 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> ReadChannelResult | SlackChannelResult:
         """Read channel messages, oldest-first, with pagination metadata.
 
-        For threads use read_thread. Discord: use before to fetch older messages.
-        Slack: use cursor to fetch the next page; at most 15 messages are returned.
+        For threads use read_thread. Each platform takes only its own
+        pagination parameter — the other is rejected. Discord: at most 200
+        messages per call; use before to fetch older messages. Slack: use
+        cursor to fetch the next page; at most 15 messages are returned.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
+            if before is not None:
+                raise ToolError("before is Discord-only — pass cursor to paginate on Slack")
             return await _slack_read_channel_impl(
                 runtime, auth, channel_id=channel_id, limit=limit, cursor=cursor
             )
+        if cursor is not None:
+            raise ToolError("cursor is Slack-only — pass before to paginate on Discord")
         return await _read_channel_impl(
             runtime, auth, channel_id=channel_id, limit=limit, before=before
         )
