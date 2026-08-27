@@ -102,8 +102,12 @@ class TestSuccessSequenceSnapshot:
         clock = _make_clock([100.0, 100.0, 111.0, 111.0, 130.0, 130.0])
         lc, sends, edits = _make_lifecycle(clock)
 
+        # D-11: on_sse_event no longer flushes -- the render tick does. Each
+        # event is followed by the render call production drives it with.
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         await lc.on_sse_event(_tool_use_event("Bash"))
+        await lc.on_render(TurnState())
 
         state = TurnState(
             content=[TextBlock(kind="text", text="Here is the answer.")],
@@ -124,7 +128,9 @@ class TestFailureSnapshot:
         clock = _make_clock([100.0, 100.0, 115.0, 115.0])
         lc, sends, edits = _make_lifecycle(clock)
 
+        # D-11: on_sse_event no longer flushes -- the render tick does.
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
 
         state = TurnState(
             usage_totals=UsageTotals(

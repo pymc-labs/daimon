@@ -86,26 +86,41 @@ def _make_success_state(text: str = "Hello response") -> TurnState:
 
 
 # ---------------------------------------------------------------------------
-# SPEC-R1: First SSE event posts embed immediately
+# D-11: on_sse_event is a cheap local tap; on_render is the delivery path
 # ---------------------------------------------------------------------------
 
 
 class TestFirstEventSendsEmbed:
-    async def test_first_sse_event_posts_embed(self) -> None:
-        """First SSE event causes an embed to be posted to the thread."""
+    async def test_on_sse_event_alone_produces_no_io(self) -> None:
+        """on_sse_event is a cheap local tap (D-11): folding an SSE event into
+        embed state performs no network I/O by itself. The embed post is
+        delivered by the render tick, not the event."""
         lc, sends, edits = _make_lifecycle()
 
         await lc.on_sse_event(_thinking_event())
 
-        assert len(sends) == 1, "first event should post embed"
+        assert sends == [], "on_sse_event alone must not send"
+        assert edits == [], "on_sse_event alone must not edit"
+
+    async def test_on_render_posts_embed_folded_by_sse_event(self) -> None:
+        """on_render delivers the embed state on_sse_event folded."""
+        lc, sends, edits = _make_lifecycle()
+
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+
+        assert len(sends) == 1, "render tick should post embed"
         assert "embeds" in sends[0], "post should include embeds kwarg"
 
-    async def test_second_event_within_debounce_does_not_edit(self) -> None:
-        """Subsequent events within the 10s debounce window do NOT trigger edits."""
+    async def test_render_tick_within_debounce_does_not_edit(self) -> None:
+        """A render tick within the 10s debounce window after the first post
+        does not trigger a repeat edit."""
         lc, sends, edits = _make_lifecycle()
 
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())  # first post
         await lc.on_sse_event(_tool_use_event("read_file"))
+        await lc.on_render(TurnState())  # same debounce window
 
         assert len(sends) == 1, "only one send — no additional posts"
         assert len(edits) == 0, "no edits within debounce window"
@@ -127,18 +142,19 @@ class TestPostInitial:
         )
         assert len(edits) == 0, "no edits before any SSE event"
 
-    async def test_sse_event_after_post_initial_edits_instead_of_resending(self) -> None:
+    async def test_render_after_sse_event_edits_instead_of_resending(self) -> None:
         """The initial embed message is adopted as the lifecycle's message ref —
-        SSE flushes edit it in place rather than posting a second embed."""
+        the render tick edits it in place rather than posting a second embed."""
         lc, sends, edits = _make_lifecycle()
 
         await lc.post_initial()
         # Simulate debounce elapsed by backdating last flush
         lc._last_flush = time.monotonic() - 11.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce is the established idiom in TestDebounce
         await lc.on_sse_event(_tool_use_event("Bash"))
+        await lc.on_render(TurnState())
 
         assert len(sends) == 1, "initial embed should be adopted, not re-posted"
-        assert len(edits) == 1, "SSE flush should edit the initial embed in place"
+        assert len(edits) == 1, "render tick should edit the initial embed in place"
         assert edits[0][0] is _SENTINEL_REF, "edit should target the initial embed's message ref"
 
 
@@ -148,31 +164,36 @@ class TestPostInitial:
 
 
 class TestDebounce:
-    async def test_event_after_debounce_window_triggers_edit(self) -> None:
-        """Event after 10s debounce window triggers an edit."""
+    async def test_render_after_debounce_window_triggers_edit(self) -> None:
+        """A render tick after the 10s debounce window triggers an edit."""
         lc, sends, edits = _make_lifecycle()
 
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         # Simulate debounce elapsed by backdating last flush
         lc._last_flush = time.monotonic() - 11.0
 
         await lc.on_sse_event(_tool_use_event("Bash"))
+        await lc.on_render(TurnState())
 
         assert len(edits) == 1, "edit should fire after debounce elapsed"
         assert edits[0][0] is _SENTINEL_REF, "edit should use stored message ref"
 
-    async def test_terminal_flushes_immediately_regardless_of_debounce(self) -> None:
-        """Terminal success bypasses debounce and flushes immediately."""
+    async def test_terminal_flushes_immediately_with_no_render_tick(self) -> None:
+        """Terminal success bypasses on_render and the debounce entirely --
+        _flush_terminal is called directly by the terminal hook."""
         lc, sends, edits = _make_lifecycle()
 
         await lc.on_sse_event(_thinking_event())
-        # Debounce NOT elapsed — but terminal should flush anyway
+        # No on_render call anywhere in this test -- terminal should still flush.
         state = _make_success_state("done")
         await lc.on_terminal_success(state)
 
-        # After terminal_success: flush_terminal calls edit (done embed),
-        # then clean replace calls edit again with content=
-        assert len(edits) >= 1, "terminal should trigger at least one edit"
+        # message_ref is unset (on_sse_event alone performs no I/O), so
+        # _flush_terminal posts the done embed via send; the clean-replace
+        # step then edits that same message with the final text.
+        assert len(sends) == 1, "flush_terminal posts since no message_ref exists yet"
+        assert len(edits) == 1, "clean replace edits the just-posted message"
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +222,7 @@ class TestCleanReplace:
         lc, sends, edits = _make_lifecycle()
 
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())  # establishes message_ref before terminal
         initial_sends = len(sends)
 
         # 4000 chars will split into multiple chunks (limit is 1900)
@@ -228,6 +250,7 @@ class TestErrorEmbed:
         lc, sends, edits = _make_lifecycle()
 
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         state = TurnState()
         await lc.on_terminal_failure(state, Exception("timeout"))
 
@@ -244,6 +267,7 @@ class TestErrorEmbed:
         lc, sends, edits = _make_lifecycle()
 
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         state = TurnState()
         await lc.on_terminal_failure(state, Exception("boom"))
 
@@ -257,25 +281,63 @@ class TestErrorEmbed:
 
 
 # ---------------------------------------------------------------------------
-# on_render is a no-op
+# T-19-07-B: on_render must not swallow adapter failures -- the driver's
+# per-tick render error policy (plan 19-06) is what handles them.
 # ---------------------------------------------------------------------------
 
 
-class TestOnRenderNoop:
-    async def test_on_render_is_noop_when_embed_posted(self) -> None:
-        """on_render leaves the embed alone — embed is driven by SSE events, not
-        render ticks — and posts nothing for unsealed trailing text."""
-        lc, sends, edits = _make_lifecycle()
+class TestRenderPropagatesFailures:
+    async def test_raising_edit_propagates_out_of_on_render(self) -> None:
+        """A rate-limited/failing Discord edit surfaces out of on_render --
+        the adapter does not swallow it."""
+
+        async def _raising_edit(ref: Any, **kwargs: Any) -> None:
+            raise RuntimeError("rate limited")
+
+        sends: list[dict[str, Any]] = []
+
+        async def _send(**kwargs: Any) -> object:
+            sends.append(kwargs)
+            return _SENTINEL_REF
+
+        lc = DiscordTurnLifecycle(
+            send=_send,
+            edit=_raising_edit,
+            agent_name="test-agent",
+            model_id="claude-sonnet-4-6",
+        )
 
         await lc.on_sse_event(_thinking_event())
-        initial_sends = len(sends)
-        initial_edits = len(edits)
+        await lc.on_render(TurnState())  # first post -- no edit yet, succeeds
+        lc._last_flush = time.monotonic() - 11.0
+        await lc.on_sse_event(_tool_use_event("Bash"))
 
-        state = _make_success_state("some content")
-        await lc.on_render(state)
+        with pytest.raises(RuntimeError, match="rate limited"):
+            await lc.on_render(TurnState())
 
-        assert len(sends) == initial_sends, "on_render must not trigger additional sends"
-        assert len(edits) == initial_edits, "on_render must not trigger edits"
+    async def test_on_sse_event_never_raises_for_the_same_scenario(self) -> None:
+        """The cheap local tap performs no I/O, so a failing edit callable
+        never reaches it -- only the render tick can hit that failure."""
+
+        async def _raising_edit(ref: Any, **kwargs: Any) -> None:
+            raise RuntimeError("rate limited")
+
+        async def _send(**kwargs: Any) -> object:
+            return _SENTINEL_REF
+
+        lc = DiscordTurnLifecycle(
+            send=_send,
+            edit=_raising_edit,
+            agent_name="test-agent",
+            model_id="claude-sonnet-4-6",
+        )
+
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+        lc._last_flush = time.monotonic() - 11.0
+        # Does not raise even though the next render tick would hit the
+        # raising edit -- on_sse_event performs no I/O at all.
+        await lc.on_sse_event(_tool_use_event("Bash"))
 
 
 # ---------------------------------------------------------------------------
@@ -313,14 +375,15 @@ class TestSealedResponsePersistence:
         assert content_sends[0]["content"] == answer, "the sealed text posts verbatim"
 
     async def test_on_render_keeps_short_narration_suppressed(self) -> None:
-        """Sealed text under the threshold is narration and never posts."""
+        """Sealed text under the threshold is narration and never posts as a
+        standalone message (on_render's own embed flush is unrelated)."""
         lc, sends, edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
-        initial_sends = len(sends)
 
         await lc.on_render(_sealed_state("Let me check the ArviZ summary."))
 
-        assert len(sends) == initial_sends, "short pre-tool narration must not post"
+        content_sends = [s for s in sends if "content" in s]
+        assert content_sends == [], "short pre-tool narration must not post"
 
     async def test_terminal_success_posts_unflushed_sealed_answer_before_final(self) -> None:
         """A sealed answer the render loop never flushed still posts at terminal,
@@ -361,10 +424,12 @@ class TestSealedResponsePersistence:
         (no 'Turn cancelled' replace)."""
         lc, sends, edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
 
         state = _sealed_state("w" * 700)
         await lc.on_terminal_success(state)
 
+        assert edits, "the done embed flush must still land"
         assert all(e[1].get("content") != "Turn cancelled." for e in edits), (
             "a turn that posted a sealed answer is not a cancellation"
         )
@@ -381,6 +446,7 @@ class TestCancelViewWiring:
         fake_view = discord.ui.View()
         lc, sends, edits = _make_lifecycle(cancel_view=fake_view)
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         assert sends[0].get("view") is fake_view, "first send must include cancel_view"
 
     async def test_debounced_edit_includes_cancel_view(self) -> None:
@@ -388,8 +454,10 @@ class TestCancelViewWiring:
         fake_view = discord.ui.View()
         lc, sends, edits = _make_lifecycle(cancel_view=fake_view)
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         lc._last_flush = time.monotonic() - 11.0
         await lc.on_sse_event(_tool_use_event("Bash"))
+        await lc.on_render(TurnState())
         assert edits[0][1].get("view") is fake_view, "debounced edit must include cancel_view"
 
     async def test_terminal_success_removes_cancel_view(self) -> None:
@@ -408,6 +476,7 @@ class TestCancelViewWiring:
         fake_view = discord.ui.View()
         lc, sends, edits = _make_lifecycle(cancel_view=fake_view)
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         state = TurnState()
         await lc.on_terminal_failure(state, Exception("boom"))
         # _flush_terminal edit must pass view=None
@@ -418,6 +487,7 @@ class TestCancelViewWiring:
         """When cancel_view is None (default), send passes view=None."""
         lc, sends, edits = _make_lifecycle()  # no cancel_view
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         # view kwarg should be None (or absent) -- no view attached
         assert sends[0].get("view") is None, "no cancel_view means view=None on send"
 
@@ -454,8 +524,10 @@ class TestThinkingNotInTrail:
         lc, sends, edits = _make_lifecycle()
 
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         lc._last_flush = time.monotonic() - 11.0
         await lc.on_sse_event(_tool_use_event("Bash"))
+        await lc.on_render(TurnState())
 
         embed = edits[-1][1]["embeds"][0]
         assert "Bash" in (embed.description or ""), "tool line must be present"
@@ -467,8 +539,10 @@ class TestThinkingNotInTrail:
         lc, sends, edits = _make_lifecycle()
 
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         lc._last_flush = time.monotonic() - 11.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce is the established idiom in TestDebounce
         await lc.on_sse_event(_message_event("Let me check the workspace config"))
+        await lc.on_render(TurnState())
 
         embeds = edits[-1][1]["embeds"]
         assert len(embeds) == 2, "activity embed on top, preview embed below"
@@ -533,6 +607,7 @@ class TestZeroMessageBehavior:
         """tools ran but no final text -> done embed stays, no clean-replace."""
         lc, sends, edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
 
         # Tools ran but no TextBlock after the last tool
         state = TurnState(
@@ -573,6 +648,7 @@ class TestMessageEventMapping:
         """agent.message SSE events surface their text in the bottom preview embed."""
         lc, sends, edits = _make_lifecycle()
         await lc.on_sse_event(_message_event(text="I'll look that up for you and check"))
+        await lc.on_render(TurnState())
 
         assert len(sends) == 1
         embeds = sends[0].get("embeds")
@@ -586,6 +662,7 @@ class TestMessageEventMapping:
         but adds no trail line — MA emits no thinking text to surface."""
         lc, sends, edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
 
         assert len(sends) == 1
         embeds: list[discord.Embed] | None = sends[0].get("embeds")
@@ -601,6 +678,7 @@ class TestMessageEventMapping:
         lc, sends, edits = _make_lifecycle()
         long_text = "A" * 400
         await lc.on_sse_event(_message_event(text=long_text))
+        await lc.on_render(TurnState())
 
         embeds = sends[0].get("embeds")
         assert embeds is not None and len(embeds) == 2
@@ -672,6 +750,7 @@ class TestWasAnswered:
         not be confused with a cancellation."""
         lc, _sends, edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
 
         state = TurnState(
             content=[
@@ -684,6 +763,7 @@ class TestWasAnswered:
         await lc.on_terminal_success(state)
 
         assert lc.was_answered is True, "visible tool activity must report an answer"
+        assert edits, "the done embed flush must still land"
         assert all(e[1].get("content") != "Turn cancelled." for e in edits), (
             "a turn with tool activity must not be rendered as a cancellation"
         )
@@ -718,6 +798,7 @@ class TestTurnSummaryFooter:
     async def test_priced_model_sets_cost_str(self) -> None:
         lc, _sends, edits = _make_lifecycle(model_id="claude-sonnet-4-6")
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         state = apply(
             TurnState(),
             _span_usage_event(
@@ -736,6 +817,7 @@ class TestTurnSummaryFooter:
     async def test_unpriced_model_omits_cost(self) -> None:
         lc, _sends, edits = _make_lifecycle(model_id="unknown-model")
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         state = apply(
             TurnState(),
             _span_usage_event(
@@ -755,6 +837,7 @@ class TestTurnSummaryFooter:
     async def test_merged_input_count_in_footer(self) -> None:
         lc, _sends, edits = _make_lifecycle(model_id="claude-sonnet-4-6")
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         state = apply(
             TurnState(),
             _span_usage_event(
@@ -776,6 +859,7 @@ class TestTurnSummaryFooter:
         # The whole point: footer cost == cost_of for the same 4 cache-split ints.
         lc, _sends, edits = _make_lifecycle(model_id="claude-sonnet-4-6")
         await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
         state = apply(
             TurnState(),
             _span_usage_event(
