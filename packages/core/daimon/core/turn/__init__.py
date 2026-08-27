@@ -7,6 +7,13 @@ No I/O lives in this package. The driver that consumes these primitives
 
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent as SessionEvent
 from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.ceiling import (
+    CEILING_MESSAGE,
+    TURN_CEILING_S,
+    ceiling_error,
+    remaining_s,
+    turn_deadline,
+)
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
@@ -54,6 +61,12 @@ __all__ = [
     # session preparation (D-01 stage two)
     "PreparedTurn",
     "bind_session",
+    # per-turn ceiling
+    "CEILING_MESSAGE",
+    "TURN_CEILING_S",
+    "ceiling_error",
+    "remaining_s",
+    "turn_deadline",
     # driver call + one-shot dead-session recovery
     "RunOutcome",
     "run_prepared_turn",
