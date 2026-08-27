@@ -60,6 +60,8 @@ def map_slack_api_error(err: SlackApiError, *, as_user: bool = False) -> ToolErr
         return ToolError(MISSING_SCOPE_USER_MSG if as_user else MISSING_SCOPE_MSG)
     if error_code in ("channel_not_found", "not_in_channel"):
         return ToolError(MISSING_ACCESS)
+    if error_code == "invalid_cursor":
+        return ToolError("invalid or expired cursor — omit cursor to restart from the newest page")
     if error_code in ("token_revoked", "token_expired", "invalid_auth"):
         return ToolError(INVALID_AUTH_MSG)
     return None

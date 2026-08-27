@@ -1173,6 +1173,7 @@ async def test_read_channel_returns_and_uses_slack_cursor(
             _CONVERSATIONS_HISTORY,
             payload={
                 "ok": True,
+                "has_more": True,
                 "messages": [{"ts": "1", "text": "oldest"}],
                 "response_metadata": {"next_cursor": "CURSOR_3"},
             },
@@ -1213,6 +1214,103 @@ async def test_read_channel_last_page_has_no_cursor_or_hint(
     assert [row.text for row in result.messages] == ["only"]
     assert result.next_cursor is None, "no response_metadata means the sweep is complete"
     assert result.hint is None, "a hint on the last page would send the caller in a loop"
+
+
+@pytest.mark.asyncio
+async def test_read_channel_drops_cursor_when_has_more_is_false(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """has_more, not next_cursor, decides whether older history exists.
+
+    Slack can return a next_cursor that only points past the end; following it
+    costs a rate-limited call that comes back empty.
+    """
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_HISTORY,
+            payload={
+                "ok": True,
+                "has_more": False,
+                "messages": [{"ts": "1", "text": "only"}],
+                "response_metadata": {"next_cursor": "CURSOR_PAST_END"},
+            },
+        )
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=50)
+    assert result.next_cursor is None, "has_more=false means the sweep is complete"
+    assert result.hint is None
+
+
+@pytest.mark.asyncio
+async def test_read_channel_flags_truncation_when_has_more_without_cursor(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """has_more with no cursor must still tell the caller the page is partial."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_HISTORY,
+            payload={"ok": True, "has_more": True, "messages": [{"ts": "1", "text": "head"}]},
+        )
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=50)
+    assert result.next_cursor is None
+    assert result.hint is not None and "more messages exist" in result.hint, (
+        "a silently partial page is the truncation failure #74 exists to prevent"
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_channel_maps_invalid_cursor_to_tool_error(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A stale or malformed cursor gets a ToolError, not a raw SlackApiError."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_HISTORY,
+            payload={"ok": False, "error": "invalid_cursor"},
+        )
+        with pytest.raises(ToolError, match="invalid or expired cursor"):
+            await _slack_read_channel_impl(
+                runtime, auth, channel_id="C1", limit=50, cursor="CURSOR_STALE"
+            )
+
+
+@pytest.mark.asyncio
+async def test_read_channel_raises_limit_floor_to_one(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """limit=0 would come back from Slack as invalid_limit; clamp it like Discord does."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(_CONVERSATIONS_HISTORY, payload={"ok": True, "messages": []})  # pyright: ignore[reportUnknownMemberType]
+        await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=0)
+        limit = _recorded_limit(m, "/api/conversations.history")
+    assert limit == "1"
 
 
 @pytest.mark.asyncio

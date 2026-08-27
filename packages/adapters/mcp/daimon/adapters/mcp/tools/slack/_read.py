@@ -240,20 +240,23 @@ async def _fetch_channel_history(
     client: AsyncWebClient, *, channel_id: str, limit: int, cursor: str | None
 ) -> SlackChannelResult:
     resp = await client.conversations_history(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-        channel=channel_id, limit=min(limit, _HISTORY_LIMIT_CAP), cursor=cursor
+        channel=channel_id, limit=max(1, min(limit, _HISTORY_LIMIT_CAP)), cursor=cursor
     )
     raw = cast(list[dict[str, Any]], resp["messages"])
     raw.reverse()  # Slack returns newest-first; tools return oldest-first
     usernames = await _resolve_usernames(client, _author_ids(raw))
-    next_cursor = (
-        str(cast(dict[str, Any], resp.get("response_metadata") or {}).get("next_cursor") or "")
-        or None
-    )
-    hint = (
-        f"more messages available — pass cursor={next_cursor} to read older messages"
-        if next_cursor is not None
-        else None
-    )
+    # has_more is the authority on whether older history exists: Slack can
+    # send a next_cursor that only points past the end, and (rarely) report
+    # has_more without a cursor — say so rather than claim the sweep is done.
+    has_more = bool(resp.get("has_more"))
+    metadata = cast(dict[str, Any], resp.get("response_metadata") or {})
+    next_cursor = (str(metadata.get("next_cursor") or "") or None) if has_more else None
+    if next_cursor is not None:
+        hint = f"more messages available — pass cursor={next_cursor} to read older messages"
+    elif has_more:
+        hint = "more messages exist, but Slack returned no continuation cursor"
+    else:
+        hint = None
     return SlackChannelResult(
         messages=_to_message_rows(raw, usernames), next_cursor=next_cursor, hint=hint
     )
@@ -322,7 +325,7 @@ async def _fetch_thread_replies(
     client: AsyncWebClient, *, channel_id: str, thread_ts: str, limit: int
 ) -> SlackThreadResult:
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-        channel=channel_id, ts=thread_ts, limit=min(limit, _HISTORY_LIMIT_CAP)
+        channel=channel_id, ts=thread_ts, limit=max(1, min(limit, _HISTORY_LIMIT_CAP))
     )
     raw = cast(list[dict[str, Any]], resp["messages"])  # already oldest-first
     has_more = bool(resp.get("has_more"))
@@ -336,7 +339,9 @@ async def _fetch_thread_replies(
         if parent_ts and str(parent_ts) != thread_ts:
             result_thread_ts = str(parent_ts)
             resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                channel=channel_id, ts=result_thread_ts, limit=min(limit, _HISTORY_LIMIT_CAP)
+                channel=channel_id,
+                ts=result_thread_ts,
+                limit=max(1, min(limit, _HISTORY_LIMIT_CAP)),
             )
             raw = cast(list[dict[str, Any]], resp["messages"])
             has_more = bool(resp.get("has_more"))
