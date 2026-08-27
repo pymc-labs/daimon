@@ -20,7 +20,13 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
 from daimon.core import usage_recording
-from daimon.core.turn.posture import Billed, BillingExempt, UsageRecorder
+from daimon.core.turn.posture import (
+    AutoApprove,
+    Billed,
+    BillingExempt,
+    RequireApproval,
+    UsageRecorder,
+)
 
 
 def _make_event(*, event_id: str = "sevt_1") -> BetaManagedAgentsSpanModelRequestEndEvent:
@@ -82,3 +88,46 @@ def test_billing_exempt_is_frozen() -> None:
     exempt = BillingExempt(reason="cli-operator-run")
     with pytest.raises(dataclasses.FrozenInstanceError):
         exempt.reason = "cli-operator-run"  # type: ignore[misc]
+
+
+def test_require_approval_is_frozen() -> None:
+    posture = RequireApproval()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        posture.never = "never"  # type: ignore[attr-defined]
+
+
+def test_auto_approve_is_frozen() -> None:
+    posture = AutoApprove()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        posture.never = "never"  # type: ignore[attr-defined]
+
+
+def test_require_approval_instances_are_equal() -> None:
+    assert RequireApproval() == RequireApproval(), (
+        "same-type frozen instances should compare equal so `match` and default "
+        "arguments behave predictably"
+    )
+
+
+def test_auto_approve_instances_are_equal() -> None:
+    assert AutoApprove() == AutoApprove(), (
+        "same-type frozen instances should compare equal so `match` and default "
+        "arguments behave predictably"
+    )
+
+
+def test_require_approval_and_auto_approve_are_not_equal() -> None:
+    assert RequireApproval() != AutoApprove()  # type: ignore[comparison-overlap]
+
+
+def _describe(posture: RequireApproval | AutoApprove) -> str:
+    match posture:
+        case RequireApproval():
+            return "require-approval"
+        case AutoApprove():
+            return "auto-approve"
+
+
+def test_tool_confirmation_union_narrows_correctly_under_match() -> None:
+    assert _describe(RequireApproval()) == "require-approval"
+    assert _describe(AutoApprove()) == "auto-approve"

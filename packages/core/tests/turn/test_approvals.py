@@ -1,0 +1,76 @@
+"""Tests for daimon.core.turn.approvals — the pure fresh-id selection and
+`user.tool_confirmation` payload construction Task 2's driver branch uses.
+
+Covers empty / partial / fully-seen `confirmed` sets, order preservation,
+non-mutation of the caller's set, and payload construction.
+"""
+
+from __future__ import annotations
+
+from daimon.core.turn.approvals import build_confirmation_events, pending_confirmation_ids
+
+from .conftest import make_requires_action, make_status_idle
+
+
+def test_pending_confirmation_ids_returns_all_ids_for_empty_confirmed_set() -> None:
+    event = make_status_idle(
+        event_id="sevt_1", stop_reason=make_requires_action(event_ids=["tu_1", "tu_2"])
+    )
+
+    assert pending_confirmation_ids(event, confirmed=set()) == ["tu_1", "tu_2"]
+
+
+def test_pending_confirmation_ids_returns_only_unseen_ids_for_partial_overlap() -> None:
+    event = make_status_idle(
+        event_id="sevt_1",
+        stop_reason=make_requires_action(event_ids=["tu_1", "tu_2", "tu_3"]),
+    )
+
+    assert pending_confirmation_ids(event, confirmed={"tu_2"}) == ["tu_1", "tu_3"]
+
+
+def test_pending_confirmation_ids_returns_empty_list_when_all_ids_already_seen() -> None:
+    event = make_status_idle(
+        event_id="sevt_1", stop_reason=make_requires_action(event_ids=["tu_1", "tu_2"])
+    )
+
+    assert pending_confirmation_ids(event, confirmed={"tu_1", "tu_2"}) == []
+
+
+def test_pending_confirmation_ids_preserves_event_ids_order() -> None:
+    event = make_status_idle(
+        event_id="sevt_1",
+        stop_reason=make_requires_action(event_ids=["tu_3", "tu_1", "tu_2"]),
+    )
+
+    assert pending_confirmation_ids(event, confirmed=set()) == ["tu_3", "tu_1", "tu_2"]
+
+
+def test_pending_confirmation_ids_does_not_mutate_confirmed() -> None:
+    event = make_status_idle(
+        event_id="sevt_1", stop_reason=make_requires_action(event_ids=["tu_1", "tu_2"])
+    )
+    confirmed: set[str] = {"tu_2"}
+
+    pending_confirmation_ids(event, confirmed=confirmed)
+
+    assert confirmed == {"tu_2"}, "the caller owns adding newly-claimed ids, not this function"
+
+
+def test_pending_confirmation_ids_returns_empty_list_for_non_requires_action_stop_reason() -> None:
+    event = make_status_idle(event_id="sevt_1")  # defaults to end_turn
+
+    assert pending_confirmation_ids(event, confirmed=set()) == []
+
+
+def test_build_confirmation_events_produces_one_allow_payload_per_id_in_order() -> None:
+    events = build_confirmation_events(["tu_1", "tu_2"])
+
+    assert events == [
+        {"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "tu_1"},
+        {"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "tu_2"},
+    ]
+
+
+def test_build_confirmation_events_returns_empty_list_for_no_ids() -> None:
+    assert build_confirmation_events([]) == []
