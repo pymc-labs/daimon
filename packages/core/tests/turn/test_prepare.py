@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import httpx
+import pytest
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
@@ -24,11 +25,13 @@ from cryptography.fernet import Fernet
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.errors import TurnError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import usage_events
+from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import PreparedTurn, bind_session
@@ -561,3 +564,196 @@ async def test_bind_session_reuse_skips_mcp_sync_when_agent_has_no_stored_creden
     )
 
     assert prepared.reused is True, "reuse path unchanged for agents with no external MCP"
+
+
+async def test_bind_session_fresh_bind_raises_ceiling_error_when_deadline_already_past(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router_with_session_create(session_bodies=session_bodies)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    past_deadline = datetime.now(UTC) - timedelta(seconds=5)
+
+    with pytest.raises(TurnError) as exc_info:
+        await bind_session(
+            deps,
+            admission,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            thread_id="thread-ceiling-fresh",
+            session_account_id=account.id,
+            reuse_existing=True,
+            deadline=past_deadline,
+        )
+
+    assert exc_info.value.kind == "ceiling"
+
+
+async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router_with_session_create(session_bodies=session_bodies)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    past_deadline = datetime.now(UTC) - timedelta(seconds=5)
+
+    with pytest.raises(TurnError) as exc_info:
+        await bind_session(
+            deps,
+            admission,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            thread_id="thread-ceiling-no-orphan",
+            session_account_id=account.id,
+            reuse_existing=True,
+            deadline=past_deadline,
+        )
+
+    assert exc_info.value.kind == "ceiling"
+
+    async with db_session_factory() as s:
+        live = await get_live_thread_session(
+            s,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-ceiling-no-orphan",
+            account_id=account.id,
+        )
+    assert live is None, "a ceiling breach during bind must not leave a partial mapping row"
+
+
+async def test_bind_session_reuse_path_raises_ceiling_error_when_deadline_already_past(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-ceiling-reuse",
+        ma_session_id="sess_existing",
+        watermark_message_id="msg-1",
+    )
+    await db_session.commit()
+
+    router = MARouter()
+
+    def _explode(_request: httpx.Request, _match: object) -> httpx.Response:
+        raise AssertionError("create_session must not be called on a reuse hit")
+
+    router.add("POST", r"/v1/sessions", _explode)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    past_deadline = datetime.now(UTC) - timedelta(seconds=5)
+
+    with pytest.raises(TurnError) as exc_info:
+        await bind_session(
+            deps,
+            admission,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            thread_id="thread-ceiling-reuse",
+            session_account_id=account.id,
+            reuse_existing=True,
+            deadline=past_deadline,
+        )
+
+    assert exc_info.value.kind == "ceiling"
+
+
+async def test_bind_session_default_deadline_none_still_succeeds_on_the_happy_path(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`deadline=None` is fail-safe, not off -- it computes a full
+    TURN_CEILING_S-away deadline, so a fast route must still complete
+    normally rather than being mistaken for "no ceiling"."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router_with_session_create(session_bodies=session_bodies)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    prepared = await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="thread-ceiling-default-none",
+        session_account_id=account.id,
+        reuse_existing=True,
+    )
+
+    assert len(session_bodies) == 1, "deadline=None must not skip create_session"
+    assert prepared.reused is False
+
+
+async def test_bind_session_with_generous_explicit_deadline_matches_no_deadline_outcome(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression pin: passing a generous, far-future deadline changes nothing
+    about the returned PreparedTurn compared to the pre-ceiling behavior."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router_with_session_create(session_bodies=session_bodies)
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    future_deadline = datetime.now(UTC) + timedelta(hours=1)
+
+    prepared = await bind_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="thread-ceiling-generous",
+        session_account_id=account.id,
+        reuse_existing=True,
+        deadline=future_deadline,
+    )
+
+    assert len(session_bodies) == 1
+    assert prepared.reused is False
+    assert prepared.watermark is None
+    assert prepared.mapping_id is not None
+    assert prepared.ma_session_id == "sess_1"
