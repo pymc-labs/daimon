@@ -11,6 +11,7 @@ considered and rejected).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -98,6 +99,21 @@ class _DeferredFailureLifecycle:
         state, err = self._held
         self._held = None
         await self.inner.on_terminal_failure(state, err)
+
+
+async def _mirror_cancel(cancel: asyncio.Event, fresh_cancel: asyncio.Event) -> None:
+    """Forward a LATE cancel on the ORIGINAL event into `fresh_cancel` for the
+    duration of the recovery turn (D-07(b)).
+
+    The adapters' recovery lifecycles rebind their cancel affordance to
+    `fresh_cancel` (Discord's new `CancelView`, Slack's re-registration), but
+    only once their next flush lands -- a click on the ORIGINAL affordance in
+    the window between `fresh_cancel` being created and that rebind landing
+    would otherwise set an event nothing is watching. This task closes that
+    window (and also covers any future adapter that forgets to rebind).
+    """
+    await cancel.wait()
+    fresh_cancel.set()
 
 
 def _is_dead_session(state: TurnState) -> bool:
@@ -229,6 +245,20 @@ async def run_prepared_turn(
                 recovered=False,
             )
 
+        # D-07(a): a cancel already signalled by the time we'd start recovery
+        # means the user asked to stop before we ever attempted a second full
+        # agentic turn -- running one anyway would bill work nobody wanted.
+        # Abort recovery and surface the withheld first-attempt failure as
+        # the final outcome, same shape as the non-recoverable branch above.
+        if cancel.is_set():
+            await first_attempt.flush_held_failure()
+            return RunOutcome(
+                state=state,
+                ma_session_id=ma_session_id,
+                mapping_id=mapping_id,
+                recovered=False,
+            )
+
         # If recovery itself blows up, the withheld failure is the only thing
         # the user would ever see -- without this the embed sits on "thinking"
         # forever, which is the exact failure mode this module exists to
@@ -271,16 +301,28 @@ async def run_prepared_turn(
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
 
-            recovered_state = await run_turn(
-                anthropic=deps.anthropic,
-                session_id=new_session_id,
-                user_message=reseeded_message,
-                lifecycle=new_lifecycle,
-                cancel=fresh_cancel,
-                render_interval_s=render_interval_s,
-                billing=Billed(record=new_record),
-                image_blocks=image_blocks,
+            # D-07(b): mirror a LATE cancel on the ORIGINAL event into
+            # `fresh_cancel` for the duration of the recovery turn -- see
+            # `_mirror_cancel`'s docstring for the window this closes.
+            mirror_task = asyncio.create_task(
+                _mirror_cancel(cancel, fresh_cancel), name="turn.cancel_mirror"
             )
+            try:
+                recovered_state = await run_turn(
+                    anthropic=deps.anthropic,
+                    session_id=new_session_id,
+                    user_message=reseeded_message,
+                    lifecycle=new_lifecycle,
+                    cancel=fresh_cancel,
+                    render_interval_s=render_interval_s,
+                    billing=Billed(record=new_record),
+                    image_blocks=image_blocks,
+                )
+            finally:
+                if not mirror_task.done():
+                    mirror_task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await mirror_task
         except Exception:
             await first_attempt.flush_held_failure()
             raise

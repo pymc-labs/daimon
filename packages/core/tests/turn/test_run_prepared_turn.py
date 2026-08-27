@@ -17,6 +17,7 @@ from pathlib import Path
 
 import anthropic
 import httpx
+import pytest
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from daimon.core.config import McpSettings
@@ -28,6 +29,7 @@ from daimon.core.stores import usage_events
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import PreparedTurn, bind_recorder
 from daimon.core.turn.run import _is_dead_session, run_prepared_turn
 from daimon.core.turn.state import TurnState
@@ -1163,3 +1165,281 @@ async def test_run_prepared_turn_default_deadline_none_still_succeeds_on_the_hap
     assert outcome.state.error is None
     assert outcome.ma_session_id == "sess_1"
     assert outcome.mapping_id == row.id
+
+
+# --- D-07: cancel coverage over the dead-session recovery cycle (19-05) ----
+#
+# Both tests below monkeypatch `daimon.core.turn.run.run_turn` itself rather
+# than racing a real driver call against a real cancel signal. The driver's
+# OWN cancel race (stream-open, send-initial, consume loop) is already
+# pinned by test_driver_cancel.py -- what's under test here is
+# run_prepared_turn's OWN orchestration: does it abort recovery when cancel
+# is already set, and does the mirror task actually forward a late cancel
+# into the recovery turn's own event. Faking `run_turn` isolates that from
+# the driver's internal race timing, which would otherwise make the exact
+# moment cancel becomes visible to the FIRST attempt's own stream-open race
+# nondeterministic (see 19-05-PLAN.md's Task 1 for that race's mechanics).
+
+
+def _leaked_turn_task_names() -> list[str]:
+    return [
+        t.get_name()
+        for t in asyncio.all_tasks()
+        if t.get_name().startswith("turn.") and not t.done()
+    ]
+
+
+async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_held_failure(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-07(a): a cancel already signalled by the time the dead-session
+    signature is observed must abort recovery -- no create_fresh_session
+    call, no second run_turn -- and still deliver the withheld first-attempt
+    failure to the caller's lifecycle exactly once."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-cancel-before-recovery",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids=set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    cancel = asyncio.Event()
+    dead_session_cause = _api_status_error(404, "not found")
+    call_count = 0
+
+    async def _fake_run_turn(
+        *,
+        anthropic: object,
+        session_id: str,
+        user_message: str,
+        lifecycle: TurnLifecycle,
+        cancel: asyncio.Event,
+        render_interval_s: object,
+        billing: object,
+        image_blocks: object,
+    ) -> TurnState:
+        nonlocal call_count
+        call_count += 1
+        err = TurnError(kind="upstream", message="not found", cause=dead_session_cause)
+        state = TurnState(error=err)
+        await lifecycle.on_terminal_failure(state, err)
+        # Cancel arrives right as the first attempt observes the
+        # dead-session signature -- strictly before run_prepared_turn's own
+        # recovery-abort check runs.
+        cancel.set()
+        return state
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+
+    caller_lifecycle = RecordingLifecycle()
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-cancel-before-recovery",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=caller_lifecycle,
+        cancel=cancel,
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert call_count == 1, "recovery must never call run_turn a second time"
+    assert outcome.recovered is False, (
+        "an already-cancelled dead-session signature must not recover"
+    )
+    assert len(session_bodies) == 0, "no create_fresh_session call when cancel already fired"
+    assert outcome.ma_session_id == "sess_old", "must report the original (unrecovered) session id"
+    assert outcome.mapping_id == row.id, "must report the original (unrecovered) mapping id"
+    assert outcome.state.error is not None
+    assert outcome.state.error.kind == "upstream", (
+        "the withheld dead-session failure is returned as-is"
+    )
+    assert len(caller_lifecycle.terminal_failures) == 1, (
+        "the withheld first-attempt failure must still be delivered exactly once"
+    )
+
+
+async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interrupts_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-07(b): a cancel set on the ORIGINAL event while the recovery turn is
+    in flight must still interrupt the recovery turn -- proving the
+    `turn.cancel_mirror` task forwards it into `fresh_cancel`, the event the
+    RECOVERY run_turn call actually owns (not the original `cancel`)."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-cancel-during-recovery",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids=set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    dead_session_cause = _api_status_error(404, "not found")
+    call_count = 0
+
+    async def _fake_run_turn(
+        *,
+        anthropic: object,
+        session_id: str,
+        user_message: str,
+        lifecycle: TurnLifecycle,
+        cancel: asyncio.Event,
+        render_interval_s: object,
+        billing: object,
+        image_blocks: object,
+    ) -> TurnState:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            err = TurnError(kind="upstream", message="not found", cause=dead_session_cause)
+            state = TurnState(error=err)
+            await lifecycle.on_terminal_failure(state, err)
+            return state
+        # Recovery attempt: this `cancel` kwarg IS `fresh_cancel` (the event
+        # run_prepared_turn built for the recovery turn) -- block until it
+        # fires, proving the mirror is what unblocks it, since the ORIGINAL
+        # event is never passed to this call directly.
+        await cancel.wait()
+        return TurnState(error=TurnError(kind="interrupted", message="interrupted during recovery"))
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+
+    original_cancel = asyncio.Event()
+
+    async def _cancel_soon() -> None:
+        await asyncio.sleep(0.02)
+        original_cancel.set()
+
+    caller_lifecycle = RecordingLifecycle()
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(_cancel_soon())
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-cancel-during-recovery",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=caller_lifecycle,
+            cancel=original_cancel,
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+        )
+
+    assert call_count == 2, "the recovery must have actually run a second attempt"
+    assert outcome.recovered is True
+    assert outcome.state.error is not None
+    assert outcome.state.error.kind == "interrupted", "the mirror must have forwarded the cancel"
+    assert _leaked_turn_task_names() == [], (
+        "no turn.cancel_mirror task may linger after the call returns"
+    )
+
+
+async def test_recovery_happy_path_unaffected_by_the_cancel_mirror_and_leaks_no_task(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression: an ordinary recovery (cancel never set) still recreates
+    the session, rebinds the recorder, and returns recovered=True -- adding
+    the mirror task must not change happy-path behavior or leak a task."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-recovery-happy-path-mirror",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-recovery-happy-path-mirror",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert outcome.recovered is True
+    assert outcome.ma_session_id != "sess_old"
+    assert outcome.state.error is None
+    assert len(session_bodies) == 1
+    assert _leaked_turn_task_names() == [], (
+        "no turn.cancel_mirror task may linger after a clean recovery"
+    )
