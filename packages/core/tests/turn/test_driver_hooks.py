@@ -11,9 +11,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types import RawMessageStreamEvent
 from daimon.core.turn import run_turn
 from daimon.core.turn.posture import BillingExempt
-
-from .conftest import make_agent_message, make_end_turn, make_status_idle
-from .fakes import (
+from daimon.testing.turn_fakes import (
     BlockForever,
     FakeAnthropic,
     RaiseConnection,
@@ -22,6 +20,8 @@ from .fakes import (
     RecordingLifecycle,
     YieldEvent,
 )
+
+from .conftest import make_agent_message, make_end_turn, make_status_idle
 
 _FROZEN_NOW = datetime(2026, 4, 21, 12, 0, 0, tzinfo=UTC)
 _EXEMPT = BillingExempt(reason="cli-operator-run")

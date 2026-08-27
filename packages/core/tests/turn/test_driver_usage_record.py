@@ -19,9 +19,9 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 )
 from daimon.core.turn import run_turn
 from daimon.core.turn.posture import Billed, BillingExempt
+from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle
-from .fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
 
 _T = datetime(2026, 1, 1, tzinfo=UTC)
 

@@ -46,10 +46,10 @@ from daimon.testing.ma import (
     send_events_response,
     sse_response,
 )
+from daimon.testing.turn_fakes import RecordingLifecycle
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import make_status_idle
-from .fakes import RecordingLifecycle
 
 from daimon.testing.factories import (  # isort: skip
     make_ledger_entry,

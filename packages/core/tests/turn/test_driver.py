@@ -10,6 +10,12 @@ from daimon.core.errors import TurnError
 from daimon.core.turn import run_turn
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TextBlock
+from daimon.testing.turn_fakes import (
+    BlockForever,
+    FakeAnthropic,
+    RecordingLifecycle,
+    YieldEvent,
+)
 
 from .conftest import (
     make_agent_message,
@@ -17,12 +23,6 @@ from .conftest import (
     make_requires_action,
     make_status_idle,
     make_status_terminated,
-)
-from .fakes import (
-    BlockForever,
-    FakeAnthropic,
-    RecordingLifecycle,
-    YieldEvent,
 )
 
 _FROZEN_NOW = datetime(2026, 4, 21, 12, 0, 0, tzinfo=UTC)
@@ -251,7 +251,7 @@ async def test_reconnect_refolds_from_empty_and_continues_the_turn() -> None:
     # First stream yields `pre`, then raises APIConnectionError.
     # replay_events returns [pre, mid] (server has it all).
     # Second stream yields `mid` (redelivered, dedup) and `done`.
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa.beta.sessions.events.stream_scripts = [
         [YieldEvent(pre), RaiseConnection()],
@@ -283,7 +283,7 @@ async def test_reconnect_does_not_re_emit_pre_reconnect_content() -> None:
     pre = make_agent_message(event_id="sevt_1", text="before ")
     mid = make_agent_message(event_id="sevt_2", text="after")
     done = make_status_idle(event_id="sevt_3", stop_reason=make_end_turn())
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa.beta.sessions.events.stream_scripts = [
         [YieldEvent(pre), RaiseConnection()],
@@ -318,7 +318,7 @@ async def test_double_connection_error_surfaces_connection_lost() -> None:
     """Second APIConnectionError (tenacity retry exhausted) →
     TurnError(kind="connection_lost")."""
     fa = FakeAnthropic()
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa.beta.sessions.events.stream_scripts = [
         [RaiseConnection()],
@@ -348,7 +348,7 @@ async def test_non_retryable_status_error_surfaces_upstream() -> None:
     """APIStatusError (non-429) does not retry; converts to
     TurnError(kind="upstream")."""
     fa = FakeAnthropic()
-    from .fakes import RaiseStatus
+    from daimon.testing.turn_fakes import RaiseStatus
 
     fa.beta.sessions.events.stream_scripts = [[RaiseStatus(status_code=500)]]
     lc = RecordingLifecycle()
@@ -370,7 +370,7 @@ async def test_non_retryable_status_error_surfaces_upstream() -> None:
 
 async def test_upstream_error_clears_stop_reason() -> None:
     """_finalize_upstream must clear stop_reason so callers don't loop on stale state."""
-    from .fakes import RaiseStatus
+    from daimon.testing.turn_fakes import RaiseStatus
 
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [[RaiseStatus(status_code=400)]]
@@ -397,7 +397,7 @@ async def test_upstream_error_clears_stop_reason() -> None:
 async def test_rate_limit_error_populates_rate_limit_until_from_retry_after() -> None:
     from datetime import timedelta
 
-    from .fakes import RaiseRateLimit
+    from daimon.testing.turn_fakes import RaiseRateLimit
 
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [[RaiseRateLimit(retry_after_seconds=30.0)]]
@@ -448,7 +448,7 @@ async def test_inband_rate_limited_session_error_wraps_but_rate_limit_until_stay
 
 
 async def test_interrupt_during_replay_raises_interrupted_without_posting_user_interrupt() -> None:
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa = FakeAnthropic()
     # Stream 1 raises APIConnectionError; tenacity will retry.
@@ -495,7 +495,7 @@ async def test_interrupt_during_reattach_raises_interrupted_without_user_interru
     """Cancel observed between replay completion and the post-reattach
     cancel-check raises `_InterruptedDuringRecovery(reattach)` and routes
     to on_terminal_failure without posting `user.interrupt`."""
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa = FakeAnthropic()
     # Attempt 1 raises APIConnectionError to enter retry. Attempt 2 opens a
@@ -566,7 +566,7 @@ async def test_interrupt_before_stream_open_raises_interrupted_with_pre_stream_p
 
 
 async def test_interrupt_mid_consume_posts_user_interrupt_and_ends_clean_on_ack() -> None:
-    from .fakes import BlockForever
+    from daimon.testing.turn_fakes import BlockForever
 
     fa = FakeAnthropic()
     pre = make_agent_message(event_id="sevt_1", text="partial")
@@ -606,7 +606,7 @@ async def test_interrupt_mid_consume_posts_user_interrupt_and_ends_clean_on_ack(
 
 
 async def test_interrupt_mid_consume_timeout_surfaces_interrupt_timeout() -> None:
-    from .fakes import BlockForever
+    from daimon.testing.turn_fakes import BlockForever
 
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [
@@ -670,8 +670,7 @@ async def test_structlog_emits_turn_started_completed_on_happy_path() -> None:
 
 async def test_structlog_emits_reconnect_events_on_retry() -> None:
     import structlog.testing
-
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa = FakeAnthropic()
     pre = make_agent_message(event_id="sevt_1", text="a")
@@ -706,8 +705,7 @@ async def test_structlog_turn_rate_limited_carries_retry_after_s_and_until() -> 
     """`turn.rate_limited` kwargs include `session_id`, `retry_after_s`,
     `until`. `retry_after_s` is the raw header value to avoid clock round-trip."""
     import structlog.testing
-
-    from .fakes import RaiseRateLimit
+    from daimon.testing.turn_fakes import RaiseRateLimit
 
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [[RaiseRateLimit(retry_after_seconds=30.0)]]
@@ -741,7 +739,7 @@ async def test_reconnect_on_reused_session_two_turn_log_renders_only_current_tur
     AFTER the last session.status_idle boundary so the render state only shows
     turn-2 content.
     """
-    from .fakes import RaiseConnection
+    from daimon.testing.turn_fakes import RaiseConnection
 
     fa = FakeAnthropic()
 

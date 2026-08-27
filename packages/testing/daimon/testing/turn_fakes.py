@@ -1,11 +1,18 @@
-"""In-test fakes for the turn driver. Kept test-only -- promoting any
-of this to a package-level helper would re-introduce the translation
-shim the SDK-passthrough refactor removed.
+"""Scripted stand-in for `client.beta.sessions.events` / `client.beta.sessions`,
+the surface the turn driver consumes to drive `run_turn` / `resume_turn`: an
+ordered script of `StreamAction` entries per `stream()` call and an ordered
+list of events for `list()` (replay).
 
-The fakes model just enough of AsyncAnthropic.beta.sessions.events to
-drive `run_turn` / `resume_turn`: an ordered script of `StreamAction`
-entries per `stream()` call and an ordered list of events for
-`list()` (replay).
+Lives in `daimon.testing` (not a core test tree) because core driver tests,
+scheduler convergence tests, and adapter tests all script the same
+vocabulary. Deliberately NOT re-exported from `daimon.testing.__init__` —
+import from `daimon.testing.turn_fakes` directly.
+
+The fakes sit at the SDK-resource layer (`client.beta.sessions.events`)
+rather than the httpx layer: that is the driver's actual dependency surface,
+and the SDK does no exception translation during body iteration, so a raw
+httpx error raised by a scripted iterator is byte-for-byte what production
+raises.
 """
 
 from __future__ import annotations
