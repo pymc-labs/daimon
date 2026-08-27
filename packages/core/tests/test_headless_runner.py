@@ -69,6 +69,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_unknown_error import (
 )
 from cryptography.fernet import Fernet
 from daimon.core.config import McpSettings
+from daimon.core.errors import TurnError
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from daimon.core.headless_runner import LAST_RESULT_TAIL_MAX, run_turn
 from daimon.core.stores import agent_github_binding as github_binding_store
@@ -82,6 +83,8 @@ from daimon.testing.ma import (
     EMPTY_SESSION_USAGE,
     MARouter,
     build_fake_anthropic,
+    list_response,
+    session_response,
     sse_response,
 )
 from pydantic import HttpUrl, SecretStr
@@ -170,12 +173,23 @@ def _build_client(
     model_id: str = _MODEL_ID,
     send_capture: list[dict[str, Any]] | None = None,
     session_create_capture: list[dict[str, Any]] | None = None,
+    terminal_less_script: bool = False,
 ) -> AsyncAnthropic:
     """Build transport-level client with session create + stream + send handlers.
 
     If `send_capture` is provided (a list), all POST /v1/sessions/{id}/events
     request bodies are appended to it for assertion. If `session_create_capture`
     is provided, the POST /v1/sessions request body is appended to it.
+
+    `terminal_less_script=True` additionally registers `GET /v1/sessions/{id}`
+    (status, "idle" -- no reopen) and `GET /v1/sessions/{id}/events` (replay,
+    the same `events`) -- required whenever `events` does not end in a real
+    terminal event. After plan 19-02 the driver checks MA's session status on
+    ANY clean close or read timeout (including one caused by a `session.error`
+    event, which the reducer folds into `TurnState.error` but which is NOT
+    itself stream-terminal to the driver's consume loop -- only
+    `session.status_idle`/`session.status_terminated` are), and finalizes via
+    a replay-and-refold rather than reopening the stream.
     """
     router = MARouter()
     session_json = _fake_session_json(session_id=session_id, model_id=model_id)
@@ -198,6 +212,17 @@ def _build_client(
     router.add("POST", r"/v1/sessions", handle_create)
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
+    if terminal_less_script:
+        router.add(
+            "GET",
+            r"/v1/sessions/[^/]+$",
+            lambda request, match: session_response(session_id=session_id, status="idle"),
+        )
+        router.add(
+            "GET",
+            r"/v1/sessions/[^/]+/events",
+            lambda request, match: list_response(event_dicts),
+        )
     _register_agent_environment_routes(router, model_id=model_id)
     return build_fake_anthropic(router.dispatch)
 
@@ -259,9 +284,14 @@ async def test_tail_truncated_at_1000() -> None:
     )
 
 
-async def test_auto_allow_requires_action_idempotent() -> None:
-    """Two requires_action idle events naming the same blocked id should
-    only produce one tool_confirmation send (no double-acks on re-emit).
+async def test_auto_allow_dedups_across_reemitted_requires_action_then_terminates() -> None:
+    """Two requires_action idle events naming the same blocked id: the first
+    is auto-confirmed exactly once (no double-ack); MA re-asking for the SAME
+    id it was already told to allow is not silently spun forever -- the
+    driver terminates the turn as a TurnError instead (plan 19-08's
+    exhausted-ids termination). This is a deliberate, better behavior change
+    from the old headless drain's continue-forever dedup loop (CONTEXT.md
+    decision 4) -- see 19-08-SUMMARY.md.
     """
     send_capture: list[dict[str, Any]] = []
 
@@ -299,11 +329,17 @@ async def test_auto_allow_requires_action_idempotent() -> None:
     ]
     client = _build_client(events, send_capture=send_capture)
 
-    tail = await run_turn(
-        anthropic=client,
-        agent_id="agent_x",
-        environment_id="env_x",
-        trigger_message="hi",
+    with pytest.raises(TurnError) as exc_info:
+        await run_turn(
+            anthropic=client,
+            agent_id="agent_x",
+            environment_id="env_x",
+            trigger_message="hi",
+        )
+
+    assert exc_info.value.kind == "requires_action", (
+        "re-requesting an already-confirmed id must terminate as requires_action, "
+        "not spin until the ceiling"
     )
 
     # send_capture has all POST /v1/sessions/{id}/events bodies:
@@ -322,10 +358,17 @@ async def test_auto_allow_requires_action_idempotent() -> None:
     assert confirmation_events[0]["tool_use_id"] == "tu_x"
     assert confirmation_events[0]["result"] == "allow"
     assert confirmation_events[0]["type"] == "user.tool_confirmation"
-    assert tail == "done", "tail should reflect the agent.message after unblocking"
 
 
-async def test_session_error_raises() -> None:
+async def test_session_error_raises_turn_error() -> None:
+    """A `session.error` event is not itself stream-terminal to the driver's
+    consume loop (only `session.status_idle`/`session.status_terminated`
+    are), so the stream ending right after it is a clean close: the driver
+    checks MA's session status, finalizes via replay-and-refold (no reopen,
+    the status is `idle`), and the replayed `session.error` folds into
+    `TurnState.error` -- a `TurnError(kind="upstream")`, raised as-is,
+    replacing the old bespoke `RuntimeError("session.error: ...")`.
+    """
     events: list[BetaManagedAgentsSessionEvent] = [
         BetaManagedAgentsSessionErrorEvent(
             id="evt_err_1",
@@ -338,15 +381,18 @@ async def test_session_error_raises() -> None:
             ),
         ),
     ]
-    client = _build_client(events)
+    client = _build_client(events, terminal_less_script=True)
 
-    with pytest.raises(RuntimeError, match=r"^session\.error:"):
+    with pytest.raises(TurnError) as exc_info:
         await run_turn(
             anthropic=client,
             agent_id="agent_x",
             environment_id="env_x",
             trigger_message="hi",
         )
+
+    assert exc_info.value.kind == "upstream"
+    assert "boom" in exc_info.value.message
 
 
 async def test_run_turn_calls_usage_record_for_span_model_request_end() -> None:
@@ -410,6 +456,119 @@ async def test_run_turn_calls_usage_record_for_span_model_request_end() -> None:
     assert call.kwargs["event"].id == "evt_span_1"
 
 
+async def test_run_turn_without_usage_record_factory_completes_unbilled() -> None:
+    """No usage_record_factory -> BillingExempt(reason="headless-unrecorded"):
+    the turn still completes and returns its tail, and no span event is ever
+    metered (there is no recorder to invoke)."""
+    events: list[BetaManagedAgentsSessionEvent] = [
+        BetaManagedAgentsSpanModelRequestEndEvent(
+            id="evt_span_1",
+            type="span.model_request_end",
+            processed_at=_NOW,
+            model_request_start_id="evt_span_start_1",
+            model_usage=BetaManagedAgentsSpanModelUsage(
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                input_tokens=10,
+                output_tokens=5,
+            ),
+        ),
+        BetaManagedAgentsAgentMessageEvent(
+            id="evt_msg_1",
+            type="agent.message",
+            processed_at=_NOW,
+            content=[BetaManagedAgentsTextBlock(type="text", text="ok")],
+        ),
+        BetaManagedAgentsSessionStatusIdleEvent(
+            id="evt_idle_1",
+            type="session.status_idle",
+            processed_at=_NOW,
+            stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
+        ),
+    ]
+    client = _build_client(events)
+
+    tail = await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="hi",
+        # usage_record_factory intentionally omitted
+    )
+
+    assert tail == "ok", "an unbilled turn still drains normally and returns its tail"
+
+
+async def test_run_turn_reconnects_through_a_clean_close_and_returns_post_reconnect_tail() -> None:
+    """The Class A fix reaching routines: a clean SSE close with the session
+    still `running` triggers a status-checked reconnect (not a quiet,
+    truncated finalize as a false success), and the returned tail reflects
+    the content delivered only after the reconnect."""
+    stream_calls = 0
+
+    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
+        nonlocal stream_calls
+        stream_calls += 1
+        if stream_calls == 1:
+            # Clean close: the connection ends with no events at all, no
+            # terminal event -- the pre-19-09 bespoke drain would have
+            # treated this stream end as a (falsely) completed turn.
+            return sse_response([])
+        return sse_response(
+            [
+                BetaManagedAgentsAgentMessageEvent(
+                    id="evt_msg_post_reconnect",
+                    type="agent.message",
+                    processed_at=_NOW,
+                    content=[BetaManagedAgentsTextBlock(type="text", text="post-reconnect")],
+                ).model_dump(mode="json"),
+                BetaManagedAgentsSessionStatusIdleEvent(
+                    id="evt_idle_post_reconnect",
+                    type="session.status_idle",
+                    processed_at=_NOW,
+                    stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
+                ).model_dump(mode="json"),
+            ]
+        )
+
+    def handle_status(request: httpx.Request, match: Any) -> httpx.Response:
+        return session_response(session_id=_SESSION_ID, status="running")
+
+    def handle_events_list(request: httpx.Request, match: Any) -> httpx.Response:
+        # Nothing was folded from the first (empty) stream, so replay is empty.
+        return list_response([])
+
+    router = MARouter()
+    router.add(
+        "POST",
+        r"/v1/sessions",
+        lambda request, match: httpx.Response(200, json=_fake_session_json()),
+    )
+    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
+    router.add("GET", r"/v1/sessions/[^/]+/events", handle_events_list)
+    router.add(
+        "POST",
+        r"/v1/sessions/[^/]+/events",
+        lambda request, match: httpx.Response(200, json={"data": None}),
+    )
+    router.add("GET", r"/v1/sessions/[^/]+$", handle_status)
+    _register_agent_environment_routes(router)
+    client = build_fake_anthropic(router.dispatch)
+
+    tail = await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="hi",
+    )
+
+    assert stream_calls == 2, "the stream must reopen exactly once after the clean close"
+    assert tail == "post-reconnect", (
+        "the tail must reflect the event delivered after the reconnect, not a quietly "
+        "truncated pre-close state"
+    )
+
+
 async def test_run_turn_propagates_usage_record_factory_exception() -> None:
     """If usage_record raises (fail-closed), run_turn lets it propagate."""
     events: list[BetaManagedAgentsSessionEvent] = [
@@ -446,7 +605,12 @@ async def test_run_turn_propagates_usage_record_factory_exception() -> None:
 
 
 async def test_run_turn_propagates_httpx_error() -> None:
-    """A transport error from events.stream surfaces as anthropic.APIConnectionError."""
+    """A persistent transport error from events.stream exhausts the driver's
+    bounded 2-attempt connection-error retry budget and surfaces as a
+    TurnError(kind="connection_lost") with the original anthropic.APIConnectionError
+    preserved as `cause` -- replacing the old bespoke behavior of the raw SDK
+    error propagating directly (the driver folds it into TurnState.error
+    instead of raising it, per its own finalizer contract)."""
     router = MARouter()
 
     def handle_create(request: httpx.Request, match: Any) -> httpx.Response:
@@ -464,13 +628,18 @@ async def test_run_turn_propagates_httpx_error() -> None:
     _register_agent_environment_routes(router)
     client = build_fake_anthropic(router.dispatch)
 
-    with pytest.raises(anthropic.APIConnectionError):
+    with pytest.raises(TurnError) as exc_info:
         await run_turn(
             anthropic=client,
             agent_id="agent_x",
             environment_id="env_x",
             trigger_message="hi",
         )
+
+    assert exc_info.value.kind == "connection_lost"
+    assert isinstance(exc_info.value.cause, anthropic.APIConnectionError), (
+        "the original SDK connection error must be preserved as the TurnError's cause"
+    )
 
 
 async def test_run_turn_attaches_vault_when_mcp_settings(

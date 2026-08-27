@@ -212,6 +212,32 @@ def _build_fake_anthropic_factory(
             except StopIteration as err:
                 raise StopAsyncIteration from err
 
+        async def close(self) -> None:
+            # Driver closes the abandoned stream on a clean close (no
+            # terminal event) before checking MA's session status —
+            # `_EmptyEventsPage`/`_events_page` below serve that status
+            # check + the replay-and-refold read that follows.
+            return None
+
+    class _EmptyEventsPage:
+        """Async-iterable stand-in for `client.beta.sessions.events.list(...)`
+        when a script's events must be replayed (no terminal event was seen,
+        so the driver's eventless-cycle finalize path re-reads the full log).
+        """
+
+        def __init__(self, evts: list[BetaManagedAgentsSessionEvent]) -> None:
+            self._evts = evts
+
+        def __aiter__(self) -> _EmptyEventsPage:
+            self._iter = iter(self._evts)
+            return self
+
+        async def __anext__(self) -> BetaManagedAgentsSessionEvent:
+            try:
+                return next(self._iter)
+            except StopIteration as err:
+                raise StopAsyncIteration from err
+
     stream_factory = _FakeAsyncIter(events)
     create_mock = AsyncMock(
         return_value=SimpleNamespace(
@@ -221,14 +247,26 @@ def _build_fake_anthropic_factory(
     )
     send_mock = AsyncMock(return_value=None)
     close_mock = AsyncMock(return_value=None)
+    # Post-19-09: any script that does not end in a real terminal event
+    # (session.status_idle / session.status_terminated) makes the driver
+    # check MA's session status on the resulting clean close, then replay
+    # the full event log to fold in whatever the (single, non-terminal)
+    # script already delivered — status "idle" finalizes without reopening
+    # the stream.
+    retrieve_mock = AsyncMock(return_value=SimpleNamespace(status="idle"))
 
     class _FakeEvents:
         stream = AsyncMock(return_value=stream_factory)
         send = send_mock
 
+        @staticmethod
+        def list(**_kwargs: object) -> _EmptyEventsPage:
+            return _EmptyEventsPage(events)
+
     class _FakeSessions:
         events = _FakeEvents()
         create = create_mock
+        retrieve = retrieve_mock
 
         @staticmethod
         def list(**_kwargs: object) -> _EmptySessionPage:
@@ -376,7 +414,12 @@ async def test_failure_records_last_error(
     assert refreshed is not None
     assert refreshed.last_result_tail is None, "no tail on failure"
     assert refreshed.last_error is not None, "last_error must be recorded"
-    assert refreshed.last_error.startswith("RuntimeError: session.error:"), (
+    # Post-19-09: headless_runner delegates its drain to the core turn
+    # driver, which raises the failed turn's own TurnError (kind-prefixed,
+    # e.g. "upstream: ...") rather than the old bespoke
+    # RuntimeError("session.error: ..."). scheduler.py's catch-all records
+    # `f"{type(err).__name__}: {err}"`.
+    assert refreshed.last_error.startswith("TurnError: upstream:"), (
         f"unexpected error format: {refreshed.last_error!r}"
     )
 

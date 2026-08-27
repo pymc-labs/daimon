@@ -57,6 +57,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
 from anthropic.types.beta.sessions.beta_managed_agents_unknown_error import (
     BetaManagedAgentsUnknownError,
 )
+from daimon.core.errors import TurnError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.smoke import SMOKE_TOPUP_USD, SmokeCheckError, run_smoke_check
@@ -70,6 +71,7 @@ from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
+    session_response,
     sse_response,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -234,8 +236,18 @@ def _register_turn_routes(
     session_id: str = "ses_smoke",
     model_id: str = _MODEL_ID,
     hang: bool = False,
+    terminal_less_script: bool = False,
 ) -> None:
-    """POST /v1/sessions (create) + GET stream (SSE) + POST events (send)."""
+    """POST /v1/sessions (create) + GET stream (SSE) + POST events (send).
+
+    `terminal_less_script=True` additionally registers `GET /v1/sessions/{id}`
+    (status "idle", no reopen) and `GET /v1/sessions/{id}/events` (replay,
+    the same `event_dicts`) -- required whenever `event_dicts` does not end
+    in a real terminal event (`session.status_idle`/`session.status_terminated`).
+    A `session.error` event alone is not stream-terminal to the driver's
+    consume loop, so the stream ending right after one is a clean close that
+    triggers a status check.
+    """
     session_json = BetaManagedAgentsSession(
         outcome_evaluations=[],
         id=session_id,
@@ -286,6 +298,17 @@ def _register_turn_routes(
         handle_stream_hang if hang else handle_stream,  # pyright: ignore[reportArgumentType]
     )
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
+    if terminal_less_script:
+        router.add(
+            "GET",
+            r"/v1/sessions/[^/]+$",
+            lambda req, _m: session_response(session_id=session_id, status="idle"),
+        )
+        router.add(
+            "GET",
+            r"/v1/sessions/[^/]+/events",
+            lambda req, _m: list_response(event_dicts),
+        )
 
 
 def _happy_events(*, id_prefix: str = "evt") -> list[BetaManagedAgentsSessionEvent]:
@@ -492,6 +515,12 @@ async def test_run_smoke_check_propagates_session_error_when_stream_errors(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A `session.error` event is not itself stream-terminal, so the stream
+    ending right after it is a clean close: the driver checks MA's session
+    status, finalizes via replay-and-refold, and the replayed `session.error`
+    folds into `TurnState.error` -- a `TurnError(kind="upstream")`, raised
+    as-is by `headless_runner.run_turn` and left unhandled by
+    `run_smoke_check` (which only catches its own `TimeoutError`)."""
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
     router = MARouter()
@@ -508,10 +537,12 @@ async def test_run_smoke_check_propagates_session_error_when_stream_errors(
             ),
         ),
     ]
-    _register_turn_routes(router, [e.model_dump(mode="json") for e in events])
+    _register_turn_routes(
+        router, [e.model_dump(mode="json") for e in events], terminal_less_script=True
+    )
     client = build_fake_anthropic(router.dispatch)
 
-    with pytest.raises(RuntimeError, match=r"^session\.error:"):
+    with pytest.raises(TurnError) as exc_info:
         await run_smoke_check(
             session_factory=db_session_factory,
             anthropic=client,
@@ -523,6 +554,9 @@ async def test_run_smoke_check_propagates_session_error_when_stream_errors(
             markup=Decimal("1.0"),
             on_stage=lambda msg: None,
         )
+
+    assert exc_info.value.kind == "upstream"
+    assert "boom" in exc_info.value.message
 
 
 async def test_run_smoke_check_inserts_topup_when_balance_zero(
