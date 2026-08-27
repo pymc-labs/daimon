@@ -165,6 +165,15 @@ def build_turn_router(
         r"/v1/sessions/[^/]+/events",
         lambda req, _m: send_events_response(),
     )
+    # The SSE script above ends in `session.status_idle` -- a real terminal
+    # event. This matters: `run_turn` now asks MA for the session's status
+    # (`GET /v1/sessions/{id}`) whenever a stream ends or stalls WITHOUT one
+    # (a "clean close" or read-timeout eventless cycle -- see driver.py's
+    # `_EventlessCycle`). A parity scenario whose SSE script does NOT end in
+    # a terminal event needs a `GET /v1/sessions/[^/]+$` route registered too
+    # (`daimon.testing.ma.session_response` builds the response), or the
+    # driver's status check 404s against this router and the turn finalizes
+    # as an unexpected upstream failure instead of exercising the scenario.
     router.add(
         "GET",
         r"/v1/sessions/[^/]+/events/stream",
