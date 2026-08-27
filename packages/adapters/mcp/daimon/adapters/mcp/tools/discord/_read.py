@@ -54,10 +54,12 @@ _DISCORD_LINK_PATTERN = re.compile(
 def _before_object(before: str | None) -> discord.Object | None:
     if before is None:
         return None
-    try:
-        return discord.Object(id=int(before))
-    except ValueError as e:
-        raise ToolError("before must be a numeric discord message id") from e
+    # Stricter than int(): "1_000", " 42 ", "+7" all parse but name a
+    # different message than written, and a negative id reaches Discord as an
+    # unmapped 400.
+    if not (before.isascii() and before.isdecimal()):
+        raise ToolError("before must be a numeric discord message id")
+    return discord.Object(id=int(before))
 
 
 async def _history_page(

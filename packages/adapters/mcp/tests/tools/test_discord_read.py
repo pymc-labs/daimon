@@ -369,10 +369,16 @@ async def test_read_channel_passes_before_cursor(monkeypatch: pytest.MonkeyPatch
     assert result.hint is None, "a hint on the last page would send the caller in a loop"
 
 
+@pytest.mark.parametrize("before", ["not-an-id", "1_000", " 42 ", "+7", "-5", "١٢"])
 async def test_read_channel_rejects_non_numeric_before(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, before: str
 ) -> None:
-    """A malformed before value gets a ToolError, not a raw ValueError."""
+    """Anything but a plain decimal id gets a ToolError.
+
+    int() alone accepts "1_000" and " 42 " — which silently page from a
+    different message than written — and "-5", which Discord answers with an
+    unmapped 400.
+    """
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
@@ -388,7 +394,7 @@ async def test_read_channel_rejects_non_numeric_before(
     patch_discord_http(monkeypatch, handler)
     with pytest.raises(ToolError, match="before must be a numeric discord message id"):
         await _read_channel_impl(
-            _runtime_with_discord_token(), _auth(), channel_id="222", limit=50, before="not-an-id"
+            _runtime_with_discord_token(), _auth(), channel_id="222", limit=50, before=before
         )
 
 
