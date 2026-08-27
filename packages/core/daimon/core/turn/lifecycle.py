@@ -40,13 +40,12 @@ call from inside the pump:**
                            chat-API posts/edits, HTTP calls, anything with
                            a retry-after sleep — move that to `on_render`
                            instead. Default no-op. Known, scheduled
-                           deviation (not a silent contradiction): Slack's
-                           implementation still does ALL of its turn I/O
-                           here today; it moves to `on_render` in a
-                           follow-up piece of work bringing Slack to
-                           parity with this contract. Discord's own
-                           implementation used to have the same problem
-                           and now conforms.
+                           deviations (not silent contradictions): both
+                           Discord's and Slack's implementations still do
+                           their turn I/O here today (a chat-API post/edit
+                           on every event); each moves to `on_render` in
+                           its own follow-up piece of work, Discord's
+                           landing immediately after this contract change.
   on_terminal_success    — bookkeeping only (structlog, transcripts).
                            Must NOT render content — same cheap-tap
                            contract as `on_sse_event`.
