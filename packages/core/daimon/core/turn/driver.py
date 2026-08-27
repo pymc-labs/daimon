@@ -50,14 +50,23 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsImageBlockParam,
+    BetaManagedAgentsSessionStatusIdleEvent,
     BetaManagedAgentsStreamSessionEvents,
     BetaManagedAgentsTextBlockParam,
     BetaManagedAgentsUserMessageEventParams,
 )
 from daimon.core.errors import TurnError
 from daimon.core.ma import replay_events, send_interrupt_and_wait, terminal_stop_reason
+from daimon.core.turn.approvals import build_confirmation_events, pending_confirmation_ids
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle
-from daimon.core.turn.posture import Billed, BillingExempt, BillingPosture
+from daimon.core.turn.posture import (
+    AutoApprove,
+    Billed,
+    BillingExempt,
+    BillingPosture,
+    RequireApproval,
+    ToolConfirmation,
+)
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
@@ -65,6 +74,11 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 log = structlog.get_logger(__name__)
 
 InterruptPhase = Literal["pre-stream", "stream-open", "send-initial", "replay", "reattach"]
+
+# Module-level singleton so `run_turn`'s default arg isn't a function call in
+# the signature (ruff B008) — `RequireApproval()` is a frozen, field-less
+# dataclass, so one shared instance is safe across every call.
+_DEFAULT_TOOL_CONFIRMATION: ToolConfirmation = RequireApproval()
 
 T = TypeVar("T")
 
@@ -192,6 +206,7 @@ async def run_turn(
     stream_read_timeout_s: float = 120.0,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     billing: BillingPosture,
+    tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
 ) -> TurnState:
     """Open the SSE stream, post the user message, and pump to terminal idle.
@@ -237,6 +252,7 @@ async def run_turn(
         now=now,
         entry="run",
         billing=billing,
+        tool_confirmation=tool_confirmation,
     )
 
 
@@ -255,6 +271,7 @@ async def _pump(
     now: Callable[[], datetime],
     entry: Literal["run", "resume"],
     billing: BillingPosture,
+    tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
 ) -> TurnState:
     log.info("turn.started", session_id=session_id, entry=entry)
 
@@ -262,6 +279,11 @@ async def _pump(
     prev_cell: list[TurnState] = [render_anchor]
     events_folded_cell: list[int] = [0]
     renders_failed_cell: list[int] = [0]
+    # Per-turn dedup for AutoApprove: lives here (not in
+    # `_consume_with_reconnect`) so it survives a reconnect -- a
+    # re-delivered `requires_action` idle after an eventless-cycle
+    # reconnect must not be double-confirmed (T-19-08-B).
+    confirmed_tool_use_ids: set[str] = set()
 
     from daimon.core.turn.render import diff as _diff  # local import to avoid cycles
 
@@ -356,6 +378,8 @@ async def _pump(
                                 cancel=cancel,
                                 lifecycle=lifecycle,
                                 billing=billing,
+                                tool_confirmation=tool_confirmation,
+                                confirmed_tool_use_ids=confirmed_tool_use_ids,
                                 stream_read_timeout_s=stream_read_timeout_s,
                             )
                     break  # a terminal event was found — exit the outer loop too
@@ -451,6 +475,7 @@ async def _pump(
             session_id=session_id,
             events_folded=events_folded_cell[0],
             renders_failed=renders_failed_cell[0],
+            tool_confirmation=tool_confirmation,
         )
     finally:
         if not render_task.done():
@@ -503,6 +528,8 @@ async def _consume_with_reconnect(
     cancel: asyncio.Event,
     lifecycle: TurnLifecycle,
     billing: BillingPosture,
+    tool_confirmation: ToolConfirmation,
+    confirmed_tool_use_ids: set[str],
     stream_read_timeout_s: float,
 ) -> None:
     """One attempt at the consume leg. On retry, replay + re-fold first."""
@@ -621,7 +648,39 @@ async def _consume_with_reconnect(
             events_folded_cell[0] += 1
             if event.type == "session.status_terminated":
                 return
-            if terminal_stop_reason(event) is not None:
+            stop = terminal_stop_reason(event)
+            if stop == "requires_action":
+                match tool_confirmation:
+                    case AutoApprove():
+                        assert isinstance(event, BetaManagedAgentsSessionStatusIdleEvent)
+                        fresh = pending_confirmation_ids(event, confirmed=confirmed_tool_use_ids)
+                        if fresh:
+                            confirmed_tool_use_ids.update(fresh)
+                            # decisions: one `user.tool_confirmation` event
+                            # with `"result": "allow"` per fresh id (built by
+                            # approvals.build_confirmation_events, decision 6
+                            # -- driver.py only sends).
+                            decisions = build_confirmation_events(fresh)
+                            # Safe to send here (and ONLY here): this is a
+                            # `requires_action` idle, i.e. the session is
+                            # NOT running. A bare `user.*` event sent into a
+                            # RUNNING session returns HTTP 200 and is
+                            # silently ignored (measured 2026-08-26) -- never
+                            # move this send to a running-session position.
+                            await anthropic.beta.sessions.events.send(session_id, events=decisions)
+                            log.info(
+                                "turn.tool_confirmation.sent",
+                                session_id=session_id,
+                                count=len(fresh),
+                            )
+                            continue
+                        # MA is re-asking for ids we already allowed -- stop
+                        # instead of spinning until the ceiling (T-19-08-C).
+                        log.info("turn.tool_confirmation.exhausted", session_id=session_id)
+                        return
+                    case RequireApproval():
+                        pass  # fall through -- unchanged interactive behavior
+            if stop is not None:
                 return
     finally:
         if not cancel_task.done():
@@ -641,6 +700,7 @@ async def _finalize_success_or_error(
     session_id: str,
     events_folded: int,
     renders_failed: int,
+    tool_confirmation: ToolConfirmation,
 ) -> TurnState:
     final_state = state_cell[0]
     if (
@@ -648,19 +708,30 @@ async def _finalize_success_or_error(
         and final_state.stop_reason is not None
         and final_state.stop_reason.type == "requires_action"
     ):
-        # No approval/resume UX is wired for interactive surfaces (Discord/CLI):
-        # the driver exits the consume loop on ANY idle, including
-        # requires_action, but pre-fix that idle finalized as blank success.
-        # Surface it as an actionable failure instead of silently dropping the
-        # agent's tool-approval request.
-        err = TurnError(
-            kind="requires_action",
-            message=(
-                "The agent requested tool approval — not supported on this "
-                "surface yet. Interrupt-free approval/resume UX is a future "
-                "feature; routines auto-approve tools."
-            ),
-        )
+        # Two distinct call sites reach a requires_action idle here:
+        # - RequireApproval (interactive, Discord/CLI): no approval/resume
+        #   UX is wired -- the consume loop exits on ANY idle, including
+        #   requires_action, so this surfaces it as an actionable failure
+        #   instead of silently dropping the agent's tool-approval request.
+        # - AutoApprove (routines): reaches here only via the "exhausted"
+        #   branch above -- MA re-asked for tool_use_ids already allowed and
+        #   not accepted, so the wording names that instead of the
+        #   interactive "not supported on this surface" framing, which
+        #   would be misleading here.
+        match tool_confirmation:
+            case AutoApprove():
+                message = (
+                    "The agent re-requested approval for tool call(s) already "
+                    "confirmed — the confirmation(s) were sent but not accepted, "
+                    "so the turn was abandoned rather than spin."
+                )
+            case RequireApproval():
+                message = (
+                    "The agent requested tool approval — not supported on this "
+                    "surface yet. Interrupt-free approval/resume UX is a future "
+                    "feature; routines auto-approve tools."
+                )
+        err = TurnError(kind="requires_action", message=message)
         final_state = dataclasses.replace(final_state, error=err)
         state_cell[0] = final_state
     await render_once(final_state)  # guarded final render (§6)
