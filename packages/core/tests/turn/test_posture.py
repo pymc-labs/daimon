@@ -90,6 +90,13 @@ def test_billing_exempt_is_frozen() -> None:
         exempt.reason = "cli-operator-run"  # type: ignore[misc]
 
 
+def test_billing_exempt_accepts_headless_unrecorded_reason() -> None:
+    """Plan 19-09: a headless turn invoked without a usage_record_factory is
+    genuinely exempt, distinct from the CLI operator bypass."""
+    exempt = BillingExempt(reason="headless-unrecorded")
+    assert exempt.reason == "headless-unrecorded"
+
+
 def test_require_approval_is_frozen() -> None:
     posture = RequireApproval()
     with pytest.raises(dataclasses.FrozenInstanceError):

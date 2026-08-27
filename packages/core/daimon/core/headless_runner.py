@@ -55,12 +55,49 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_tool_confirmation_ev
 from cryptography.fernet import MultiFernet
 from daimon.core.config import McpSettings
 from daimon.core.sessions import create_session
+from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState, extract_final_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 LAST_RESULT_TAIL_MAX = 1000
 """Final-message tail is truncated to at most this many characters."""
+
+
+class _NoOpLifecycle(TurnLifecycle):
+    """A headless turn has no surface to render to, so every delivery hook
+    is a no-op. Inherits `TurnLifecycle`'s own default no-op bodies for the
+    four optional hooks (`on_sse_event`/`on_reconnect`/`on_rate_limited`/
+    `on_interrupt_sent`); only the three mandatory ones are overridden here.
+
+    Failures are NOT raised from here. `run_turn` (below) inspects
+    `TurnState.error` after the driver's `run_turn` returns and raises then —
+    the driver's own finalizer/render machinery deliberately folds failures
+    into `TurnState.error` rather than raising (RESEARCH.md Open Question 2),
+    and a lifecycle hook that raised would fight that design from inside the
+    driver's own pump.
+    """
+
+    async def on_render(self, state: TurnState) -> None:
+        return None
+
+    async def on_terminal_success(self, state: TurnState) -> None:
+        return None
+
+    async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
+        return None
+
+
+def _assert_satisfies_turn_lifecycle(lifecycle: TurnLifecycle) -> None:
+    """Static-typing guard: `_NoOpLifecycle` satisfies `TurnLifecycle`.
+
+    Runtime no-op; pyright's structural check on the parameter type is what
+    matters here, mirroring `daimon.testing.turn_fakes.assert_lifecycle`.
+    """
+    del lifecycle
+
+
+_assert_satisfies_turn_lifecycle(_NoOpLifecycle())
 
 
 async def run_turn(

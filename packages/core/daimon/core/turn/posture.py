@@ -9,6 +9,17 @@ closed `ExemptReason` literal: widening the set of exempt reasons is a
 deliberate, reviewable act (edit the `Literal`, not a free-form string),
 not something a caller can invent inline.
 
+Two members exist today. `"cli-operator-run"` is the CLI operator's own
+bypass. `"headless-unrecorded"` (plan 19-09) is a headless turn
+(`daimon.core.headless_runner`) invoked without a `usage_record_factory` —
+genuinely nothing to meter, not the operator bypass. This is deliberately
+NOT modeled as `Billed(record=<no-op recorder>)`: that would record a
+metered turn that meters nothing, which is a worse lie than an honest
+"exempt, and here is why" reason. `Billed` means "this turn's usage is being
+recorded somewhere"; a no-op recorder would satisfy the type while breaking
+that meaning for anyone reading a `turn.billing_exempt`-adjacent log line or
+auditing billing coverage.
+
 Every call to `run_turn` also declares a `ToolConfirmation` posture — how a
 `requires_action` idle (the agent paused, waiting for a tool call to be
 approved) is handled. `RequireApproval` is the interactive default: a
@@ -32,7 +43,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 
-ExemptReason = Literal["cli-operator-run"]
+ExemptReason = Literal["cli-operator-run", "headless-unrecorded"]
 
 
 class UsageRecorder(Protocol):
