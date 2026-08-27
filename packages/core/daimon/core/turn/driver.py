@@ -28,9 +28,9 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeVar, cast
 
 import anthropic as _anthropic
 import httpx
@@ -38,6 +38,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsImageBlockParam,
+    BetaManagedAgentsStreamSessionEvents,
     BetaManagedAgentsTextBlockParam,
     BetaManagedAgentsUserMessageEventParams,
 )
@@ -51,7 +52,9 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 
 log = structlog.get_logger(__name__)
 
-InterruptPhase = Literal["pre-stream", "replay", "reattach"]
+InterruptPhase = Literal["pre-stream", "stream-open", "send-initial", "replay", "reattach"]
+
+T = TypeVar("T")
 
 # The SDK only wraps httpx failures raised while *opening* a request into
 # `APIConnectionError`. Once an SSE stream is open, a mid-body drop surfaces
@@ -116,6 +119,53 @@ class _EventlessCycle(Exception):
     def __init__(self, *, reason: ReconnectReason) -> None:
         super().__init__(f"eventless cycle ({reason})")
         self.reason: ReconnectReason = reason
+
+
+async def _await_or_cancel[T](
+    coro: Coroutine[Any, Any, T],
+    *,
+    cancel_task: asyncio.Task[bool],
+    phase: InterruptPhase,
+    on_cancel_win_result: Callable[[T], Awaitable[None]] | None = None,
+) -> T:
+    """Race a setup await (`coro`) against `cancel_task` (`FIRST_COMPLETED`).
+
+    Reused at every setup call site (stream-open, send-initial) so a cancel
+    signalled while either is in flight is observed promptly instead of
+    being silently ignored the way a plain `await` would ignore it — the
+    same idiom the consume loop already uses for `stream.__anext__()`.
+
+    On a cancel win: if the work task had NOT yet finished, cancel + drain
+    it (`_suppress_task_exc()`). If it HAD already finished with a real
+    result despite losing the race — a genuine tie, e.g. the stream opened
+    right as cancel fired — `on_cancel_win_result` (when given) is awaited
+    with that result so the caller can release it (close the stream) before
+    the interrupt propagates; a work task that finished with an exception is
+    drained silently, since cancel already wins regardless of what the
+    upstream call did. Either way, raises
+    `_InterruptedDuringRecovery(phase=phase)`.
+
+    On the normal path (work task wins), returns the work task's result —
+    keeps both call sites one line each.
+    """
+    work_task: asyncio.Task[T] = asyncio.create_task(coro, name=f"turn.{phase.replace('-', '_')}")
+    done, _pending = await asyncio.wait(
+        {work_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+    )
+    if cancel_task in done:
+        if work_task in done:
+            if (
+                not work_task.cancelled()
+                and work_task.exception() is None
+                and on_cancel_win_result is not None
+            ):
+                await on_cancel_win_result(work_task.result())
+        else:
+            work_task.cancel()
+            with _suppress_task_exc():
+                await work_task
+        raise _InterruptedDuringRecovery(phase=phase)
+    return work_task.result()
 
 
 async def run_turn(
@@ -416,40 +466,71 @@ async def _consume_with_reconnect(
     if cancel.is_set():
         raise _InterruptedDuringRecovery(phase="pre-stream")
 
-    if is_retry:
-        log.info("turn.reconnect.started", session_id=session_id, reconnect_reason=reconnect_reason)
-        await lifecycle.on_reconnect(reconnect_reason)
-        replayed = await replay_events(anthropic, session_id=session_id)
-        if cancel.is_set():
-            raise _InterruptedDuringRecovery(phase="replay")
-        current_turn_events = _events_since_last_turn_boundary(replayed)
-        state_cell[0] = functools.reduce(apply, current_turn_events, TurnState())
-        log.info(
-            "turn.reconnect.completed",
-            session_id=session_id,
-            replayed=len(replayed),
-        )
-
-    stream = await anthropic.beta.sessions.events.stream(
-        session_id=session_id,
-        timeout=httpx.Timeout(stream_read_timeout_s, connect=5.0),
-    )
-    if cancel.is_set():
-        raise _InterruptedDuringRecovery(phase="reattach")
-
-    if not is_retry:
-        # Send user.message (or user.tool_confirmation on resume) exactly
-        # once, after the first stream open. On retry the server already
-        # has these events in its log.
-        await send_initial()
-
-    # Race each next-event fetch against `cancel.wait()` so the inner loop
-    # is reactive to the interrupt signal even while the stream is idle
-    # (no events arriving). `cancel.is_set()` checked pre-loop for the
-    # already-set case.
-    stream_iter = stream.__aiter__()
+    # One waiter task for the whole attempt: races the stream-open and
+    # send-initial setup awaits below (via `_await_or_cancel`) as well as
+    # every next-event fetch in the consume loop, so a cancel signalled at
+    # ANY point after this line is observed promptly rather than only once
+    # the consume loop starts. Cancelled + drained in the `finally` below,
+    # which now covers the whole attempt (not just the consume loop), so no
+    # waiter task leaks on any exit path.
     cancel_task = asyncio.create_task(cancel.wait(), name="turn.cancel_waiter")
     try:
+        if is_retry:
+            log.info(
+                "turn.reconnect.started", session_id=session_id, reconnect_reason=reconnect_reason
+            )
+            await lifecycle.on_reconnect(reconnect_reason)
+            replayed = await replay_events(anthropic, session_id=session_id)
+            if cancel.is_set():
+                raise _InterruptedDuringRecovery(phase="replay")
+            current_turn_events = _events_since_last_turn_boundary(replayed)
+            state_cell[0] = functools.reduce(apply, current_turn_events, TurnState())
+            log.info(
+                "turn.reconnect.completed",
+                session_id=session_id,
+                replayed=len(replayed),
+            )
+
+        async def _open_stream() -> _anthropic.AsyncStream[BetaManagedAgentsStreamSessionEvents]:
+            return await anthropic.beta.sessions.events.stream(
+                session_id=session_id,
+                timeout=httpx.Timeout(stream_read_timeout_s, connect=5.0),
+            )
+
+        stream = await _await_or_cancel(
+            _open_stream(),
+            cancel_task=cancel_task,
+            phase="stream-open",
+            # A stream that opened anyway on the losing side of the race
+            # must not leak the underlying SSE connection.
+            on_cancel_win_result=lambda s: s.close(),
+        )
+        if cancel.is_set():
+            raise _InterruptedDuringRecovery(phase="reattach")
+
+        if not is_retry:
+            # Send user.message (or user.tool_confirmation on resume) exactly
+            # once, after the first stream open. On retry the server already
+            # has these events in its log.
+            async def _send_initial() -> None:
+                await send_initial()
+
+            try:
+                await _await_or_cancel(
+                    _send_initial(), cancel_task=cancel_task, phase="send-initial"
+                )
+            except _InterruptedDuringRecovery:
+                # The stream (opened above, on the WINNING side of that
+                # race) is now abandoned -- close it so this cancel doesn't
+                # leak the connection.
+                await stream.close()
+                raise
+
+        # Race each next-event fetch against the same `cancel_task` so the
+        # inner loop is reactive to the interrupt signal even while the
+        # stream is idle (no events arriving). `cancel.is_set()` checked
+        # pre-loop for the already-set case.
+        stream_iter = stream.__aiter__()
         while True:
             if cancel.is_set():
                 raise _InterruptInConsume()

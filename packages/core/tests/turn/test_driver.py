@@ -491,16 +491,21 @@ async def test_interrupt_during_replay_raises_interrupted_without_posting_user_i
             assert ev.get("type") != "user.interrupt"
 
 
-async def test_interrupt_during_reattach_raises_interrupted_without_user_interrupt() -> None:
-    """Cancel observed between replay completion and the post-reattach
-    cancel-check raises `_InterruptedDuringRecovery(reattach)` and routes
-    to on_terminal_failure without posting `user.interrupt`."""
+async def test_interrupt_during_reconnect_stream_open_raises_interrupted_without_user_interrupt() -> (
+    None
+):
+    """Cancel observed exactly as a RECONNECT attempt's stream re-open
+    resolves is now caught by the stream-open race itself (19-05), not the
+    older post-open `reattach` fast-check -- a cancel arriving mid-open on a
+    retry attempt is no longer silently ignored until the open resolves.
+    Routes to on_terminal_failure without posting `user.interrupt`, and the
+    stream that opened anyway on the losing side of the race is closed."""
     from daimon.testing.turn_fakes import RaiseConnection
 
     fa = FakeAnthropic()
     # Attempt 1 raises APIConnectionError to enter retry. Attempt 2 opens a
-    # fresh stream after replay -- intercept that open to set cancel before
-    # the post-reattach cancel-check fires.
+    # fresh stream after replay -- intercept that open to set cancel exactly
+    # as it resolves, racing the driver's own stream-open race.
     fa.beta.sessions.events.stream_scripts = [
         [RaiseConnection()],
         [YieldEvent(make_status_idle(event_id="s", stop_reason=make_end_turn()))],
@@ -510,8 +515,7 @@ async def test_interrupt_during_reattach_raises_interrupted_without_user_interru
 
     async def _stream_triggering_cancel(*, session_id: str, timeout: object = None):
         result = await original_stream(session_id=session_id, timeout=timeout)
-        # Post-replay, post-reattach-open. The driver's next cancel-check
-        # should observe this and raise `_InterruptedDuringRecovery(reattach)`.
+        # Second stream call is the reconnect attempt's re-open.
         if fa.beta.sessions.events.stream_calls == 2:
             cancel.set()
         return result
@@ -531,12 +535,15 @@ async def test_interrupt_during_reattach_raises_interrupted_without_user_interru
     )
 
     assert final.error is not None
-    assert final.error.kind == "interrupted", "reattach-phase interrupt must surface as interrupted"
-    assert "reattach" in final.error.message, "message should identify reattach phase"
+    assert final.error.kind == "interrupted", "reconnect-open interrupt must surface as interrupted"
+    assert "stream-open" in final.error.message, "message should identify stream-open phase"
+    assert fa.beta.sessions.events.streams[1].closed is True, (
+        "the reconnect stream opened on the losing side of the race must be closed"
+    )
     for _sid, payload in fa.beta.sessions.events.sent_events:
         for ev in payload:
             assert ev.get("type") != "user.interrupt", (
-                "reattach-phase interrupt must not post user.interrupt"
+                "reconnect-open interrupt must not post user.interrupt"
             )
 
 
