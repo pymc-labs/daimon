@@ -552,6 +552,112 @@ async def test_read_thread_slack_caller_rejects_discord_before_param(
 
 
 @pytest.mark.asyncio
+async def test_read_channel_slack_caller_treats_empty_pagination_params_as_absent(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """MCP clients often send "" for an optional param they mean to omit.
+
+    An empty before must not trip the Discord-only rejection, and an empty
+    cursor must not be forwarded to Slack — the call proceeds into the Slack
+    impl and fails on the missing crypto keys like any other routed call.
+    """
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="slack-empty-params")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session,
+        platform="slack",
+        external_id="U_SLACK_CALLER",
+        tenant=tenant,
+        account=account,
+    )
+    await db_session.commit()
+    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    app = _make_app(sessionmaker)
+
+    call_result = await _call_tool(
+        app,
+        token=token,
+        tool_name="read_channel",
+        arguments={"channel_id": "C_TEST", "before": "", "cursor": ""},
+    )
+
+    assert call_result.get("isError") is True
+    output_text = _output_text(call_result)
+    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
+        f"empty pagination params must read as absent, not as misuse; got {output_text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_channel_discord_caller_treats_empty_cursor_as_absent(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An empty cursor from a Discord caller must not trip the Slack-only rejection."""
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="discord-empty-params")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session,
+        platform="discord",
+        external_id="U_DISCORD_CALLER",
+        tenant=tenant,
+        account=account,
+    )
+    await db_session.commit()
+    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    app = _make_app(sessionmaker)
+
+    call_result = await _call_tool(
+        app,
+        token=token,
+        tool_name="read_channel",
+        arguments={"channel_id": "C_TEST", "before": "", "cursor": ""},
+    )
+
+    assert call_result.get("isError") is True
+    output_text = _output_text(call_result)
+    assert "discord tools require DAIMON_DISCORD__BOT_TOKEN" in output_text, (
+        f"empty pagination params must read as absent, not as misuse; got {output_text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_thread_slack_caller_treats_empty_before_as_absent(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An empty before on read_thread must not trip the Discord-only rejection."""
+    tenant = await make_tenant(
+        db_session, platform="slack", workspace_id="slack-thread-empty-before"
+    )
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session,
+        platform="slack",
+        external_id="U_SLACK_CALLER",
+        tenant=tenant,
+        account=account,
+    )
+    await db_session.commit()
+    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    app = _make_app(sessionmaker)
+
+    call_result = await _call_tool(
+        app,
+        token=token,
+        tool_name="read_thread",
+        arguments={"thread_id": "C_TEST:1717171717.123456", "before": ""},
+    )
+
+    assert call_result.get("isError") is True
+    output_text = _output_text(call_result)
+    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
+        f"an empty before must read as absent, not as misuse; got {output_text!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_create_thread_slack_caller_routes_to_slack_impl_and_fails_on_missing_crypto(
     db_session: AsyncSession,
     sessionmaker: async_sessionmaker[AsyncSession],

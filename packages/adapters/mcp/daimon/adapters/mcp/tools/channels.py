@@ -87,6 +87,10 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         cursor to fetch the next page; at most 15 messages are returned.
         """
         auth = await _auth(ctx)
+        # MCP clients often send "" for an optional param they mean to omit —
+        # treat it as absent, not as the wrong platform's cursor.
+        before = before or None
+        cursor = cursor or None
         if auth.platform == "slack":
             if before is not None:
                 raise ToolError("before is Discord-only — pass cursor to paginate on Slack")
@@ -115,6 +119,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         not returned.
         """
         auth = await _auth(ctx)
+        before = before or None
         if auth.platform == "slack":
             if before is not None:
                 raise ToolError("before is Discord-only — slack read_thread has no pagination")
