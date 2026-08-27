@@ -5,6 +5,21 @@ runs the consume-loop and render-loop concurrently. Every call must declare
 a `BillingPosture`: `Billed(record=...)` meters each `span.model_request_end`
 event through the caller-bound recorder, `BillingExempt(reason=...)` emits a
 single structured exempt-billing log line at turn start and meters nothing.
+
+`_pump`'s reconnect machinery is two levels, for two distinct failure modes:
+
+- Outer `while True:` loop — an unbounded, status-gated reconnect for
+  eventless cycles (the SSE stream ends or stalls with no terminal event).
+  A stream ending or stalling is not itself meaningful: the server closes
+  cleanly every ~600s by design, and a healthy long tool call produces
+  multiple such cycles. The driver asks MA (`sessions.retrieve`) whether the
+  session is still running before deciding anything, so silence alone can
+  never finalize a turn as a quiet, truncated success (Class A). This loop
+  has no attempt cap by design — the per-turn ceiling is the sole backstop.
+- Inner `AsyncRetrying` block — the bounded 2-attempt budget for
+  `_CONNECTION_LOST` (a dropped connection, a genuinely different failure
+  mode from silence). Each outer iteration gets a fresh `AsyncRetrying`, so
+  this budget is per stream generation, not per turn.
 """
 
 from __future__ import annotations
@@ -28,7 +43,7 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core.errors import TurnError
 from daimon.core.ma import replay_events, send_interrupt_and_wait, terminal_stop_reason
-from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle
 from daimon.core.turn.posture import Billed, BillingExempt, BillingPosture
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState
@@ -79,6 +94,28 @@ class _InterruptInConsume(Exception):
 
     Module-private sentinel; caught exactly once at `_pump`'s top level.
     """
+
+
+class _EventlessCycle(Exception):
+    """The SSE stream ended without a terminal event: either a clean close
+    (`StopAsyncIteration`) or a mid-body read stall (`httpx.ReadTimeout`).
+
+    Neither is itself a decision -- a stream can end this way while the
+    session is still healthily running (the server's ~600s clean-close
+    cadence, or a missed keepalive window). `_pump` asks MA for the
+    session's actual status and only then decides to reconnect (status
+    still running/rescheduling) or replay-and-finalize (status idle or
+    terminated).
+
+    Module-private sentinel; excluded from tenacity's retry predicate (not
+    a member of `_CONNECTION_LOST`), so `reraise=True` surfaces it to
+    `_pump` immediately rather than consuming the bounded connection-error
+    retry budget.
+    """
+
+    def __init__(self, *, reason: ReconnectReason) -> None:
+        super().__init__(f"eventless cycle ({reason})")
+        self.reason: ReconnectReason = reason
 
 
 async def run_turn(
@@ -184,28 +221,82 @@ async def _pump(
         with _suppress_task_exc():
             await render_task
 
-    # Open + initial-send happen inside the retryable unit on attempt 1 only.
-    # On retry, replay + reattach replace them.
+    # Two-level reconnect structure:
+    #
+    # - Outer `while True:` loop: an unbounded status-gated reconnect for
+    #   eventless cycles (`_EventlessCycle` — a clean close or read-timeout
+    #   with no terminal event). Unbounded on purpose: a healthy long tool
+    #   call produces multiple eventless close/reopen cycles while the
+    #   session is genuinely `running`/`rescheduling`, so silence alone is
+    #   never treated as suspicion. The per-turn ceiling (a separate,
+    #   later change) is the sole backstop on this loop.
+    # - Inner `AsyncRetrying` block: the bounded 2-attempt budget for
+    #   `_CONNECTION_LOST` (a dropped connection, not silence). Each outer
+    #   iteration gets a FRESH `AsyncRetrying`, so the budget is per stream
+    #   generation, not per turn.
+    #
+    # Open + initial-send happen inside the retryable unit on attempt 1 of
+    # the FIRST generation only. On any later attempt (a connection-error
+    # retry within a generation, or the first attempt of a generation
+    # entered after an eventless cycle), replay + reattach replace them.
     try:
         try:
-            async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(2),
-                retry=retry_if_exception_type(_CONNECTION_LOST),
-                reraise=True,
-            ):
-                with attempt:
-                    await _consume_with_reconnect(
-                        anthropic=anthropic,
+            eventless_reconnect = False
+            eventless_reason: ReconnectReason = "connection_dropped"
+            while True:
+                try:
+                    async for attempt in AsyncRetrying(
+                        stop=stop_after_attempt(2),
+                        retry=retry_if_exception_type(_CONNECTION_LOST),
+                        reraise=True,
+                    ):
+                        with attempt:
+                            first_attempt_of_generation = attempt.retry_state.attempt_number == 1
+                            if eventless_reconnect and first_attempt_of_generation:
+                                attempt_is_retry = True
+                                attempt_reason: ReconnectReason = eventless_reason
+                            else:
+                                attempt_is_retry = not first_attempt_of_generation
+                                attempt_reason = "connection_dropped"
+                            await _consume_with_reconnect(
+                                anthropic=anthropic,
+                                session_id=session_id,
+                                send_initial=send_initial,
+                                is_retry=attempt_is_retry,
+                                reconnect_reason=attempt_reason,
+                                state_cell=state_cell,
+                                events_folded_cell=events_folded_cell,
+                                cancel=cancel,
+                                lifecycle=lifecycle,
+                                billing=billing,
+                                stream_read_timeout_s=stream_read_timeout_s,
+                            )
+                    break  # a terminal event was found — exit the outer loop too
+                except _EventlessCycle as cycle:
+                    session = await anthropic.beta.sessions.retrieve(session_id)
+                    if session.status in {"running", "rescheduling"}:
+                        log.info(
+                            "turn.eventless_cycle",
+                            session_id=session_id,
+                            reason=cycle.reason,
+                            status=session.status,
+                        )
+                        eventless_reconnect = True
+                        eventless_reason = cycle.reason
+                        continue
+                    # status in {"idle", "terminated"}: the terminal event
+                    # the driver missed lives in the replay history. Fold it
+                    # in and finalize — do NOT reopen the stream.
+                    log.info(
+                        "turn.eventless_cycle_finalizing",
                         session_id=session_id,
-                        send_initial=send_initial,
-                        is_retry=attempt.retry_state.attempt_number > 1,
-                        state_cell=state_cell,
-                        events_folded_cell=events_folded_cell,
-                        cancel=cancel,
-                        lifecycle=lifecycle,
-                        billing=billing,
-                        stream_read_timeout_s=stream_read_timeout_s,
+                        reason=cycle.reason,
+                        status=session.status,
                     )
+                    replayed = await replay_events(anthropic, session_id=session_id)
+                    current_turn_events = _events_since_last_turn_boundary(replayed)
+                    state_cell[0] = functools.reduce(apply, current_turn_events, TurnState())
+                    break
         except _InterruptedDuringRecovery as err:
             await _cancel_render()
             return await _finalize_interrupted(
@@ -283,11 +374,23 @@ def _events_since_last_turn_boundary(
     (Pitfall 2 of multi-turn reconnect). A turn ends with `session.status_idle`;
     events after the LAST such event belong to the current turn.
 
+    Boundary detection deliberately excludes the final event of `events` from
+    the scan: this helper is also used on the eventless-cycle finalize path
+    (`_pump`, status idle/terminated), where the current turn has ITSELF just
+    ended and the last event in `events` is that turn's own terminal
+    `session.status_idle`. Counting it as a boundary would strip it (and every
+    other current-turn event) from the result -- an empty fold that silently
+    drops the very terminal event this replay exists to recover. The mid-turn
+    reconnect call site (is_retry) is unaffected: its `events` never end on the
+    current turn's own idle (the consume loop returns on a terminal event
+    before a reconnect is ever attempted), so the excluded slot was never a
+    boundary candidate there either.
+
     If no `session.status_idle` boundary is found, the whole list is returned
     (single-turn session — no prior-turn content to filter).
     """
     last_boundary = -1
-    for i, ev in enumerate(events):
+    for i, ev in enumerate(events[:-1]):
         if getattr(ev, "type", None) == "session.status_idle":
             last_boundary = i
     if last_boundary == -1:
@@ -301,6 +404,7 @@ async def _consume_with_reconnect(
     session_id: str,
     send_initial: Callable[[], Awaitable[None]],
     is_retry: bool,
+    reconnect_reason: ReconnectReason,
     state_cell: list[TurnState],
     events_folded_cell: list[int],
     cancel: asyncio.Event,
@@ -313,8 +417,8 @@ async def _consume_with_reconnect(
         raise _InterruptedDuringRecovery(phase="pre-stream")
 
     if is_retry:
-        log.info("turn.reconnect.started", session_id=session_id)
-        await lifecycle.on_reconnect("connection_dropped")
+        log.info("turn.reconnect.started", session_id=session_id, reconnect_reason=reconnect_reason)
+        await lifecycle.on_reconnect(reconnect_reason)
         replayed = await replay_events(anthropic, session_id=session_id)
         if cancel.is_set():
             raise _InterruptedDuringRecovery(phase="replay")
@@ -366,7 +470,18 @@ async def _consume_with_reconnect(
             try:
                 event = next_task.result()
             except StopAsyncIteration:
-                return
+                # Clean close, no terminal event: not itself completion.
+                # Close the abandoned stream and hand the decision to
+                # `_pump`'s status check.
+                await stream.close()
+                raise _EventlessCycle(reason="clean_close") from None
+            except httpx.ReadTimeout:
+                # No bytes for `stream_read_timeout_s`: same status-checked
+                # path as a clean close, not an unhandled crash and not a
+                # connection error (it does not consume the bounded
+                # `_CONNECTION_LOST` retry budget).
+                await stream.close()
+                raise _EventlessCycle(reason="read_timeout") from None
             # Per-event metering. Invoke the caller-bound recorder on
             # span.model_request_end events. Exceptions propagate (fail-closed).
             match billing:
