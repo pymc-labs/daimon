@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import anthropic
+import httpx
 from daimon.core.errors import TurnError
 from daimon.core.turn.ceiling import (
     TURN_CEILING_S,
@@ -69,5 +71,17 @@ def test_is_dead_session_never_recovers_a_ceiling_error() -> None:
     that would re-run a 45-minute turn as a fresh one, doubling wall clock and
     tokens spent (T-19-03-B)."""
     state = TurnState(error=TurnError(kind="ceiling", message="abandoned"))
+
+    assert _is_dead_session(state) is False
+
+
+def test_is_dead_session_never_recovers_a_ceiling_error_even_with_a_404_shaped_cause() -> None:
+    """The kind gate is the thing doing the work, not the cause-type check --
+    pin this with a ceiling error whose cause WOULD satisfy the 404 branch if
+    the kind check were ever loosened or removed."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/sessions/sess_1/events")
+    response = httpx.Response(404, request=request, json={"error": {"message": "not found"}})
+    cause = anthropic.APIStatusError("not found", response=response, body=None)
+    state = TurnState(error=TurnError(kind="ceiling", message="abandoned", cause=cause))
 
     assert _is_dead_session(state) is False

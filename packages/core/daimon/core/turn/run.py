@@ -14,13 +14,14 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 import anthropic as _anthropic
 import structlog
 from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.stores.thread_sessions import mark_dead
+from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
@@ -130,6 +131,11 @@ def _is_dead_session(state: TurnState) -> bool:
     just replay whatever killed it. Recovery instead happens on the NEXT
     message, which is the first to see the archived-session 400 — so the thread
     heals on its own without retrying poison.
+
+    D-10: a `kind == "ceiling"` error must NEVER recover here either -- it is
+    excluded by construction (this function only ever returns True for
+    `kind == "upstream"`), and that exclusion is what stops a 45-minute
+    wall-clock timeout from being re-run as a second 45-minute turn.
     """
     err = state.error
     if err is None or err.kind != "upstream":
@@ -157,6 +163,8 @@ async def run_prepared_turn(
     recovery_lifecycle: Callable[[asyncio.Event], TurnLifecycle],
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     render_interval_s: float = 2.0,
+    deadline: datetime | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
     signature, recover exactly once: mark the stale mapping dead, create a
@@ -169,87 +177,154 @@ async def run_prepared_turn(
     the new session id via `prepare.py`'s binding helper, which needs the
     platform user id explicitly, exactly as `bind_session` did to build the
     original recorder.
+
+    `deadline`/`now` bound the WHOLE body -- first attempt, recovery setup,
+    and the recovery re-run -- against the per-turn ceiling (D-08/D-09).
+    `deadline=None` is fail-safe, not off: it computes
+    `turn_deadline(now=now())` so a caller that never passes a deadline is
+    still ceiling-covered. On breach: the mapping id the FINAL attempt was
+    running against (tracked as it moves through recovery) is marked dead
+    (D-09, relocated from Discord's `_retire_deadlocked_turn`) so the next
+    mention does not bind the same wedged session, the caller's own
+    `lifecycle.on_terminal_failure` is invoked directly (the driver's
+    finalizers never ran, so nothing else would render this), and a
+    `RunOutcome` carrying `state.error.kind == "ceiling"` is returned rather
+    than raised -- adapters take their existing `state.error is not None`
+    branch with no new code. D-10: this can never be misread as a dead-session
+    signal (`_is_dead_session` gates on `kind == "upstream"`), so a ceiling
+    breach can never loop into a second wall-clock-priced attempt.
     """
-    ma_session_id = prepared.ma_session_id
-    mapping_id = prepared.mapping_id
+    effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
 
-    first_attempt = _DeferredFailureLifecycle(inner=lifecycle)
-    state = await run_turn(
-        anthropic=deps.anthropic,
-        session_id=ma_session_id,
-        user_message=user_message,
-        lifecycle=first_attempt,
-        cancel=cancel,
-        render_interval_s=render_interval_s,
-        billing=Billed(record=prepared._record),  # pyright: ignore[reportPrivateUsage]
-        image_blocks=image_blocks,
-    )
+    # Tracks the session/mapping id (and whether recovery has taken over) the
+    # FINAL attempt is running against, updated by `_run` the instant recovery
+    # recreates -- so a ceiling breach mid-recovery marks the NEW mapping dead,
+    # not the stale one already marked dead by the ordinary recovery cycle.
+    active_session_id_cell: list[str] = [prepared.ma_session_id]
+    active_mapping_id_cell: list[uuid.UUID | None] = [prepared.mapping_id]
+    recovered_cell: list[bool] = [False]
 
-    if not (_is_dead_session(state) and mapping_id is not None):
-        await first_attempt.flush_held_failure()
-        return RunOutcome(
-            state=state,
-            ma_session_id=ma_session_id,
-            mapping_id=mapping_id,
-            recovered=False,
-        )
+    async def _run() -> RunOutcome:
+        ma_session_id = prepared.ma_session_id
+        mapping_id = prepared.mapping_id
 
-    # If recovery itself blows up, the withheld failure is the only thing the
-    # user would ever see -- without this the embed sits on "thinking" forever,
-    # which is the exact failure mode this module exists to prevent. Re-raise:
-    # the caller still needs to know recovery broke.
-    try:
-        async with deps.sessionmaker() as session:
-            await mark_dead(session, id=mapping_id)
-            await session.commit()
-
-        new_session_id, new_mapping_id = await create_fresh_session(
-            deps,
-            prepared.admission,
-            tenant_id=tenant_id,
-            platform=platform,
-            thread_id=thread_id,
-            session_account_id=prepared.session_account_id,
-        )
-
-        new_record = bind_recorder(
-            deps,
-            prepared.admission,
-            tenant_id=tenant_id,
-            external_user_id=external_user_id,
-            ma_session_id=new_session_id,
-        )
-
-        log.info(
-            "turn.session_recovered",
-            old_session_id=ma_session_id,
-            new_session_id=new_session_id,
-            old_mapping_id=str(mapping_id),
-            new_mapping_id=str(new_mapping_id),
-            thread_id=thread_id,
-        )
-
-        reseeded_message = await reseed_user_message()
-        fresh_cancel = asyncio.Event()
-        new_lifecycle = recovery_lifecycle(fresh_cancel)
-
-        recovered_state = await run_turn(
+        first_attempt = _DeferredFailureLifecycle(inner=lifecycle)
+        state = await run_turn(
             anthropic=deps.anthropic,
-            session_id=new_session_id,
-            user_message=reseeded_message,
-            lifecycle=new_lifecycle,
-            cancel=fresh_cancel,
+            session_id=ma_session_id,
+            user_message=user_message,
+            lifecycle=first_attempt,
+            cancel=cancel,
             render_interval_s=render_interval_s,
-            billing=Billed(record=new_record),
+            billing=Billed(record=prepared._record),  # pyright: ignore[reportPrivateUsage]
             image_blocks=image_blocks,
         )
-    except Exception:
-        await first_attempt.flush_held_failure()
-        raise
 
-    return RunOutcome(
-        state=recovered_state,
-        ma_session_id=new_session_id,
-        mapping_id=new_mapping_id,
-        recovered=True,
-    )
+        if not (_is_dead_session(state) and mapping_id is not None):
+            await first_attempt.flush_held_failure()
+            return RunOutcome(
+                state=state,
+                ma_session_id=ma_session_id,
+                mapping_id=mapping_id,
+                recovered=False,
+            )
+
+        # If recovery itself blows up, the withheld failure is the only thing
+        # the user would ever see -- without this the embed sits on "thinking"
+        # forever, which is the exact failure mode this module exists to
+        # prevent. Re-raise: the caller still needs to know recovery broke.
+        try:
+            async with deps.sessionmaker() as session:
+                await mark_dead(session, id=mapping_id)
+                await session.commit()
+
+            new_session_id, new_mapping_id = await create_fresh_session(
+                deps,
+                prepared.admission,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                session_account_id=prepared.session_account_id,
+            )
+            active_session_id_cell[0] = new_session_id
+            active_mapping_id_cell[0] = new_mapping_id
+            recovered_cell[0] = True
+
+            new_record = bind_recorder(
+                deps,
+                prepared.admission,
+                tenant_id=tenant_id,
+                external_user_id=external_user_id,
+                ma_session_id=new_session_id,
+            )
+
+            log.info(
+                "turn.session_recovered",
+                old_session_id=ma_session_id,
+                new_session_id=new_session_id,
+                old_mapping_id=str(mapping_id),
+                new_mapping_id=str(new_mapping_id),
+                thread_id=thread_id,
+            )
+
+            reseeded_message = await reseed_user_message()
+            fresh_cancel = asyncio.Event()
+            new_lifecycle = recovery_lifecycle(fresh_cancel)
+
+            recovered_state = await run_turn(
+                anthropic=deps.anthropic,
+                session_id=new_session_id,
+                user_message=reseeded_message,
+                lifecycle=new_lifecycle,
+                cancel=fresh_cancel,
+                render_interval_s=render_interval_s,
+                billing=Billed(record=new_record),
+                image_blocks=image_blocks,
+            )
+        except Exception:
+            await first_attempt.flush_held_failure()
+            raise
+
+        return RunOutcome(
+            state=recovered_state,
+            ma_session_id=new_session_id,
+            mapping_id=new_mapping_id,
+            recovered=True,
+        )
+
+    try:
+        return await asyncio.wait_for(_run(), timeout=remaining_s(effective_deadline, now=now()))
+    except TimeoutError:
+        active_session_id = active_session_id_cell[0]
+        active_mapping_id = active_mapping_id_cell[0]
+        recovered = recovered_cell[0]
+        err = ceiling_error()
+
+        log.error(
+            "turn.ceiling_exceeded",
+            phase="run_prepared_turn",
+            session_id=active_session_id,
+            mapping_id=str(active_mapping_id) if active_mapping_id is not None else None,
+            thread_id=thread_id,
+            platform=platform,
+            deadline=effective_deadline.isoformat(),
+        )
+
+        if active_mapping_id is not None:
+            async with deps.sessionmaker() as session:
+                await mark_dead(session, id=active_mapping_id)
+                await session.commit()
+
+        try:
+            await lifecycle.on_terminal_failure(TurnState(error=err), err)
+        except Exception as render_err:
+            # Rendering is delivery, not correctness -- a broken adapter hook
+            # must not mask the ceiling error itself.
+            log.warning("turn.ceiling_render_failed", error=str(render_err))
+
+        return RunOutcome(
+            state=TurnState(error=err),
+            ma_session_id=active_session_id,
+            mapping_id=active_mapping_id,
+            recovered=recovered,
+        )

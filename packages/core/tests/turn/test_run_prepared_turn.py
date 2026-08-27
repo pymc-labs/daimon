@@ -7,10 +7,11 @@ recorder, and on an upstream 404 with a live mapping row, mark-dead + recreate
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -887,3 +888,278 @@ async def test_unrecovered_failure_is_still_delivered_to_the_caller(
     assert len(caller_lifecycle.terminal_failures) == 1, (
         "a turn that is not recovered must still deliver its failure exactly once"
     )
+
+
+async def test_ceiling_breach_on_first_attempt_returns_ceiling_error_and_marks_mapping_dead(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-ceiling-first",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids=set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    caller_lifecycle = RecordingLifecycle()
+    past_deadline = datetime.now(UTC) - timedelta(seconds=5)
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-ceiling-first",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=caller_lifecycle,
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        deadline=past_deadline,
+    )
+
+    assert outcome.state.error is not None
+    assert outcome.state.error.kind == "ceiling"
+    assert outcome.recovered is False, "a first-attempt breach never entered recovery"
+    assert outcome.mapping_id == row.id, "must report the originally prepared mapping id"
+    assert outcome.ma_session_id == "sess_1"
+    assert len(session_bodies) == 0, "a first-attempt breach must never call create_session"
+    assert len(caller_lifecycle.terminal_failures) == 1, (
+        "on_terminal_failure must be delivered exactly once on the caller's own lifecycle"
+    )
+    assert caller_lifecycle.terminal_failures[0][1].kind == "ceiling"  # type: ignore[attr-defined]
+
+    async with db_session_factory() as s:
+        live = await get_live_thread_session(
+            s,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-ceiling-first",
+            account_id=account.id,
+        )
+    assert live is None, "a ceiling breach must mark the mapping dead (no longer live)"
+
+
+async def test_ceiling_breach_during_recovery_marks_the_new_mapping_dead_not_the_old_one(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """First attempt returns a dead-session 404, so recovery recreates a new
+    session/mapping; the ceiling then breaches inside the recovery run_turn
+    call itself. The NEW mapping must be marked dead, not the stale one the
+    ordinary recovery cycle already marked dead on its own."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-ceiling-recovery",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+
+    # The first attempt's 404 and the recreate are cheap in-process/DB calls;
+    # the SECOND run_turn call's stream open is the one deliberately slowed
+    # down (real asyncio.sleep, not a past deadline) so the ceiling breaches
+    # specifically inside the recovery attempt rather than the first one.
+    # create_fresh_session always allocates the router's next sequential id,
+    # and this is the router's only create_session call in this test, so the
+    # recreated session id is deterministically "sess_1".
+    async def _slow_stream_for_recovered_session(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/sessions/sess_1/events/stream":
+            await asyncio.sleep(1.0)
+        return router.dispatch(request)
+
+    transport = httpx.MockTransport(_slow_stream_for_recovered_session)
+    http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        anthropic=anthropic.AsyncAnthropic(api_key="test", http_client=http_client),
+    )
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    deadline = datetime.now(UTC) + timedelta(seconds=0.2)
+
+    caller_lifecycle = RecordingLifecycle()
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-ceiling-recovery",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=caller_lifecycle,
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        deadline=deadline,
+    )
+
+    assert outcome.state.error is not None
+    assert outcome.state.error.kind == "ceiling"
+    assert len(session_bodies) == 1, "recovery must still have created exactly one new session"
+    assert outcome.mapping_id != row.id, "the reported mapping id must be the NEW one"
+    assert outcome.ma_session_id != "sess_old", "the reported session id must be the NEW one"
+
+    async with db_session_factory() as s:
+        old_live = await get_live_thread_session(
+            s,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-ceiling-recovery",
+            account_id=account.id,
+        )
+    assert old_live is None, (
+        "the NEW mapping must be marked dead too (get_live_thread_session excludes both)"
+    )
+
+
+async def test_ceiling_breach_never_triggers_dead_session_recovery(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """D-10 / T-19-03-B pin: a ceiling breach must never be mistaken for a
+    dead-session (404) signal, which would re-run a 45-minute turn as a fresh
+    one -- create_fresh_session must be called zero times on a first-attempt
+    ceiling breach."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-ceiling-no-loop",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids=set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    past_deadline = datetime.now(UTC) - timedelta(seconds=5)
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-ceiling-no-loop",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        deadline=past_deadline,
+    )
+
+    assert outcome.recovered is False
+    assert len(session_bodies) == 0, "a ceiling error must never trigger create_fresh_session"
+
+
+async def test_run_prepared_turn_default_deadline_none_still_succeeds_on_the_happy_path(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression pin: deadline=None must not change happy-path behavior."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-ceiling-default-none",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids=set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-ceiling-default-none",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert outcome.recovered is False
+    assert outcome.state.error is None
+    assert outcome.ma_session_id == "sess_1"
+    assert outcome.mapping_id == row.id
