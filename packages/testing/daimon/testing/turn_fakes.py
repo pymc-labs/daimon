@@ -26,8 +26,12 @@ from typing import Any
 import anthropic
 import httpx
 from anthropic.types import RawMessageStreamEvent
+from anthropic.types.beta import BetaManagedAgentsSession
+from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
+from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.state import TurnState
+from daimon.testing.ma import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
 
 # --- Stream scripts --------------------------------------------------------
 
@@ -88,8 +92,41 @@ class BlockForever:
     """
 
 
+@dataclass
+class RaiseReadTimeout:
+    """Stream step: raise the raw httpx error a mid-body read stall produces.
+
+    The SDK does NOT wrap this one: body iteration in `anthropic/_streaming.py`
+    has no exception translation, so it escapes raw to the driver's
+    `__anext__()` — the same shape as `RaiseStreamDrop`.
+    """
+
+    message: str = "The read operation timed out"
+
+
+@dataclass
+class DelayThenYield:
+    """Stream step: `await asyncio.sleep(seconds)` then yield `event`.
+
+    Used to prove the render loop keeps ticking while the consume loop
+    awaits a slow next-event, and to order a cancel against an in-flight
+    open/send. Compose with `RaiseReadTimeout` in a script (rather than a
+    dedicated `DelayThenRaiseReadTimeout` action) to delay-then-timeout.
+    """
+
+    seconds: float
+    event: Any
+
+
 StreamAction = (
-    YieldEvent | RaiseConnection | RaiseStreamDrop | RaiseStatus | RaiseRateLimit | BlockForever
+    YieldEvent
+    | RaiseConnection
+    | RaiseStreamDrop
+    | RaiseStatus
+    | RaiseRateLimit
+    | BlockForever
+    | RaiseReadTimeout
+    | DelayThenYield
 )
 
 
@@ -102,23 +139,34 @@ class FakeEventsResource:
     - `replay_events` is the full event history returned by `list(...)`.
     - `sent_events` records every `events.send(...)` payload (for
       interrupt assertions).
+    - `stream_timeouts` records the per-call `timeout` kwarg the driver
+      passed to `stream(...)`, in call order (including the `RaiseRateLimit`
+      open-time-error path, recorded before the raise).
+    - `streams` records every `_FakeEventStream` handed out, so a test can
+      assert `streams[0].closed` after the driver abandons a stream it
+      opened.
     """
 
     stream_scripts: list[list[StreamAction]] = field(default_factory=list)
     replay_events: list[Any] = field(default_factory=list)
     sent_events: list[tuple[str, list[dict[str, Any]]]] = field(default_factory=list)
     stream_calls: int = 0
+    stream_timeouts: list[Any] = field(default_factory=list[Any])
+    streams: list[_FakeEventStream] = field(default_factory=list["_FakeEventStream"])
 
-    async def stream(self, *, session_id: str) -> _FakeEventStream:
+    async def stream(self, *, session_id: str, timeout: Any = None) -> _FakeEventStream:
         if not self.stream_scripts:
             raise AssertionError("FakeEventsResource: no stream_scripts left")
         script = self.stream_scripts.pop(0)
         self.stream_calls += 1
+        self.stream_timeouts.append(timeout)
         # RaiseRateLimit fires at open-time
         if script and isinstance(script[0], RaiseRateLimit):
             await asyncio.sleep(0)  # let cancel checks observe the schedule
             raise _make_rate_limit_error(script[0].retry_after_seconds)
-        return _FakeEventStream(script)
+        fake_stream = _FakeEventStream(script)
+        self.streams.append(fake_stream)
+        return fake_stream
 
     def list(self, *, session_id: str) -> _FakeEventList:
         return _FakeEventList(list(self.replay_events))
@@ -130,9 +178,19 @@ class FakeEventsResource:
 class _FakeEventStream:
     def __init__(self, script: list[StreamAction]) -> None:
         self._script = script
+        self.closed: bool = False
 
     def __aiter__(self) -> AsyncIterator[Any]:
         return self._iter()
+
+    async def close(self) -> None:
+        """Track whether the driver closed a stream it opened.
+
+        The cancel-coverage plan asserts the driver closes a stream it opened
+        but abandoned (e.g. on interrupt or reconnect), rather than leaking
+        the underlying connection.
+        """
+        self.closed = True
 
     async def _iter(self) -> AsyncIterator[Any]:
         for step in self._script:
@@ -148,6 +206,11 @@ class _FakeEventStream:
                 await asyncio.Event().wait()  # never resolves
             elif isinstance(step, RaiseRateLimit):
                 raise AssertionError("RaiseRateLimit must be first step only")
+            elif isinstance(step, RaiseReadTimeout):
+                raise httpx.ReadTimeout(step.message, request=_make_request())
+            else:
+                await asyncio.sleep(step.seconds)
+                yield step.event
 
 
 class _FakeEventList:
@@ -162,9 +225,68 @@ class _FakeEventList:
             yield e
 
 
+def _make_session(*, session_id: str, status: str) -> BetaManagedAgentsSession:
+    """Build a real `BetaManagedAgentsSession` with fixed, obviously-fake
+    values, via the SDK's own validated Pydantic construction -- see
+    `guideline:testing`'s validated-construction rule for why unvalidated
+    shortcuts are banned here."""
+    now = datetime(2026, 1, 1)
+    return BetaManagedAgentsSession(
+        id=session_id,
+        type="session",
+        status=status,  # pyright: ignore[reportArgumentType]
+        agent=BetaManagedAgentsSessionAgent(
+            id="agent_fake",
+            type="agent",
+            name="fake-agent",
+            model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
+            mcp_servers=[],
+            skills=[],
+            tools=[],
+            version=1,
+        ),
+        environment_id="env_fake",
+        created_at=now,
+        updated_at=now,
+        metadata={},
+        outcome_evaluations=[],
+        resources=[],
+        stats=EMPTY_SESSION_STATS,
+        usage=EMPTY_SESSION_USAGE,
+        vault_ids=[],
+    )
+
+
 @dataclass
 class FakeSessionsBeta:
+    """Stand-in for `client.beta.sessions`.
+
+    - `retrieve_statuses` is a queue: each call to `retrieve(...)` pops one
+      status. Empty queue raises `AssertionError` naming the unexpected
+      extra call, rather than defaulting -- a silent default status would
+      hide a driver bug where it checks status more often than the test
+      intends.
+    - `retrieve_calls` records the session ids the driver checked, in order.
+    - `retrieve_raises`, when set, makes `retrieve` raise it instead of
+      returning -- drives the "status check itself errors" path.
+    """
+
     events: FakeEventsResource = field(default_factory=FakeEventsResource)
+    retrieve_statuses: list[str] = field(default_factory=list[str])
+    retrieve_calls: list[str] = field(default_factory=list[str])
+    retrieve_raises: Exception | None = None
+
+    async def retrieve(self, session_id: str) -> BetaManagedAgentsSession:
+        self.retrieve_calls.append(session_id)
+        if self.retrieve_raises is not None:
+            raise self.retrieve_raises
+        if not self.retrieve_statuses:
+            raise AssertionError(
+                f"FakeSessionsBeta.retrieve: no retrieve_statuses left "
+                f"(unexpected extra status check for session_id={session_id!r})"
+            )
+        status = self.retrieve_statuses.pop(0)
+        return _make_session(session_id=session_id, status=status)
 
 
 @dataclass
