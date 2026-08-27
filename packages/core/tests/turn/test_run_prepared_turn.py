@@ -18,6 +18,7 @@ from pathlib import Path
 import anthropic
 import httpx
 import pytest
+from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from daimon.core.config import McpSettings
@@ -29,7 +30,7 @@ from daimon.core.stores import usage_events
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.prepare import PreparedTurn, bind_recorder
 from daimon.core.turn.run import _is_dead_session, run_prepared_turn
 from daimon.core.turn.state import TurnState
@@ -231,6 +232,45 @@ def _recovery_lifecycle(_cancel: asyncio.Event) -> RecordingLifecycle:
     return RecordingLifecycle()
 
 
+class _AlwaysRaisingRenderLifecycle:
+    """`on_render` always raises; every other hook forwards to an inner
+    `RecordingLifecycle` so terminal-hook firing is still observable.
+
+    Used to prove the driver's per-tick render error policy composes
+    cleanly with D-08 recovery: a render failure inside the recovery
+    turn's own render loop must not derail `run_prepared_turn`'s outcome
+    -- `on_render`'s exceptions are swallowed inside `run_turn`'s render
+    loop itself, long before `run_prepared_turn`'s own error handling
+    could ever see them.
+    """
+
+    def __init__(self) -> None:
+        self.inner = RecordingLifecycle()
+        self.render_calls = 0
+
+    async def on_render(self, state: TurnState) -> None:
+        self.render_calls += 1
+        raise RuntimeError("adapter render boom")
+
+    async def on_terminal_success(self, state: TurnState) -> None:
+        await self.inner.on_terminal_success(state)
+
+    async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
+        await self.inner.on_terminal_failure(state, err)
+
+    async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
+        await self.inner.on_sse_event(event)
+
+    async def on_reconnect(self, reason: ReconnectReason) -> None:
+        await self.inner.on_reconnect(reason)
+
+    async def on_rate_limited(self, until: datetime | None) -> None:
+        await self.inner.on_rate_limited(until)
+
+    async def on_interrupt_sent(self, source: InterruptSource) -> None:
+        await self.inner.on_interrupt_sent(source)
+
+
 async def test_happy_path_runs_once_and_returns_recovered_false(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -358,6 +398,77 @@ async def test_dead_session_recovers_once_and_rebinds_recorder(
     # is never invoked by run_turn itself -- assert the REBOUND recorder,
     # once invoked directly, writes against the NEW session id (not the old).
     assert len(rows) == 0, "no span.model_request_end event fired during either run"
+
+
+async def test_render_failure_during_recovery_does_not_prevent_recovery(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Plan 19-06's per-tick render error policy composes cleanly with D-08
+    recovery. Note on scoping: the doomed FIRST attempt in this scenario
+    404s directly at stream-open (see `_router`'s `dead_session_ids`
+    handling), so it never calls `on_render` at all -- there is nothing
+    for `_DeferredFailureLifecycle` to hold back. The render failure this
+    test exercises is inside the RECOVERY turn's own render loop instead,
+    reached via the `recovery_lifecycle` factory `run_prepared_turn` calls
+    once recovery starts.
+    """
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-render-fail",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = _agent(agent_id="ag_1", tenant_id=tenant.id)
+    env = _env(env_id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    recovery_lc = _AlwaysRaisingRenderLifecycle()
+
+    def _raising_recovery_lifecycle(_cancel: asyncio.Event) -> TurnLifecycle:
+        return recovery_lc
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-render-fail",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_raising_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert outcome.recovered is True, (
+        "a render failure inside the recovery turn's own render loop must "
+        "not prevent run_prepared_turn from reporting a successful recovery"
+    )
+    assert outcome.state.error is None, "the recovered re-run completes cleanly"
+    assert recovery_lc.render_calls >= 1, "on_render must have been attempted (and failed)"
+    assert len(recovery_lc.inner.terminal_success) == 1, (
+        "terminal hooks must still fire despite every render attempt failing"
+    )
 
 
 async def test_dead_session_recorder_rebind_targets_new_session_id(

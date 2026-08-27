@@ -261,6 +261,7 @@ async def _pump(
     state_cell: list[TurnState] = [seed_state]
     prev_cell: list[TurnState] = [render_anchor]
     events_folded_cell: list[int] = [0]
+    renders_failed_cell: list[int] = [0]
 
     from daimon.core.turn.render import diff as _diff  # local import to avoid cycles
 
@@ -268,7 +269,31 @@ async def _pump(
         delta = _diff(prev_cell[0], state)
         if delta.is_empty():
             return
-        await lifecycle.on_render(state)
+        # Named boundary (guideline:architecture): rendering is delivery,
+        # not correctness, and the adapter exceptions it must survive are
+        # open-ended (discord.HTTPException, Slack API errors, whatever a
+        # future adapter raises). `Exception`, not `BaseException` --
+        # CancelledError must still propagate so the render task stays
+        # cancellable; `_suppress_task_exc()` remains the sole
+        # BaseException drain site in this module.
+        #
+        # On failure: log and return WITHOUT advancing `prev_cell[0]`. The
+        # next tick re-diffs from the unchanged anchor and naturally
+        # retries the identical delta -- no retry counter, no backoff, no
+        # extra state. This function always returns `None` either way, and
+        # every finalizer proceeds to its `on_terminal_*` call regardless,
+        # so a render failure can never change the turn's own outcome.
+        try:
+            await lifecycle.on_render(state)
+        except Exception as err:
+            renders_failed_cell[0] += 1
+            log.warning(
+                "turn.render_failed",
+                session_id=session_id,
+                error_type=type(err).__name__,
+                error=str(err),
+            )
+            return
         prev_cell[0] = state
 
     async def _render_loop() -> None:
@@ -367,6 +392,7 @@ async def _pump(
                 render_once=_render_once,
                 session_id=session_id,
                 phase=err.phase,
+                renders_failed=renders_failed_cell[0],
             )
         except _InterruptInConsume:
             await _cancel_render()
@@ -377,6 +403,7 @@ async def _pump(
                 lifecycle=lifecycle,
                 render_once=_render_once,
                 interrupt_timeout_s=interrupt_timeout_s,
+                renders_failed=renders_failed_cell[0],
             )
         except _CONNECTION_LOST as err:
             # tenacity exhausted with reraise=True.
@@ -387,6 +414,7 @@ async def _pump(
                 render_once=_render_once,
                 session_id=session_id,
                 err=err,
+                renders_failed=renders_failed_cell[0],
             )
         except _anthropic.RateLimitError as err:
             await _cancel_render()
@@ -399,6 +427,7 @@ async def _pump(
                 err=err,
                 rate_limit_until=rate_limit[0] if rate_limit else None,
                 retry_after_s=rate_limit[1] if rate_limit else None,
+                renders_failed=renders_failed_cell[0],
             )
         except _anthropic.APIError as err:
             await _cancel_render()
@@ -410,6 +439,7 @@ async def _pump(
                 err=err,
                 rate_limit_until=None,
                 retry_after_s=None,
+                renders_failed=renders_failed_cell[0],
             )
 
         # Normal termination path.
@@ -420,6 +450,7 @@ async def _pump(
             render_once=_render_once,
             session_id=session_id,
             events_folded=events_folded_cell[0],
+            renders_failed=renders_failed_cell[0],
         )
     finally:
         if not render_task.done():
@@ -609,6 +640,7 @@ async def _finalize_success_or_error(
     render_once: RenderOnce,
     session_id: str,
     events_folded: int,
+    renders_failed: int,
 ) -> TurnState:
     final_state = state_cell[0]
     if (
@@ -638,6 +670,7 @@ async def _finalize_success_or_error(
             session_id=session_id,
             turn_error_kind=final_state.error.kind,
             error=final_state.error.message,
+            renders_failed=renders_failed,
         )
         await lifecycle.on_terminal_failure(final_state, final_state.error)
     else:
@@ -646,6 +679,7 @@ async def _finalize_success_or_error(
             session_id=session_id,
             stop_reason_type=(final_state.stop_reason.type if final_state.stop_reason else None),
             events_folded=events_folded,
+            renders_failed=renders_failed,
         )
         await lifecycle.on_terminal_success(final_state)
     return final_state
@@ -658,6 +692,7 @@ async def _finalize_connection_lost(
     render_once: RenderOnce,
     session_id: str,
     err: Exception,
+    renders_failed: int,
 ) -> TurnState:
     turn_err = TurnError(kind="connection_lost", message=str(err), cause=err)
     state_cell[0] = dataclasses.replace(state_cell[0], error=turn_err, stop_reason=None)
@@ -668,6 +703,7 @@ async def _finalize_connection_lost(
         session_id=session_id,
         turn_error_kind="connection_lost",
         error=str(err),
+        renders_failed=renders_failed,
     )
     await lifecycle.on_terminal_failure(state_cell[0], turn_err)
     return state_cell[0]
@@ -682,6 +718,7 @@ async def _finalize_upstream(
     err: Exception,
     rate_limit_until: datetime | None,
     retry_after_s: float | None,
+    renders_failed: int,
 ) -> TurnState:
     turn_err = TurnError(kind="upstream", message=str(err), cause=err)
     state_cell[0] = dataclasses.replace(
@@ -696,6 +733,7 @@ async def _finalize_upstream(
         session_id=session_id,
         turn_error_kind="upstream",
         error=str(err),
+        renders_failed=renders_failed,
     )
     if rate_limit_until is not None:
         log.warning(
@@ -716,6 +754,7 @@ async def _finalize_interrupted(
     render_once: RenderOnce,
     session_id: str,
     phase: InterruptPhase,
+    renders_failed: int,
 ) -> TurnState:
     log.info("turn.interrupt.during_reconnect", session_id=session_id, phase=phase)
     turn_err = TurnError(kind="interrupted", message=f"interrupted during {phase}")
@@ -726,6 +765,7 @@ async def _finalize_interrupted(
         session_id=session_id,
         turn_error_kind="interrupted",
         error=turn_err.message,
+        renders_failed=renders_failed,
     )
     await lifecycle.on_terminal_failure(state_cell[0], turn_err)
     return state_cell[0]
@@ -739,6 +779,7 @@ async def _handle_interrupt_in_consume(
     lifecycle: TurnLifecycle,
     render_once: RenderOnce,
     interrupt_timeout_s: float,
+    renders_failed: int,
 ) -> TurnState:
     """Normal-flow interrupt: post user.interrupt, wait for terminal idle,
     route to on_terminal_success on ack or on_terminal_failure on timeout.
@@ -764,6 +805,7 @@ async def _handle_interrupt_in_consume(
             session_id=session_id,
             turn_error_kind=err.kind,
             error=err.message,
+            renders_failed=renders_failed,
         )
         await lifecycle.on_terminal_failure(state_cell[0], err)
         return state_cell[0]
@@ -778,6 +820,7 @@ async def _handle_interrupt_in_consume(
         session_id=session_id,
         stop_reason_type=(state_cell[0].stop_reason.type if state_cell[0].stop_reason else None),
         events_folded=None,
+        renders_failed=renders_failed,
     )
     await lifecycle.on_terminal_success(state_cell[0])
     return state_cell[0]
