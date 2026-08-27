@@ -518,6 +518,40 @@ async def test_read_channel_discord_caller_rejects_slack_cursor_param(
 
 
 @pytest.mark.asyncio
+async def test_read_thread_slack_caller_rejects_discord_before_param(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A Slack caller passing before to read_thread gets a ToolError — Slack
+    threads have no pagination, so dropping it would replay page 1 as a sweep."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="slack-thread-before")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session,
+        platform="slack",
+        external_id="U_SLACK_CALLER",
+        tenant=tenant,
+        account=account,
+    )
+    await db_session.commit()
+    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    app = _make_app(sessionmaker)
+
+    call_result = await _call_tool(
+        app,
+        token=token,
+        tool_name="read_thread",
+        arguments={"thread_id": "C_TEST:1717171717.123456", "before": "1000"},
+    )
+
+    assert call_result.get("isError") is True
+    output_text = _output_text(call_result)
+    assert "before is Discord-only" in output_text, (
+        f"Slack caller's before param must be rejected, not dropped; got {output_text!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_create_thread_slack_caller_routes_to_slack_impl_and_fails_on_missing_crypto(
     db_session: AsyncSession,
     sessionmaker: async_sessionmaker[AsyncSession],

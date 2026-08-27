@@ -110,11 +110,14 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Discord: thread_id is the thread's channel id; use before for older messages.
         Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456);
-        before is ignored. At most 15 messages per call, from the thread root;
-        has_more=true means the newest replies were not returned.
+        before is rejected — Slack threads read one page of at most 15 messages
+        from the thread root, and has_more=true means the newest replies were
+        not returned.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
+            if before is not None:
+                raise ToolError("before is Discord-only — slack read_thread has no pagination")
             return await _slack_read_thread_impl(runtime, auth, thread_id=thread_id, limit=limit)
         return await _read_thread_impl(
             runtime, auth, thread_id=thread_id, limit=limit, before=before
