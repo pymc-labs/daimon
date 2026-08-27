@@ -96,6 +96,15 @@ class DiscordTurnLifecycle:
     Receives SSE events, accumulates embed state, debounces Discord API calls.
     send and edit callables are injected so the class is testable without
     a real discord.py connection.
+
+    D-11: the embed flush (``_maybe_flush``) rides ``on_render``, not
+    ``on_sse_event`` -- the pump awaits ``on_sse_event`` inline, so a slow or
+    rate-limited Discord edit there would stall the whole consume loop
+    (deadening Cancel and blurring the read-timeout clock). Moving it to
+    ``on_render`` costs at most one render tick (~2s) of first-update
+    latency, which the existing 10s debounce already dominates; accepted
+    as-is with no tuning. Terminal flushes (``_flush_terminal``) bypass both
+    paths and are unaffected.
     """
 
     def __init__(
@@ -146,19 +155,24 @@ class DiscordTurnLifecycle:
     async def post_initial(self) -> None:
         """Post the initial thinking embed immediately, before the turn starts.
 
-        Called before session setup so the user gets instant feedback —
+        Called before session setup so the user gets instant feedback --
         MA sessions.create can hold its response for minutes while it
-        provisions the session. The posted message becomes the lifecycle's
-        message ref, so subsequent SSE flushes edit it in place.
+        provisions the session. Runs before the turn starts (and therefore
+        before any render tick exists), so this is the one place that
+        deliberately flushes directly instead of waiting on `on_render`.
         """
         await self._maybe_flush()
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
+        # Cheap local tap per the hardened TurnLifecycle contract (D-11):
+        # the pump awaits this hook inline, so it stays a local reducer
+        # call only. The embed flush (chat-API I/O) rides the render tick
+        # instead, where a slow or rate-limited edit only delays the
+        # render task, never the consume loop.
         embed_event = _map_sse_event(event)
         if embed_event is None:
             return
         self._state = update(self._state, embed_event)
-        await self._maybe_flush()
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
         """Render the activity embed plus the optional text-preview embed below it."""
@@ -278,11 +292,13 @@ class DiscordTurnLifecycle:
         log.warning("turn.terminal_failure", error=str(err))
 
     async def on_render(self, state: TurnState) -> None:
-        # Embed state is driven by on_sse_event and terminal hooks;
-        # render ticks only flush sealed answers so they land near-live.
+        # Sole delivery path (D-11). Sealed answers first, then the embed
+        # flush -- matches on_terminal_success's existing order, so a sealed
+        # answer never trails behind an embed that already moved past it.
         if self._terminal:
             return
         await self._persist_sealed_responses(state)
+        await self._maybe_flush()
 
     async def on_reconnect(self, reason: ReconnectReason) -> None:
         pass
