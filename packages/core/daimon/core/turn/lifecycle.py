@@ -13,7 +13,14 @@ Seven hooks:
   on_sse_event           — upstream Anthropic SSE event, verbatim, before
                            the reducer folds it into state. Default no-op.
   on_reconnect           — driver reconnected to an in-flight session.
-                           Default no-op.
+                           Default no-op. `reason` names the cause:
+                           `connection_dropped` = error-path reconnect under
+                           the bounded 2-attempt retry budget;
+                           `clean_close` = the server ended the stream with
+                           no terminal event and the session is still
+                           running; `read_timeout` = no bytes for
+                           `stream_read_timeout_s` and the session is still
+                           running.
   on_rate_limited        — driver hit a 429 and is about to sleep.
                            Default no-op.
   on_interrupt_sent      — driver just posted user.interrupt to MA.
@@ -28,7 +35,7 @@ from typing import Literal, Protocol
 from anthropic.types import RawMessageStreamEvent
 from daimon.core.turn.state import TurnState
 
-ReconnectReason = Literal["connection_dropped"]
+ReconnectReason = Literal["connection_dropped", "clean_close", "read_timeout"]
 InterruptSource = Literal["sigint", "cancel_event"]
 
 

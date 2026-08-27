@@ -23,7 +23,7 @@ class SseEvent(_Envelope):
 
 class ReconnectEvent(_Envelope):
     kind: Literal["reconnect"] = "reconnect"
-    reason: Literal["connection_dropped"]
+    reason: Literal["connection_dropped", "clean_close", "read_timeout"]
 
 
 class RateLimitedEvent(_Envelope):

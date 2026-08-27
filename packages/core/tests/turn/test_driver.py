@@ -508,8 +508,8 @@ async def test_interrupt_during_reattach_raises_interrupted_without_user_interru
     cancel = asyncio.Event()
     original_stream = fa.beta.sessions.events.stream
 
-    async def _stream_triggering_cancel(*, session_id: str):
-        result = await original_stream(session_id=session_id)
+    async def _stream_triggering_cancel(*, session_id: str, timeout: object = None):
+        result = await original_stream(session_id=session_id, timeout=timeout)
         # Post-replay, post-reattach-open. The driver's next cancel-check
         # should observe this and raise `_InterruptedDuringRecovery(reattach)`.
         if fa.beta.sessions.events.stream_calls == 2:

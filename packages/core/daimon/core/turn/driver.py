@@ -44,6 +44,12 @@ InterruptPhase = Literal["pre-stream", "replay", "reattach"]
 # common "peer closed connection without sending complete message body"
 # case. Both mean the same thing to us (stream died, session still alive
 # server-side), so both take the reconnect-and-replay path.
+#
+# `httpx.ReadTimeout` is deliberately NOT in this tuple. A read stall is
+# handled as an eventless-cycle signal (see `_EventlessCycle` below), not a
+# connection error — the driver asks MA for the session's status before
+# deciding anything, so it does not consume the bounded 2-attempt retry
+# budget reserved for genuine connection loss.
 _CONNECTION_LOST = (_anthropic.APIConnectionError, httpx.RemoteProtocolError)
 
 # Guarded single-render: no-op if `diff(prev, state)` is empty; else calls
@@ -84,11 +90,23 @@ async def run_turn(
     cancel: asyncio.Event,
     render_interval_s: float = 0.05,
     interrupt_timeout_s: float = 120.0,
+    stream_read_timeout_s: float = 120.0,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     billing: BillingPosture,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
 ) -> TurnState:
     """Open the SSE stream, post the user message, and pump to terminal idle.
+
+    `stream_read_timeout_s` (default 120.0) is the per-call read timeout
+    passed to `events.stream(...)`. A wire probe found the server sending
+    `:keepalive` SSE comment frames every 30s on every connection from
+    connect; those bytes reset httpx's read clock even though the SDK's SSE
+    decoder drops comment lines before the driver ever sees them. 120s is
+    four missed keepalives — a genuinely dead socket — and the far more
+    common reconnect trigger is expected to be the server's ~600s clean
+    close, not this timeout. Both numbers are non-contractual measurements,
+    which is why this is an injectable param rather than a constant or an
+    env setting.
 
     Returns the final `TurnState`.
     """
@@ -116,6 +134,7 @@ async def run_turn(
         cancel=cancel,
         render_interval_s=render_interval_s,
         interrupt_timeout_s=interrupt_timeout_s,
+        stream_read_timeout_s=stream_read_timeout_s,
         now=now,
         entry="run",
         billing=billing,
@@ -133,6 +152,7 @@ async def _pump(
     cancel: asyncio.Event,
     render_interval_s: float,
     interrupt_timeout_s: float,
+    stream_read_timeout_s: float,
     now: Callable[[], datetime],
     entry: Literal["run", "resume"],
     billing: BillingPosture,
@@ -184,6 +204,7 @@ async def _pump(
                         cancel=cancel,
                         lifecycle=lifecycle,
                         billing=billing,
+                        stream_read_timeout_s=stream_read_timeout_s,
                     )
         except _InterruptedDuringRecovery as err:
             await _cancel_render()
@@ -285,6 +306,7 @@ async def _consume_with_reconnect(
     cancel: asyncio.Event,
     lifecycle: TurnLifecycle,
     billing: BillingPosture,
+    stream_read_timeout_s: float,
 ) -> None:
     """One attempt at the consume leg. On retry, replay + re-fold first."""
     if cancel.is_set():
@@ -304,7 +326,10 @@ async def _consume_with_reconnect(
             replayed=len(replayed),
         )
 
-    stream = await anthropic.beta.sessions.events.stream(session_id=session_id)
+    stream = await anthropic.beta.sessions.events.stream(
+        session_id=session_id,
+        timeout=httpx.Timeout(stream_read_timeout_s, connect=5.0),
+    )
     if cancel.is_set():
         raise _InterruptedDuringRecovery(phase="reattach")
 
