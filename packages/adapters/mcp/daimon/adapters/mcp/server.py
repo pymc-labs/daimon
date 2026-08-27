@@ -56,6 +56,7 @@ from daimon.adapters.mcp.uploads import build_upload_route
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
+from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
@@ -185,8 +186,13 @@ def create_mcp_app(
 
     effective_anthropic = anthropic
     if effective_anthropic is None:
+        # This client drives real turns (start_turn/continue_turn), so it
+        # needs the same retry budget every other adapter runtime passes --
+        # the SDK's own default of 2 is not enough to ride out a sustained
+        # provider overage (see MA_MAX_RETRIES's docstring).
         effective_anthropic = AsyncAnthropic(
-            api_key=effective_settings.anthropic.api_key.get_secret_value()
+            api_key=effective_settings.anthropic.api_key.get_secret_value(),
+            max_retries=MA_MAX_RETRIES,
         )
 
     effective_billing_config = billing_config
