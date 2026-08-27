@@ -621,6 +621,7 @@ def _make_orchestrate_app(
     *,
     max_concurrent_turns_per_tenant: int = 3,
     deployment_default: DeploymentDefault | None = None,
+    crypto_key: str | None = None,
 ) -> tuple[SlackApp, AsyncAnthropic]:
     """Build a SlackApp for orchestration tests.
 
@@ -632,9 +633,13 @@ def _make_orchestrate_app(
     ``deployment_default`` defaults to the seeded defaults/config.yaml values
     (agent "daimon", environment "default") so tests without scoped rows
     resolve the same tags a fresh deployment would.
+
+    ``crypto_key`` is None by default (matching the pre-existing behavior of
+    every caller of this helper); pass one when the test also drives
+    ``_handle_app_mention``, whose per-event token decrypt needs a real key.
     """
     settings = MagicMock()
-    settings.crypto.keys = ()
+    settings.crypto.keys = (SecretStr(crypto_key),) if crypto_key is not None else ()
     settings.slack.max_concurrent_turns_per_tenant = max_concurrent_turns_per_tenant
     settings.mcp.public_url = None
     # app_root_url=None short-circuits _maybe_post_connect_nudge (Task 11) — these
@@ -2602,6 +2607,224 @@ async def test_run_thread_turn_reused_session_unblocked_writes_usage_event_and_l
     ledger_rows = await tenant_ledger.list_for_tenant(db_session, tenant_id=tenant_id)
     assert len(ledger_rows) == 1, "unblocked reused-session turn must write one tenant_ledger debit"
     assert ledger_rows[0].delta_usd < 0, "the ledger row must be a debit (negative delta_usd)"
+
+
+# ---------------------------------------------------------------------------
+# Plan 19-10: one shared turn ceiling deadline threaded through both core calls
+# ---------------------------------------------------------------------------
+
+
+async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """`_run_thread_turn` computes exactly ONE `turn_deadline_at` after
+    admission and passes it as `deadline=` to BOTH `bind_session` and
+    `run_prepared_turn` -- a Slack turn must share one ~45-minute ceiling
+    window, not one per core call (T-19-10-A).
+
+    Wraps (does not stub) the two real core functions with a recording
+    side_effect that still delegates to the real implementation, so the
+    assertion below cannot pass against a stubbed-out turn -- the real
+    bind_session/run_prepared_turn bodies run exactly as they do in
+    production, only the `deadline` kwarg each receives is intercepted.
+    """
+    from daimon.core.turn.prepare import bind_session as real_bind_session
+    from daimon.core.turn.run import run_prepared_turn as real_run_prepared_turn
+
+    team_id = "T_ORCH_SHARED_DEADLINE"
+    channel = "C_TEST"
+    thread_ts = "9000000040.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+
+    app, _ = _make_orchestrate_app(db_session_factory)
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": thread_ts,
+        "event_ts": thread_ts,
+        "channel": channel,
+        "user": "U_TEST_SHARED_DEADLINE",
+        "text": "<@U_BOT> hello",
+    }
+
+    _now = datetime.now(UTC)
+    _agent_snapshot = BetaManagedAgentsSessionAgent(
+        id="agent_test_id",
+        mcp_servers=[],
+        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
+        name="test-agent",
+        skills=[],
+        tools=[],
+        type="agent",
+        version=1,
+    )
+    _fake_session = BetaManagedAgentsSession(
+        outcome_evaluations=[],
+        id="sess-shared-deadline",
+        agent=_agent_snapshot,
+        created_at=_now,
+        environment_id="env_test_id",
+        metadata={},
+        resources=[],
+        stats=BetaManagedAgentsSessionStats(),
+        status="idle",
+        type="session",
+        updated_at=_now,
+        usage=BetaManagedAgentsSessionUsage(),
+        vault_ids=[],
+    )
+
+    async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
+        state = TurnState(content=[TextBlock(kind="text", text="Hello!")])
+        await lifecycle.on_terminal_success(state)
+        return state
+
+    captured_deadlines: dict[str, datetime | None] = {}
+
+    async def _bind_session_wrapper(*args: Any, **kwargs: Any) -> Any:
+        captured_deadlines["bind"] = kwargs.get("deadline")
+        return await real_bind_session(*args, **kwargs)
+
+    async def _run_prepared_turn_wrapper(*args: Any, **kwargs: Any) -> Any:
+        captured_deadlines["run"] = kwargs.get("deadline")
+        return await real_run_prepared_turn(*args, **kwargs)
+
+    with (
+        patch(
+            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
+        ) as mock_resolve_agent,
+        patch(
+            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+        ) as mock_resolve_env,
+        patch(
+            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+        ) as mock_over_balance,
+        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch(
+            "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
+        ) as mock_create_session,
+        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+        patch(
+            "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
+        ) as mock_bind_session,
+        patch(
+            "daimon.adapters.slack.app.run_prepared_turn", new_callable=AsyncMock
+        ) as mock_run_prepared_turn,
+    ):
+        mock_resolve_agent.return_value = "agent_test_id"
+        mock_resolve_env.return_value = "env_test_id"
+        mock_over_balance.return_value = False
+        mock_over_cap.return_value = False
+        mock_create_session.return_value = _fake_session
+        mock_run_turn.side_effect = _fake_run_turn
+        mock_bind_session.side_effect = _bind_session_wrapper
+        mock_run_prepared_turn.side_effect = _run_prepared_turn_wrapper
+
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event,
+            team_id=team_id,
+            channel=channel,
+            event_ts=thread_ts,
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+    assert captured_deadlines.get("bind") is not None, (
+        "bind_session must receive a non-None deadline"
+    )
+    assert captured_deadlines.get("run") is not None, (
+        "run_prepared_turn must receive a non-None deadline"
+    )
+    assert captured_deadlines["bind"] == captured_deadlines["run"], (
+        "bind_session and run_prepared_turn must share ONE deadline value, "
+        "not two independent ~45-minute windows"
+    )
+    assert captured_deadlines["bind"] is captured_deadlines["run"], (
+        "the SAME deadline object must be threaded to both calls"
+    )
+
+
+async def test_run_thread_turn_bind_phase_ceiling_does_not_escape_handle_app_mention(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A `bind_session` ceiling breach (D-03/D-10) must surface through
+    Slack's EXISTING generic `DaimonError` boundary in `_handle_app_mention`
+    -- exactly one in-thread failure message is posted and no exception
+    escapes the background task. Pins that plan 19-03's new ceiling raise
+    site lands in Slack's existing boundary with zero new adapter
+    error-handling code (T-19-10-C). Reuses
+    `test_handle_app_mention_failure_posts_error_into_thread`'s harness
+    shape/assertions rather than inventing a second one.
+    """
+    from daimon.core.turn.ceiling import ceiling_error
+
+    team_id = "T_APP_MENTION_CEILING"
+    channel = "C_TEST"
+    thread_ts = "9000000041.000001"
+    fernet_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((fernet_key,))
+
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(fernet, "xoxb-ceiling"),
+    )
+    await db_session.flush()
+
+    app, _ = _make_orchestrate_app(db_session_factory, crypto_key=fernet_key)
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "channel": channel,
+        "event_ts": thread_ts,
+        "ts": thread_ts,
+        "thread_ts": thread_ts,
+        "user": "U_AUTHOR_CEILING",
+        "text": "<@U_BOT> hello",
+    }
+
+    with (
+        patch(
+            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
+        ) as mock_resolve_agent,
+        patch(
+            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+        ) as mock_resolve_env,
+        patch(
+            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+        ) as mock_over_balance,
+        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch(
+            "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
+        ) as mock_bind_session,
+    ):
+        mock_resolve_agent.return_value = "agent_test_id"
+        mock_resolve_env.return_value = "env_test_id"
+        mock_over_balance.return_value = False
+        mock_over_cap.return_value = False
+        mock_bind_session.side_effect = ceiling_error()
+
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+
+    posts = [
+        req
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == URL("https://slack.com/api/chat.postMessage")
+        for req in reqs
+    ]
+    assert len(posts) == 1, (
+        "a bind-phase ceiling breach must post exactly one in-thread failure message"
+    )
+    body = posts[0].kwargs["json"]
+    assert body["channel"] == channel
+    assert body["thread_ts"] == thread_ts, "the failure notice must land in the mention's thread"
 
 
 # ---------------------------------------------------------------------------

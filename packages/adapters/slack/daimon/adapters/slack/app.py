@@ -114,6 +114,7 @@ from daimon.core.stores.slack_turn_contexts import (
 )
 from daimon.core.stores.slack_user_tokens import get_slack_user_token
 from daimon.core.stores.thread_sessions import update_watermark
+from daimon.core.turn import turn_deadline
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
@@ -1111,6 +1112,9 @@ class SlackApp:
         On follow-up mentions: reuses the existing MA session, replays only the
         delta since the watermark via ``build_delta_xml``.
 
+        One ~45-minute ceiling deadline is computed after admission and shared
+        by both the ``bind_session`` and ``run_prepared_turn`` calls below.
+
         Mirrors Discord ``_orchestrate`` (bot.py:831-1098).
         No try/except — errors propagate to the listener boundary in
         ``_handle_app_mention``.
@@ -1210,6 +1214,29 @@ class SlackApp:
         _lc_agent_name: str = agent.name
         _lc_model_id: str = agent.model.id
 
+        # One shared ceiling deadline for THIS turn, computed once the clock
+        # starts (D-03/D-04): right after admission passes, not before --
+        # admit() itself is deliberately outside the ceiling. Passed as the
+        # SAME value to both bind_session and run_prepared_turn below rather
+        # than letting each default its own `deadline=None` window -- the
+        # fail-safe default exists so no caller is ever unbounded, but a
+        # caller that makes BOTH calls would otherwise get two independent
+        # ~45-minute budgets (bind, then run) instead of one shared one.
+        #
+        # This budget does NOT cover the interstitial Slack-API work below
+        # (build_context_xml / build_delta_xml thread-history replay,
+        # download_as_image_blocks) or the create_slack_turn_context write --
+        # all of that is adapter-owned I/O, neither bounded nor cancelled by
+        # the deadline, and runs to completion regardless. That is deliberate,
+        # not an oversight: it means the interstitial CONSUMES the shared
+        # budget rather than getting a window of its own, so a slow history
+        # replay leaves the pump less than the full ceiling, and an
+        # interstitial that outruns the deadline entirely makes
+        # run_prepared_turn fail immediately at its first await with a
+        # ceiling TurnError. Bounding the interstitial itself is separate,
+        # deferred work.
+        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+
         # --- Stage two: bind_session (find-or-create, mapping write,
         # recorder binding) -- D-01 bind_session(). Slack has no
         # per_caller_thread_sessions equivalent: session_account_id is always
@@ -1223,6 +1250,7 @@ class SlackApp:
             thread_id=thread_id,
             session_account_id=admission.account_id,
             reuse_existing=True,
+            deadline=turn_deadline_at,
         )
         ma_session_id = prepared.ma_session_id
         watermark = prepared.watermark
@@ -1398,6 +1426,7 @@ class SlackApp:
                 recovery_lifecycle=_recovery_lifecycle,
                 image_blocks=image_blocks or None,
                 render_interval_s=2.0,
+                deadline=turn_deadline_at,
             )
         finally:
             # Leak-policy bookkeeping only — a delete failure must not mask the
