@@ -369,27 +369,26 @@ async def test_read_channel_passes_before_cursor(monkeypatch: pytest.MonkeyPatch
     assert result.hint is None, "a hint on the last page would send the caller in a loop"
 
 
-@pytest.mark.parametrize("before", ["not-an-id", "1_000", " 42 ", "+7", "-5", "١٢"])
+@pytest.mark.parametrize(
+    "before",
+    ["not-an-id", "1_000", " 42 ", "+7", "-5", "١٢", "0", "9999999999999999999999999"],
+)
 async def test_read_channel_rejects_non_numeric_before(
     monkeypatch: pytest.MonkeyPatch, before: str
 ) -> None:
-    """Anything but a plain decimal id gets a ToolError.
+    """Anything but an in-range decimal snowflake gets a ToolError, before any
+    REST call.
 
     int() alone accepts "1_000" and " 42 " — which silently page from a
     different message than written — and "-5", which Discord answers with an
-    unmapped 400.
+    unmapped 400. A 25-digit id is that same 400, and "0" returns an empty
+    page that reads as exhausted history.
     """
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
-        if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
-        if route.path == "/guilds/{guild_id}/members/{member_id}":
-            return _member_payload()
-        if route.path == "/channels/{channel_id}":
-            return _text_channel_payload()
-        raise AssertionError(f"unexpected route {route.method} {route.path}")
+        raise AssertionError(
+            f"a bad cursor must fail before any REST call; got {route.method} {route.path}"
+        )
 
     patch_discord_http(monkeypatch, handler)
     with pytest.raises(ToolError, match="before must be a numeric discord message id"):
