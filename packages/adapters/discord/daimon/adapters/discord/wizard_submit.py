@@ -87,6 +87,7 @@ from daimon.core.stores.domain import Role, WizardSessionRow
 from daimon.core.stores.thread_sessions import update_watermark
 from daimon.core.stores.wizard_session import try_claim_submit
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import bind_session
@@ -407,6 +408,14 @@ async def run_wizard_submit_turn(
                 )
             return
 
+        # D-03 boundary, mirroring bot.py's mention path: the per-turn
+        # ceiling clock starts here, once admission has passed, and covers
+        # session bind (bind_session) plus the driver pump (run_prepared_turn)
+        # as ONE shared budget. This call site had NO timeout of any kind
+        # before this phase -- the old 45-minute wait_for lived only in
+        # bot.py's mention path, so a wizard-submit turn could hang forever.
+        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+
         agent = admission.agent
 
         # --- Per-turn role upsert -- unconditional, same rationale as
@@ -443,6 +452,7 @@ async def run_wizard_submit_turn(
             thread_id=thread_id,
             session_account_id=session_account_id,
             reuse_existing=True,
+            deadline=turn_deadline_at,
         )
 
         _log.info(
@@ -515,6 +525,7 @@ async def run_wizard_submit_turn(
             reseed_user_message=_reseed_user_message,
             recovery_lifecycle=_recovery_lifecycle,
             render_interval_s=2.0,
+            deadline=turn_deadline_at,
         )
         turn_state = outcome.state
         mapping_id = outcome.mapping_id

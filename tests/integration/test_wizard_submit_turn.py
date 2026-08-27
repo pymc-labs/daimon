@@ -655,3 +655,109 @@ async def test_a_submitter_over_balance_is_told_and_no_turn_runs(
         "the row must stay claimed -- the claim commits before admission runs, so a "
         "post-hoc refusal must not lose the submitter's answers"
     )
+
+
+# --- per-turn ceiling (19-04) -------------------------------------------------
+
+
+async def test_a_ceiling_outcome_takes_the_existing_turn_error_branch(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A `run_prepared_turn` outcome carrying a `"ceiling"` error is not a
+    special case for the wizard-submit path -- it takes the same
+    `turn_state.error is not None` branch any other turn error takes: no
+    watermark write, no unhandled exception out of the background task.
+    """
+    from daimon.core.errors import TurnError
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TurnState
+
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800008001")
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+
+    channel = _make_channel(thread_id=5008, parent_id=4008)
+    sent_events: list[dict[str, Any]] = []
+    stream_hits: list[str] = []
+    router = _build_router(str(tenant.id), sent_events=sent_events, stream_hits=stream_hits)
+    runtime = _make_runtime(db_session_factory, router)
+    bot = _make_bot(runtime)
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    ceiling_outcome = RunOutcome(
+        state=TurnState(error=TurnError(kind="ceiling", message="this turn stopped responding")),
+        ma_session_id="sess_ceiling_wizard",
+        mapping_id=None,
+        recovered=False,
+    )
+
+    with (
+        patch("daimon.core.turn.prepare.create_session") as mock_create_session,
+        patch(
+            "daimon.adapters.discord.wizard_submit.run_prepared_turn", new_callable=AsyncMock
+        ) as mock_run_prepared_turn,
+    ):
+        mock_create_session.return_value = _make_fake_session(session_id="sess_ceiling_wizard")
+        mock_run_prepared_turn.return_value = ceiling_outcome
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        tasks = list(bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]  # asserting the spawn contract
+        assert len(tasks) == 1
+        await asyncio.gather(*tasks)
+
+    mock_run_prepared_turn.assert_called_once()
+    call_kwargs = mock_run_prepared_turn.call_args.kwargs
+    assert "deadline" in call_kwargs, "run_prepared_turn must be given the shared core deadline"
+
+    async with db_session_factory() as session:
+        after = await get_wizard_session(session, short_id=row.id)
+    assert after is not None and after.status == "submitted", (
+        "a ceiling turn error must not lose or revert the claimed row"
+    )
+
+
+async def test_a_bind_phase_ceiling_does_not_escape_the_background_task(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """`bind_session` raising the ceiling `TurnError` is caught by
+    `run_wizard_submit_turn`'s own `except (DaimonError, ...)` boundary --
+    same as any other bind-phase failure -- and rendered through the
+    existing turn-failure path rather than escaping the background task.
+    """
+    from daimon.core.turn.ceiling import ceiling_error
+
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800009001")
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+
+    channel = _make_channel(thread_id=5009, parent_id=4009)
+    sent_events: list[dict[str, Any]] = []
+    stream_hits: list[str] = []
+    router = _build_router(str(tenant.id), sent_events=sent_events, stream_hits=stream_hits)
+    runtime = _make_runtime(db_session_factory, router)
+    bot = _make_bot(runtime)
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    with patch(
+        "daimon.adapters.discord.wizard_submit.bind_session", new_callable=AsyncMock
+    ) as mock_bind_session:
+        mock_bind_session.side_effect = ceiling_error()
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        tasks = list(bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]  # asserting the spawn contract
+        assert len(tasks) == 1
+        # No exception escapes -- the background task's own error boundary
+        # catches TurnError (a DaimonError) and renders it instead.
+        await asyncio.gather(*tasks)
+
+    assert stream_hits == [], "a bind-phase ceiling must never reach the SSE turn stream"
+    posted_texts = [
+        call.args[0]
+        for call in channel.send.call_args_list
+        if call.args and isinstance(call.args[0], str)
+    ]
+    assert posted_texts, "the bind-phase ceiling must render through the existing turn-failure path"
