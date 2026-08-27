@@ -28,7 +28,7 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import pytest
@@ -36,9 +36,12 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     BetaCloudConfig,
     BetaEnvironment,
+    BetaManagedAgentsSession,
     BetaPackages,
     BetaUnrestrictedNetwork,
 )
+from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
+from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
 from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
 from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
 
@@ -147,6 +150,57 @@ def sse_response(events: list[dict[str, Any]]) -> httpx.Response:
 def send_events_response(data: list[dict[str, Any]] | None = None) -> httpx.Response:
     """Response for POST /v1/sessions/{id}/events."""
     return httpx.Response(200, json={"data": data})
+
+
+SessionStatus = Literal["rescheduling", "running", "idle", "terminated"]
+"""The SDK's own status enum (`BetaManagedAgentsSession.status`) is inlined on
+the model rather than exported as a standalone type, so this is a local
+alias of the same four literals."""
+
+
+def session_response(
+    *,
+    session_id: str,
+    status: SessionStatus = "idle",
+    agent_id: str | None = None,
+    environment_id: str = "env_test",
+) -> httpx.Response:
+    """Response for GET /v1/sessions/{id} (the SDK's `beta.sessions.retrieve`).
+
+    After plan 19-02, a driver-driven SSE script that ends without a terminal
+    event makes the driver check session status, so every transport-level
+    test that drives the driver needs this route registered.
+
+    Builds a real `BetaManagedAgentsSession` and serializes with
+    `.model_dump(mode="json")`, exactly as `_agent_response` /
+    `_environment_response` do.
+    """
+    now = datetime.now(UTC).isoformat()
+    session = BetaManagedAgentsSession(
+        id=session_id,
+        type="session",
+        status=status,
+        agent=BetaManagedAgentsSessionAgent(
+            id=agent_id or _ma_id("agent"),
+            type="agent",
+            name="test-agent",
+            model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),  # type: ignore[arg-type]
+            mcp_servers=[],
+            skills=[],
+            tools=[],
+            version=1,
+        ),
+        environment_id=environment_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+        outcome_evaluations=[],
+        resources=[],
+        stats=EMPTY_SESSION_STATS,
+        usage=EMPTY_SESSION_USAGE,
+        vault_ids=[],
+    )
+    return httpx.Response(200, json=session.model_dump(mode="json"))
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +359,8 @@ def _environment_response(
     """Build a validated BetaEnvironment using real SDK construction.
 
     Uses EMPTY_CLOUD_CONFIG for the config field. Serializes with
-    `.model_dump(mode="json")` — never model_construct.
+    `.model_dump(mode="json")` -- see `guideline:testing`'s validated-
+    construction rule for why unvalidated shortcuts are banned here.
     """
     now = datetime.now(UTC).isoformat()
     return BetaEnvironment(

@@ -12,6 +12,7 @@ import time
 
 import httpx
 import pytest
+from daimon.testing.ma import MARouter, build_fake_anthropic, session_response
 from daimon.testing.turn_fakes import (
     DelayThenYield,
     FakeEventsResource,
@@ -93,3 +94,19 @@ async def test_retrieve_raises_propagates_the_configured_exception() -> None:
 
     with pytest.raises(RuntimeError, match="boom"):
         await sessions.retrieve("sess_1")
+
+
+async def test_session_response_serves_sessions_retrieve_through_a_real_sdk_client() -> None:
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+$",
+        lambda request, match: session_response(session_id="sess_1", status="running"),
+    )
+    client = build_fake_anthropic(router.dispatch)
+
+    session = await client.beta.sessions.retrieve("sess_1")
+
+    assert session.status == "running", (
+        "session_response must round-trip status through the real SDK client"
+    )

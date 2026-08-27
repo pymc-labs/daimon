@@ -27,6 +27,7 @@ from daimon.testing.ma import (
     list_response,
     make_fake_ma_handler,
     send_events_response,
+    session_response,
     sse_response,
     stub_anthropic,
 )
@@ -56,6 +57,7 @@ __all__ = [
     "make_usage_event",
     "make_wizard_session",
     "send_events_response",
+    "session_response",
     "sse_response",
     "stub_anthropic",
 ]
