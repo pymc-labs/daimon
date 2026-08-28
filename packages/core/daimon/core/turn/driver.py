@@ -603,6 +603,13 @@ async def _pump(
         )
     finally:
         if not render_task.done():
+            # Cancel without draining, unlike `_cancel_render()` on the normal
+            # paths. This `finally` also runs while the ceiling's `wait_for` is
+            # unwinding a cancellation, and awaiting there is the very hazard
+            # `_await_or_cancel`'s own except-branch exists to contain. Safe to
+            # leave: `_render_loop` can only exit via CancelledError (its
+            # per-tick `_render_once` catches Exception), so nothing goes
+            # unretrieved, and the task reaps within a loop turn.
             render_task.cancel()
 
 

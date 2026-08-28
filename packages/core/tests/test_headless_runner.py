@@ -1415,3 +1415,48 @@ async def test_run_turn_deadline_feeds_remaining_s_rather_than_being_ignored() -
     assert exc_info.value.kind == "ceiling", (
         "a deadline of exactly now must breach, proving the param feeds remaining_s"
     )
+
+
+async def test_run_turn_creates_a_fresh_session_per_fire_and_never_reuses_one() -> None:
+    """Invariant pin: every routine fire gets its OWN MA session.
+
+    `driver._events_since_last_turn_boundary` exempts a `requires_action` idle
+    from the turn-boundary scan under `AutoApprove` — which is this path's
+    posture — on the strength of this invariant. A `requires_action` idle CAN
+    still end an AutoApprove turn (the already-confirmed / no-fresh-ids branch
+    of `_finalize_success_or_error`), so if a routine ever ran two turns on one
+    session, that ended turn's events would fold into the next fire's state.
+    The exemption is only safe because the replay can never span two turns.
+
+    `run_turn` takes no `session_id` and no caller supplies one; this pins the
+    consequence rather than the wording, so it fails if that ever changes.
+    """
+    events: list[BetaManagedAgentsSessionEvent] = [
+        BetaManagedAgentsAgentMessageEvent(
+            id="evt_msg_1",
+            type="agent.message",
+            processed_at=_NOW,
+            content=[BetaManagedAgentsTextBlock(type="text", text="done")],
+        ),
+        BetaManagedAgentsSessionStatusIdleEvent(
+            id="evt_idle_1",
+            type="session.status_idle",
+            processed_at=_NOW,
+            stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
+        ),
+    ]
+    creates: list[dict[str, Any]] = []
+    client = _build_client(events, session_create_capture=creates)
+
+    for trigger in ("first fire", "second fire"):
+        await run_turn(
+            anthropic=client,
+            agent_id="agent_x",
+            environment_id="env_x",
+            trigger_message=trigger,
+        )
+
+    assert len(creates) == 2, (
+        "each routine fire must open its own MA session -- a reused session "
+        "would let a prior turn's events reach the next fire's replay fold"
+    )
