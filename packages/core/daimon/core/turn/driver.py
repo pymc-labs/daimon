@@ -588,28 +588,40 @@ def _events_since_last_turn_boundary(
 
     In a reused MA session the event log spans multiple turns. Folding the full
     log from TurnState() leaks prior-turn content into the current render state
-    (Pitfall 2 of multi-turn reconnect). A turn ends with `session.status_idle`;
-    events after the LAST such event belong to the current turn.
+    (Pitfall 2 of multi-turn reconnect). The current turn begins right after the
+    last event that ENDED a previous turn.
 
-    Boundary detection deliberately excludes the final event of `events` from
-    the scan: this helper is also used on the eventless-cycle finalize path
-    (`_pump`, status idle/terminated), where the current turn has ITSELF just
-    ended and the last event in `events` is that turn's own terminal
-    `session.status_idle`. Counting it as a boundary would strip it (and every
-    other current-turn event) from the result -- an empty fold that silently
-    drops the very terminal event this replay exists to recover. The mid-turn
-    reconnect call site (is_retry) is unaffected: its `events` never end on the
-    current turn's own idle (the consume loop returns on a terminal event
-    before a reconnect is ever attempted), so the excluded slot was never a
-    boundary candidate there either.
+    Two rules decide what counts as "ended a previous turn", and both matter:
 
-    If no `session.status_idle` boundary is found, the whole list is returned
-    (single-turn session — no prior-turn content to filter).
+    1. A `session.status_idle` carrying a `requires_action` stop reason is NOT a
+       turn boundary. Under `AutoApprove` it is a mid-turn PAUSE: the driver
+       answers it with `user.tool_confirmation` events and the SAME turn keeps
+       going. Treating it as a boundary slices away the pause event itself, so
+       the folded `stop_reason` comes back `None`, `pending_confirmation_ids`
+       finds nothing to confirm, and a turn genuinely blocked on a tool approval
+       is finalized as a quiet success with truncated content.
+
+    2. The current turn's OWN terminal idle is not a prior-turn boundary. On the
+       eventless-cycle finalize path (`_pump`, status idle/terminated) the turn
+       has just ended and the last event in `events` is that turn's own terminal
+       `session.status_idle`; counting it would strip every current-turn event
+       and fold an empty state, dropping the very terminal event this replay
+       exists to recover. Since that idle is always the final element there, the
+       scan skips the last slot. The mid-turn reconnect call site (is_retry) is
+       unaffected: its `events` never end on the current turn's own idle (the
+       consume loop returns on a terminal event before a reconnect is ever
+       attempted), so the skipped slot was never a boundary candidate there.
+
+    If no boundary is found, the whole list is returned (single-turn session --
+    no prior-turn content to filter).
     """
     last_boundary = -1
     for i, ev in enumerate(events[:-1]):
-        if getattr(ev, "type", None) == "session.status_idle":
-            last_boundary = i
+        if getattr(ev, "type", None) != "session.status_idle":
+            continue
+        if getattr(getattr(ev, "stop_reason", None), "type", None) == "requires_action":
+            continue  # a mid-turn pause, not the end of a turn -- rule 1 above
+        last_boundary = i
     if last_boundary == -1:
         return events
     return events[last_boundary + 1 :]

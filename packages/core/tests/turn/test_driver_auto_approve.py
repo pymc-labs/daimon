@@ -21,6 +21,7 @@ from daimon.core.turn.state import TextBlock
 from daimon.testing.turn_fakes import (
     FakeAnthropic,
     RaiseReadTimeout,
+    RaiseStreamDrop,
     RecordingLifecycle,
     YieldEvent,
 )
@@ -477,3 +478,140 @@ async def test_require_approval_still_finalizes_a_requires_action_found_on_the_i
     assert final.error is not None
     assert final.error.kind == "requires_action"
     assert "not supported on this surface" in final.error.message
+
+
+async def test_auto_approve_eventless_reconnect_keeps_pre_approval_content_when_an_event_follows_the_pause() -> (
+    None
+):
+    """Boundary regression: a `requires_action` idle is a mid-turn PAUSE, so an
+    event after it in the replay must not be mistaken for the start of a new
+    turn. The prior shape of this test (idle as the LAST replay element) is the
+    one case the old scan accidentally handled; here the pause is followed by
+    agent content, which the old scan sliced the pause away for -- yielding a
+    fold with `stop_reason is None`, no confirmation sent, and a quiet
+    truncated success."""
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="pre-approval text ")
+    ra_idle = make_status_idle(
+        event_id="sevt_2", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    post = make_agent_message(event_id="sevt_3", text="post-approval text")
+    done = make_status_idle(event_id="sevt_4", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pre)],  # exhausts -> clean close; the pause never delivered live
+        [YieldEvent(done)],  # reopened stream after the confirmation is sent
+    ]
+    fa.beta.sessions.events.replay_events = [pre, ra_idle, post]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=AutoApprove(),
+    )
+
+    assert fa.beta.sessions.events.sent_events == [
+        ("sess_1", [{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}]),
+        (
+            "sess_1",
+            [{"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "tu_1"}],
+        ),
+    ], "the pause must still be found and confirmed when replay content follows it"
+    assert fa.beta.sessions.events.stream_calls == 2, "confirming reopens the stream"
+    assert final.error is None
+    assert final.content == [TextBlock(kind="text", text="pre-approval text post-approval text")], (
+        "the fold must keep pre-approval content, not restart at the event after the pause"
+    )
+    assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
+    assert len(lc.terminal_success) == 1
+
+
+async def test_auto_approve_mid_turn_reconnect_keeps_pre_approval_content_across_the_pause() -> (
+    None
+):
+    """Same boundary defect on the other call site: the mid-turn `is_retry`
+    re-fold, reached through a real connection drop rather than an eventless
+    cycle. The turn completes and the confirmation is sent either way -- what
+    the old scan lost was the pre-approval text, silently, inside an apparent
+    success."""
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="pre-approval text ")
+    ra_idle = make_status_idle(
+        event_id="sevt_2", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    post = make_agent_message(event_id="sevt_3", text="post-approval text")
+    done = make_status_idle(event_id="sevt_4", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        # confirms tu_1 live, keeps consuming on the same stream, then drops
+        [YieldEvent(pre), YieldEvent(ra_idle), RaiseStreamDrop()],
+        [YieldEvent(done)],  # reconnect: replay + re-fold happens before this
+    ]
+    fa.beta.sessions.events.replay_events = [pre, ra_idle, post]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=AutoApprove(),
+    )
+
+    assert lc.reconnects == ["connection_dropped"], "the drop must take the is_retry re-fold path"
+    assert final.error is None
+    assert final.content == [TextBlock(kind="text", text="pre-approval text post-approval text")], (
+        "the re-fold must not slice the turn at its own mid-turn pause"
+    )
+    assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
+    assert len(lc.terminal_success) == 1
+
+
+async def test_auto_approve_reconnect_still_drops_a_prior_turns_content_at_its_end_turn_idle() -> (
+    None
+):
+    """The `requires_action` exemption must not make the scan boundary-blind: a
+    prior turn ending in a real `end_turn` idle is still a boundary, so its
+    content stays out of the current turn's fold."""
+    fa = FakeAnthropic()
+    prior = make_agent_message(event_id="sevt_1", text="PRIOR TURN")
+    prior_done = make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())
+    pre = make_agent_message(event_id="sevt_3", text="pre-approval text ")
+    ra_idle = make_status_idle(
+        event_id="sevt_4", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    post = make_agent_message(event_id="sevt_5", text="post-approval text")
+    done = make_status_idle(event_id="sevt_6", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pre)],
+        [YieldEvent(done)],
+    ]
+    fa.beta.sessions.events.replay_events = [prior, prior_done, pre, ra_idle, post]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=AutoApprove(),
+    )
+
+    assert final.error is None
+    assert final.content == [TextBlock(kind="text", text="pre-approval text post-approval text")], (
+        "the prior turn's content must not leak into the current turn's fold"
+    )
