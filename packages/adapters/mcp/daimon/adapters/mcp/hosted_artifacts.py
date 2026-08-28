@@ -28,9 +28,17 @@ _MAX_CHARTS = 5
 _MAX_IMAGE_BLOCKS = 3
 _MAX_IMAGE_EDGE = 1000
 _MAX_IMAGE_BLOCK_ENCODED_BYTES = 400 * 1024
+# Pillow's decompression-bomb *error* fires only above ~179M pixels; below
+# that a compact PNG can still decode to gigabytes of RGBA, so the byte cap
+# alone does not bound decode memory.
+_MAX_IMAGE_PIXELS = 25_000_000
 _MAX_SCANNED = 200
 _CLOCK_SLACK = dt.timedelta(seconds=30)
 _HOSTED_DELIVERY_TIMEOUT_SECONDS = 60.0
+# put_object runs in a thread asyncio.timeout cannot cancel; an upload that
+# starts near the deadline completes after the caller gave up and strands an
+# object nobody has a URL for. Don't start one that can't finish in time.
+_UPLOAD_DEADLINE_MARGIN_SECONDS = 10.0
 
 
 class ChartUrl(BaseModel):
@@ -112,6 +120,8 @@ def _bounded_image_block(content: bytes, content_type: str) -> ImageContent | No
         return None
 
     with Image.open(io.BytesIO(content)) as source:
+        if source.width * source.height > _MAX_IMAGE_PIXELS:
+            raise ValueError("artifact exceeds the per-chart pixel limit")
         source.load()
         image = source.copy()
 
@@ -156,10 +166,14 @@ async def _discover_chart_outputs(
     candidates: list[FileMetadata] = []
     async for item in anthropic.beta.files.list(
         scope_id=session_id,
+        limit=min(_MAX_SCANNED, 1000),
         betas=["managed-agents-2026-04-01"],
     ):
         candidates.append(item)
         if len(candidates) >= _MAX_SCANNED:
+            # The Files API documents no ordering, so the sort below only sees
+            # what fit under the cap; a >_MAX_SCANNED session may lose charts.
+            _log.warning("mcp.hosted_artifact.scan_truncated", scanned=_MAX_SCANNED)
             break
 
     candidates.sort(
@@ -191,8 +205,11 @@ async def _deliver_hosted_charts_impl(
     message: str,
     store: ArtifactStore | None = None,
     record_failure: Callable[..., None],
+    upload_deadline: float,
 ) -> HostedChartDelivery:
     """Embed charts by default and add URLs only when storage is configured."""
+    if settings is not None and store is None:
+        _log.warning("mcp.hosted_artifact.store_unconfigured")
     try:
         outputs = await _discover_chart_outputs(
             anthropic,
@@ -254,8 +271,21 @@ async def _deliver_hosted_charts_impl(
         if settings is None or store is None:
             continue
 
+        if asyncio.get_running_loop().time() > upload_deadline - _UPLOAD_DEADLINE_MARGIN_SECONDS:
+            record_failure(
+                stage="storage",
+                key=None,
+                exc=TimeoutError("upload skipped near the delivery deadline"),
+            )
+            continue
+
         try:
-            key = f"tenant/{tenant_id}/account/{account_id}/session/{session_id}/{filename}"
+            # file_id keeps the key unique per upload: a turn that rewrites
+            # chart.png must not repoint an earlier turn's still-live URL.
+            key = (
+                f"tenant/{tenant_id}/account/{account_id}/session/{session_id}/"
+                f"{_safe_filename(output.file_id)}/{filename}"
+            )
             stored = await store.upload_and_presign(
                 key=key,
                 content=content,
@@ -323,6 +353,7 @@ async def deliver_hosted_charts(
         )
 
     try:
+        upload_deadline = asyncio.get_running_loop().time() + _HOSTED_DELIVERY_TIMEOUT_SECONDS
         async with asyncio.timeout(_HOSTED_DELIVERY_TIMEOUT_SECONDS):
             result = await _deliver_hosted_charts_impl(
                 anthropic,
@@ -334,6 +365,7 @@ async def deliver_hosted_charts(
                 message=message,
                 store=store,
                 record_failure=record_failure,
+                upload_deadline=upload_deadline,
             )
     except TimeoutError as exc:
         record_failure(stage="timeout", key=None, exc=exc)

@@ -70,10 +70,12 @@ class _FilesTransport:
         self.files = files
         self.downloaded_ids: list[str] = []
         self.beta_headers: list[str] = []
+        self.list_params: list[dict[str, str]] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == "/v1/files":
             self.beta_headers.append(request.headers.get("anthropic-beta", ""))
+            self.list_params.append(dict(request.url.params))
             return httpx.Response(200, json={"data": list(self.files), "has_more": False})
         prefix = "/v1/files/"
         suffix = "/content"
@@ -158,7 +160,7 @@ async def test_configured_store_adds_presigned_link_and_structured_url() -> None
             store=store,
         )
 
-    key = "tenant/tenant-1/account/account-1/session/session-1/margin.png"
+    key = "tenant/tenant-1/account/account-1/session/session-1/file-1/margin.png"
     assert result.message == (
         "Analytical answer\n\n"
         f"Chart: [margin.png](https://bucket.example.test/{key}?signed=yes) — "
@@ -440,3 +442,147 @@ async def test_delivery_caps_each_turn_and_embeds_at_most_three_images() -> None
     assert len(result.image_blocks) == 3
     assert len(store.calls) == 4
     assert len(transport.downloaded_ids) == 4
+
+
+async def test_oversized_pixel_raster_is_dropped_not_decoded() -> None:
+    source = _png(width=200, height=100)
+    client, _transport = _client(source)
+    output = _ChartOutput(file_id="file-1", filename="huge.png", size_bytes=len(source))
+
+    with (
+        patch(
+            "daimon.adapters.mcp.hosted_artifacts._discover_chart_outputs",
+            new=AsyncMock(return_value=(output,)),
+        ),
+        patch("daimon.adapters.mcp.hosted_artifacts._MAX_IMAGE_PIXELS", 10_000),
+        patch("daimon.adapters.mcp.hosted_artifacts._log.warning") as warning,
+    ):
+        result = await deliver_hosted_charts(
+            client,
+            settings=None,
+            tenant_id="tenant-1",
+            account_id="account-1",
+            session_id="session-1",
+            turn_started_at=_NOW,
+            message="Answer survives",
+        )
+
+    assert result == HostedChartDelivery(message="Answer survives")
+    warning.assert_called_once()
+    assert warning.call_args.kwargs["stage"] == "embed"
+    assert warning.call_args.kwargs["error_type"] == "ValueError"
+
+
+async def test_same_filename_across_files_gets_distinct_object_keys() -> None:
+    client, _transport = _client()
+    store = FakeStore()
+    outputs = (
+        _ChartOutput(file_id="file-a", filename="chart.png", size_bytes=len(_PNG)),
+        _ChartOutput(file_id="file-b", filename="chart.png", size_bytes=len(_PNG)),
+    )
+
+    with patch(
+        "daimon.adapters.mcp.hosted_artifacts._discover_chart_outputs",
+        new=AsyncMock(return_value=outputs),
+    ):
+        await deliver_hosted_charts(
+            client,
+            settings=_settings(),
+            tenant_id="tenant-1",
+            account_id="account-1",
+            session_id="session-1",
+            turn_started_at=_NOW,
+            message="Answer",
+            store=store,
+        )
+
+    keys = [call["key"] for call in store.calls]
+    assert keys == [
+        "tenant/tenant-1/account/account-1/session/session-1/file-a/chart.png",
+        "tenant/tenant-1/account/account-1/session/session-1/file-b/chart.png",
+    ]
+
+
+async def test_upload_is_skipped_when_the_delivery_deadline_is_near() -> None:
+    client, _transport = _client()
+    store = FakeStore()
+    output = _ChartOutput(file_id="file-1", filename="chart.png", size_bytes=len(_PNG))
+
+    with (
+        patch(
+            "daimon.adapters.mcp.hosted_artifacts._discover_chart_outputs",
+            new=AsyncMock(return_value=(output,)),
+        ),
+        patch("daimon.adapters.mcp.hosted_artifacts._HOSTED_DELIVERY_TIMEOUT_SECONDS", 5.0),
+        patch("daimon.adapters.mcp.hosted_artifacts._UPLOAD_DEADLINE_MARGIN_SECONDS", 10.0),
+        patch("daimon.adapters.mcp.hosted_artifacts._log.warning") as warning,
+    ):
+        result = await deliver_hosted_charts(
+            client,
+            settings=_settings(),
+            tenant_id="tenant-1",
+            account_id="account-1",
+            session_id="session-1",
+            turn_started_at=_NOW,
+            message="Answer survives",
+            store=store,
+        )
+
+    assert store.calls == []
+    assert result.chart_urls == ()
+    assert len(result.image_blocks) == 1
+    warning.assert_called_once()
+    assert warning.call_args.kwargs["stage"] == "storage"
+    assert warning.call_args.kwargs["error_type"] == "TimeoutError"
+
+
+async def test_discovery_requests_full_pages_and_logs_scan_truncation() -> None:
+    files = tuple(
+        _file(f"file-{index}", f"chart-{index}.png", created_at=_NOW) for index in range(4)
+    )
+    client, transport = _client(files=files)
+
+    with (
+        patch("daimon.adapters.mcp.hosted_artifacts._MAX_SCANNED", 3),
+        patch("daimon.adapters.mcp.hosted_artifacts._log.warning") as warning,
+    ):
+        await deliver_hosted_charts(
+            client,
+            settings=None,
+            tenant_id="tenant-1",
+            account_id="account-1",
+            session_id="session-1",
+            turn_started_at=_NOW,
+            message="Answer",
+        )
+
+    assert transport.list_params[0]["limit"] == "3"
+    truncation_calls = [
+        call
+        for call in warning.call_args_list
+        if call.args and call.args[0] == "mcp.hosted_artifact.scan_truncated"
+    ]
+    assert len(truncation_calls) == 1
+    assert truncation_calls[0].kwargs["scanned"] == 3
+
+
+async def test_configured_settings_without_store_logs_once_and_still_embeds() -> None:
+    client, _transport = _client(
+        files=(_file("current", "current.png", created_at=_NOW),),
+    )
+
+    with patch("daimon.adapters.mcp.hosted_artifacts._log.warning") as warning:
+        result = await deliver_hosted_charts(
+            client,
+            settings=_settings(),
+            tenant_id="tenant-1",
+            account_id="account-1",
+            session_id="session-1",
+            turn_started_at=_NOW,
+            message="Answer",
+            store=None,
+        )
+
+    assert result.chart_urls == ()
+    assert len(result.image_blocks) == 1
+    warning.assert_called_once_with("mcp.hosted_artifact.store_unconfigured")
