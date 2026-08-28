@@ -15,7 +15,10 @@ single structured exempt-billing log line at turn start and meters nothing.
   multiple such cycles. The driver asks MA (`sessions.retrieve`) whether the
   session is still running before deciding anything, so silence alone can
   never finalize a turn as a quiet, truncated success (Class A). This loop
-  has no attempt cap by design — the per-turn ceiling is the sole backstop.
+  has no attempt cap by design — the per-turn ceiling
+  (`daimon.core.turn.ceiling`), enforced at `bind_session` and
+  `run_prepared_turn` for the chat paths and, for callers that bypass those,
+  `run_turn`'s own optional `deadline`, is the sole backstop.
 - Inner `AsyncRetrying` block — the bounded 2-attempt budget for
   `_CONNECTION_LOST` (a dropped connection, a genuinely different failure
   mode from silence). Each outer iteration gets a fresh `AsyncRetrying`, so
@@ -58,6 +61,7 @@ from anthropic.types.beta.sessions import (
 from daimon.core.errors import TurnError
 from daimon.core.ma import replay_events, send_interrupt_and_wait, terminal_stop_reason
 from daimon.core.turn.approvals import build_confirmation_events, pending_confirmation_ids
+from daimon.core.turn.ceiling import ceiling_error, remaining_s
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle
 from daimon.core.turn.posture import (
     AutoApprove,
@@ -208,6 +212,7 @@ async def run_turn(
     billing: BillingPosture,
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
+    deadline: datetime | None = None,
 ) -> TurnState:
     """Open the SSE stream, post the user message, and pump to terminal idle.
 
@@ -221,6 +226,32 @@ async def run_turn(
     close, not this timeout. Both numbers are non-contractual measurements,
     which is why this is an injectable param rather than a constant or an
     env setting.
+
+    `deadline` (default `None`) is an optional core-owned wall-clock bound
+    (`daimon.core.turn.ceiling`). `None` means the driver enforces NOTHING —
+    the caller owns the bound — deliberately the OPPOSITE of `bind_session` /
+    `run_prepared_turn`, whose `None` is fail-safe (`turn_deadline(now=now())`
+    is computed for them). The reason: `run_prepared_turn` already wraps this
+    whole call in `asyncio.wait_for`, and its own `TimeoutError` handler is
+    what performs D-09's `mark_dead` on the thread-session mapping, logs
+    `turn.ceiling_exceeded` with the mapping id, and calls the caller's
+    `on_terminal_failure` directly. A driver-level bound that ever won that
+    race would silently bypass all of it — so the driver defers to the
+    enforcement site that also owns the mapping, and the chat adapters, which
+    pass nothing, are byte-identical. The callers that DO pass a deadline are
+    the ones that bypass `run_prepared_turn` entirely:
+    `daimon.core.headless_runner` (routines, post-deploy smoke) and the CLI's
+    `daimon run` — `headless_runner.run_turn` computes its own fail-safe
+    `turn_deadline(now)` one layer up and threads it in here.
+
+    On breach: `_pump` is cancelled via `asyncio.wait_for`, so its own
+    finalizers never run — this is the single delivery of
+    `on_terminal_failure`. No `mark_dead` happens here: a headless routine has
+    no `thread_sessions` mapping and the CLI's session is operator-supplied,
+    so there is nothing to retire. Honesty note: the one interleaving this
+    does not defend against — the timeout landing inside a finalizer's own
+    await, producing a second `on_terminal_failure` — is the same one
+    `run_prepared_turn` already accepts.
 
     Returns the final `TurnState`.
     """
@@ -238,7 +269,7 @@ async def run_turn(
         }
         await anthropic.beta.sessions.events.send(session_id, events=[event])
 
-    return await _pump(
+    pump_coro = _pump(
         anthropic=anthropic,
         session_id=session_id,
         send_initial=_send_initial,
@@ -254,6 +285,26 @@ async def run_turn(
         billing=billing,
         tool_confirmation=tool_confirmation,
     )
+    if deadline is None:
+        return await pump_coro
+
+    try:
+        return await asyncio.wait_for(pump_coro, timeout=remaining_s(deadline, now=now()))
+    except TimeoutError:
+        log.error(
+            "turn.ceiling_exceeded",
+            phase="driver",
+            session_id=session_id,
+            deadline=deadline.isoformat(),
+        )
+        err = ceiling_error()
+        try:
+            await lifecycle.on_terminal_failure(TurnState(error=err), err)
+        except Exception as render_err:
+            # Rendering is delivery, not correctness -- a broken adapter hook
+            # must not mask the ceiling error itself.
+            log.warning("turn.ceiling_render_failed", session_id=session_id, error=str(render_err))
+        return TurnState(error=err)
 
 
 async def _pump(
@@ -337,8 +388,11 @@ async def _pump(
     #   with no terminal event). Unbounded on purpose: a healthy long tool
     #   call produces multiple eventless close/reopen cycles while the
     #   session is genuinely `running`/`rescheduling`, so silence alone is
-    #   never treated as suspicion. The per-turn ceiling (a separate,
-    #   later change) is the sole backstop on this loop.
+    #   never treated as suspicion. The per-turn ceiling
+    #   (`daimon.core.turn.ceiling`), enforced at `bind_session` and
+    #   `run_prepared_turn` for the chat paths and, for callers that bypass
+    #   those, `run_turn`'s own optional `deadline`, is the sole backstop
+    #   on this loop.
     # - Inner `AsyncRetrying` block: the bounded 2-attempt budget for
     #   `_CONNECTION_LOST` (a dropped connection, not silence). Each outer
     #   iteration gets a FRESH `AsyncRetrying`, so the budget is per stream
@@ -589,6 +643,17 @@ async def _consume_with_reconnect(
     # which now covers the whole attempt (not just the consume loop), so no
     # waiter task leaks on any exit path.
     cancel_task = asyncio.create_task(cancel.wait(), name="turn.cancel_waiter")
+    # Tracks the stream this attempt successfully opened (assigned right
+    # after `_await_or_cancel` returns it below), so the `finally` can close
+    # it unconditionally regardless of which exit path is taken -- a clean
+    # close, a read timeout, a mid-consume cancel, or a `wait_for` ceiling
+    # cancellation landing inside the consume loop all leave an open SSE
+    # response otherwise. `httpx.Response.aclose()` is idempotent, so this is
+    # safe even when an explicit path above already closed it. Does NOT cover
+    # the stream-open race in `_await_or_cancel` below: a stream that opens on
+    # the losing side of that race never reaches this assignment, and its own
+    # `on_cancel_win_result=lambda s: s.close()` already covers it.
+    opened_stream: _anthropic.AsyncStream[BetaManagedAgentsStreamSessionEvents] | None = None
     try:
         if is_retry:
             log.info(
@@ -620,6 +685,7 @@ async def _consume_with_reconnect(
             # must not leak the underlying SSE connection.
             on_cancel_win_result=lambda s: s.close(),
         )
+        opened_stream = stream
         if cancel.is_set():
             raise _InterruptedDuringRecovery(phase="reattach")
 
@@ -636,9 +702,8 @@ async def _consume_with_reconnect(
                 )
             except _InterruptedDuringRecovery:
                 # The stream (opened above, on the WINNING side of that
-                # race) is now abandoned -- close it so this cancel doesn't
-                # leak the connection.
-                await stream.close()
+                # race) is now abandoned -- the `finally` below closes it
+                # unconditionally, so this cancel doesn't leak the connection.
                 raise
 
         # Race each next-event fetch against the same `cancel_task` so the
@@ -667,16 +732,15 @@ async def _consume_with_reconnect(
                 event = next_task.result()
             except StopAsyncIteration:
                 # Clean close, no terminal event: not itself completion.
-                # Close the abandoned stream and hand the decision to
-                # `_pump`'s status check.
-                await stream.close()
+                # The `finally` below closes the abandoned stream; hand the
+                # decision to `_pump`'s status check.
                 raise _EventlessCycle(reason="clean_close") from None
             except httpx.ReadTimeout:
                 # No bytes for `stream_read_timeout_s`: same status-checked
                 # path as a clean close, not an unhandled crash and not a
                 # connection error (it does not consume the bounded
-                # `_CONNECTION_LOST` retry budget).
-                await stream.close()
+                # `_CONNECTION_LOST` retry budget). The `finally` below
+                # closes the abandoned stream.
                 raise _EventlessCycle(reason="read_timeout") from None
             # D-06: the one inline I/O the consume loop is allowed to do.
             # A local Postgres write, correctness not delivery -- unlike the
@@ -734,6 +798,18 @@ async def _consume_with_reconnect(
             cancel_task.cancel()
             with _suppress_task_exc():
                 await cancel_task
+        if opened_stream is not None:
+            # Unconditional close of any stream this attempt opened, on
+            # every exit path -- clean close, read timeout, mid-consume
+            # cancel, and (new) a ceiling `wait_for` cancellation landing
+            # here all leave an open SSE response otherwise.
+            # `httpx.Response.aclose()` is idempotent, so this is safe even
+            # when an explicit path above already closed it. Cleanup
+            # boundary (guideline:architecture): a transport that is
+            # already broken must not replace the real exception with a
+            # close failure.
+            with contextlib.suppress(Exception):
+                await opened_stream.close()
 
 
 # --- Finalizers ----------------------------------------------------------
