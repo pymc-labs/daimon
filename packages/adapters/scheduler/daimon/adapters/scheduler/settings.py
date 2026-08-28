@@ -6,8 +6,18 @@ fields (matches ``DiscordSettings``/``McpSettings`` boundary).
 
 from __future__ import annotations
 
+from daimon.core.turn.ceiling import TURN_CEILING_S
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Headroom above the core ~45-minute ceiling for the pre-turn adapter work
+# `_fire` does OUTSIDE headless_runner's two ceiling-covered legs (routine
+# row bookkeeping, agent/environment resolution, the usage-recorder factory,
+# `record_result`). `dispatch_timeout_s`'s default is derived from this
+# constant plus `TURN_CEILING_S` rather than hardcoded, so the inversion
+# 19-VERIFICATION.md found (an outer guard sitting BELOW the core ceiling
+# it's supposed to backstop) is structurally impossible to reintroduce.
+DISPATCH_TIMEOUT_MARGIN_S: float = 300.0
 
 
 class SchedulerSettings(BaseSettings):
@@ -40,11 +50,21 @@ class SchedulerSettings(BaseSettings):
     )
 
     dispatch_timeout_s: float = Field(
-        default=600.0,
+        default=TURN_CEILING_S + DISPATCH_TIMEOUT_MARGIN_S,
         description=(
-            "Per-fire wall-clock deadline (asyncio.wait_for) guarding hung "
-            "connections, not legitimately long agent turns; well under "
-            "max_age_s."
+            "An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's "
+            "deadline. The core ~45-minute ceiling (daimon.core.turn.ceiling) "
+            "is enforced inside headless_runner.run_turn and fires first, "
+            "producing a TurnError(kind='ceiling'). This bound only catches a "
+            "fire that hangs OUTSIDE the ceiling's two legs (routine row "
+            "bookkeeping, agent/environment resolution, the usage-recorder "
+            "factory, record_result), and must stay strictly above "
+            "TURN_CEILING_S or the core ceiling becomes unreachable for "
+            "routines. run_one_tick awaits the full gather, so a fire "
+            "running to this bound blocks the tick loop for that long, and "
+            "cron slots that slip more than max_age_s (default 900s) behind "
+            "during that window are advanced by advance_stale rather than "
+            "fired."
         ),
     )
 

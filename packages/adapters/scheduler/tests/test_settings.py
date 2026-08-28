@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 from daimon.adapters.scheduler.settings import SchedulerSettings
+from daimon.core.turn.ceiling import TURN_CEILING_S
 
 
 def test_scheduler_settings_defaults_are_sane() -> None:
@@ -35,7 +36,20 @@ def test_scheduler_settings_reads_from_env(monkeypatch: pytest.MonkeyPatch) -> N
 def test_scheduler_settings_new_concurrency_defaults() -> None:
     s = SchedulerSettings()
     assert s.max_concurrent_fires == 10, "default global concurrent-fire cap should be 10"
-    assert s.dispatch_timeout_s == 600.0, "default per-fire timeout should be 600s"
+    assert s.dispatch_timeout_s == 3000.0, (
+        "default per-fire timeout should be TURN_CEILING_S + DISPATCH_TIMEOUT_MARGIN_S (3000s)"
+    )
+
+
+def test_dispatch_timeout_default_sits_above_the_core_turn_ceiling() -> None:
+    """The outer process guard must always sit strictly above the core
+    ~45-minute ceiling, or the core ceiling becomes unreachable for
+    routines -- the core ceiling must fire first."""
+    s = SchedulerSettings()
+    assert s.dispatch_timeout_s > TURN_CEILING_S, (
+        "dispatch_timeout_s must stay strictly above TURN_CEILING_S so the "
+        "core ceiling always fires before this outer guard"
+    )
 
 
 def test_scheduler_settings_concurrency_reads_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

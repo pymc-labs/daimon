@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 import anthropic
@@ -18,6 +19,7 @@ from daimon.adapters.cli.run.events import (
 from daimon.adapters.cli.run.lifecycle import NdjsonLifecycle
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.config import load_settings
+from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
@@ -68,10 +70,19 @@ async def run_conversation(
     rt: CliRuntime,
     session_id: str,
     user_message: str,
+    deadline: datetime | None = None,
 ) -> int:
     turn_id = f"turn_{uuid.uuid4().hex[:12]}"
     lifecycle = NdjsonLifecycle(stdout=sys.stdout, session_id=session_id, turn_id=turn_id)
     cancel = asyncio.Event()
+    # `daimon run` is the other caller (besides headless_runner) that bypasses
+    # run_prepared_turn, so it threads its own core-owned deadline into the
+    # driver -- fail-safe like headless_runner: a caller that never passes one
+    # still gets a full TURN_CEILING_S window. A human operator running this
+    # interactively can always Ctrl-C, so this bound is a backstop rather than
+    # the primary control; it exists so the CLI is not the one turn path left
+    # without the core ceiling.
+    effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
 
     try:
         state = await run_turn(
@@ -81,6 +92,7 @@ async def run_conversation(
             lifecycle=lifecycle,
             cancel=cancel,
             billing=BillingExempt(reason="cli-operator-run"),
+            deadline=effective_deadline,
         )
     except anthropic.APIError as err:
         _emit_failed_terminal(
