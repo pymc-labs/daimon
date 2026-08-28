@@ -10,7 +10,8 @@ any collaborator the caller supplied.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 import httpx
@@ -56,7 +57,7 @@ from daimon.adapters.mcp.uploads import build_upload_route
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
-from daimon.core.db import build_engine, build_session_factory
+from daimon.core.db import build_engine, build_session_factory, ensure_database_migrated
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
@@ -68,7 +69,6 @@ from fastmcp.server.transforms import Visibility
 from fastmcp.server.transforms.search.base import serialize_tools_for_output_markdown
 from google import genai
 from sentry_sdk.integrations.starlette import StarletteIntegration
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -113,8 +113,7 @@ def _build_readyz(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> Callable[[Request], Awaitable[PlainTextResponse]]:
     async def readyz(_req: Request) -> PlainTextResponse:
-        async with sessionmaker() as s:
-            await s.execute(text("SELECT 1"))
+        await ensure_database_migrated(sessionmaker)
         return PlainTextResponse("ready")
 
     return readyz
@@ -195,7 +194,12 @@ def create_mcp_app(
         # Stripe webhook route is only mounted when billing_config is not None (see below).
         effective_billing_config = load_billing_config()
 
-    mcp = FastMCP(name="daimon", auth=effective_auth)
+    @asynccontextmanager
+    async def _lifespan(_server: FastMCP[object]) -> AsyncIterator[dict[str, object]]:
+        await ensure_database_migrated(effective_sessionmaker)
+        yield {}
+
+    mcp = FastMCP(name="daimon", auth=effective_auth, lifespan=_lifespan)
     mcp.add_middleware(
         IdentityMiddleware(
             subject_resolver=effective_resolver,

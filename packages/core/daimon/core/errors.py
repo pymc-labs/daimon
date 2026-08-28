@@ -86,6 +86,10 @@ class BootstrapError(DaimonError):
     """
 
 
+class DatabaseNotMigratedError(BootstrapError):
+    """The configured database is reachable but lacks the daimon schema."""
+
+
 class GitHubOAuthError(DaimonError):
     """Raised when GitHub returns an error payload from OAuth token exchange."""
 

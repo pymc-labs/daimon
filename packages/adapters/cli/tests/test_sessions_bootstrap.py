@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -17,6 +18,7 @@ from daimon.core.scope import DeploymentDefault, TenantScopeRef, UserScopeRef
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import EMPTY_CLOUD_CONFIG, MARouter, build_stub_anthropic, list_response
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -91,6 +93,37 @@ def _make_client(
         router.add("GET", r"/v1/environments", lambda req, _m: list_response([]))
 
     return build_stub_anthropic(router.dispatch)
+
+
+@pytest.mark.asyncio
+async def test_sessions_create_maps_unmigrated_database_before_tenant_lookup() -> None:
+    from daimon.adapters.cli.commands.sessions import sessions_create
+
+    missing_table = ProgrammingError(
+        "SELECT 1 FROM tenants",
+        {},
+        RuntimeError("relation tenants does not exist"),
+    )
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.side_effect = missing_table
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=session)
+    context.__aexit__ = AsyncMock(return_value=False)
+    runtime = MagicMock()
+    runtime.sessionmaker.return_value = context
+
+    with pytest.raises(SessionBootstrapError) as exc_info:
+        await sessions_create(
+            rt=runtime,
+            console=MagicMock(),
+            agent_flag=None,
+            environment_flag=None,
+            as_json=False,
+        )
+
+    assert exc_info.value.kind == "db_not_migrated"
+    assert "uv run alembic upgrade head" in str(exc_info.value)
+    assert runtime.sessionmaker.call_count == 1, "tenant discovery must not run after preflight"
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.boot_sweep import run_boot_sweep
 from daimon.adapters.slack.runtime import build_runtime
 from daimon.core.config import load_settings
+from daimon.core.db import ensure_database_migrated
 from daimon.core.health import start_liveness_responder
 from daimon.core.logging_setup import configure_log_level
 from daimon.core.observability import init_sentry
@@ -52,6 +53,7 @@ async def main() -> None:
         integrations=[AsyncioIntegration()],
     )
     async with build_runtime(settings) as runtime:
+        await ensure_database_migrated(runtime.sessionmaker)
         app = SlackApp(runtime=runtime)
         client = SocketModeClient(
             app_token=settings.slack.app_token.get_secret_value(),

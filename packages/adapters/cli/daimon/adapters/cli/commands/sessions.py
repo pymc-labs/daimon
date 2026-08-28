@@ -17,11 +17,14 @@ from daimon.adapters.cli.logging import configure_admin_logging
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.sessions_bootstrap import (
+    SessionBootstrapError,
     check_preconditions,
     resolve_agent_and_environment,
 )
 from daimon.adapters.cli.tenant import discover_tenant
 from daimon.core.config import load_settings
+from daimon.core.db import ensure_database_migrated
+from daimon.core.errors import DatabaseNotMigratedError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.sessions import create_session
 from daimon.core.stores.identity import get_or_create_cli_principal
@@ -63,6 +66,10 @@ async def sessions_create(
     as_json: bool,
 ) -> None:
     configure_admin_logging()
+    try:
+        await ensure_database_migrated(rt.sessionmaker)
+    except DatabaseNotMigratedError as err:
+        raise SessionBootstrapError("db_not_migrated", str(err)) from err
     async with rt.sessionmaker() as db:
         tenant_id = await discover_tenant(db)
         await db.commit()

@@ -10,7 +10,6 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-import asyncpg.exceptions  # type: ignore[reportMissingTypeStubs]
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
@@ -28,7 +27,6 @@ from daimon.core.scope import (
     TenantScopeRef,
 )
 from daimon.core.stores.scoped_config_read import get_scope, resolve
-from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 BootstrapErrorKind = Literal[
@@ -57,15 +55,8 @@ async def check_preconditions(
     tenant_id: uuid.UUID,
     default: DeploymentDefault,
 ) -> None:
-    try:
-        async with sessionmaker() as s:
-            raw = await get_scope(s, scope=TenantScopeRef(tenant_id=tenant_id))
-    except (ProgrammingError, asyncpg.exceptions.UndefinedTableError) as err:
-        raise SessionBootstrapError(
-            "db_not_migrated",
-            "database not migrated.\n  run: uv run alembic upgrade head\n"
-            "  (with DAIMON_DATABASE_URL set to your target DB)",
-        ) from err
+    async with sessionmaker() as s:
+        raw = await get_scope(s, scope=TenantScopeRef(tenant_id=tenant_id))
     cfg = raw if isinstance(raw, TenantConfigRow) else None
     tenant_agent_name = cfg.agent_name if cfg is not None else None
     # A tenant is ready when an agent name resolves from EITHER an explicit
