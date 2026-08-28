@@ -769,6 +769,149 @@ async def test_ask_tool_result_preserves_images_and_structured_urls() -> None:
     assert embed_only.content[1] == image
 
 
+async def test_ask_result_schema_omits_the_unserialized_image_blocks() -> None:
+    schema = AskResult.model_json_schema()
+
+    assert "image_blocks" not in schema["properties"], (
+        "image_blocks is excluded from every dump, so advertising it in the "
+        "output schema points clients at a field that never arrives"
+    )
+
+
+async def test_ask_tool_result_keeps_prose_shape_without_charts() -> None:
+    result = _ask_tool_result(AskResult(handle="ses_plain001", message="Plain answer"))
+
+    assert isinstance(result, ToolResult)
+    assert result.content[0].model_dump(by_alias=True, exclude_none=True) == {
+        "type": "text",
+        "text": "Plain answer",
+    }
+    assert result.structured_content is not None
+    assert result.structured_content["handle"] == "ses_plain001"
+
+
+async def test_ask_keeps_polling_through_an_unmodeled_transient_status() -> None:
+    runtime = MagicMock()
+    runtime.settings.artifacts = None
+    runtime.artifact_store = None
+    auth = _auth()
+    events = MagicMock(
+        items=[
+            MagicMock(
+                type="agent.message",
+                content=[{"type": "text", "text": "Final answer"}],
+            )
+        ],
+        next_page=None,
+    )
+
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._start_turn_impl",
+            new=AsyncMock(return_value={"handle": "ses_queued001"}),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._get_session_impl",
+            new=AsyncMock(side_effect=[MagicMock(status="queued"), MagicMock(status="idle")]),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._list_events_impl",
+            new=AsyncMock(return_value=events),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat.deliver_hosted_charts",
+            new=AsyncMock(return_value=HostedChartDelivery(message="Final answer")),
+        ),
+    ):
+        result = await _ask_impl(
+            runtime,
+            auth,
+            "Question",
+            sleep=AsyncMock(),
+            clock=lambda: 0.0,
+        )
+
+    assert result.message == "Final answer"
+
+
+async def test_deliver_turn_charts_bounds_the_transcript_walk() -> None:
+    runtime = MagicMock()
+    auth = _auth()
+    reply_at = dt.datetime(2026, 8, 25, 12, 20, tzinfo=dt.UTC)
+
+    def endless_page(*args: Any, **kwargs: Any) -> MagicMock:
+        del args, kwargs
+        return MagicMock(
+            items=[_timed_event("sevt_reply", "agent.message", reply_at, text="Answer")],
+            next_page="more",
+        )
+
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._get_session_impl",
+            new=AsyncMock(
+                return_value=MagicMock(
+                    status="idle",
+                    created_at=dt.datetime(2026, 8, 25, 12, 0, tzinfo=dt.UTC),
+                )
+            ),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._list_events_impl",
+            new=AsyncMock(side_effect=endless_page),
+        ) as list_events,
+        patch("daimon.adapters.mcp.tools.agent_chat._MAX_EVENT_PAGES", 2),
+        pytest.raises(ToolError, match="no completed turn boundary"),
+    ):
+        await _deliver_turn_charts_impl(runtime, auth, "ses_endless001")
+
+    assert list_events.await_count == 2
+
+
+async def test_deliver_turn_charts_serves_repeat_calls_from_cache() -> None:
+    runtime = MagicMock()
+    runtime.settings.artifacts = None
+    runtime.artifact_store = None
+    auth = _auth()
+    reply_at = dt.datetime(2026, 8, 25, 12, 20, tzinfo=dt.UTC)
+    turn_started_at = dt.datetime(2026, 8, 25, 12, 10, tzinfo=dt.UTC)
+
+    def transcript(*args: Any, **kwargs: Any) -> MagicMock:
+        del args, kwargs
+        return MagicMock(
+            items=[
+                _timed_event("sevt_reply", "agent.message", reply_at, text="Final answer"),
+                _timed_event("sevt_turn_start", "user.message", turn_started_at),
+            ],
+            next_page=None,
+        )
+
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._get_session_impl",
+            new=AsyncMock(
+                return_value=MagicMock(
+                    status="idle",
+                    created_at=dt.datetime(2026, 8, 25, 12, 0, tzinfo=dt.UTC),
+                )
+            ),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._list_events_impl",
+            new=AsyncMock(side_effect=transcript),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat.deliver_hosted_charts",
+            new=AsyncMock(return_value=HostedChartDelivery(message="Final answer")),
+        ) as deliver,
+    ):
+        first = await _deliver_turn_charts_impl(runtime, auth, "ses_retry001")
+        second = await _deliver_turn_charts_impl(runtime, auth, "ses_retry001")
+
+    assert first == second
+    deliver.assert_awaited_once()
+
+
 async def test_deliver_turn_charts_uses_newest_completed_turn_window() -> None:
     runtime = MagicMock()
     runtime.settings.artifacts = None

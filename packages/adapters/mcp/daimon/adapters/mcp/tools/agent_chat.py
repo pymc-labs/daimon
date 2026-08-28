@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from time import monotonic
 from typing import Any, Literal
@@ -68,8 +69,13 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
 
 from mcp.types import ImageContent, TextContent
+
+# Each transcript page costs two upstream calls (ownership retrieve + events
+# list), so an uncapped walk on a long session can outlast any client timeout.
+_MAX_EVENT_PAGES = 20
 
 
 class AgentDescription(BaseModel):
@@ -92,17 +98,65 @@ class AskResult(BaseModel):
     handle: str
     message: str
     chart_urls: tuple[ChartUrl, ...] = ()
-    image_blocks: tuple[ImageContent, ...] = Field(default=(), exclude=True, repr=False)
+    # Excluded from dumps AND the JSON schema: image blocks travel as MCP
+    # content, never inside structured content, and advertising the field
+    # would point schema-reading clients at a value that never arrives.
+    image_blocks: SkipJsonSchema[tuple[ImageContent, ...]] = Field(
+        default=(), exclude=True, repr=False
+    )
 
 
-def _ask_tool_result(result: AskResult) -> AskResult | ToolResult:
-    """Add model-visible images while preserving the structured ask payload."""
-    if not result.chart_urls and not result.image_blocks:
-        return result
+def _ask_tool_result(result: AskResult) -> ToolResult:
+    """Give the model prose plus image blocks alongside the typed payload.
+
+    Built the same way with or without charts, so the caller sees one content
+    shape: prose text first, image blocks after, structured payload throughout.
+    """
     return ToolResult(
         content=[TextContent(type="text", text=result.message), *result.image_blocks],
         structured_content=result.model_dump(mode="json"),
     )
+
+
+class _DeliveryCache:
+    """Absorb hosted-client retry loops on ``deliver_turn_charts``.
+
+    A repeated call for the same completed turn re-downloads every chart from
+    the Files API and re-writes the artifact store on the operator's account,
+    unmetered — so one delivered result is held briefly per turn boundary.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_entries: int = 128,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        self._entries: OrderedDict[tuple[str, str], tuple[float, AskResult]] = OrderedDict()
+        self._max_entries = max_entries
+        self._clock = clock
+
+    def get(self, key: tuple[str, str]) -> AskResult | None:
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        expires_at, result = entry
+        if self._clock() >= expires_at:
+            del self._entries[key]
+            return None
+        return result
+
+    def put(self, key: tuple[str, str], result: AskResult, *, ttl_seconds: float) -> None:
+        if ttl_seconds <= 0:
+            return
+        self._entries[key] = (self._clock() + ttl_seconds, result)
+        self._entries.move_to_end(key)
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+
+
+_DELIVERY_CACHE_TTL_SECONDS = 300.0
+_delivery_cache = _DeliveryCache()
 
 
 async def _resolve_environment_name(
@@ -386,7 +440,7 @@ async def _deliver_turn_charts_impl(
     page: str | None = None
     final_text: str | None = None
     turn_started_at: dt.datetime | None = None
-    while True:
+    for _ in range(_MAX_EVENT_PAGES):
         events = await _list_events_impl(runtime, auth, handle, page, 100, "desc")
         for event in events.items:
             if final_text is None:
@@ -404,6 +458,11 @@ async def _deliver_turn_charts_impl(
     if turn_started_at is None:
         raise ToolError(f"no completed turn boundary found for session {handle}")
 
+    cache_key = (handle, turn_started_at.isoformat())
+    cached = _delivery_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     delivery = await deliver_hosted_charts(
         runtime.client,
         settings=runtime.settings.artifacts,
@@ -414,12 +473,19 @@ async def _deliver_turn_charts_impl(
         message=final_text,
         store=runtime.artifact_store,
     )
-    return AskResult(
+    result = AskResult(
         handle=handle,
         message=delivery.message,
         chart_urls=delivery.chart_urls,
         image_blocks=delivery.image_blocks,
     )
+    ttl = _DELIVERY_CACHE_TTL_SECONDS
+    if result.chart_urls:
+        # A cached entry must never outlive its presigned links.
+        earliest = min(chart.expires_at for chart in result.chart_urls)
+        ttl = min(ttl, (earliest - dt.datetime.now(dt.UTC)).total_seconds())
+    _delivery_cache.put(cache_key, result, ttl_seconds=ttl)
+    return result
 
 
 async def _ask_impl(
@@ -441,7 +507,11 @@ async def _ask_impl(
 
     while True:
         current = await _get_session_impl(runtime, auth, handle)
-        if current.status not in {"idle", "rescheduling", "running"}:
+        # Only terminated is treated as terminal: the status value set is
+        # upstream-controlled (see SessionInfo.status), so an unmodeled
+        # transient status keeps polling until the deadline instead of
+        # failing a turn that admission already billed.
+        if current.status == "terminated":
             raise ToolError(
                 f"Daimon turn reached terminal status {current.status!r}; "
                 f"resume or inspect events with handle {handle}"
@@ -449,7 +519,7 @@ async def _ask_impl(
         if current.status == "idle":
             page: str | None = None
             final_text: str | None = None
-            while True:
+            for _ in range(_MAX_EVENT_PAGES):
                 events = await _list_events_impl(runtime, auth, handle, page, 100, "desc")
                 for event in events.items:
                     final_text = _agent_message_text(event)
