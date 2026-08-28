@@ -20,6 +20,7 @@ from daimon.core.turn.posture import AutoApprove, BillingExempt, RequireApproval
 from daimon.core.turn.state import TextBlock
 from daimon.testing.turn_fakes import (
     FakeAnthropic,
+    RaiseReadTimeout,
     RecordingLifecycle,
     YieldEvent,
 )
@@ -277,3 +278,202 @@ async def test_explicit_require_approval_behaves_identically_to_default() -> Non
     assert fa.beta.sessions.events.sent_events == [
         ("sess_1", [{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}])
     ], "no confirmation payload should ever be sent under RequireApproval"
+
+
+async def test_auto_approve_confirms_a_requires_action_discovered_via_a_clean_close_and_finishes_after_reconnect() -> (
+    None
+):
+    """Gap regression: a `requires_action` idle whose event is lost to a
+    clean close (never delivered live) must still be confirmed and the turn
+    finished, via the eventless-cycle idle branch rather than the live
+    consume loop's own AutoApprove check."""
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="working")
+    ra_idle = make_status_idle(
+        event_id="sevt_2", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    done = make_status_idle(event_id="sevt_3", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pre)],  # exhausts -> clean close; ra_idle never delivered live
+        [YieldEvent(done)],  # reopened stream after the confirmation is sent
+    ]
+    fa.beta.sessions.events.replay_events = [pre, ra_idle]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=AutoApprove(),
+    )
+
+    assert fa.beta.sessions.events.sent_events == [
+        ("sess_1", [{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}]),
+        (
+            "sess_1",
+            [{"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "tu_1"}],
+        ),
+    ], "the eventless-cycle idle branch must confirm tu_1 exactly once"
+    assert fa.beta.sessions.events.stream_calls == 2, "confirming reopens the stream"
+    assert final.error is None
+    assert len(lc.terminal_success) == 1
+
+
+async def test_auto_approve_confirms_a_requires_action_discovered_via_a_read_timeout() -> None:
+    """Same shape as the clean-close regression test, but the eventless
+    cycle is triggered by a read timeout instead -- both cycle reasons must
+    take the identical confirm-and-reopen path."""
+    fa = FakeAnthropic()
+    ra_idle = make_status_idle(
+        event_id="sevt_1", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    done = make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [RaiseReadTimeout()],
+        [YieldEvent(done)],
+    ]
+    fa.beta.sessions.events.replay_events = [ra_idle]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=AutoApprove(),
+    )
+
+    assert fa.beta.sessions.events.sent_events == [
+        ("sess_1", [{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}]),
+        (
+            "sess_1",
+            [{"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "tu_1"}],
+        ),
+    ], "a read-timeout eventless cycle must take the same confirm-and-reopen path as a clean close"
+    assert fa.beta.sessions.events.stream_calls == 2
+    assert final.error is None
+    assert len(lc.terminal_success) == 1
+
+
+async def test_auto_approve_does_not_re_confirm_on_the_idle_branch_ids_already_confirmed_live() -> (
+    None
+):
+    """An id confirmed by the LIVE consume loop, then re-seen on the
+    eventless-cycle idle branch's replay fold, must not be re-confirmed --
+    the per-turn dedup set spans both call sites."""
+    fa = FakeAnthropic()
+    ra_idle = make_status_idle(
+        event_id="sevt_1", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(ra_idle)],  # confirms tu_1 live, then exhausts -> clean close
+    ]
+    fa.beta.sessions.events.replay_events = [ra_idle]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=AutoApprove(),
+    )
+
+    assert fa.beta.sessions.events.stream_calls == 1, "no fresh ids on the idle branch -> no reopen"
+    assert len(fa.beta.sessions.events.sent_events) == 2, (
+        "one user.message plus exactly one confirmation batch -- the live confirm, not a second"
+    )
+    assert final.error is not None
+    assert final.error.kind == "requires_action"
+    assert "already" in final.error.message, "these ids really were confirmed, live"
+
+
+async def test_auto_approve_never_sends_confirmations_into_a_terminated_session() -> None:
+    """A `terminated` session paused on `requires_action` can no longer
+    accept events -- the eventless-cycle branch must never send into it,
+    and the finalizer must not claim a confirmation that never happened."""
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="working")
+    ra_idle = make_status_idle(
+        event_id="sevt_2", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pre)],  # exhausts -> clean close; ra_idle never delivered live
+    ]
+    fa.beta.sessions.events.replay_events = [pre, ra_idle]
+    fa.beta.sessions.retrieve_statuses = ["terminated"]
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=AutoApprove(),
+    )
+
+    assert fa.beta.sessions.events.stream_calls == 1
+    assert fa.beta.sessions.events.sent_events == [
+        ("sess_1", [{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}])
+    ], "a terminated session must never be sent confirmations"
+    assert final.error is not None
+    assert final.error.kind == "requires_action"
+    assert "already" not in final.error.message, (
+        "nothing was ever sent for these ids, so the message must not claim they were"
+    )
+
+
+async def test_require_approval_still_finalizes_a_requires_action_found_on_the_idle_branch() -> (
+    None
+):
+    """The default/interactive posture through the same script as the
+    clean-close regression test: RequireApproval never sends confirmations,
+    and its finalize wording is unchanged by this plan."""
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="working")
+    ra_idle = make_status_idle(
+        event_id="sevt_2", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pre)],
+    ]
+    fa.beta.sessions.events.replay_events = [pre, ra_idle]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=RequireApproval(),
+    )
+
+    assert fa.beta.sessions.events.stream_calls == 1
+    assert fa.beta.sessions.events.sent_events == [
+        ("sess_1", [{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}])
+    ], "no confirmation payload should ever be sent under RequireApproval"
+    assert final.error is not None
+    assert final.error.kind == "requires_action"
+    assert "not supported on this surface" in final.error.message

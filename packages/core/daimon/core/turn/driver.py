@@ -397,7 +397,10 @@ async def _pump(
                         continue
                     # status in {"idle", "terminated"}: the terminal event
                     # the driver missed lives in the replay history. Fold it
-                    # in and finalize — do NOT reopen the stream.
+                    # in and finalize — do NOT reopen the stream. UNLESS the
+                    # folded state is a `requires_action` idle and
+                    # AutoApprove has unconfirmed ids for it: then this
+                    # branch sends confirmations and reopens instead (below).
                     log.info(
                         "turn.eventless_cycle_finalizing",
                         session_id=session_id,
@@ -407,6 +410,47 @@ async def _pump(
                     replayed = await replay_events(anthropic, session_id=session_id)
                     current_turn_events = _events_since_last_turn_boundary(replayed)
                     state_cell[0] = functools.reduce(apply, current_turn_events, TurnState())
+                    if session.status == "idle":
+                        match tool_confirmation:
+                            case AutoApprove():
+                                fresh = pending_confirmation_ids(
+                                    state_cell[0].stop_reason,
+                                    confirmed=confirmed_tool_use_ids,
+                                )
+                                if fresh:
+                                    confirmed_tool_use_ids.update(fresh)
+                                    decisions = build_confirmation_events(fresh)
+                                    # Safe to send here (and only here on this
+                                    # branch): `session.status` just came back
+                                    # `idle` from the `sessions.retrieve` above,
+                                    # i.e. the session is NOT running — the same
+                                    # not-running precondition the live loop's
+                                    # send documents (a bare `user.*` event sent
+                                    # into a RUNNING session returns HTTP 200 and
+                                    # is silently ignored). A `terminated`
+                                    # session cannot accept events at all, so it
+                                    # is deliberately excluded from this branch
+                                    # and keeps the unchanged finalize path.
+                                    #
+                                    # The fresh-ids guard above is what prevents
+                                    # a confirm-reconnect-confirm spin: a
+                                    # re-delivered `requires_action` for ids
+                                    # already in `confirmed_tool_use_ids` yields
+                                    # no fresh ids and falls through to `break`.
+                                    await anthropic.beta.sessions.events.send(
+                                        session_id, events=decisions
+                                    )
+                                    log.info(
+                                        "turn.tool_confirmation.sent",
+                                        session_id=session_id,
+                                        count=len(fresh),
+                                        via="eventless_cycle",
+                                    )
+                                    eventless_reconnect = True
+                                    eventless_reason = cycle.reason
+                                    continue
+                            case RequireApproval():
+                                pass  # fall through -- unchanged interactive behavior
                     break
         except _InterruptedDuringRecovery as err:
             await _cancel_render()
@@ -476,6 +520,7 @@ async def _pump(
             events_folded=events_folded_cell[0],
             renders_failed=renders_failed_cell[0],
             tool_confirmation=tool_confirmation,
+            confirmed_tool_use_ids=confirmed_tool_use_ids,
         )
     finally:
         if not render_task.done():
@@ -703,6 +748,7 @@ async def _finalize_success_or_error(
     events_folded: int,
     renders_failed: int,
     tool_confirmation: ToolConfirmation,
+    confirmed_tool_use_ids: set[str],
 ) -> TurnState:
     final_state = state_cell[0]
     if (
@@ -710,23 +756,37 @@ async def _finalize_success_or_error(
         and final_state.stop_reason is not None
         and final_state.stop_reason.type == "requires_action"
     ):
-        # Two distinct call sites reach a requires_action idle here:
+        # Three distinct paths reach a requires_action idle here:
         # - RequireApproval (interactive, Discord/CLI): no approval/resume
         #   UX is wired -- the consume loop exits on ANY idle, including
         #   requires_action, so this surfaces it as an actionable failure
         #   instead of silently dropping the agent's tool-approval request.
-        # - AutoApprove (routines): reaches here only via the "exhausted"
-        #   branch above -- MA re-asked for tool_use_ids already allowed and
-        #   not accepted, so the wording names that instead of the
-        #   interactive "not supported on this surface" framing, which
-        #   would be misleading here.
+        # - AutoApprove, exhausted: MA re-asked for tool_use_ids already in
+        #   `confirmed_tool_use_ids` -- confirmations really were sent, so
+        #   the "already confirmed" wording stays.
+        # - AutoApprove, never sent: the eventless-cycle idle branch found a
+        #   `terminated` session paused on `requires_action` -- it
+        #   deliberately does not send into a session that cannot accept
+        #   events, so those ids are still unconfirmed here. The "already
+        #   confirmed" wording would be a lie in this case; a second wording
+        #   names what actually happened.
         match tool_confirmation:
             case AutoApprove():
-                message = (
-                    "The agent re-requested approval for tool call(s) already "
-                    "confirmed — the confirmation(s) were sent but not accepted, "
-                    "so the turn was abandoned rather than spin."
+                unsent = pending_confirmation_ids(
+                    final_state.stop_reason, confirmed=confirmed_tool_use_ids
                 )
+                if unsent:
+                    message = (
+                        "The agent requested tool approval but the session was "
+                        "no longer accepting events, so the turn was abandoned "
+                        "without sending confirmations."
+                    )
+                else:
+                    message = (
+                        "The agent re-requested approval for tool call(s) already "
+                        "confirmed — the confirmation(s) were sent but not accepted, "
+                        "so the turn was abandoned rather than spin."
+                    )
             case RequireApproval():
                 message = (
                     "The agent requested tool approval — not supported on this "
