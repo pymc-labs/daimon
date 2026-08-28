@@ -653,7 +653,9 @@ async def _consume_with_reconnect(
                 match tool_confirmation:
                     case AutoApprove():
                         assert isinstance(event, BetaManagedAgentsSessionStatusIdleEvent)
-                        fresh = pending_confirmation_ids(event, confirmed=confirmed_tool_use_ids)
+                        fresh = pending_confirmation_ids(
+                            event.stop_reason, confirmed=confirmed_tool_use_ids
+                        )
                         if fresh:
                             confirmed_tool_use_ids.update(fresh)
                             # decisions: one `user.tool_confirmation` event

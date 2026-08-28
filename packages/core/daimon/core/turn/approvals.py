@@ -17,32 +17,38 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from anthropic.types.beta.sessions import (
-    BetaManagedAgentsSessionStatusIdleEvent,
-    BetaManagedAgentsUserToolConfirmationEventParams,
-)
+from anthropic.types.beta.sessions import BetaManagedAgentsUserToolConfirmationEventParams
+from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event import StopReason
 
 
 def pending_confirmation_ids(
-    event: BetaManagedAgentsSessionStatusIdleEvent,
+    stop_reason: StopReason | None,
     *,
     confirmed: set[str],
 ) -> list[str]:
-    """Return the `stop_reason.event_ids` not already in `confirmed`.
+    """Return `stop_reason.event_ids` not already in `confirmed`.
 
-    Order is preserved from the event's own `event_ids`. Does NOT mutate
+    Takes the SDK `StopReason` union directly (not the `session.status_idle`
+    event that carries it) so this ONE implementation serves both call
+    sites that need it: the live consume loop, which has the idle event
+    itself, and the eventless-cycle reconnect branch in `driver.py`, which
+    only has the folded `TurnState.stop_reason` (the reducer stores the
+    same SDK union verbatim). A second, near-identically-named function for
+    the reconnect branch is precisely where a reconnect-dedup bug would
+    hide — one function, two callers, zero duplicated dedup logic.
+
+    Order is preserved from `stop_reason.event_ids`. Does NOT mutate
     `confirmed` — the caller owns that step, so "which ids did we just
     claim" stays visible at the call site instead of hidden inside this
     function.
 
-    Narrows on `stop_reason.type == "requires_action"` using the real SDK
-    type; returns an empty list for any other stop reason rather than
-    raising, so a caller that has already checked
-    `terminal_stop_reason(event) == "requires_action"` can call this
-    directly.
+    `None` and any non-`requires_action` member return `[]` rather than
+    raising, so neither caller needs a pre-check: the live loop already
+    knows `terminal_stop_reason(event) == "requires_action"` before
+    calling, and the reconnect branch may have folded a `TurnState` whose
+    `stop_reason` is `None` or some other member entirely.
     """
-    stop_reason = event.stop_reason
-    if stop_reason.type != "requires_action":
+    if stop_reason is None or stop_reason.type != "requires_action":
         return []
     return [tool_use_id for tool_use_id in stop_reason.event_ids if tool_use_id not in confirmed]
 
