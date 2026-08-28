@@ -7,6 +7,23 @@ checked eventless-cycle reconnect, the per-call read timeout, the cancel
 race, the hardened render error policy — instead of a bespoke bare drain
 loop, and still auto-approves tool confirmations via `AutoApprove()`.
 
+A routine/headless turn is bounded end to end by the core per-turn ceiling
+(`daimon.core.turn.ceiling`, ~45 minutes): one shared deadline covers BOTH
+session assembly (the `agent`/`environment` retrieve calls plus
+`create_session`) and the delegated drain, mirroring how the chat path
+splits its own ceiling coverage between `bind_session` and
+`run_prepared_turn`. `deadline` is fail-safe like those two sites: a caller
+that passes none (every caller today, including the scheduler's `_fire`)
+still gets `turn_deadline(now=datetime.now(UTC))` computed here. A breach
+during assembly is raised as `TurnError(kind="ceiling")`; a breach during
+the drain comes back the same way via the driver's own `state.error` and
+this function's existing `if state.error is not None: raise state.error`.
+Either way it reaches the scheduler's `_fire_guarded` boundary as
+`"TurnError: ceiling: ..."` via `_record_fire_error`, not the adapter's own
+bespoke `"timeout: exceeded Ns"` string — the scheduler's `dispatch_timeout_s`
+is now strictly above `TURN_CEILING_S` and exists only as an outer process
+guard that this ceiling always fires ahead of.
+
 Used by `daimon.adapters.scheduler` for routine fires and by
 `daimon.core.smoke` for the post-deploy smoke turn.
 
@@ -31,19 +48,25 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
+import structlog
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from cryptography.fernet import MultiFernet
 from daimon.core.config import McpSettings
 from daimon.core.sessions import create_session
+from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.driver import run_turn as drive_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.posture import AutoApprove, Billed, BillingExempt, BillingPosture
 from daimon.core.turn.state import TurnState, extract_final_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+log = structlog.get_logger(__name__)
 
 LAST_RESULT_TAIL_MAX = 1000
 """Final-message tail is truncated to at most this many characters."""
@@ -101,6 +124,7 @@ async def run_turn(
     github_fallback_pat: str | None = None,
     github_app_id: str | None = None,
     github_app_private_key: str | None = None,
+    deadline: datetime | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its tail.
 
@@ -123,10 +147,14 @@ async def run_turn(
        even without a per-agent PAT.
     3. The drain is delegated to ``daimon.core.turn.driver.run_turn`` with a
        no-op lifecycle (nothing to render to), ``tool_confirmation=AutoApprove()``
-       (a routine still auto-allows tool calls), and a billing posture of
-       ``Billed(record=usage_record)`` when a ``usage_record_factory`` was
-       given, else ``BillingExempt(reason="headless-unrecorded")``. A routine
-       turn now inherits the driver's full liveness story — status-checked
+       (a routine still auto-allows tool calls), ``deadline=effective_deadline``
+       (the same instant that bounded step 1/2's assembly, so the driver's own
+       ``remaining_s`` naturally subtracts the time assembly already spent —
+       one window, two disjoint legs, no double enforcement), and a billing
+       posture of ``Billed(record=usage_record)`` when a
+       ``usage_record_factory`` was given, else
+       ``BillingExempt(reason="headless-unrecorded")``. A routine turn now
+       inherits the driver's full liveness story — status-checked
        eventless-cycle reconnect, the per-call read timeout, the cancel race,
        the hardened render error policy — instead of a bespoke bare drain
        loop with no reconnect and stream-end-as-success.
@@ -156,22 +184,40 @@ async def run_turn(
     returns, but adapter callers want to preset their own routine context
     (platform, user, guild) via ``functools.partial`` before fire time.
     """
-    agent = await anthropic.beta.agents.retrieve(agent_id)
-    environment = await anthropic.beta.environments.retrieve(environment_id)
-    session = await create_session(
-        anthropic,
-        agent=agent,
-        environment=environment,
-        mcp_settings=mcp_settings,
-        account_id=account_id,
-        tenant_id=tenant_id,
-        agent_uuid=agent_uuid,
-        session_factory=session_factory,
-        fernet=fernet,
-        github_fallback_pat=github_fallback_pat,
-        github_app_id=github_app_id,
-        github_app_private_key=github_app_private_key,
-    )
+    effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
+
+    async def _assemble_session() -> BetaManagedAgentsSession:
+        agent = await anthropic.beta.agents.retrieve(agent_id)
+        environment = await anthropic.beta.environments.retrieve(environment_id)
+        return await create_session(
+            anthropic,
+            agent=agent,
+            environment=environment,
+            mcp_settings=mcp_settings,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_uuid=agent_uuid,
+            session_factory=session_factory,
+            fernet=fernet,
+            github_fallback_pat=github_fallback_pat,
+            github_app_id=github_app_id,
+            github_app_private_key=github_app_private_key,
+        )
+
+    try:
+        session = await asyncio.wait_for(
+            _assemble_session(),
+            timeout=remaining_s(effective_deadline, now=datetime.now(UTC)),
+        )
+    except TimeoutError as err:
+        log.error(
+            "turn.ceiling_exceeded",
+            phase="headless_session_assembly",
+            agent_id=agent_id,
+            environment_id=environment_id,
+            deadline=effective_deadline.isoformat(),
+        )
+        raise ceiling_error() from err
 
     usage_record: Callable[..., Awaitable[None]] | None = None
     if usage_record_factory is not None:
@@ -200,6 +246,7 @@ async def run_turn(
         render_interval_s=2.0,  # nothing renders; do not spin the diff timer
         billing=billing,
         tool_confirmation=AutoApprove(),
+        deadline=effective_deadline,
     )
 
     if state.error is not None:

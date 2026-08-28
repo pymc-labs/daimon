@@ -18,6 +18,7 @@ blocking behavior is not needed.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import uuid
@@ -1281,3 +1282,136 @@ async def test_run_turn_composes_resources_alongside_vault_ids(
     assert bodies[0].get("resources") == [
         {"type": "file", "file_id": "file_both_hr", "mount_path": ".env"}
     ], "resources must compose alongside vault_ids, not replace it"
+
+
+# --- Ceiling coverage (19-12) ---
+
+
+async def test_run_turn_past_deadline_raises_a_ceiling_turn_error_from_session_assembly() -> None:
+    """A deadline already in the past must breach during session assembly
+    (agent/environment retrieve + create_session), before the drain ever
+    starts -- proven by an empty session_create_capture.
+
+    `remaining_s` clamps an already-past deadline to a 0.001s floor, but a
+    fast in-process fake transport can complete the two retrieve calls
+    within that floor before the real wall clock advances 1ms (observed:
+    the breach lands in the drain instead). To make the assembly-phase
+    breach deterministic, the agent-retrieve leg -- which runs BEFORE
+    create_session in the code -- is slowed with a real `asyncio.sleep`,
+    the same technique `test_run_prepared_turn.py`'s
+    `_slow_stream_for_recovered_session` uses to breach a specific leg.
+    """
+    session_create_capture: list[dict[str, Any]] = []
+    router = MARouter()
+    session_json = _fake_session_json()
+
+    def handle_create(request: httpx.Request, match: Any) -> httpx.Response:
+        session_create_capture.append(json.loads(request.content))
+        return httpx.Response(200, json=session_json)
+
+    router.add("POST", r"/v1/sessions", handle_create)
+    _register_agent_environment_routes(router)
+
+    async def _slow_agent_retrieve(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.startswith("/v1/agents/"):
+            await asyncio.sleep(1.0)
+        return router.dispatch(request)
+
+    transport = httpx.MockTransport(_slow_agent_retrieve)
+    http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
+    client = anthropic.AsyncAnthropic(api_key="test", http_client=http_client)
+
+    with pytest.raises(TurnError) as exc_info:
+        await run_turn(
+            anthropic=client,
+            agent_id="agent_x",
+            environment_id="env_x",
+            trigger_message="hi",
+            deadline=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=5),
+        )
+
+    assert exc_info.value.kind == "ceiling", "a past deadline must breach as kind='ceiling'"
+    assert session_create_capture == [], "a breach during assembly must never reach create_session"
+
+
+async def test_run_turn_ceiling_breach_during_the_drain_raises_a_ceiling_turn_error() -> None:
+    """Assembly completes normally (proven by a captured session-create body);
+    the breach happens once the drain's stream-open is deliberately slowed
+    past a tight future deadline."""
+    session_create_capture: list[dict[str, Any]] = []
+    router = MARouter()
+    session_json = _fake_session_json()
+
+    def handle_create(request: httpx.Request, match: Any) -> httpx.Response:
+        session_create_capture.append(json.loads(request.content))
+        return httpx.Response(200, json=session_json)
+
+    def handle_send(request: httpx.Request, match: Any) -> httpx.Response:
+        return httpx.Response(200, json={"data": None})
+
+    router.add("POST", r"/v1/sessions", handle_create)
+    router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
+    _register_agent_environment_routes(router)
+
+    async def _slow_stream(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/events/stream"):
+            await asyncio.sleep(2.0)
+        return router.dispatch(request)
+
+    transport = httpx.MockTransport(_slow_stream)
+    http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
+    client = anthropic.AsyncAnthropic(api_key="test", http_client=http_client)
+
+    with pytest.raises(TurnError) as exc_info:
+        await run_turn(
+            anthropic=client,
+            agent_id="agent_x",
+            environment_id="env_x",
+            trigger_message="hi",
+            deadline=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=0.3),
+        )
+
+    assert exc_info.value.kind == "ceiling", "a slow drain past the deadline must breach as ceiling"
+    assert len(session_create_capture) == 1, (
+        "assembly must have completed (session-create captured) before the drain breached"
+    )
+
+
+async def test_run_turn_omitting_the_deadline_still_completes_a_normal_turn() -> None:
+    """The fail-safe default (a full 45-minute window) must not interfere
+    with an ordinary routine that never passes a deadline."""
+    client = _build_client(_idle_events())
+
+    tail = await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="hi",
+        # deadline intentionally omitted
+    )
+
+    assert tail == "ok", "omitting deadline must not prevent a normal routine from completing"
+
+
+async def test_run_turn_deadline_feeds_remaining_s_rather_than_being_ignored() -> None:
+    """Cheap pin that `deadline` is actually plumbed into `remaining_s`,
+    without waiting 45 minutes for the real default: a deadline of exactly
+    `now` (ceiling_s=0.0) must breach the same way a past deadline does --
+    whether the breach lands during assembly or the drain, the parameter is
+    proven to be live rather than silently ignored."""
+    from daimon.core.turn.ceiling import turn_deadline
+
+    client = _build_client(_idle_events())
+
+    with pytest.raises(TurnError) as exc_info:
+        await run_turn(
+            anthropic=client,
+            agent_id="agent_x",
+            environment_id="env_x",
+            trigger_message="hi",
+            deadline=turn_deadline(now=dt.datetime.now(dt.UTC), ceiling_s=0.0),
+        )
+
+    assert exc_info.value.kind == "ceiling", (
+        "a deadline of exactly now must breach, proving the param feeds remaining_s"
+    )
