@@ -143,3 +143,57 @@ async def test_a_future_deadline_does_not_disturb_a_normal_turn() -> None:
 
     assert final.error is None, "a deadline far in the future must not disturb a normal turn"
     assert len(lc.terminal_success) == 1, "a normal turn under a generous deadline must succeed"
+
+
+async def test_ceiling_breach_during_stream_open_leaks_no_task_and_no_stream() -> None:
+    """A ceiling breach landing while the stream-open await is still in flight
+    must not orphan `_await_or_cancel`'s work task.
+
+    The breach cancels `run_turn` from OUTSIDE (`asyncio.wait_for`), so neither
+    branch of the helper's cancel-vs-work race runs. Without an explicit
+    release the work task outlives the turn, and when it later completes it
+    opens an SSE stream nobody holds a reference to -- the caller's
+    `opened_stream` is only assigned once `_await_or_cancel` RETURNS, which on
+    this path it never does.
+    """
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(make_status_idle(event_id="s", stop_reason=make_end_turn()))]
+    ]
+    original_stream = fa.beta.sessions.events.stream
+
+    async def _slow_stream(*, session_id: str, timeout: object = None):
+        await asyncio.sleep(0.20)  # still in flight when the ceiling fires
+        return await original_stream(session_id=session_id, timeout=timeout)
+
+    fa.beta.sessions.events.stream = _slow_stream  # type: ignore[assignment]
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        deadline=datetime.now(UTC) + timedelta(milliseconds=50),
+    )
+
+    assert final.error is not None
+    assert final.error.kind == "ceiling"
+    # Scoped to the setup tasks `_await_or_cancel` owns. `turn.render_loop` is
+    # deliberately excluded: the outer `finally` cancels it without draining, so
+    # it is routinely cancelled-but-not-yet-reaped for one more loop turn --
+    # a different (and pre-existing) question from orphaning a setup await.
+    orphaned = [
+        t.get_name()
+        for t in asyncio.all_tasks()
+        if t.get_name() in {"turn.stream_open", "turn.send_initial"} and not t.done()
+    ]
+    assert orphaned == [], f"the breach must not orphan a setup task: {orphaned}"
+
+    # Let anything the orphan would have done happen, then prove it didn't.
+    await asyncio.sleep(0.30)
+    assert fa.beta.sessions.events.streams == [], (
+        "a cancelled stream-open must never go on to open a stream nobody closes"
+    )

@@ -179,9 +179,32 @@ async def _await_or_cancel[T](
     keeps both call sites one line each.
     """
     work_task: asyncio.Task[T] = asyncio.create_task(coro, name=f"turn.{phase.replace('-', '_')}")
-    done, _pending = await asyncio.wait(
-        {work_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
-    )
+    try:
+        done, _pending = await asyncio.wait(
+            {work_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+    except BaseException:
+        # An OUTER cancellation landed on the race itself -- the ceiling's
+        # `asyncio.wait_for` in `run_turn`, or an adapter tearing the turn task
+        # down -- so neither branch below ever runs. Without this, `work_task`
+        # outlives `run_turn`: nothing cancels it, and when it later completes
+        # it hands a freshly opened SSE stream to nobody. The caller's
+        # `opened_stream` is only assigned once this function RETURNS, so its
+        # `finally` cannot close that stream either; the connection is simply
+        # abandoned. Same two cases as the cancel-wins branch below, for the
+        # same reasons.
+        if not work_task.done():
+            work_task.cancel()
+            with _suppress_task_exc():
+                await work_task
+        elif (
+            not work_task.cancelled()
+            and work_task.exception() is None
+            and on_cancel_win_result is not None
+        ):
+            with _suppress_task_exc():
+                await on_cancel_win_result(work_task.result())
+        raise
     if cancel_task in done:
         if work_task in done:
             if (
@@ -462,7 +485,9 @@ async def _pump(
                         status=session.status,
                     )
                     replayed = await replay_events(anthropic, session_id=session_id)
-                    current_turn_events = _events_since_last_turn_boundary(replayed)
+                    current_turn_events = _events_since_last_turn_boundary(
+                        replayed, tool_confirmation=tool_confirmation
+                    )
                     state_cell[0] = functools.reduce(apply, current_turn_events, TurnState())
                     if session.status == "idle":
                         match tool_confirmation:
@@ -583,6 +608,8 @@ async def _pump(
 
 def _events_since_last_turn_boundary(
     events: list[Any],
+    *,
+    tool_confirmation: ToolConfirmation,
 ) -> list[Any]:
     """Return only the events belonging to the current (most recent) turn.
 
@@ -593,13 +620,25 @@ def _events_since_last_turn_boundary(
 
     Two rules decide what counts as "ended a previous turn", and both matter:
 
-    1. A `session.status_idle` carrying a `requires_action` stop reason is NOT a
-       turn boundary. Under `AutoApprove` it is a mid-turn PAUSE: the driver
+    1. Under `AutoApprove`, a `session.status_idle` carrying a `requires_action`
+       stop reason is NOT a turn boundary. It is a mid-turn PAUSE: the driver
        answers it with `user.tool_confirmation` events and the SAME turn keeps
        going. Treating it as a boundary slices away the pause event itself, so
        the folded `stop_reason` comes back `None`, `pending_confirmation_ids`
        finds nothing to confirm, and a turn genuinely blocked on a tool approval
        is finalized as a quiet success with truncated content.
+
+       This exemption is posture-scoped because the SAME event means the
+       opposite thing under `RequireApproval` (the default, and what Discord,
+       Slack and `daimon run` use): there the driver has no way to answer, so
+       `_finalize_success_or_error` turns that idle into
+       `TurnError(kind="requires_action")` and the turn really does END on it.
+       Nothing retires the MA session on that error, so the next turn in the
+       same thread replays it -- and exempting it there would fold the previous
+       turn's content, and its `requires_action` stop reason, into the current
+       turn's state. `AutoApprove` cannot hit the mirror-image problem: its one
+       production caller (`headless_runner`) opens a fresh session per fire, so
+       its replays never span two turns.
 
     2. The current turn's OWN terminal idle is not a prior-turn boundary. On the
        eventless-cycle finalize path (`_pump`, status idle/terminated) the turn
@@ -619,7 +658,10 @@ def _events_since_last_turn_boundary(
     for i, ev in enumerate(events[:-1]):
         if getattr(ev, "type", None) != "session.status_idle":
             continue
-        if getattr(getattr(ev, "stop_reason", None), "type", None) == "requires_action":
+        if (
+            isinstance(tool_confirmation, AutoApprove)
+            and getattr(getattr(ev, "stop_reason", None), "type", None) == "requires_action"
+        ):
             continue  # a mid-turn pause, not the end of a turn -- rule 1 above
         last_boundary = i
     if last_boundary == -1:
@@ -675,7 +717,9 @@ async def _consume_with_reconnect(
             replayed = await replay_events(anthropic, session_id=session_id)
             if cancel.is_set():
                 raise _InterruptedDuringRecovery(phase="replay")
-            current_turn_events = _events_since_last_turn_boundary(replayed)
+            current_turn_events = _events_since_last_turn_boundary(
+                replayed, tool_confirmation=tool_confirmation
+            )
             state_cell[0] = functools.reduce(apply, current_turn_events, TurnState())
             log.info(
                 "turn.reconnect.completed",

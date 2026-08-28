@@ -615,3 +615,89 @@ async def test_auto_approve_reconnect_still_drops_a_prior_turns_content_at_its_e
     assert final.content == [TextBlock(kind="text", text="pre-approval text post-approval text")], (
         "the prior turn's content must not leak into the current turn's fold"
     )
+
+
+async def test_require_approval_treats_a_prior_turns_requires_action_idle_as_a_boundary_on_the_idle_branch() -> (
+    None
+):
+    """Posture regression: the `requires_action` pause exemption applies to
+    `AutoApprove` ONLY.
+
+    Under `RequireApproval` the driver cannot answer a `requires_action` idle,
+    so `_finalize_success_or_error` ends the turn on it. Nothing retires the MA
+    session, so the NEXT turn in the same thread replays that idle. Exempting
+    it there folds the prior turn's content -- and its `requires_action` stop
+    reason -- into the current turn, which then gets blamed for an approval
+    request that belongs to a turn that already ended and already reported it.
+    """
+    fa = FakeAnthropic()
+    prior = make_agent_message(event_id="sevt_1", text="TURN-1 TEXT ")
+    prior_end = make_status_idle(
+        event_id="sevt_2", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    current = make_agent_message(event_id="sevt_3", text="turn-2 text ")
+    tail = make_agent_message(event_id="sevt_4", text="tail")
+    fa.beta.sessions.events.stream_scripts = [[YieldEvent(current)]]  # clean close
+    fa.beta.sessions.events.replay_events = [prior, prior_end, current, tail]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_reused",
+        user_message="second question",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=RequireApproval(),
+    )
+
+    assert final.content == [TextBlock(kind="text", text="turn-2 text tail")], (
+        "the prior turn's text must not be glued onto this turn's answer"
+    )
+    assert final.stop_reason is None, (
+        "the prior turn's requires_action stop reason must not be inherited"
+    )
+    assert lc.terminal_failures == [], (
+        "this turn asked for no tool approval and must not be failed for one"
+    )
+
+
+async def test_require_approval_treats_a_prior_turns_requires_action_idle_as_a_boundary_on_the_retry_refold() -> (
+    None
+):
+    """The same posture regression on the other call site: the mid-turn
+    `is_retry` re-fold after a real connection drop."""
+    fa = FakeAnthropic()
+    prior = make_agent_message(event_id="sevt_1", text="PRIOR TURN TEXT ")
+    prior_end = make_status_idle(
+        event_id="sevt_2", stop_reason=make_requires_action(event_ids=["tu_1"])
+    )
+    current = make_agent_message(event_id="sevt_3", text="current turn ")
+    done = make_status_idle(event_id="sevt_4", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(current), RaiseStreamDrop()],
+        [YieldEvent(done)],
+    ]
+    fa.beta.sessions.events.replay_events = [prior, prior_end, current]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_reused",
+        user_message="second question",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=RequireApproval(),
+    )
+
+    assert lc.reconnects == ["connection_dropped"]
+    assert final.error is None
+    assert final.content == [TextBlock(kind="text", text="current turn ")], (
+        "the re-fold must still cut at a prior turn that ENDED on requires_action"
+    )
