@@ -278,6 +278,22 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
             if row is None:
                 return
 
+            # Same authority as pause/resume/delete. last_result_tail is the
+            # agent's own output from a scheduled run and routinely carries
+            # business data, so reading it is not a lesser act than pausing.
+            is_admin = await resolve_is_admin(client, user_id=user_id)
+            is_creator = row.created_by_user_id is not None and row.created_by_user_id == user_id
+            if not (is_admin or is_creator):
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_id or user_id,
+                    user=user_id,
+                    text=(
+                        "Only the routine's creator or a workspace admin "
+                        "can read this routine's output."
+                    ),
+                )
+                return
+
             if row.last_error is not None:
                 output_text = row.last_error
             else:
