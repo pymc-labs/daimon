@@ -175,6 +175,20 @@ def _compose_queued_content(events: list[dict[str, Any]]) -> str:
     return "\n\n".join(f"[{_author_id(e)}]: {e.get('text', '')}" for e in events)
 
 
+def _revokes_bot_token(event: dict[str, Any]) -> bool:
+    """Return True if a ``tokens_revoked`` event revoked the workspace bot token.
+
+    Slack sends ``tokens_revoked`` with ``{"tokens": {"oauth": [...], "bot": [...]}}``.
+    The ``oauth`` list fires when a single member revokes their own user token —
+    daimon triggers exactly that itself, from /privacy → Disconnect. Only a
+    non-empty ``bot`` list means the install is actually gone, so only that may
+    reach teardown; treating the whole event as an uninstall let one member's
+    Disconnect archive the tenant and delete the bot token for everyone.
+    """
+    tokens: dict[str, Any] = event.get("tokens") or {}
+    return bool(tokens.get("bot"))
+
+
 def _collect_files(events: list[dict[str, Any]]) -> list[SlackFile]:
     """Flatten the ``files`` arrays across events, preserving order.
 
@@ -654,7 +668,9 @@ class SlackApp:
             etype: str | None = event.get("type")
             if etype == "app_mention":
                 self._spawn(self._handle_app_mention(event, team_id=team_id))
-            elif etype in ("app_uninstalled", "tokens_revoked"):
+            elif etype == "app_uninstalled" or (
+                etype == "tokens_revoked" and _revokes_bot_token(event)
+            ):
                 self._spawn(self._handle_teardown(team_id=team_id))
         elif req.type == "slash_commands":
             # Slash commands arrive as req.type == "slash_commands".
@@ -735,7 +751,10 @@ class SlackApp:
             self._inflight.pop(tenant_id, None)
 
     async def _handle_teardown(self, *, team_id: str) -> None:
-        """Route app_uninstalled / tokens_revoked to teardown_slack_install.
+        """Archive the install: soft-archive the tenant, delete the bot token.
+
+        Reached from app_uninstalled unconditionally, and from tokens_revoked
+        only when the event names the bot token (see _revokes_bot_token).
 
         Soft-archives the tenant and deletes the bot-token row so subsequent
         events see no token and are dropped cleanly.

@@ -272,6 +272,93 @@ async def test_handle_teardown_when_app_uninstalled_archives_tenant_and_deletes_
     )
 
 
+async def test_on_request_when_tokens_revoked_carries_only_oauth_does_not_tear_down() -> None:
+    """A member revoking their own user token must not uninstall the workspace.
+
+    Slack sends tokens_revoked with {"tokens": {"oauth": [...], "bot": [...]}}.
+    The oauth list fires per-member — and daimon triggers it itself from
+    /privacy -> Disconnect, which calls auth_revoke on that member's user
+    token. Routing the whole event to teardown let one Disconnect click delete
+    the bot token and archive the tenant for everyone in the workspace.
+    """
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+
+    torn_down: list[str] = []
+
+    async def _spy_teardown(*, team_id: str) -> None:
+        torn_down.append(team_id)
+
+    app._handle_teardown = _spy_teardown  # type: ignore[method-assign]
+
+    req = _make_events_api_request(
+        event_type="tokens_revoked",
+        extra_event={"tokens": {"oauth": ["U_TEST"]}},
+    )
+    await app.on_request(fake_client, req)  # type: ignore[arg-type]
+
+    pending = list(app._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    assert torn_down == [], (
+        "an oauth-only tokens_revoked is one member's user token, not the "
+        f"install — teardown must not run, got {torn_down}"
+    )
+
+
+async def test_on_request_when_tokens_revoked_carries_bot_tears_down() -> None:
+    """A tokens_revoked naming the bot token IS the install going away."""
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+
+    torn_down: list[str] = []
+
+    async def _spy_teardown(*, team_id: str) -> None:
+        torn_down.append(team_id)
+
+    app._handle_teardown = _spy_teardown  # type: ignore[method-assign]
+
+    req = _make_events_api_request(
+        event_type="tokens_revoked",
+        team_id="T_REVOKED_BOT",
+        extra_event={"tokens": {"oauth": ["U_TEST"], "bot": ["B_TEST"]}},
+    )
+    await app.on_request(fake_client, req)  # type: ignore[arg-type]
+
+    pending = list(app._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    assert torn_down == ["T_REVOKED_BOT"], (
+        f"a bot-token revocation must reach teardown, got {torn_down}"
+    )
+
+
+async def test_on_request_when_app_uninstalled_tears_down() -> None:
+    """The uninstall path is unchanged by the tokens_revoked split."""
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+
+    torn_down: list[str] = []
+
+    async def _spy_teardown(*, team_id: str) -> None:
+        torn_down.append(team_id)
+
+    app._handle_teardown = _spy_teardown  # type: ignore[method-assign]
+
+    req = _make_events_api_request(event_type="app_uninstalled", team_id="T_UNINSTALLED")
+    await app.on_request(fake_client, req)  # type: ignore[arg-type]
+
+    pending = list(app._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    assert torn_down == ["T_UNINSTALLED"], (
+        f"app_uninstalled must still reach teardown unconditionally, got {torn_down}"
+    )
+
+
 async def test_drain_and_close_flips_draining_and_calls_client_close() -> None:
     """drain_and_close sets draining=True and awaits client.close()."""
     fake_client = _FakeSocketClient()
@@ -1650,6 +1737,39 @@ async def test_drain_skips_an_event_with_no_author_and_still_runs_the_real_ones(
     drained = [c["user"] for c in calls[1:]]
     assert drained == ["U_REAL"], (
         f"the authorless event must run no turn at all, got authors {drained}"
+    )
+
+
+async def test_on_request_when_tokens_revoked_carries_an_empty_bot_list_does_not_tear_down() -> (
+    None
+):
+    """`{"bot": []}` is the payload that separates truthiness from key-presence.
+
+    A discriminator written as `"bot" in tokens` would tear the workspace down
+    on an empty list; the guard tests non-emptiness.
+    """
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+
+    torn_down: list[str] = []
+
+    async def _spy_teardown(*, team_id: str) -> None:
+        torn_down.append(team_id)
+
+    app._handle_teardown = _spy_teardown  # type: ignore[method-assign]
+
+    req = _make_events_api_request(
+        event_type="tokens_revoked",
+        extra_event={"tokens": {"oauth": ["U_TEST"], "bot": []}},
+    )
+    await app.on_request(fake_client, req)  # type: ignore[arg-type]
+
+    pending = list(app._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    assert torn_down == [], (
+        f"an empty bot list revokes no bot token — teardown must not run, got {torn_down}"
     )
 
 
