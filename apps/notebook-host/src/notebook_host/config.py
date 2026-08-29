@@ -54,6 +54,13 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_marimo_port_range(self) -> Settings:
+        """Reject an inverted pool before startup reports it as exhausted."""
+        if self.marimo_port_start > self.marimo_port_end:
+            raise ValueError("marimo_port_start must not exceed marimo_port_end")
+        return self
+
     host_port: int = 8001
     marimo_port_start: int = 8100
     marimo_port_end: int = 8160

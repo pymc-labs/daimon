@@ -70,6 +70,15 @@ def test_settings_env_override_applied(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_settings_rejects_an_inverted_marimo_port_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_NOTEBOOK__MARIMO_PORT_START", "9001")
+    monkeypatch.setenv("DAIMON_NOTEBOOK__MARIMO_PORT_END", "9000")
+    from notebook_host.config import load_settings
+
+    with pytest.raises(ValidationError, match="marimo_port_start must not exceed"):
+        load_settings(_env_file=None)
+
+
 def test_resolved_blogs_file_defaults_to_data_dir_blogs_json() -> None:
     """blogs_file unset → resolved_blogs_file is data_dir / 'blogs.json'."""
     from notebook_host.config import load_settings
