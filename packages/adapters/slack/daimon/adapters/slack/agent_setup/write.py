@@ -28,7 +28,7 @@ from daimon.core.defaults.ma_index import (
     find_agents_by_daimon_tag,
 )
 from daimon.core.defaults.mcp_merge import merge_default_mcp_server, merge_default_mcp_toolset
-from daimon.core.defaults.metadata import build_metadata
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, build_metadata
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.skills import resolve_refs
@@ -304,6 +304,16 @@ async def delete_agent(runtime: SlackRuntime, *, tenant_id: uuid.UUID, name: str
     agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
     if agent is None:
         raise DaimonError(f"No agent named *{name}* found.")
+    if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+        # Server-side refusal, and on Slack the ONLY one: RosterEntry carries no
+        # managed flag, so the panel offers Delete on a seeded agent exactly as
+        # it does on a user agent, and the click branch checks only admin.
+        # Archiving here would take the deployment's built-in agent and its
+        # memory store with it.
+        raise DaimonError(
+            f"*{name}* is a built-in agent and cannot be deleted. "
+            "Fork it first, then delete the fork."
+        )
     await runtime.anthropic.beta.agents.archive(agent.id)
     await agent_lifecycle.archive_memory_store_best_effort(
         anthropic=runtime.anthropic,

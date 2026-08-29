@@ -484,6 +484,15 @@ async def delete_agent(runtime: DiscordRuntime, *, tenant_id: uuid.UUID, name: s
     agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
     if agent is None:
         raise DaimonError(f"No agent named **{name}** found.")
+    if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+        # Server-side refusal. The panel disables Delete for a seeded agent
+        # (is_system on the roster entry), but a stale or re-fired view
+        # interaction reaches this function anyway — and archiving here would
+        # take the deployment's built-in agent and its memory store with it.
+        raise DaimonError(
+            f"**{name}** is a built-in agent and cannot be deleted. "
+            "Fork it first, then delete the fork."
+        )
     await runtime.anthropic.beta.agents.archive(agent.id)
     await agent_lifecycle.archive_memory_store_best_effort(
         anthropic=runtime.anthropic,

@@ -37,13 +37,18 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 import yarl
+from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsModelConfig
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
     handle_agent_setup_command,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_TENANT,
+)
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelConfigRow, ChannelScopeRef, TenantScopeRef
@@ -1268,6 +1273,236 @@ async def test_handle_agent_setup_action_delete_non_admin_refused_no_write(
     texts = _ephemeral_texts(client_fake)
     assert any("no longer have permission" in t for t in texts), (
         "non-admin agent_setup__delete must be refused (admin-only, unconditional)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Delete against the deployment's built-in agent.
+#
+# ``write.delete_agent`` raises for this case and stays the server-side
+# backstop, but on Slack a raise reaches only the boundary catch at the bottom
+# of handle_agent_setup_action -- log + Sentry, no Slack call -- and the caller
+# is fire-and-forget, so the click renders as nothing happening at all. These
+# two tests pin the visible refusal and its unmanaged counterpart.
+# ---------------------------------------------------------------------------
+
+
+def _make_ma_handler_recording_archive(
+    agent_payloads: list[dict[str, object]],
+    recorded_requests: list[str],
+) -> Any:
+    """Serve the given agents, record every request, and honour archive.
+
+    Extends the read-only handler above with POST ``/v1/agents/{id}/archive``
+    so a delete that is NOT refused runs to completion (archive, then the
+    roster re-read that repaints L1). ``recorded_requests`` collects
+    ``"METHOD /path"`` for every call, which is what lets a test assert that no
+    archive was ever attempted.
+    """
+    agent_store: dict[str, dict[str, object]] = {str(ag["id"]): ag for ag in agent_payloads}
+    archived_ids: set[str] = set()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        method = request.method
+        recorded_requests.append(f"{method} {path}")
+
+        if method == "GET" and path == "/v1/agents":
+            live = [ag for agent_id, ag in agent_store.items() if agent_id not in archived_ids]
+            return httpx.Response(200, json={"data": live, "has_more": False})
+
+        archive_match = re.match(r"^/v1/agents/(?P<id>[^/]+)/archive$", path)
+        if archive_match and method == "POST":
+            agent_id_req = archive_match.group("id")
+            if agent_id_req not in agent_store:
+                return httpx.Response(
+                    404,
+                    json={
+                        "type": "error",
+                        "error": {"type": "not_found_error", "message": "not found"},
+                    },
+                )
+            archived_ids.add(agent_id_req)
+            return httpx.Response(
+                200,
+                json={
+                    **agent_store[agent_id_req],
+                    "archived_at": datetime.now(UTC).isoformat(),
+                },
+            )
+
+        if method == "GET" and path.startswith("/v1/agents/"):
+            agent_id_req = path.removeprefix("/v1/agents/")
+            if agent_id_req in agent_store:
+                return httpx.Response(200, json=agent_store[agent_id_req])
+            return httpx.Response(
+                404,
+                json={
+                    "type": "error",
+                    "error": {"type": "not_found_error", "message": "not found"},
+                },
+            )
+
+        if method == "GET" and path == "/v1/environments":
+            return httpx.Response(200, json={"data": [], "has_more": False})
+
+        return httpx.Response(404, json={"error": f"unhandled {method} {path}"})
+
+    return handler
+
+
+def _views_update_bodies(client_fake: Any) -> list[str]:
+    """Serialized bodies of every views.update call, for hint assertions."""
+    calls = client_fake.mock.requests.get(("POST", yarl.URL(f"{_SLACK_API_BASE}/views.update")), [])
+    return [json.dumps(call.kwargs.get("json") or {}) for call in calls]
+
+
+@pytest.mark.asyncio
+async def test_handle_agent_setup_action_delete_builtin_agent_refuses_visibly_and_archives_nothing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: object,
+) -> None:
+    """Delete on the deployment's built-in agent refuses in Slack, not just server-side.
+
+    The roster carries no managed flag, so the panel offers Delete on a seeded
+    agent exactly as it does on a user agent. An admin clicking it must see why
+    it will not happen -- a silent no-op invites a second click and turns an
+    expected policy refusal into a Sentry event.
+    """
+    tenant_id, fernet_key, _ = await _seed_team(db_session)
+
+    now = datetime.now(UTC)
+    builtin_agent = BetaManagedAgentsAgent(
+        id=_MA_AGENT_ID,
+        type="agent",
+        name=_AGENT_NAME,
+        version=1,
+        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
+        metadata={
+            MA_METADATA_KEY_TENANT: str(tenant_id),
+            MA_METADATA_KEY_NAME: _AGENT_NAME,
+            MA_METADATA_KEY_MANAGED: "true",
+        },
+        mcp_servers=[],
+        skills=[],
+        tools=[],
+        created_at=now,
+        updated_at=now,
+    ).model_dump(mode="json")
+
+    recorded_requests: list[str] = []
+    handler = _make_ma_handler_recording_archive([builtin_agent], recorded_requests)
+    runtime = _build_runtime(fernet_key, db_session_factory, anthropic_handler=handler)
+
+    client_fake: Any = fake_slack_web_client
+    _override_users_info_admin(client_fake.mock)
+
+    payload = _action_payload("agent_setup__delete", selected_agent_name=_AGENT_NAME)
+    await handle_agent_setup_action(runtime, payload)  # type: ignore[arg-type]
+
+    assert not [req for req in recorded_requests if req.endswith("/archive")], (
+        "deleting the built-in agent must reach no archive call on the Anthropic "
+        f"transport, got requests: {recorded_requests!r}"
+    )
+
+    texts = _ephemeral_texts(client_fake)
+    assert len(texts) == 1, f"exactly one refusal ephemeral must be posted, got {texts!r}"
+    assert "built-in agent" in texts[0], (
+        f"the refusal must say the agent is built in, got {texts[0]!r}"
+    )
+    assert "ork" in texts[0], (
+        f"the refusal must point at forking as the way forward, got {texts[0]!r}"
+    )
+
+    update_bodies = _views_update_bodies(client_fake)
+    assert not update_bodies, (
+        "a refused delete must leave the open panel untouched -- the agent still "
+        f"exists, so the rendered view is still accurate; got {update_bodies!r}"
+    )
+    assert not any("wastebasket" in body or "deleted." in body for body in update_bodies), (
+        "the panel must never claim the built-in agent was deleted, got "
+        f"views.update bodies: {update_bodies!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_agent_setup_action_delete_unmanaged_agent_archives_and_repaints(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: object,
+) -> None:
+    """An ordinary user agent still deletes -- the built-in refusal must not over-block."""
+    tenant_id, fernet_key, _ = await _seed_team(db_session)
+
+    now = datetime.now(UTC)
+    user_agent = BetaManagedAgentsAgent(
+        id=_MA_AGENT_ID,
+        type="agent",
+        name=_AGENT_NAME,
+        version=1,
+        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
+        metadata={
+            MA_METADATA_KEY_TENANT: str(tenant_id),
+            MA_METADATA_KEY_NAME: _AGENT_NAME,
+        },
+        mcp_servers=[],
+        skills=[],
+        tools=[],
+        created_at=now,
+        updated_at=now,
+    ).model_dump(mode="json")
+
+    # A second agent survives the delete: the L1 empty state replaces the hint
+    # line entirely, so the repaint is only observable on a non-empty roster.
+    surviving_agent = BetaManagedAgentsAgent(
+        id=f"agent_{'b' * 24}",
+        type="agent",
+        name="other-agent",
+        version=1,
+        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
+        metadata={
+            MA_METADATA_KEY_TENANT: str(tenant_id),
+            MA_METADATA_KEY_NAME: "other-agent",
+        },
+        mcp_servers=[],
+        skills=[],
+        tools=[],
+        created_at=now,
+        updated_at=now,
+    ).model_dump(mode="json")
+
+    recorded_requests: list[str] = []
+    handler = _make_ma_handler_recording_archive([user_agent, surviving_agent], recorded_requests)
+    runtime = _build_runtime(fernet_key, db_session_factory, anthropic_handler=handler)
+
+    client_fake: Any = fake_slack_web_client
+    _override_users_info_admin(client_fake.mock)
+
+    payload = _action_payload("agent_setup__delete", selected_agent_name=_AGENT_NAME)
+    await handle_agent_setup_action(runtime, payload)  # type: ignore[arg-type]
+
+    assert f"POST /v1/agents/{_MA_AGENT_ID}/archive" in recorded_requests, (
+        "deleting an unmanaged agent must archive it on the Anthropic transport, got "
+        f"requests: {recorded_requests!r}"
+    )
+    assert not _ephemeral_texts(client_fake), (
+        f"an allowed delete must post no refusal ephemeral, got {_ephemeral_texts(client_fake)!r}"
+    )
+
+    update_bodies = _views_update_bodies(client_fake)
+    assert len(update_bodies) == 1, (
+        f"a successful delete must repaint L1 exactly once, got {update_bodies!r}"
+    )
+    # The repaint is asserted through the roster it renders, not through the
+    # delete hint: build_l1_view drops scope_hint whenever no agent is
+    # selected, and the success path deliberately clears the selection, so
+    # ``delete_hint`` never reaches the rendered view.
+    assert _AGENT_NAME not in update_bodies[0], (
+        f"the repainted roster must no longer offer the archived agent, got {update_bodies[0]!r}"
+    )
+    assert "other-agent" in update_bodies[0], (
+        f"the repainted roster must still offer the surviving agent, got {update_bodies[0]!r}"
     )
 
 

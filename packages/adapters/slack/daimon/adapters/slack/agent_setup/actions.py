@@ -42,7 +42,10 @@ decided post-ack, server-side, never trusted from the rendered view):
     workspace default) — an unreachable agent has no live gate to defend.
   - Admin-only unconditionally, unchanged: delete, the three scope:* branches,
     connect_mcp (mints a bearer token; token issuance stays outside what
-    this phase opens).
+    this phase opens). Delete carries one refusal above the admin check as
+    well: the deployment's built-in agent is never deletable, admins included,
+    and that refusal is posted as an ephemeral rather than raised, so the
+    click does not look like a no-op.
   - JWT values for connect-mcp: never logged, last4/presence only.
   - Stale agent: re-fetch tolerates missing agent → no write, re-render L1 with
     warning notice.
@@ -103,7 +106,7 @@ from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
     list_agents_by_tenant,
 )
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token
@@ -118,6 +121,15 @@ from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
+
+# Refusal copy for Delete against the deployment's built-in agent. Worded in
+# the shape ``agent_setup.gate`` uses for its own seeded-agent refusal: what is
+# refused, that admin rights do not change it, and the fork path out.
+_BUILTIN_AGENT_DELETE_MESSAGE = (
+    ":lock: This is the workspace's built-in agent, so it cannot be deleted "
+    "from here — not even by an admin. Fork it to get a copy you own, then "
+    "delete the fork."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +669,29 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                     is_admin=is_admin,
                     runtime=runtime,
                     tenant_id=tenant_id,
+                )
+                return
+
+            # Built-in agent: a policy refusal, not a failure. ``delete_agent``
+            # raises for this case and stays the server-side backstop, but a
+            # raise reaches only the boundary catch at the bottom of this
+            # function — which logs and reports to Sentry without touching
+            # Slack, so the click would look like nothing happened and the
+            # admin would click again. Read the marker off the agent already
+            # fetched for the stale guard (no extra round trip) and refuse in
+            # the shape ``agent_setup.gate`` uses: ephemeral, then return. No
+            # repaint — the agent still exists, so the panel on screen is still
+            # accurate, and the non-admin refusal above returns the same way.
+            if ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+                log.info(
+                    "slack.agent_setup.delete_refused_builtin",
+                    team_id=team_id,
+                    agent_name=target_name,
+                )
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_id or user_id,
+                    user=user_id,
+                    text=_BUILTIN_AGENT_DELETE_MESSAGE,
                 )
                 return
 
