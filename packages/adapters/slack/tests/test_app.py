@@ -58,6 +58,7 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma import build_fake_anthropic
 from pydantic import SecretStr
+from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1149,6 +1150,506 @@ async def test_orchestrate_queue_coalesce_when_thread_in_flight_adds_hourglass_a
     assert mock_deliver_outputs.await_count == 2, (
         "a delivery failure is isolated inside a detached sweep task, so the "
         "queued turn never waited for it and both turns still swept"
+    )
+
+
+async def test_drain_partitions_queued_mentions_by_author_when_two_users_queue_in_one_thread(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Two users queueing behind one in-flight turn drain as TWO turns, one
+    per author — never one composite turn under the first author's identity.
+
+    Coalescing distinct authors would run B's instructions inside A's session,
+    under A's vault token and Slack visibility, billed to A. The assertion is
+    on the sequence of ``external_id`` values reaching principal resolution:
+    each turn must resolve its own author.
+    """
+    team_id = "T_DRAIN_PARTITION"
+    channel = "C_TEST"
+    thread_ts = "9000000009.000001"
+    event_ts1 = "9000000009.000001"
+    event_ts2 = "9000000009.000002"
+    event_ts3 = "9000000009.000003"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+
+    await provision_tenant(
+        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    )
+
+    app, _ = _make_orchestrate_app(db_session_factory)
+
+    turn_count = 0
+    # Gate that pauses the first run_turn call so event2 can arrive while task1
+    # is in-flight.  The test sets this after sending event2.
+    first_turn_gate = asyncio.Event()
+
+    async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
+        nonlocal turn_count
+        turn_count += 1
+        if turn_count == 1:
+            await first_turn_gate.wait()  # guaranteed suspension — event2 arrives here
+        # ToolUseBlock so the tool-use-gated output sweep runs for both turns.
+        state = TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use", id="tu_part", type="agent.tool_use", name="bash", input={}
+                ),
+                TextBlock(kind="text", text="Partitioned response"),
+            ]
+        )
+        await lifecycle.on_terminal_success(state)
+        return state
+
+    event1: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": event_ts1,
+        "event_ts": event_ts1,
+        "channel": channel,
+        "user": "U_TEST_A",
+        "text": "<@U_BOT> first",
+    }
+    event2: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": event_ts2,
+        "thread_ts": thread_ts,
+        "event_ts": event_ts2,
+        "channel": channel,
+        "user": "U_TEST_B",
+        "text": "<@U_BOT> second",
+    }
+    event3: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": event_ts3,
+        "thread_ts": thread_ts,
+        "event_ts": event_ts3,
+        "channel": channel,
+        "user": "U_TEST_A",
+        "text": "<@U_BOT> third",
+    }
+
+    # Patch all store functions so concurrent tasks don't share the single test connection.
+    # The coalesce test verifies queue/drain logic, not DB correctness (that is tested
+    # in test_orchestrate_first_turn_*).
+    fake_principal = MagicMock()
+    fake_principal.account_id = uuid.uuid4()
+    resolved_authors: list[str] = []
+    fake_row = MagicMock()
+    fake_row.id = uuid.uuid4()
+
+    with (
+        patch(
+            "daimon.core.turn.admission.get_or_create_platform_principal", new_callable=AsyncMock
+        ) as mock_principal,
+        patch(
+            "daimon.core.turn.prepare.get_live_thread_session", new_callable=AsyncMock
+        ) as mock_get_session,
+        patch(
+            "daimon.core.turn.prepare.create_thread_session", new_callable=AsyncMock
+        ) as mock_create_ts,
+        patch("daimon.adapters.slack.app.update_watermark", new_callable=AsyncMock),
+        patch("daimon.core.turn.admission.reconcile_tenant_defaults", new_callable=AsyncMock),
+        patch(
+            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
+        ) as mock_resolve_agent,
+        patch(
+            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+        ) as mock_resolve_env,
+        patch(
+            "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
+        ) as mock_create_session,
+        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+        patch(
+            "daimon.adapters.slack.app.deliver_session_outputs", new_callable=AsyncMock
+        ) as mock_deliver_outputs,
+    ):
+
+        async def _capture_principal(*_args: Any, **kwargs: Any) -> Any:
+            resolved_authors.append(str(kwargs["external_id"]))
+            return fake_principal
+
+        mock_principal.side_effect = _capture_principal
+        mock_get_session.return_value = None  # simulate new thread each time
+        mock_create_ts.return_value = fake_row
+        mock_resolve_agent.return_value = "agent_partition_id"
+        mock_resolve_env.return_value = "env_partition_id"
+        _now_p = datetime.now(UTC)
+        _agent_snap_p = BetaManagedAgentsSessionAgent(
+            id="agent_partition_id",
+            mcp_servers=[],
+            model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
+            name="test-agent",
+            skills=[],
+            tools=[],
+            type="agent",
+            version=1,
+        )
+        mock_create_session.return_value = BetaManagedAgentsSession(
+            outcome_evaluations=[],
+            id="sess-partition-001",
+            agent=_agent_snap_p,
+            created_at=_now_p,
+            environment_id="env_partition_id",
+            metadata={},
+            resources=[],
+            stats=BetaManagedAgentsSessionStats(),
+            status="idle",
+            type="session",
+            updated_at=_now_p,
+            usage=BetaManagedAgentsSessionUsage(),
+            vault_ids=[],
+        )
+        mock_run_turn.side_effect = _fake_run_turn
+        mock_deliver_outputs.side_effect = [RuntimeError("delivery exploded"), None, None]
+
+        # Start the first orchestrate as a background task.
+        task1 = asyncio.create_task(
+            app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                event1,
+                team_id=team_id,
+                channel=channel,
+                event_ts=event_ts1,
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant_id,
+            )
+        )
+        # Yield to the event loop so task1 runs past _processing.add(thread_id)
+        # and suspends inside run_turn at first_turn_gate.wait().
+        await asyncio.sleep(0)
+
+        # Second mention arrives while the first turn is in flight (task1 is
+        # paused at first_turn_gate — thread_id is in _processing).
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event2,
+            team_id=team_id,
+            channel=channel,
+            event_ts=event_ts2,
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event3,
+            team_id=team_id,
+            channel=channel,
+            event_ts=event_ts3,
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+        # Release task1 to complete the first turn and drain the queue.
+        first_turn_gate.set()
+
+        # Wait for task1 to complete (it also drains the queue).
+        await task1
+
+        # Drain the detached output sweeps before asserting on delivery calls.
+        # The sleep(0) yields so the tasks' call_soon-scheduled done-callbacks
+        # (the _bg_tasks discards) actually run — gather over already-done
+        # tasks completes without ever yielding to the event loop.
+        while app._bg_tasks:  # pyright: ignore[reportPrivateUsage]
+            await asyncio.gather(
+                *list(app._bg_tasks),  # pyright: ignore[reportPrivateUsage]
+                return_exceptions=True,
+            )
+            await asyncio.sleep(0)
+
+    # Assert ⌛ reactions were added for both queued mentions.
+    reactions_calls = [
+        req
+        for (method, url), reqs in fake_slack_web_client.mock.requests.items()
+        if method == "POST" and url.path == "/api/reactions.add"
+        for req in reqs
+    ]
+    assert len(reactions_calls) >= 2, (
+        "reactions_add must be called with 'hourglass_flowing_sand' for each queued mention"
+    )
+
+    assert turn_count == 3, (
+        "three turns must run — the initial A turn plus one drain turn per "
+        f"distinct queued author, got {turn_count}"
+    )
+    assert resolved_authors == ["U_TEST_A", "U_TEST_B", "U_TEST_A"], (
+        "each drained turn must resolve its OWN author's principal; a composite "
+        "turn would resolve U_TEST_A twice and never resolve U_TEST_B "
+        f"(confused deputy), got {resolved_authors}"
+    )
+
+
+async def _drive_drain(
+    app: Any,
+    *,
+    team_id: str,
+    channel: str,
+    thread_ts: str,
+    tenant_id: uuid.UUID,
+    web_client: Any,
+    root_event: dict[str, Any],
+    queued_events: list[dict[str, Any]],
+    turn_side_effect: Any = None,
+) -> list[dict[str, Any]]:
+    """Run one _orchestrate whose first turn is held open while `queued_events`
+    arrive, then release it so the drain loop runs.
+
+    Returns one record per _run_thread_turn call: the author, the composed
+    content override, and the files that reached that turn. _run_thread_turn is
+    the drain loop's only output, so it is the honest observable for "which
+    turns ran, for whom, with what" — the question this whole partition exists
+    to answer.
+    """
+    calls: list[dict[str, Any]] = []
+    first_turn_gate = asyncio.Event()
+
+    async def _spy_turn(event: dict[str, Any], **kwargs: Any) -> None:
+        calls.append(
+            {
+                "user": event.get("user"),
+                "content_override": kwargs.get("content_override"),
+                "files": kwargs.get("files") or [],
+            }
+        )
+        if len(calls) == 1:
+            await first_turn_gate.wait()
+        elif turn_side_effect is not None:
+            turn_side_effect(event)
+
+    app._run_thread_turn = _spy_turn  # type: ignore[method-assign]
+
+    task = asyncio.create_task(
+        app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            root_event,
+            team_id=team_id,
+            channel=channel,
+            event_ts=str(root_event["event_ts"]),
+            web_client=web_client,
+            tenant_id=tenant_id,
+        )
+    )
+    await asyncio.sleep(0)  # let task reach the gate inside the first turn
+
+    for ev in queued_events:
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            ev,
+            team_id=team_id,
+            channel=channel,
+            event_ts=str(ev["event_ts"]),
+            web_client=web_client,
+            tenant_id=tenant_id,
+        )
+
+    first_turn_gate.set()
+    await task
+    return calls
+
+
+def _mention(
+    *,
+    ts: str,
+    user: str | None,
+    text: str,
+    channel: str,
+    thread_ts: str | None = None,
+    files: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    ev: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": ts,
+        "event_ts": ts,
+        "channel": channel,
+        "text": text,
+    }
+    if user is not None:
+        ev["user"] = user
+    if thread_ts is not None:
+        ev["thread_ts"] = thread_ts
+    if files is not None:
+        ev["files"] = files
+    return ev
+
+
+async def test_drain_merges_each_authors_files_and_never_crosses_them_between_authors(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Files must follow their author into that author's turn, and only there.
+
+    The partition merges files across all of one author's queued events; a
+    regression that used only user_events[0] would silently drop files on their
+    later mentions, and one that kept the old flat _collect_files(queued) would
+    hand A's upload to B's session.
+    """
+    team_id, channel = "T_DRAIN_FILES", "C_TEST"
+    thread_ts = "9100000001.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(
+        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    )
+    app, _ = _make_orchestrate_app(db_session_factory)
+
+    calls = await _drive_drain(
+        app,
+        team_id=team_id,
+        channel=channel,
+        thread_ts=thread_ts,
+        tenant_id=tenant_id,
+        web_client=fake_slack_web_client.client,
+        root_event=_mention(ts=thread_ts, user="U_A", text="<@U_BOT> root", channel=channel),
+        queued_events=[
+            _mention(
+                ts="9100000001.000002",
+                user="U_A",
+                text="<@U_BOT> a1",
+                channel=channel,
+                thread_ts=thread_ts,
+                files=[{"id": "F_A1"}],
+            ),
+            _mention(
+                ts="9100000001.000003",
+                user="U_B",
+                text="<@U_BOT> b1",
+                channel=channel,
+                thread_ts=thread_ts,
+                files=[{"id": "F_B1"}],
+            ),
+            _mention(
+                ts="9100000001.000004",
+                user="U_A",
+                text="<@U_BOT> a2",
+                channel=channel,
+                thread_ts=thread_ts,
+                files=[{"id": "F_A2"}],
+            ),
+        ],
+    )
+
+    drained = calls[1:]
+    by_user = {c["user"]: c for c in drained}
+    assert set(by_user) == {"U_A", "U_B"}, (
+        f"exactly one drained turn per distinct author, got {[c['user'] for c in drained]}"
+    )
+    assert [f["id"] for f in by_user["U_A"]["files"]] == ["F_A1", "F_A2"], (
+        "U_A's turn must carry files from BOTH of their queued mentions, in "
+        f"arrival order, got {by_user['U_A']['files']}"
+    )
+    assert [f["id"] for f in by_user["U_B"]["files"]] == ["F_B1"], (
+        f"U_B's turn must carry only their own file, got {by_user['U_B']['files']}"
+    )
+
+
+async def test_drain_runs_remaining_authors_when_one_authors_turn_raises(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """One author's failure must not consume the others' mentions.
+
+    Their events are already popped from _pending, so the finally-block notice
+    cannot reach them — without per-author isolation they vanish with no turn
+    and no message at all.
+    """
+    team_id, channel = "T_DRAIN_ISOLATE", "C_TEST"
+    thread_ts = "9100000002.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(
+        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    )
+    app, _ = _make_orchestrate_app(db_session_factory)
+
+    def _explode_for_a(event: dict[str, Any]) -> None:
+        if event.get("user") == "U_A":
+            raise SlackApiError("boom", response={"ok": False, "error": "internal_error"})
+
+    calls = await _drive_drain(
+        app,
+        team_id=team_id,
+        channel=channel,
+        thread_ts=thread_ts,
+        tenant_id=tenant_id,
+        web_client=fake_slack_web_client.client,
+        root_event=_mention(ts=thread_ts, user="U_ROOT", text="<@U_BOT> root", channel=channel),
+        queued_events=[
+            _mention(
+                ts="9100000002.000002",
+                user="U_A",
+                text="<@U_BOT> a",
+                channel=channel,
+                thread_ts=thread_ts,
+            ),
+            _mention(
+                ts="9100000002.000003",
+                user="U_B",
+                text="<@U_BOT> b",
+                channel=channel,
+                thread_ts=thread_ts,
+            ),
+        ],
+        turn_side_effect=_explode_for_a,
+    )
+
+    attempted = [c["user"] for c in calls[1:]]
+    assert attempted == ["U_A", "U_B"], (
+        "U_B's turn must still be attempted after U_A's raised; a bare await "
+        f"would abandon the rest of the queue, got {attempted}"
+    )
+    posts = [
+        req
+        for (method, url), reqs in fake_slack_web_client.mock.requests.items()
+        if method == "POST" and url.path == "/api/chat.postMessage"
+        for req in reqs
+    ]
+
+    assert any("something went wrong" in str(r.kwargs) for r in posts), (
+        "the author whose turn raised must be told, not silently dropped"
+    )
+
+
+async def test_drain_skips_an_event_with_no_author_and_still_runs_the_real_ones(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """An event with no `user` must not form its own turn.
+
+    Partitioning on a defaulted "" would resolve a principal for the empty
+    string and bill a phantom account. Discord cannot reach this state because
+    a Message always has an author.
+    """
+    team_id, channel = "T_DRAIN_NOAUTHOR", "C_TEST"
+    thread_ts = "9100000003.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(
+        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    )
+    app, _ = _make_orchestrate_app(db_session_factory)
+
+    calls = await _drive_drain(
+        app,
+        team_id=team_id,
+        channel=channel,
+        thread_ts=thread_ts,
+        tenant_id=tenant_id,
+        web_client=fake_slack_web_client.client,
+        root_event=_mention(ts=thread_ts, user="U_ROOT", text="<@U_BOT> root", channel=channel),
+        queued_events=[
+            _mention(
+                ts="9100000003.000002",
+                user=None,
+                text="<@U_BOT> ghost",
+                channel=channel,
+                thread_ts=thread_ts,
+            ),
+            _mention(
+                ts="9100000003.000003",
+                user="U_REAL",
+                text="<@U_BOT> real",
+                channel=channel,
+                thread_ts=thread_ts,
+            ),
+        ],
+    )
+
+    drained = [c["user"] for c in calls[1:]]
+    assert drained == ["U_REAL"], (
+        f"the authorless event must run no turn at all, got authors {drained}"
     )
 
 

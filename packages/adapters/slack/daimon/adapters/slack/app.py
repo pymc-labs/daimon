@@ -149,6 +149,16 @@ def _log_bg_task_exception(task: asyncio.Task[None]) -> None:
         log.error("bg_task_failed", task_name=task.get_name(), exc_info=exc)
 
 
+def _author_id(event: dict[str, Any]) -> str:
+    """The Slack user id that authored an event, or "" when there is none.
+
+    One spelling, used by both the drain partition and
+    ``_compose_queued_content`` — deriving the author two different ways is how
+    a partition key and a rendered attribution drift apart.
+    """
+    return str(event.get("user") or "")
+
+
 def _compose_queued_content(events: list[dict[str, Any]]) -> str:
     """Compose pending mention texts into a single composite user message.
 
@@ -159,10 +169,10 @@ def _compose_queued_content(events: list[dict[str, Any]]) -> str:
     """
     if not events:
         return ""
-    user_ids = {str(e.get("user", "")) for e in events}
+    user_ids = {_author_id(e) for e in events}
     if len(user_ids) == 1:
         return "\n\n".join(str(e.get("text", "")) for e in events)
-    return "\n\n".join(f"[{e.get('user', '')}]: {e.get('text', '')}" for e in events)
+    return "\n\n".join(f"[{_author_id(e)}]: {e.get('text', '')}" for e in events)
 
 
 def _collect_files(events: list[dict[str, Any]]) -> list[SlackFile]:
@@ -1066,18 +1076,73 @@ class SlackApp:
             # turn independently re-enters _run_thread_turn, which admission-gates
             # and bills every turn — new session or reused.
             while queued := self._pending.pop(thread_id, []):
-                composite = _compose_queued_content(queued)
-                representative = queued[0]
-                await self._run_thread_turn(
-                    representative,
-                    channel=channel,
-                    web_client=web_client,
-                    tenant_id=tenant_id,
-                    thread_id=thread_id,
-                    content_override=composite,
-                    team_id=team_id,
-                    files=_collect_files(queued),
-                )
+                # Partition by author and run one composite turn per author,
+                # in first-seen arrival order. Coalescing distinct authors onto
+                # one turn would route B's mention into A's session, under A's
+                # vault token and Slack visibility, billed to A, with B's own
+                # per-user cap never evaluated. One turn = one caller.
+                # Mirrors Discord's _drain_pending_mentions (bot.py:900-914).
+                by_user: dict[str, list[dict[str, Any]]] = {}
+                for q_event in queued:
+                    author = _author_id(q_event)
+                    if not author:
+                        # No author to run as. `_run_thread_turn` would resolve a
+                        # principal for the empty string and bill a turn to a
+                        # phantom account. Discord cannot hit this — a Message
+                        # always has an author.
+                        log.warning(
+                            "slack.drain.skipped_authorless_event",
+                            thread_id=thread_id,
+                            team_id=team_id,
+                        )
+                        continue
+                    by_user.setdefault(author, []).append(q_event)
+                for user_events in by_user.values():
+                    # One author's failure must not consume the others'. Their
+                    # events are already popped from _pending, so the `finally`
+                    # notice below cannot reach them — without this they would
+                    # vanish with no turn and no message. Discord gets the same
+                    # property for free because `_handle_mention` renders turn
+                    # errors internally and never raises; `_run_thread_turn`
+                    # documents the opposite ("errors propagate to the listener
+                    # boundary"), so Slack has to isolate here.
+                    try:
+                        await self._run_thread_turn(
+                            user_events[0],
+                            channel=channel,
+                            web_client=web_client,
+                            tenant_id=tenant_id,
+                            thread_id=thread_id,
+                            content_override=_compose_queued_content(user_events),
+                            team_id=team_id,
+                            # Merge files from ALL of this author's queued events,
+                            # in first-seen order — user_events[0] alone would
+                            # silently drop files on their later mentions.
+                            files=_collect_files(user_events),
+                        )
+                    except (
+                        DaimonError,
+                        anthropic.APIError,
+                        SlackApiError,
+                        InvalidToken,
+                        SQLAlchemyError,
+                        aiohttp.ClientError,
+                        TimeoutError,
+                    ) as exc:
+                        log.exception(
+                            "slack.drain.turn_failed",
+                            thread_id=thread_id,
+                            team_id=team_id,
+                            exc_info=exc,
+                        )
+                        with contextlib.suppress(SlackApiError):
+                            await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                                channel=channel,
+                                text=(
+                                    "Sorry, something went wrong handling that — please try again."
+                                ),
+                                thread_ts=thread_id,
+                            )
         finally:
             self._processing.discard(thread_id)
             still_pending = self._pending.pop(thread_id, [])
