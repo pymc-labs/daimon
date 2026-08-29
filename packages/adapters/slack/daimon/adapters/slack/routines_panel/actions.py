@@ -24,10 +24,7 @@ from typing import Any
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.admin import (
-    _dev_allow_all_admin,  # pyright: ignore[reportPrivateUsage]
-    resolve_is_admin,
-)
+from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.routines_panel.read import load_routines
@@ -244,10 +241,8 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 )
                 return
             # Authority gate before showing the confirm modal (re-checked at
-            # submit for TOCTOU safety). Admin (honoring dev_allow_all) OR creator.
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            # submit for TOCTOU safety). Admin OR creator.
+            is_admin = await resolve_is_admin(client, user_id=user_id)
             is_creator = row.created_by_user_id is not None and row.created_by_user_id == user_id
             if not (is_admin or is_creator):
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
@@ -310,10 +305,8 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
             )
 
         elif action_value == "create":
-            # Admin gate at click time (honors dev_allow_all). Refused → ephemeral.
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            # Admin gate at click time. Refused → ephemeral.
+            is_admin = await resolve_is_admin(client, user_id=user_id)
             if not is_admin:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,

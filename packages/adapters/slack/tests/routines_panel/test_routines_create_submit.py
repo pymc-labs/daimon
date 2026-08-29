@@ -4,13 +4,16 @@ Covers:
 - evaluate_routines_create_submission: valid → proceed/clear + extra; missing
   field → response_action errors keyed to the right block.
 - run_routines_create_submission (real Postgres + transport-level fakes):
-  - dev_allow_all admin: a valid submission creates a routine row whose
+  - admin: a valid submission creates a routine row whose
     created_by_user_id is the submitting Slack user id.
-  - bad cron: no row created + :x: ephemeral posted.
+  - bad cron: no row created + an ephemeral naming the rejected cron expression
+    (a bare :x: would also match the non-admin refusal, which returns before
+    the cron is ever parsed).
 """
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
@@ -159,9 +162,49 @@ def _agent_handler(tenant_id_str: str, *, agent_name: str = _AGENT_NAME) -> Any:
     return _handler
 
 
+_USERS_INFO_PATTERN = re.compile(r"https://slack\.com/api/users\.info.*")
+
+
+def _override_users_info_admin(mock: Any) -> None:
+    """Replace the conftest non-admin users.info stub with an admin one.
+
+    aioresponses matches by insertion order and the conftest baseline is
+    registered with repeat=True, so a plain append never wins — the existing
+    users.info matchers have to be dropped first.
+
+    Reaches into aioresponses internals, so it fails loudly when they move: a
+    silent no-op here would leave the non-admin baseline winning and quietly
+    turn every caller into a test of the refusal path.
+    """
+    to_remove = [
+        k
+        for k, v in mock._matches.items()  # type: ignore[attr-defined]
+        if getattr(v, "url_or_pattern", None) == _USERS_INFO_PATTERN
+    ]
+    if not to_remove:
+        raise AssertionError(
+            "no users.info matcher found to override — aioresponses internals moved"
+        )
+    for k in to_remove:
+        del mock._matches[k]  # type: ignore[attr-defined]
+    mock.get(  # pyright: ignore[reportUnknownMemberType]
+        _USERS_INFO_PATTERN,
+        payload={
+            "ok": True,
+            "user": {
+                "id": _USER_ID,
+                "name": "admin",
+                "is_admin": True,
+                "is_owner": False,
+                "is_primary_owner": False,
+            },
+        },
+        repeat=True,
+    )
+
+
 def _build_runtime(handler: Any, db_session_factory: Any) -> SlackRuntime:
     settings: MagicMock = MagicMock()
-    settings.slack.dev_allow_all_admin = True
     return SlackRuntime(
         settings=settings,
         anthropic=build_fake_anthropic(handler),
@@ -174,13 +217,14 @@ def _build_runtime(handler: Any, db_session_factory: Any) -> SlackRuntime:
 
 
 @pytest.mark.asyncio
-async def test_run_routines_create_when_dev_allow_all_creates_row_with_creator_user_id(
+async def test_run_routines_create_when_admin_creates_row_with_creator_user_id(
     fake_slack_web_client: Any,
     db_session_factory: Any,
 ) -> None:
-    """A valid submission (dev_allow_all admin) creates a routine row whose
+    """A valid submission by an admin creates a routine row whose
     created_by_user_id is the submitting Slack user id — the whole point of the
     Slack-native create surface."""
+    _override_users_info_admin(fake_slack_web_client.mock)
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID)
     async with db_session_factory() as session:
         await make_tenant(session, platform="slack", workspace_id=_TEAM_ID, id=tenant_id)
@@ -228,7 +272,14 @@ async def test_run_routines_create_when_bad_cron_creates_no_row_and_posts_error(
     fake_slack_web_client: Any,
     db_session_factory: Any,
 ) -> None:
-    """A bad cron expression must create no routine row and post an :x: ephemeral."""
+    """A bad cron expression must create no routine row and post an ephemeral that
+    names the rejected expression.
+
+    The assertion deliberately does not settle for the bare ``:x:`` prefix: the
+    non-admin refusal in ``_refuse_non_admin`` also posts ``:x:`` and also
+    writes no row, so ``:x:`` alone proves nothing about cron validation.
+    """
+    _override_users_info_admin(fake_slack_web_client.mock)
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID)
     async with db_session_factory() as session:
         await make_tenant(session, platform="slack", workspace_id=_TEAM_ID, id=tenant_id)
@@ -258,4 +309,7 @@ async def test_run_routines_create_when_bad_cron_creates_no_row_and_posts_error(
     ephemeral_key = ("POST", yarl.URL("https://slack.com/api/chat.postEphemeral"))
     assert ephemeral_key in fake_slack_web_client.mock.requests, "bad cron should post an ephemeral"
     texts = [c.kwargs["json"]["text"] for c in fake_slack_web_client.mock.requests[ephemeral_key]]
-    assert any(":x:" in t for t in texts), "bad cron ephemeral must include :x:"
+    assert any("invalid cron `not a cron`" in t for t in texts), (
+        "bad cron ephemeral must name the rejected cron expression — only the "
+        "cron-validation branch can produce this text, unlike a bare :x:"
+    )

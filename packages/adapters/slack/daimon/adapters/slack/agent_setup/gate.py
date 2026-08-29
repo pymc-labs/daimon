@@ -72,7 +72,6 @@ async def refuse_if_reachable_and_not_admin(
     agent_name: str,
     channel_id: str,
     user_id: str,
-    dev_allow_all: bool = False,
 ) -> bool:
     """Refuse a spec-touching action against a built-in or reachable agent.
 
@@ -96,8 +95,6 @@ async def refuse_if_reachable_and_not_admin(
                         tenant-scoped lookup key.
         channel_id:     Invoking channel, for the refusal ephemeral.
         user_id:        Invoking user, for the admin check and the ephemeral.
-        dev_allow_all:  Testing-only admin-gate override, threaded through
-                        unchanged from ``_dev_allow_all_admin(runtime)``.
 
     Returns:
         ``True`` if the caller must refuse and return early, ``False`` to
@@ -119,7 +116,7 @@ async def refuse_if_reachable_and_not_admin(
         )
         return True
 
-    is_admin = await resolve_is_admin(web_client, user_id=user_id, dev_allow_all=dev_allow_all)
+    is_admin = await resolve_is_admin(web_client, user_id=user_id)
     if is_admin:
         return False
 
@@ -153,7 +150,6 @@ async def refuse_if_shared_and_not_admin(
     agent_name: str,
     channel_id: str,
     user_id: str,
-    dev_allow_all: bool = False,
 ) -> bool:
     """Refuse an attachment write against a shared agent by a non-admin.
 
@@ -189,14 +185,12 @@ async def refuse_if_shared_and_not_admin(
                         tenant-scoped lookup key.
         channel_id:     Invoking channel, for the refusal ephemeral.
         user_id:        Invoking user, for the admin check and the ephemeral.
-        dev_allow_all:  Testing-only admin-gate override, threaded through
-                        unchanged from ``_dev_allow_all_admin(runtime)``.
 
     Returns:
         ``True`` if the caller must refuse and return early, ``False`` to
         proceed.
     """
-    is_admin = await resolve_is_admin(web_client, user_id=user_id, dev_allow_all=dev_allow_all)
+    is_admin = await resolve_is_admin(web_client, user_id=user_id)
     if is_admin:
         return False
 

@@ -24,8 +24,7 @@ run_* submissions:
     updated in place and the requester gets an ephemeral.
   - A second submission of a consumed row writes nothing.
   - mcp: missing daimon-mcp configuration refuses BEFORE the consume.
-  - repo: non-admin refused before the consume; an admin (via the dev
-    override, which must reach this gate) binds a public repo.
+  - repo: non-admin refused before the consume; an admin binds a public repo.
   - skill_repo: the pasted token binds the repo and the imported skills are
     attached to the agent the request named.
 """
@@ -33,6 +32,7 @@ run_* submissions:
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -81,6 +81,39 @@ _MESSAGE_TS = "1700000002.000200"
 _EPHEMERAL_URL = yarl.URL("https://slack.com/api/chat.postEphemeral")
 _VIEWS_OPEN_URL = yarl.URL("https://slack.com/api/views.open")
 _CHAT_UPDATE_URL = yarl.URL("https://slack.com/api/chat.update")
+
+_USERS_INFO_PATTERN = re.compile(r"https://slack\.com/api/users\.info.*")
+
+
+def _override_users_info_admin(mock: Any) -> None:
+    """Replace the conftest non-admin users.info stub with an admin one.
+
+    aioresponses matches by insertion order and the conftest baseline is
+    registered with repeat=True, so a plain append never wins — the existing
+    users.info matchers have to be dropped first.
+    """
+    to_remove = [
+        k
+        for k, v in mock._matches.items()  # type: ignore[attr-defined]
+        if getattr(v, "url_or_pattern", None) == _USERS_INFO_PATTERN
+    ]
+    for k in to_remove:
+        del mock._matches[k]  # type: ignore[attr-defined]
+    mock.get(  # pyright: ignore[reportUnknownMemberType]
+        _USERS_INFO_PATTERN,
+        payload={
+            "ok": True,
+            "user": {
+                "id": _USER_ID,
+                "name": "admin",
+                "is_admin": True,
+                "is_owner": False,
+                "is_primary_owner": False,
+            },
+        },
+        repeat=True,
+    )
+
 
 # ---------------------------------------------------------------------------
 # build_credential_modal
@@ -251,16 +284,12 @@ def _build_runtime(
     fernet_key: str,
     db_factory: async_sessionmaker[AsyncSession],
     *,
-    dev_allow_all_admin: bool = False,
     anthropic_handler: Any = None,
 ) -> SlackRuntime:
     settings = MagicMock()
     settings.crypto.keys = (SecretStr(fernet_key),)
     settings.mcp.public_url = None
     settings.mcp.jwt_secret = None
-    # MagicMock attributes are truthy — the admin override must be pinned off
-    # explicitly or every gate test silently runs as a dev-mode admin.
-    settings.slack.dev_allow_all_admin = dev_allow_all_admin
     settings.github.oauth_scopes = ("repo",)
     return SlackRuntime(
         settings=settings,
@@ -604,16 +633,15 @@ async def test_repo_submission_by_admin_binds_a_public_repo(
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """The dev override reaches the request gate the same way it reaches the
-    panel gate — without it, `resolve_is_admin` reads `users.info` and this
-    non-admin fake refuses before the consume."""
+    """A workspace admin (per users.info) passes the gate and binds the repo."""
     monkeypatch.setattr(credential_requests_mod, "is_public_repo", AsyncMock(return_value=True))
+    _override_users_info_admin(fake_slack_web_client.mock)
     tenant_id, fernet_key = await _seed_team(db_session)
     token = await _seed_request(
         db_session, tenant_id=tenant_id, kind="repo", target="https://github.com/o/r"
     )
     await db_session.commit()
-    runtime = _build_runtime(fernet_key, db_session_factory, dev_allow_all_admin=True)
+    runtime = _build_runtime(fernet_key, db_session_factory)
 
     await run_repo_bind_credential_submission(
         runtime,

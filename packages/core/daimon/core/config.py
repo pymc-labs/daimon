@@ -234,15 +234,6 @@ class SlackSettings(BaseModel):
             "scheduler process (8082) — all process groups share one host."
         ),
     )
-    dev_allow_all_admin: bool = Field(
-        default=False,
-        description=(
-            "Testing-only flag: when True, treats every Slack user as a "
-            "workspace admin, bypassing the normal admin lookup, so a "
-            "non-admin tester can exercise agent CRUD on a test deployment. "
-            "Must stay unset in production."
-        ),
-    )
 
 
 class GithubSettings(BaseModel):

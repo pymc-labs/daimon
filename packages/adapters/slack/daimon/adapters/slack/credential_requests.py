@@ -41,10 +41,7 @@ import httpx
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAgentsSkillParams
-from daimon.adapters.slack.admin import (
-    _dev_allow_all_admin,  # pyright: ignore[reportPrivateUsage]
-    resolve_is_admin,
-)
+from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_setup.write import (
     load_agent_inline_pat,
     mask_tail,
@@ -349,7 +346,7 @@ async def _refuse_if_shared_and_not_admin_for_request(
 
     Returns True when the caller must return immediately (refused).
     """
-    if await resolve_is_admin(client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)):
+    if await resolve_is_admin(client, user_id=user_id):
         return False
     agent = await find_agent_by_derived_uuid(
         runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id

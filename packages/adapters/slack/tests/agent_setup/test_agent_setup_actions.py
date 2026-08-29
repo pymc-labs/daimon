@@ -299,7 +299,6 @@ def _build_runtime(
     settings.mcp.jwt_secret = None
     settings.github = MagicMock()
     settings.github.app_id = None
-    settings.slack.dev_allow_all_admin = False  # real default; MagicMock would be truthy
     return SlackRuntime(
         settings=settings,
         anthropic=build_fake_anthropic(handler),
@@ -566,7 +565,6 @@ async def test_handle_agent_setup_action_connect_mcp_sends_ephemeral_not_modal_u
     settings.mcp.jwt_secret = SecretStr("test-secret-32-bytes-long-padding!")
     settings.github = MagicMock()
     settings.github.app_id = None
-    settings.slack.dev_allow_all_admin = False  # real default; MagicMock would be truthy
     runtime = SlackRuntime(
         settings=settings,
         anthropic=build_fake_anthropic(handler),
@@ -1345,7 +1343,6 @@ async def test_handle_agent_setup_action_connect_mcp_non_admin_refused_no_epheme
     settings.mcp.jwt_secret = SecretStr("test-secret-32-bytes-long-padding!")
     settings.github = MagicMock()
     settings.github.app_id = None
-    settings.slack.dev_allow_all_admin = False
     runtime = SlackRuntime(
         settings=settings,
         anthropic=build_fake_anthropic(handler),

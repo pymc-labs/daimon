@@ -25,10 +25,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anthropic
 import structlog
-from daimon.adapters.slack.admin import (
-    _dev_allow_all_admin,  # pyright: ignore[reportPrivateUsage]
-    resolve_is_admin,
-)
+from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.routines_panel.read import load_routines
 from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
@@ -168,14 +165,13 @@ async def _refuse_non_admin(
     *,
     channel_id: str,
     user_id: str,
-    dev_allow_all: bool = False,
 ) -> bool:
     """Re-check is_admin server-side; send ephemeral and return True if non-admin.
 
     Every mutating run_* calls this first. Returns True = caller should return
     early (refused). Returns False = admin confirmed, proceed.
     """
-    is_admin = await resolve_is_admin(web_client, user_id=user_id, dev_allow_all=dev_allow_all)
+    is_admin = await resolve_is_admin(web_client, user_id=user_id)
     if not is_admin:
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
@@ -228,7 +224,6 @@ async def run_routines_create_submission(
             web_client,
             channel_id=channel_id,
             user_id=user_id,
-            dev_allow_all=_dev_allow_all_admin(runtime),
         )
         if refused:
             return
@@ -310,7 +305,7 @@ async def run_routines_delete_submission(
 ) -> None:
     """Post-ack: delete a routine after its confirm modal is submitted.
 
-    Re-checks tenant + authority (admin honoring dev_allow_all, OR the routine's
+    Re-checks tenant + authority (admin, OR the routine's
     creator) inside ``session.begin()`` (TOCTOU-safe, fail-closed), deletes the
     row, then refreshes the underlying panel view (``root_view_id``) in place and
     posts a confirmation ephemeral back to the invoking channel.
@@ -333,9 +328,7 @@ async def run_routines_delete_submission(
                     text="This routine no longer exists.",
                 )
                 return
-            is_admin = await resolve_is_admin(
-                web_client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(web_client, user_id=user_id)
             is_creator = row.created_by_user_id is not None and row.created_by_user_id == user_id
             if not (is_admin or is_creator):
                 await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]

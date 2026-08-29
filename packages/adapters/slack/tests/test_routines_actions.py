@@ -55,9 +55,6 @@ async def _seed_team(
 def _build_runtime(fernet_key: str, db_factory: async_sessionmaker[AsyncSession]) -> SlackRuntime:
     settings = MagicMock()
     settings.crypto.keys = (SecretStr(fernet_key),)
-    # Prod default: no dev admin override, so the delete gate exercises the real
-    # admin-OR-creator path (MagicMock would otherwise make this truthy).
-    settings.slack.dev_allow_all_admin = False
     return SlackRuntime(
         settings=settings,
         anthropic=build_fake_anthropic(make_fake_ma_handler()),

@@ -83,7 +83,6 @@ def _non_admin_users_info_payload(user_id: str = _USER_ID) -> dict[str, Any]:
 def _build_runtime(db_factory: async_sessionmaker[AsyncSession]) -> SlackRuntime:
     """Construct a SlackRuntime with a fake Anthropic transport and real DB factory."""
     settings = MagicMock()
-    settings.slack.dev_allow_all_admin = False
     return SlackRuntime(
         settings=settings,
         anthropic=build_fake_anthropic(make_fake_ma_handler()),
@@ -103,7 +102,6 @@ def _runtime_with_failing_sessionmaker() -> SlackRuntime:
         raise AssertionError("sessionmaker must not be called when the caller is already admin")
 
     settings = MagicMock()
-    settings.slack.dev_allow_all_admin = False
     return SlackRuntime(
         settings=settings,
         anthropic=build_fake_anthropic(make_fake_ma_handler()),
@@ -556,42 +554,3 @@ async def test_shared_gate_non_admin_passes_on_an_unreachable_unmanaged_agent(
 
         post_key = ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral"))
         assert post_key not in mock.requests, "pass-through case must not post any ephemeral"
-
-
-async def test_shared_gate_dev_allow_all_lets_a_non_admin_through(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """dev_allow_all=True treats a non-admin as admin, matching the spec gate."""
-    async with db_session_factory() as session:
-        tenant = await make_tenant(session, platform="slack", workspace_id=_TEAM_ID)
-        await make_tenant_config(session, tenant=tenant, agent_name=_AGENT_NAME, mode="agent")
-        await session.commit()
-
-    with AioResponsesMock() as mock:
-        mock.get(  # pyright: ignore[reportUnknownMemberType]
-            _USERS_INFO_PATTERN,
-            payload=_non_admin_users_info_payload(),
-            repeat=True,
-        )
-        mock.post(  # pyright: ignore[reportUnknownMemberType]
-            f"{_SLACK_API_BASE}/chat.postEphemeral",
-            payload={"ok": True},
-            repeat=True,
-        )
-        client = AsyncWebClient(token="xoxb-test")
-        runtime = _build_runtime(db_session_factory)
-
-        refused = await refuse_if_shared_and_not_admin(
-            runtime,
-            client,
-            tenant_id=tenant.id,
-            agent_name=_AGENT_NAME,
-            channel_id=_CHANNEL_ID,
-            user_id=_USER_ID,
-            dev_allow_all=True,
-        )
-
-        assert refused is False, "the dev admin-gate override must open the attachment gate too"
-
-        post_key = ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral"))
-        assert post_key not in mock.requests, "the override path must not post any ephemeral"

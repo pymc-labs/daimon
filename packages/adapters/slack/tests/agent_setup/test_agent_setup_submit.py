@@ -553,7 +553,6 @@ def _build_runtime_with_db(
     settings.mcp.jwt_secret = None
     settings.github = MagicMock()
     settings.github.app_id = None
-    settings.slack.dev_allow_all_admin = False
     return SlackRuntime(
         settings=settings,
         anthropic=build_fake_anthropic(handler),
@@ -1563,10 +1562,6 @@ def _build_edit_repo_settings(*, app_id: str | None, fernet_key: str | None = No
     settings.github = MagicMock()
     settings.github.app_id = app_id
     settings.github.oauth_scopes = ("repo",)
-    # Explicitly off: a MagicMock attribute is truthy, so leaving this unset
-    # makes _dev_allow_all_admin treat every caller as an admin and every
-    # admin gate inert while the suite stays green.
-    settings.slack.dev_allow_all_admin = False
     return settings
 
 

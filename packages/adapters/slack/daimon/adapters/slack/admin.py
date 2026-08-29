@@ -11,24 +11,13 @@ The caller resolves once per interaction; no cross-interaction cache.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import structlog
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
-if TYPE_CHECKING:
-    from daimon.adapters.slack.runtime import SlackRuntime
-
 log = structlog.get_logger()
-
-
-def _dev_allow_all_admin(  # pyright: ignore[reportUnusedFunction]  # used cross-module by every run_* call site
-    runtime: SlackRuntime,
-) -> bool:
-    """Read the testing-only admin-gate override from settings (default False)."""
-    slack = runtime.settings.slack
-    return slack is not None and slack.dev_allow_all_admin
 
 
 def _is_admin_signal(user: dict[str, Any]) -> bool:
@@ -40,9 +29,7 @@ def _is_admin_signal(user: dict[str, Any]) -> bool:
     return bool(user.get("is_admin") or user.get("is_owner") or user.get("is_primary_owner"))
 
 
-async def resolve_is_admin(
-    client: AsyncWebClient, *, user_id: str, dev_allow_all: bool = False
-) -> bool:
+async def resolve_is_admin(client: AsyncWebClient, *, user_id: str) -> bool:
     """Return True if the Slack user is a workspace admin, fail-closed.
 
     Calls ``users.info`` via the injected per-event client; never caches the
@@ -53,19 +40,11 @@ async def resolve_is_admin(
     Args:
         client:  Per-event ``AsyncWebClient`` (injected; never cached).
         user_id: Slack user ID from the verified Socket Mode payload.
-        dev_allow_all: Testing-only escape hatch (env
-            ``DAIMON_SLACK__DEV_ALLOW_ALL_ADMIN``). When ``True``, every user is
-            treated as admin and ``users.info`` is skipped entirely — so the
-            gate opens even on a workspace where the bot lacks ``users:read``.
-            Defaults ``False``; production deployments must leave it unset.
 
     Returns:
         ``True`` if the user is a workspace admin, owner, or primary owner;
         ``False`` otherwise, including on ``users.info`` failure.
     """
-    if dev_allow_all:
-        log.warning("slack.is_admin.dev_allow_all", user=user_id)
-        return True
     try:
         resp = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
     except SlackApiError as exc:

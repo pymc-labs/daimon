@@ -128,23 +128,3 @@ async def test_resolve_is_admin_returns_false_and_does_not_raise_on_slack_api_er
         result = await resolve_is_admin(client, user_id="U_TEST")
 
     assert result is False, "resolve_is_admin should return False (fail-closed) on SlackApiError"
-
-
-@pytest.mark.asyncio
-async def test_resolve_is_admin_returns_true_when_dev_allow_all_set_without_calling_users_info() -> (
-    None
-):
-    """dev_allow_all short-circuits to True before any users.info I/O.
-
-    Testing-only escape hatch (DAIMON_SLACK__DEV_ALLOW_ALL_ADMIN). No users.info
-    response is registered, so if the function attempted the call it would raise —
-    reaching True proves the short-circuit skips the network entirely (and works
-    even when the bot lacks the users:read scope).
-    """
-    from slack_sdk.web.async_client import AsyncWebClient
-
-    with AioResponsesMock():
-        client = AsyncWebClient(token="xoxb-test")
-        result = await resolve_is_admin(client, user_id="U_NOBODY", dev_allow_all=True)
-
-    assert result is True, "dev_allow_all=True should grant admin without consulting users.info"

@@ -61,10 +61,7 @@ import anthropic
 import jwt as pyjwt
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.admin import (
-    _dev_allow_all_admin,  # pyright: ignore[reportPrivateUsage]
-    resolve_is_admin,
-)
+from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_setup import gate
 from daimon.adapters.slack.agent_setup.read import (
     load_agent_channel_ids,
@@ -363,9 +360,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
 
         # Slow path (off the 3s window): resolve tenant + is_admin + fetch roster.
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-        is_admin = await resolve_is_admin(
-            client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-        )
+        is_admin = await resolve_is_admin(client, user_id=user_id)
 
         async with runtime.sessionmaker() as session:
             entries, over_cap = await load_tenant_roster(
@@ -470,9 +465,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                     channel_id=channel_id,
                 )
 
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
 
             # Stale check — if the chosen agent is not in the fresh roster, re-render warning.
             agent_exists = any(e.agent_name == chosen for e in entries)
@@ -512,9 +505,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
             if not agent_name_for_tab:
                 return
 
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
 
             # Stale check before fetching section data.
             agents_check = await list_agents_by_tenant(runtime.anthropic, tenant_id=tenant_id)
@@ -580,9 +571,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
             if not agent_name_for_edit:
                 return
 
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
 
             # Stale check.
             agents_check = await list_agents_by_tenant(runtime.anthropic, tenant_id=tenant_id)
@@ -641,9 +630,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
         # Delete (archive) — MUTATION: re-resolve is_admin (T-83-10)
         # -----------------------------------------------------------------------
         elif action_id == "agent_setup__delete":
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
             if not is_admin:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
@@ -700,9 +687,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
         # Scope: whole workspace — MUTATION: re-resolve is_admin (T-83-10)
         # -----------------------------------------------------------------------
         elif action_id == "agent_setup__scope:workspace":
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
             if not is_admin:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
@@ -770,9 +755,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
         # Scope: this channel — MUTATION: re-resolve is_admin (T-83-10)
         # -----------------------------------------------------------------------
         elif action_id == "agent_setup__scope:channel":
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
             if not is_admin:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
@@ -843,9 +826,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
         # Scope: clear — MUTATION: re-resolve is_admin (T-83-10)
         # -----------------------------------------------------------------------
         elif action_id == "agent_setup__scope:clear":
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
             if not is_admin:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
@@ -913,9 +894,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
         # currently reachable. Re-resolves via the shared gate post-ack.
         # -----------------------------------------------------------------------
         elif action_id == "agent_setup__remove_skill":
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
 
             skill_to_remove: str = action.get("selected_option", {}).get("value") or ""
             if not skill_to_remove or skill_to_remove == "__none__":
@@ -932,7 +911,6 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                 agent_name=agent_name_for_remove,
                 channel_id=channel_id,
                 user_id=user_id,
-                dev_allow_all=_dev_allow_all_admin(runtime),
             ):
                 return
 
@@ -1002,9 +980,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
         # is currently reachable. Re-resolves via the shared gate post-ack.
         # -----------------------------------------------------------------------
         elif action_id == "agent_setup__remove_mcp":
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
 
             mcp_to_remove: str = action.get("selected_option", {}).get("value") or ""
             if not mcp_to_remove or mcp_to_remove == "__none__":
@@ -1021,7 +997,6 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                 agent_name=agent_name_for_remove,
                 channel_id=channel_id,
                 user_id=user_id,
-                dev_allow_all=_dev_allow_all_admin(runtime),
             ):
                 return
 
@@ -1093,9 +1068,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
         # only the L1 stale fallback and the L2 re-render's build_l2_view kwargs.
         # -----------------------------------------------------------------------
         elif action_id == "agent_setup__remove_secret":
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
 
             secret_key_to_remove: str = action.get("selected_option", {}).get("value") or ""
             if not secret_key_to_remove or secret_key_to_remove == "__none__":
@@ -1112,7 +1085,6 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                 agent_name=agent_name_for_remove,
                 channel_id=channel_id,
                 user_id=user_id,
-                dev_allow_all=_dev_allow_all_admin(runtime),
             ):
                 return
 
@@ -1179,9 +1151,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
         # JWT: never logged, jti only (T-83-11).
         # -----------------------------------------------------------------------
         elif action_id == "agent_setup__connect_mcp":
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
             if not is_admin:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
@@ -1292,9 +1262,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
             if not fork_source:
                 return
 
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
 
             # Stale check (T-83-21): verify source agent still exists.
             ma_agent = await find_agent_by_daimon_tag(
@@ -1333,9 +1301,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
             if not agent_name_for_edit:
                 return
 
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
 
             if await gate.refuse_if_reachable_and_not_admin(
                 runtime,
@@ -1344,7 +1310,6 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                 agent_name=agent_name_for_edit,
                 channel_id=channel_id,
                 user_id=user_id,
-                dev_allow_all=_dev_allow_all_admin(runtime),
             ):
                 return
 
@@ -1406,13 +1371,10 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                 agent_name=agent_name_for_repo,
                 channel_id=channel_id,
                 user_id=user_id,
-                dev_allow_all=_dev_allow_all_admin(runtime),
             ):
                 return
 
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
 
             # Stale check (T-83-21).
             ma_agent = await find_agent_by_daimon_tag(
@@ -1451,9 +1413,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
             if not agent_name_for_skill:
                 return
 
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
 
             if await gate.refuse_if_reachable_and_not_admin(
                 runtime,
@@ -1462,7 +1422,6 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                 agent_name=agent_name_for_skill,
                 channel_id=channel_id,
                 user_id=user_id,
-                dev_allow_all=_dev_allow_all_admin(runtime),
             ):
                 return
 
@@ -1503,9 +1462,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
             if not agent_name_for_mcp:
                 return
 
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
 
             if await gate.refuse_if_reachable_and_not_admin(
                 runtime,
@@ -1514,7 +1471,6 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                 agent_name=agent_name_for_mcp,
                 channel_id=channel_id,
                 user_id=user_id,
-                dev_allow_all=_dev_allow_all_admin(runtime),
             ):
                 return
 
@@ -1557,9 +1513,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
             if not agent_name_for_secrets:
                 return
 
-            is_admin = await resolve_is_admin(
-                client, user_id=user_id, dev_allow_all=_dev_allow_all_admin(runtime)
-            )
+            is_admin = await resolve_is_admin(client, user_id=user_id)
 
             # Stale check (T-83-21).
             ma_agent = await find_agent_by_daimon_tag(

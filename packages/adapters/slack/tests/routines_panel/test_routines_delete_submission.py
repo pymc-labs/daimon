@@ -30,8 +30,6 @@ _ROOT_VIEW_ID = "V_ROOT"
 
 def _build_runtime(db_session_factory: Any) -> SlackRuntime:
     settings: MagicMock = MagicMock()
-    # Prod default so the re-gate exercises the real admin-OR-creator path.
-    settings.slack.dev_allow_all_admin = False
     return SlackRuntime(
         settings=settings,
         anthropic=build_fake_anthropic(make_fake_ma_handler()),

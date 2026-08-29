@@ -46,9 +46,6 @@ from typing import Any
 
 import anthropic
 import structlog
-from daimon.adapters.slack.admin import (
-    _dev_allow_all_admin,  # pyright: ignore[reportPrivateUsage]
-)
 from daimon.adapters.slack.agent_setup import gate
 from daimon.adapters.slack.agent_setup.state import decode_private_metadata
 from daimon.adapters.slack.agent_setup.write import (
@@ -712,7 +709,6 @@ async def run_edit_agent_submission(
             agent_name=agent_name,
             channel_id=channel_id,
             user_id=user_id,
-            dev_allow_all=_dev_allow_all_admin(runtime),
         )
         if refused:
             return
@@ -822,7 +818,6 @@ async def run_edit_repo_submission(
             agent_name=agent_name,
             channel_id=channel_id,
             user_id=user_id,
-            dev_allow_all=_dev_allow_all_admin(runtime),
         )
         if refused:
             return
@@ -1036,7 +1031,6 @@ async def run_add_skill_submission(
             agent_name=agent_name,
             channel_id=channel_id,
             user_id=user_id,
-            dev_allow_all=_dev_allow_all_admin(runtime),
         )
         if refused:
             return
@@ -1137,7 +1131,6 @@ async def run_add_mcp_submission(
             agent_name=agent_name,
             channel_id=channel_id,
             user_id=user_id,
-            dev_allow_all=_dev_allow_all_admin(runtime),
         )
         if refused:
             return
@@ -1324,7 +1317,6 @@ async def run_paste_secrets_submission(
             agent_name=agent_name,
             channel_id=channel_id,
             user_id=user_id,
-            dev_allow_all=_dev_allow_all_admin(runtime),
         )
         if refused:
             return
