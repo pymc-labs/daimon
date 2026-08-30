@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsModelConfig
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_WORKSPACE,
@@ -11,7 +12,10 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.ma import WORKSPACE_SENTINEL_AGENT_NAME
 from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
-from daimon.testing.workspace_sentinel import mark_workspace_disposable
+from daimon.testing.workspace_sentinel import (
+    mark_workspace_disposable,
+    require_disposable_workspace,
+)
 
 
 def _build_agent_crud_client(created: list[dict[str, Any]]) -> Any:
@@ -79,3 +83,24 @@ async def test_mark_workspace_disposable_reuses_existing_sentinel_when_called_tw
 
     assert second_id == first_id, "a second call must adopt the existing sentinel"
     assert len(created) == 1, "marking twice must not accumulate duplicate sentinel agents"
+
+
+async def test_require_disposable_workspace_fails_the_run_when_workspace_is_unmarked() -> None:
+    created: list[dict[str, Any]] = []
+    client = _build_agent_crud_client(created)
+
+    with pytest.raises(pytest.fail.Exception) as exc_info:
+        await require_disposable_workspace(client)
+
+    assert "mark_disposable --yes" in str(exc_info.value), (
+        "the banner must tell the operator how to mark a throwaway workspace"
+    )
+    assert created == [], "the guard must never mark the workspace on the caller's behalf"
+
+
+async def test_require_disposable_workspace_returns_when_sentinel_is_present() -> None:
+    created: list[dict[str, Any]] = []
+    client = _build_agent_crud_client(created)
+    await mark_workspace_disposable(client)
+
+    await require_disposable_workspace(client)

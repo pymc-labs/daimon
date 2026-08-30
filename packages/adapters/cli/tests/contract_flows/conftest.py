@@ -24,6 +24,7 @@ from daimon.core._models import Base
 from daimon.core.config import Settings
 from daimon.core.ma import delete_entire_workspace_for_testing
 from daimon.testing.factories import make_tenant
+from daimon.testing.workspace_sentinel import require_disposable_workspace
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -129,6 +130,7 @@ async def seed_tenant(db_session_factory: async_sessionmaker[AsyncSession]) -> N
 @pytest_asyncio.fixture(scope="module", autouse=True)
 async def _cleanup(anthropic_client: AsyncAnthropic) -> AsyncIterator[None]:  # pyright: ignore[reportUnusedFunction]
     """Nuke all MA resources before and after each test module."""
+    await require_disposable_workspace(anthropic_client)
     await delete_entire_workspace_for_testing(
         anthropic_client, i_understand_this_destroys_all_tenants=True
     )
