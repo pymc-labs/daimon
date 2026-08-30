@@ -13,6 +13,12 @@ MA_METADATA_KEY_ACCOUNT = "daimon_account"
 MA_METADATA_KEY_MANAGED = "daimon_managed"
 MA_METADATA_KEY_SPEC_HASH = "daimon_spec_hash"
 
+# Marks a whole MA workspace as a throwaway one that the test-only workspace
+# nuke is allowed to empty. Stamped on a single sentinel agent, never on a
+# tenant resource — see `daimon.core.ma.find_workspace_disposable_sentinel`.
+MA_METADATA_KEY_WORKSPACE = "daimon_workspace"
+MA_METADATA_VALUE_WORKSPACE_DISPOSABLE = "disposable"
+
 
 def compute_spec_fingerprint(payload: dict[str, Any]) -> str:
     """Stable short digest of a JSON-serializable payload.

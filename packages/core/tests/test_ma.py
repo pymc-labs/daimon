@@ -29,11 +29,18 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsTextBlock,
     BetaManagedAgentsUserMessageEvent,
 )
-from daimon.core.errors import TurnError
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_WORKSPACE,
+    MA_METADATA_VALUE_WORKSPACE_DISPOSABLE,
+)
+from daimon.core.errors import DaimonError, TurnError
 from daimon.core.ma import (
     _INTERRUPT_TERMINAL,
     _TERMINAL_STOP_REASONS,
+    WORKSPACE_SENTINEL_AGENT_NAME,
+    delete_entire_workspace_for_testing,
     delete_sessions_for_account,
+    find_workspace_disposable_sentinel,
     replay_events,
     send_interrupt_and_wait,
     terminal_stop_reason,
@@ -706,3 +713,154 @@ async def test_update_agent_with_version_retry_propagates_second_conflict() -> N
 
     assert exc_info.value.status_code == 409, "second conflict must propagate as 409"
     assert update_count == 2, "must attempt exactly two updates before propagating"
+
+
+# ---------------------------------------------------------------------------
+# delete_entire_workspace_for_testing sentinel guard tests
+# ---------------------------------------------------------------------------
+
+
+def _build_workspace_nuke_client(
+    agents: list[BetaManagedAgentsAgent],
+    seen: list[tuple[str, str]],
+) -> AsyncAnthropic:
+    """Transport-level client covering every endpoint the nuke can touch.
+
+    Appends `(method, path)` to `seen` for every request so a test can assert
+    that NOTHING mutating was issued. Every mutating route is registered so an
+    unwanted call shows up in `seen` rather than as an unrouted-request error.
+    """
+    router = MARouter()
+
+    def handle_agents_list(request: httpx.Request, match: Any) -> httpx.Response:
+        return list_response([a.model_dump(mode="json") for a in agents])
+
+    def handle_empty_list(request: httpx.Request, match: Any) -> httpx.Response:
+        return list_response([])
+
+    def handle_agent_archive(request: httpx.Request, match: Any) -> httpx.Response:
+        archived = next(a for a in agents if a.id == match.group(1))
+        return httpx.Response(200, json=archived.model_dump(mode="json"))
+
+    def handle_environment_delete(request: httpx.Request, match: Any) -> httpx.Response:
+        return httpx.Response(200, json={"id": match.group(1), "type": "environment_deleted"})
+
+    router.add("GET", r"/v1/agents", handle_agents_list)
+    router.add("GET", r"/v1/skills", handle_empty_list)
+    router.add("GET", r"/v1/environments", handle_empty_list)
+    router.add("POST", r"/v1/agents/([^/]+)/archive", handle_agent_archive)
+    router.add("DELETE", r"/v1/environments/([^/]+)", handle_environment_delete)
+
+    def record_then_dispatch(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        return router.dispatch(request)
+
+    return build_fake_anthropic(record_then_dispatch)
+
+
+async def test_delete_entire_workspace_raises_and_touches_nothing_when_sentinel_is_absent() -> None:
+    now = datetime.now(UTC).isoformat()
+    tenant_agent = BetaManagedAgentsAgent(
+        id="agent_tenant",
+        archived_at=None,
+        created_at=now,
+        description=None,
+        mcp_servers=[],
+        metadata={"daimon_tenant": str(uuid.uuid4())},
+        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
+        name="someone-elses-agent",
+        skills=[],
+        system=None,
+        tools=[],
+        type="agent",
+        updated_at=now,
+        version=1,
+    )
+    seen: list[tuple[str, str]] = []
+    client = _build_workspace_nuke_client([tenant_agent], seen)
+
+    with pytest.raises(DaimonError) as exc_info:
+        await delete_entire_workspace_for_testing(
+            client, i_understand_this_destroys_all_tenants=True
+        )
+
+    assert "not marked disposable" in str(exc_info.value), (
+        "the refusal must say why it refused, not just that it failed"
+    )
+    assert "daimon.testing.mark_disposable" in str(exc_info.value), (
+        "the refusal must name the command that marks a workspace disposable"
+    )
+    assert [m for m, _ in seen] == ["GET"], f"an unmarked workspace must see reads only, got {seen}"
+
+
+async def test_delete_entire_workspace_archives_other_agents_but_spares_sentinel() -> None:
+    now = datetime.now(UTC).isoformat()
+    sentinel = BetaManagedAgentsAgent(
+        id="agent_sentinel",
+        archived_at=None,
+        created_at=now,
+        description=None,
+        mcp_servers=[],
+        metadata={MA_METADATA_KEY_WORKSPACE: MA_METADATA_VALUE_WORKSPACE_DISPOSABLE},
+        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
+        name=WORKSPACE_SENTINEL_AGENT_NAME,
+        skills=[],
+        system=None,
+        tools=[],
+        type="agent",
+        updated_at=now,
+        version=1,
+    )
+    disposable_agent = BetaManagedAgentsAgent(
+        id="agent_disposable",
+        archived_at=None,
+        created_at=now,
+        description=None,
+        mcp_servers=[],
+        metadata={"daimon_tenant": str(uuid.uuid4())},
+        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
+        name="scratch-agent",
+        skills=[],
+        system=None,
+        tools=[],
+        type="agent",
+        updated_at=now,
+        version=1,
+    )
+    seen: list[tuple[str, str]] = []
+    client = _build_workspace_nuke_client([sentinel, disposable_agent], seen)
+
+    await delete_entire_workspace_for_testing(client, i_understand_this_destroys_all_tenants=True)
+
+    archived_paths = [path for method, path in seen if method == "POST"]
+    assert archived_paths == ["/v1/agents/agent_disposable/archive"], (
+        f"only the non-sentinel agent may be archived, got {archived_paths}"
+    )
+
+
+async def test_find_workspace_disposable_sentinel_returns_none_when_no_agent_carries_the_marker() -> (
+    None
+):
+    now = datetime.now(UTC).isoformat()
+    plain_agent = BetaManagedAgentsAgent(
+        id="agent_plain",
+        archived_at=None,
+        created_at=now,
+        description=None,
+        mcp_servers=[],
+        metadata={"daimon_tenant": str(uuid.uuid4())},
+        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6"),
+        name="plain-agent",
+        skills=[],
+        system=None,
+        tools=[],
+        type="agent",
+        updated_at=now,
+        version=1,
+    )
+    seen: list[tuple[str, str]] = []
+    client = _build_workspace_nuke_client([plain_agent], seen)
+
+    assert await find_workspace_disposable_sentinel(client) is None, (
+        "a tenant agent without the workspace marker must not count as a sentinel"
+    )

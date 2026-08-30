@@ -23,7 +23,10 @@ import uvicorn
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import Settings
-from daimon.core.ma import delete_entire_workspace_for_testing
+from daimon.core.ma import (
+    delete_entire_workspace_for_testing,
+    find_workspace_disposable_sentinel,
+)
 from daimon.core.skill_zip import build_skill_zip
 from daimon.testing.ma import _require_api_key
 
@@ -39,9 +42,32 @@ async def anthropic_client() -> AsyncAnthropic:
     return AsyncAnthropic(api_key=key)
 
 
+_NOT_DISPOSABLE_BANNER = """
+================================================================================
+THIS SUITE DESTROYS THE ENTIRE MANAGED AGENTS WORKSPACE.
+
+Every skill, environment and agent reachable from DAIMON_TEST_ANTHROPIC_API_KEY
+is deleted before and after each test module. Only ever point that key at a
+disposable dev workspace — never at one any real install depends on.
+
+The workspace behind the current key is NOT marked disposable, so nothing was
+touched. If it genuinely is a throwaway workspace, mark it with:
+
+    uv run python -m daimon.testing.mark_disposable --yes
+================================================================================
+"""
+
+
 @pytest_asyncio.fixture(scope="module", autouse=True)
 async def _cleanup(anthropic_client: AsyncAnthropic) -> AsyncIterator[None]:  # pyright: ignore[reportUnusedFunction]
-    """Module-scoped cleanup: delete all workspace resources before and after."""
+    """Module-scoped cleanup: delete all workspace resources before and after.
+
+    Gated on the disposable sentinel. The sentinel is deliberately NOT created
+    here — auto-marking would make the guard permit exactly the mistake it
+    exists to catch.
+    """
+    if await find_workspace_disposable_sentinel(anthropic_client) is None:
+        pytest.fail(_NOT_DISPOSABLE_BANNER, pytrace=False)
     await delete_entire_workspace_for_testing(
         anthropic_client, i_understand_this_destroys_all_tenants=True
     )

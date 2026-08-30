@@ -241,14 +241,50 @@ async def delete_skill_and_versions(anthropic: AsyncAnthropic, skill_id: str) ->
     await anthropic.beta.skills.delete(skill_id)
 
 
+# Name of the agent that marks a workspace as disposable. Only the metadata
+# decides — the name is a courtesy to whoever finds the agent in the console.
+WORKSPACE_SENTINEL_AGENT_NAME = "workspace-disposable-sentinel"
+
+WORKSPACE_NOT_DISPOSABLE_MESSAGE = (
+    "Refusing to empty this Managed Agents workspace: it is not marked disposable, "
+    "so the destructive cleanup stopped before deleting anything. The marker exists "
+    "so that a misrouted API key cannot wipe a shared workspace other installs depend "
+    "on. If this workspace really is a throwaway one, mark it with: "
+    "uv run python -m daimon.testing.mark_disposable --yes"
+)
+
+
+async def find_workspace_disposable_sentinel(
+    client: AsyncAnthropic,
+) -> BetaManagedAgentsAgent | None:
+    """Return the agent marking this MA workspace as disposable, else None.
+
+    The sentinel is workspace-wide, not tenant-scoped: it answers "may the test
+    suite destroy everything reachable from this API key?" and nothing else.
+    """
+    from daimon.core.defaults.metadata import (  # noqa: PLC0415
+        MA_METADATA_KEY_WORKSPACE,
+        MA_METADATA_VALUE_WORKSPACE_DISPOSABLE,
+    )
+
+    async for agent in client.beta.agents.list(limit=100):
+        if agent.metadata.get(MA_METADATA_KEY_WORKSPACE) == MA_METADATA_VALUE_WORKSPACE_DISPOSABLE:
+            return agent
+    return None
+
+
 async def delete_entire_workspace_for_testing(
     client: AsyncAnthropic, *, i_understand_this_destroys_all_tenants: bool = False
 ) -> None:
     """Delete every skill/environment/agent in the shared MA workspace.
 
     DESTRUCTIVE — the workspace is shared by ALL tenants on the operator's one
-    API key. Test-only: the required flag must be set True by the caller; a
-    production path that forgets it raises RuntimeError before any MA call.
+    API key. Test-only, and fail-closed twice over: the caller must set the
+    required flag (a production path that forgets it raises RuntimeError before
+    any MA call), AND the workspace itself must carry a disposable sentinel
+    agent (see `find_workspace_disposable_sentinel`). The flag alone is worth
+    little — the caller that passes it is the same caller that would be pointed
+    at the wrong workspace. The sentinel travels with the workspace instead.
 
     Deletion order is dependency-safe: skills (versions first via
     delete_skill_and_versions) → environments (delete, 409 fallback to archive)
@@ -264,6 +300,9 @@ async def delete_entire_workspace_for_testing(
             "for ALL tenants; pass i_understand_this_destroys_all_tenants=True "
             "from a test."
         )
+    sentinel = await find_workspace_disposable_sentinel(client)
+    if sentinel is None:
+        raise DaimonError(WORKSPACE_NOT_DISPOSABLE_MESSAGE)
     errors: list[Exception] = []
 
     # Skills: versions first (MA requires this), then skill.
@@ -295,8 +334,12 @@ async def delete_entire_workspace_for_testing(
             elif err.status_code != 404:
                 errors.append(err)
 
-    # Agents: archive only — DELETE /v1/agents/{id} returns 404
+    # Agents: archive only — DELETE /v1/agents/{id} returns 404.
+    # The sentinel is spared: archiving it would un-mark the workspace and make
+    # the next module's pre-clean refuse.
     async for agent in client.beta.agents.list(limit=100):
+        if agent.id == sentinel.id:
+            continue
         try:
             await client.beta.agents.archive(agent.id)
         except APIStatusError as err:
