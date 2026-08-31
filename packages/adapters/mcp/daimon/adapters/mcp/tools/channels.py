@@ -83,8 +83,9 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         For threads use read_thread. Each platform takes only its own
         pagination parameter — the other is rejected. Discord: at most 200
-        messages per call; use before to fetch older messages. Slack: use
-        cursor to fetch the next page; at most 15 messages are returned.
+        messages per call; use before to fetch older messages. Slack: at most
+        999 per call, and some workspaces cap a single call at 15 whatever
+        limit is asked for; use cursor to fetch the next page.
         """
         auth = await _auth(ctx)
         # MCP clients often send "" for an optional param they mean to omit —
@@ -114,9 +115,10 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Discord: thread_id is the thread's channel id; use before for older messages.
         Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456);
-        before is rejected — Slack threads read one page of at most 15 messages
-        from the thread root, and has_more=true means the newest replies were
-        not returned.
+        before is rejected — Slack threads read one page of at most 999
+        messages from the thread root, some workspaces cap that page at 15
+        whatever limit is asked for, and has_more=true means the newest
+        replies were not returned.
         """
         auth = await _auth(ctx)
         before = before or None

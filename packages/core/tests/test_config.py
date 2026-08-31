@@ -575,3 +575,59 @@ def test_slack_settings_max_concurrent_turns_per_tenant_defaults_to_3(
     assert settings.slack.max_concurrent_turns_per_tenant == 3, (
         "max_concurrent_turns_per_tenant must default to 3 (STURN-06 per-tenant cap)"
     )
+
+
+def test_slack_settings_history_page_limit_defaults_to_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The requested conversations.replies page size defaults above the capped ceiling.
+
+    Slack clamps the value per workspace, so a default of 200 costs a capped
+    install nothing and gives an internal-app install the depth it is entitled
+    to.
+    """
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_SLACK__SIGNING_SECRET", "s" * 32)
+    monkeypatch.setenv("DAIMON_SLACK__APP_TOKEN", "xapp-test")
+    settings = load_settings(_env_file=None)
+    assert settings.slack is not None, "slack block must be present when DAIMON_SLACK__* are set"
+    assert settings.slack.history_page_limit == 200, (
+        "history_page_limit must default to 200 so unclamped workspaces replay deep threads"
+    )
+
+
+def test_slack_settings_history_page_limit_overrides_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator on an unclamped workspace can raise the page size to Slack's maximum."""
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_SLACK__SIGNING_SECRET", "s" * 32)
+    monkeypatch.setenv("DAIMON_SLACK__APP_TOKEN", "xapp-test")
+    monkeypatch.setenv("DAIMON_SLACK__HISTORY_PAGE_LIMIT", "1000")
+    settings = load_settings(_env_file=None)
+    assert settings.slack is not None
+    assert settings.slack.history_page_limit == 1000, (
+        "DAIMON_SLACK__HISTORY_PAGE_LIMIT must override the default page size"
+    )
+
+
+def test_slack_settings_history_page_limit_rejects_zero() -> None:
+    """A page size Slack would refuse fails at boot, not on the first mention.
+
+    conversations.replies answers ``invalid_limit`` for 0 and for anything above
+    1000, and the listener boundary posts nothing on failure, so an unbounded
+    field would turn a typo in .env into a workspace-wide silent bot.
+    """
+    from daimon.core.config import SlackSettings
+
+    with pytest.raises(ValidationError):
+        SlackSettings(signing_secret="s" * 32, app_token="xapp-test", history_page_limit=0)
+
+
+def test_slack_settings_history_page_limit_rejects_above_slack_maximum() -> None:
+    from daimon.core.config import SlackSettings
+
+    with pytest.raises(ValidationError):
+        SlackSettings(signing_secret="s" * 32, app_token="xapp-test", history_page_limit=1001)
