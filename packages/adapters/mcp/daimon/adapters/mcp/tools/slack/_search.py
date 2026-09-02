@@ -20,6 +20,7 @@ from daimon.adapters.mcp.tools.slack._client import (
     build_connect_hint,
     slack_read_client,
 )
+from daimon.adapters.mcp.tools.slack._files import file_url_minter, to_file_rows
 from daimon.adapters.mcp.tools.slack._leak_policy import get_destination, is_dm_destination
 from daimon.adapters.mcp.tools.slack._models import SlackSearchMatch, SlackSearchResult
 from daimon.adapters.mcp.tools.slack._visibility import map_slack_api_error
@@ -52,6 +53,7 @@ async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
     messages = cast(dict[str, Any], resp.get("messages") or {})
     raw_matches = cast(list[dict[str, Any]], messages.get("matches") or [])
     total = int(cast(dict[str, Any], messages.get("paging") or {}).get("total") or 0)
+    files = file_url_minter(runtime, team_id=team_id, now=int(time.time()))
     matches: list[SlackSearchMatch] = []
     for m in raw_matches:
         channel = cast(dict[str, Any], m.get("channel") or {})
@@ -65,6 +67,7 @@ async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
                 username=str(m["username"]) if m.get("username") else None,
                 text=str(m.get("text", "")),
                 permalink=str(m["permalink"]) if m.get("permalink") else None,
+                files=to_file_rows(cast(list[dict[str, Any]], m.get("files") or []), files),
             )
         )
     return SlackSearchResult(matches=matches, total=total)

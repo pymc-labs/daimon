@@ -28,6 +28,11 @@ from daimon.adapters.mcp.tools.slack._client import (
     slack_read_client,
     slack_web_client,
 )
+from daimon.adapters.mcp.tools.slack._files import (
+    FileUrlMinter,
+    file_url_minter,
+    to_file_rows,
+)
 from daimon.adapters.mcp.tools.slack._leak_policy import (
     DM_REDIRECT_MSG,
     get_destination,
@@ -129,7 +134,10 @@ async def _resolve_usernames(client: AsyncWebClient, user_ids: set[str]) -> dict
 
 
 def _to_message_rows(
-    raw_messages: list[dict[str, Any]], usernames: dict[str, str]
+    raw_messages: list[dict[str, Any]],
+    usernames: dict[str, str],
+    *,
+    files: FileUrlMinter | None,
 ) -> list[SlackMessageRow]:
     rows: list[SlackMessageRow] = []
     for msg in raw_messages:
@@ -142,6 +150,7 @@ def _to_message_rows(
                 text=str(msg.get("text", "")),
                 thread_ts=str(msg["thread_ts"]) if msg.get("thread_ts") else None,
                 reply_count=int(msg["reply_count"]) if msg.get("reply_count") else None,
+                files=to_file_rows(cast(list[dict[str, Any]], msg.get("files") or []), files),
             )
         )
     return rows
@@ -244,7 +253,12 @@ async def _slack_list_channels_impl(  # pyright: ignore[reportUnusedFunction]  #
 
 
 async def _fetch_channel_history(
-    client: AsyncWebClient, *, channel_id: str, limit: int, cursor: str | None
+    client: AsyncWebClient,
+    *,
+    channel_id: str,
+    limit: int,
+    cursor: str | None,
+    files: FileUrlMinter | None,
 ) -> SlackChannelResult:
     resp = await client.conversations_history(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
         channel=channel_id, limit=_bounded_page(limit), cursor=cursor
@@ -265,7 +279,9 @@ async def _fetch_channel_history(
     else:
         hint = None
     return SlackChannelResult(
-        messages=_to_message_rows(raw, usernames), next_cursor=next_cursor, hint=hint
+        messages=_to_message_rows(raw, usernames, files=files),
+        next_cursor=next_cursor,
+        hint=hint,
     )
 
 
@@ -280,13 +296,14 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
     user_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
     rc = await slack_read_client(runtime, team_id=team_id, slack_user_id=user_id)
+    files = file_url_minter(runtime, team_id=team_id, now=int(time.time()))
 
     if rc.runs_as_user:
         try:
             channel = await _channel_info(rc.client, channel_id=channel_id)
             await _gate_user_source(runtime, auth, channel=channel)
             return await _fetch_channel_history(
-                rc.client, channel_id=channel_id, limit=limit, cursor=cursor
+                rc.client, channel_id=channel_id, limit=limit, cursor=cursor, files=files
             )
         except SlackApiError as err:
             # Any not_in_channel from the user token (typically a public channel
@@ -303,7 +320,7 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
         channel = await _channel_info(bot_client, channel_id=channel_id)
         await check_channel_access(bot_client, channel=channel, user_id=user_id)
         return await _fetch_channel_history(
-            bot_client, channel_id=channel_id, limit=limit, cursor=cursor
+            bot_client, channel_id=channel_id, limit=limit, cursor=cursor, files=files
         )
     except ToolError as terr:
         if rc.runs_as_user:
@@ -335,6 +352,7 @@ async def _fetch_thread_replies(
     thread_ts: str,
     limit: int,
     cursor: str | None,
+    files: FileUrlMinter | None,
 ) -> SlackThreadResult:
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
         channel=channel_id, ts=thread_ts, limit=_bounded_page(limit), cursor=cursor
@@ -374,7 +392,7 @@ async def _fetch_thread_replies(
     return SlackThreadResult(
         channel_id=channel_id,
         thread_ts=result_thread_ts,
-        messages=_to_message_rows(raw, usernames),
+        messages=_to_message_rows(raw, usernames, files=files),
         has_more=has_more,
         next_cursor=next_cursor,
         hint=hint,
@@ -393,13 +411,19 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
     user_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
     rc = await slack_read_client(runtime, team_id=team_id, slack_user_id=user_id)
+    files = file_url_minter(runtime, team_id=team_id, now=int(time.time()))
 
     if rc.runs_as_user:
         try:
             channel = await _channel_info(rc.client, channel_id=channel_id)
             await _gate_user_source(runtime, auth, channel=channel)
             return await _fetch_thread_replies(
-                rc.client, channel_id=channel_id, thread_ts=thread_ts, limit=limit, cursor=cursor
+                rc.client,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                limit=limit,
+                cursor=cursor,
+                files=files,
             )
         except SlackApiError as err:
             # Any not_in_channel from the user token (typically a public channel
@@ -416,7 +440,12 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
         channel = await _channel_info(bot_client, channel_id=channel_id)
         await check_channel_access(bot_client, channel=channel, user_id=user_id)
         return await _fetch_thread_replies(
-            bot_client, channel_id=channel_id, thread_ts=thread_ts, limit=limit, cursor=cursor
+            bot_client,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            limit=limit,
+            cursor=cursor,
+            files=files,
         )
     except ToolError as terr:
         if rc.runs_as_user:
@@ -432,7 +461,7 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
 
 
 async def _fetch_single_message(
-    client: AsyncWebClient, *, channel_id: str, message_id: str
+    client: AsyncWebClient, *, channel_id: str, message_id: str, files: FileUrlMinter | None
 ) -> SlackMessageRow:
     resp = await client.conversations_history(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
         channel=channel_id, latest=message_id, inclusive=True, limit=1
@@ -460,7 +489,7 @@ async def _fetch_single_message(
     if match is None:
         raise ToolError("message not found")
     usernames = await _resolve_usernames(client, _author_ids([match]))
-    return _to_message_rows([match], usernames)[0]
+    return _to_message_rows([match], usernames, files=files)[0]
 
 
 async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
@@ -469,13 +498,14 @@ async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
     user_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
     rc = await slack_read_client(runtime, team_id=team_id, slack_user_id=user_id)
+    files = file_url_minter(runtime, team_id=team_id, now=int(time.time()))
 
     if rc.runs_as_user:
         try:
             channel = await _channel_info(rc.client, channel_id=channel_id)
             await _gate_user_source(runtime, auth, channel=channel)
             return await _fetch_single_message(
-                rc.client, channel_id=channel_id, message_id=message_id
+                rc.client, channel_id=channel_id, message_id=message_id, files=files
             )
         except SlackApiError as err:
             # Any not_in_channel from the user token (typically a public channel
@@ -491,7 +521,9 @@ async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
     try:
         channel = await _channel_info(bot_client, channel_id=channel_id)
         await check_channel_access(bot_client, channel=channel, user_id=user_id)
-        return await _fetch_single_message(bot_client, channel_id=channel_id, message_id=message_id)
+        return await _fetch_single_message(
+            bot_client, channel_id=channel_id, message_id=message_id, files=files
+        )
     except ToolError as terr:
         if rc.runs_as_user:
             raise

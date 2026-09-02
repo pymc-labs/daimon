@@ -33,6 +33,7 @@ from daimon.core.config import (
 )
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.scope import DeploymentDefault
+from daimon.core.slack_file_token import verify_file_token
 from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.slack_turn_contexts import create_slack_turn_context
@@ -66,7 +67,21 @@ def _auth(**overrides: object) -> AuthIdentity:
     return AuthIdentity(**base)  # type: ignore[arg-type]  # test kwargs are shape-correct
 
 
-def _build_settings(*, fernet_key: SecretStr, mintable: bool = False) -> Settings:
+_FILE_PROXY_SECRET = "file-proxy-secret"
+
+
+def _build_settings(
+    *, fernet_key: SecretStr, mintable: bool = False, file_proxy: bool = False
+) -> Settings:
+    if file_proxy:
+        mcp = McpSettings(
+            public_url=HttpUrl("https://mcp.example.com/mcp"),
+            jwt_secret=SecretStr(_FILE_PROXY_SECRET),
+        )
+    elif mintable:
+        mcp = McpSettings(public_url=HttpUrl("https://mcp.example.com/mcp"))
+    else:
+        mcp = McpSettings()
     return Settings(
         database=DatabaseSettings(
             url=PostgresDsn("postgresql+asyncpg://daimon:daimon@localhost:5432/daimon"),
@@ -77,9 +92,7 @@ def _build_settings(*, fernet_key: SecretStr, mintable: bool = False) -> Setting
         ),
         crypto=CryptoSettings(keys=(fernet_key,)),
         credentials=CredentialsSettings(google_sa_json=None),
-        mcp=McpSettings(public_url=HttpUrl("https://mcp.example.com/mcp"))
-        if mintable
-        else McpSettings(),
+        mcp=mcp,
         slack=(
             SlackSettings(signing_secret=SecretStr("shh-secret"), app_token=SecretStr("xapp-test"))
             if mintable
@@ -92,6 +105,7 @@ async def _make_runtime(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     *,
     mintable: bool = False,
+    file_proxy: bool = False,
 ) -> McpRuntime:
     fernet_key = SecretStr(Fernet.generate_key().decode("ascii"))
     fernet = build_multifernet((fernet_key.get_secret_value(),))
@@ -103,7 +117,7 @@ async def _make_runtime(
     return McpRuntime(
         session_factory=committing_sessionmaker,
         client=MagicMock(spec=AsyncAnthropic),
-        settings=_build_settings(fernet_key=fernet_key, mintable=mintable),
+        settings=_build_settings(fernet_key=fernet_key, mintable=mintable, file_proxy=file_proxy),
         deployment_default=DeploymentDefault(),
         fernet=fernet,
     )
@@ -1494,3 +1508,155 @@ async def test_read_thread_reply_ts_refetch_by_parent_keeps_the_cursor(
         cursors = _recorded_query(m, "/api/conversations.replies", "cursor")
     assert result.thread_ts == "1.0"
     assert cursors == ["CURSOR_3", "CURSOR_3"], "both lookups page from the same continuation"
+
+
+_CHART_FILE = {
+    "id": "F_CHART",
+    "name": "chart.png",
+    "mimetype": "image/png",
+    "size": 4096,
+    "url_private": "https://files.slack.com/files-pri/T_TEST-F_CHART/chart.png",
+}
+_TOMBSTONE_FILE = {"id": "F_GONE", "mode": "tombstone", "name": "gone.csv"}
+
+
+def _mock_public_channel(m: aioresponses) -> None:
+    m.get(  # pyright: ignore[reportUnknownMemberType]
+        _CONVERSATIONS_INFO,
+        payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+    )
+    m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+
+
+@pytest.mark.asyncio
+async def test_read_channel_lists_files_with_a_proxy_url_the_route_would_accept(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    with aioresponses() as m:
+        _mock_public_channel(m)
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_HISTORY,
+            payload={
+                "ok": True,
+                "messages": [
+                    {"ts": "1", "user": "U_A", "text": "see attached", "files": [_CHART_FILE]}
+                ],
+            },
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO,
+            payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
+        )
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=50)
+
+    (row,) = result.messages
+    (file,) = row.files
+    assert (file.id, file.name, file.mimetype, file.size) == (
+        "F_CHART",
+        "chart.png",
+        "image/png",
+        4096,
+    )
+    assert file.url is not None and file.url.startswith("https://mcp.example.com/slack/file/"), (
+        "the url must point at the proxy route on the app root, not under /mcp"
+    )
+    token = file.url.rsplit("/", 1)[1]
+    ref = verify_file_token(
+        token, secret=_FILE_PROXY_SECRET, now=int(datetime.now(UTC).timestamp())
+    )
+    assert ref is not None, "the minted token must verify with the secret the route uses"
+    assert (ref.team_id, ref.file_id) == ("T_TEST", "F_CHART"), (
+        "the token must name the caller's workspace and this file, nothing else"
+    )
+    assert "url_private" not in file.model_dump_json(), "Slack's private url must not leak"
+
+
+@pytest.mark.asyncio
+async def test_read_channel_without_a_file_proxy_still_lists_files_with_no_url(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        _mock_public_channel(m)
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_HISTORY,
+            payload={
+                "ok": True,
+                "messages": [{"ts": "1", "user": "U_A", "text": "", "files": [_CHART_FILE]}],
+            },
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO,
+            payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
+        )
+        result = await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=50)
+
+    (file,) = result.messages[0].files
+    assert file.name == "chart.png" and file.url is None, (
+        "a deployment that cannot mint a link still tells the agent the file exists"
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_thread_skips_tombstoned_files_and_keeps_readable_ones(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    with aioresponses() as m:
+        _mock_public_channel(m)
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={
+                "ok": True,
+                "messages": [
+                    {"ts": "1.0", "user": "U_A", "text": "root", "thread_ts": "1.0"},
+                    {
+                        "ts": "2.0",
+                        "user": "U_A",
+                        "text": "two files",
+                        "thread_ts": "1.0",
+                        "files": [_TOMBSTONE_FILE, _CHART_FILE],
+                    },
+                ],
+            },
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO,
+            payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
+        )
+        result = await _slack_read_thread_impl(runtime, auth, thread_id="C1:1.0", limit=50)
+
+    root, reply = result.messages
+    assert root.files == [], "a message with no files reports an empty list, not a missing key"
+    assert [f.id for f in reply.files] == ["F_CHART"], (
+        "a deleted file's placeholder has no bytes behind it and must not be offered"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_message_returns_its_files(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    with aioresponses() as m:
+        _mock_public_channel(m)
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_HISTORY,
+            payload={
+                "ok": True,
+                "messages": [{"ts": "5.0", "user": "U_A", "text": "hit", "files": [_CHART_FILE]}],
+            },
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO,
+            payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
+        )
+        row = await _slack_get_message_impl(runtime, auth, channel_id="C1", message_id="5.0")
+
+    assert [f.name for f in row.files] == ["chart.png"]
+    assert row.files[0].url is not None

@@ -13,6 +13,17 @@ class SlackChannelRow(BaseModel):
     num_members: int | None = None
 
 
+class SlackFileRow(BaseModel):
+    """A file attached to a message. ``url`` is a signed, expiring link through
+    daimon's file proxy; unset when the deployment cannot mint one."""
+
+    id: str
+    name: str
+    mimetype: str
+    size: int | None = None
+    url: str | None = None
+
+
 class SlackMessageRow(BaseModel):
     ts: str
     user_id: str | None = None
@@ -20,6 +31,7 @@ class SlackMessageRow(BaseModel):
     text: str
     thread_ts: str | None = None
     reply_count: int | None = None
+    files: list[SlackFileRow] = []
 
 
 class SlackChannelResult(BaseModel):
@@ -46,6 +58,7 @@ class SlackSearchMatch(BaseModel):
     username: str | None = None
     text: str
     permalink: str | None = None
+    files: list[SlackFileRow] = []
 
 
 class SlackSearchResult(BaseModel):
