@@ -78,9 +78,9 @@ it goes through `/agent-setup` or the `daimon agents archive` CLI command.
 `request_env_credential`, `request_mcp_credential`, and
 `request_repo_binding` post a single-use, expiring button in the thread;
 clicking it opens a private modal where the user enters the value, so it
-never enters channel history or the session log. All three are Discord-only
-today — on Slack, credential entry and repo binding go through
-`/agent-setup` instead.
+never enters channel history or the session log. They work the same way on
+Discord and Slack, so on either platform post the button rather than
+sending the user to `/agent-setup`.
 
 If a user pastes a token or secret in chat anyway: acknowledge that you saw
 it, call no tool with it, and tell them to rotate it immediately — it is
