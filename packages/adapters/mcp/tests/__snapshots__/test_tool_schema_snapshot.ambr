@@ -1901,7 +1901,9 @@
         and has no token to paste, or when a sync failed because the repo is
         not readable. Posts a button in the thread; clicking it opens the
         install page on GitHub, where the user chooses which repositories to
-        grant access to.
+        grant access to. Slack: ``channel_id`` may be ``channel_id:thread_ts``
+        to post into the thread you were invoked from; ``message_id`` is the
+        posted message's ts.
         
         This tool CANNOT tell whether the install happened — a link button
         gives no signal back. After the user says they installed it, verify
