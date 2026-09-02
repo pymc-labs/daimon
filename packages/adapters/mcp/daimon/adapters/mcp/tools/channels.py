@@ -110,22 +110,29 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         thread_id: str,
         limit: int = 50,
         before: str | None = None,
+        cursor: str | None = None,
     ) -> ReadThreadResult | SlackThreadResult:
         """Read messages from a thread, oldest-first.
 
         Discord: thread_id is the thread's channel id; use before for older messages.
-        Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456);
-        before is rejected — Slack threads read one page of at most 999
-        messages from the thread root, some workspaces cap that page at 15
-        whatever limit is asked for, and has_more=true means the newest
-        replies were not returned.
+        Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456).
+        Pages start at the thread root and run towards the newest reply, at
+        most 999 per page (some workspaces cap a page at 15 whatever limit is
+        asked for). has_more=true means newer replies exist; pass the returned
+        next_cursor as cursor to read them. before is Discord-only and cursor
+        is Slack-only.
         """
         auth = await _auth(ctx)
         before = before or None
+        cursor = cursor or None
         if auth.platform == "slack":
             if before is not None:
-                raise ToolError("before is Discord-only — slack read_thread has no pagination")
-            return await _slack_read_thread_impl(runtime, auth, thread_id=thread_id, limit=limit)
+                raise ToolError("before is Discord-only — slack read_thread pages with cursor")
+            return await _slack_read_thread_impl(
+                runtime, auth, thread_id=thread_id, limit=limit, cursor=cursor
+            )
+        if cursor is not None:
+            raise ToolError("cursor is Slack-only — discord read_thread pages with before")
         return await _read_thread_impl(
             runtime, auth, thread_id=thread_id, limit=limit, before=before
         )

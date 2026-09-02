@@ -33,6 +33,8 @@ class SlackThreadResult(BaseModel):
     thread_ts: str
     messages: list[SlackMessageRow]
     has_more: bool
+    next_cursor: str | None = None
+    hint: str | None = None
 
 
 class SlackSearchMatch(BaseModel):
