@@ -76,7 +76,9 @@ def _auth(**overrides: object) -> AuthIdentity:
     return AuthIdentity(**base)  # type: ignore[arg-type]  # test kwargs are shape-correct
 
 
-def _build_settings(*, fernet_key: SecretStr, mintable: bool = False) -> Settings:
+def _build_settings(
+    *, fernet_key: SecretStr, mintable: bool = False, file_proxy: bool = False
+) -> Settings:
     return Settings(
         database=DatabaseSettings(
             url=PostgresDsn("postgresql+asyncpg://daimon:daimon@localhost:5432/daimon"),
@@ -87,8 +89,11 @@ def _build_settings(*, fernet_key: SecretStr, mintable: bool = False) -> Setting
         ),
         crypto=CryptoSettings(keys=(fernet_key,)),
         credentials=CredentialsSettings(google_sa_json=None),
-        mcp=McpSettings(public_url=HttpUrl("https://mcp.example.com/mcp"))
-        if mintable
+        mcp=McpSettings(
+            public_url=HttpUrl("https://mcp.example.com/mcp"),
+            jwt_secret=SecretStr("file-proxy-secret") if file_proxy else None,
+        )
+        if (mintable or file_proxy)
         else McpSettings(),
         slack=(
             SlackSettings(signing_secret=SecretStr("shh-secret"), app_token=SecretStr("xapp-test"))
@@ -102,6 +107,7 @@ async def _make_runtime(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     *,
     mintable: bool = False,
+    file_proxy: bool = False,
 ) -> McpRuntime:
     fernet_key = SecretStr(Fernet.generate_key().decode("ascii"))
     fernet = build_multifernet((fernet_key.get_secret_value(),))
@@ -113,7 +119,7 @@ async def _make_runtime(
     return McpRuntime(
         session_factory=committing_sessionmaker,
         client=MagicMock(spec=AsyncAnthropic),
-        settings=_build_settings(fernet_key=fernet_key, mintable=mintable),
+        settings=_build_settings(fernet_key=fernet_key, mintable=mintable, file_proxy=file_proxy),
         deployment_default=DeploymentDefault(),
         fernet=fernet,
     )
@@ -272,3 +278,48 @@ async def test_dispatch_slack_search_rejects_discord_only_filters(
     async with Client(mcp) as client:
         with pytest.raises(ToolError, match="slack"):
             await client.call_tool("search_messages", {"content": "q", "author_ids": ["U1"]})
+
+
+@pytest.mark.asyncio
+async def test_search_matches_carry_files_with_proxy_urls(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker, file_proxy=True)
+    auth = _auth()
+    await _seed_user_token(runtime, committing_sessionmaker)
+    await _seed_turn_context(committing_sessionmaker, auth, channel_id="C1")
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _SEARCH_MESSAGES,
+            payload={
+                "ok": True,
+                "messages": {
+                    "paging": {"count": 20, "total": 1, "page": 1, "pages": 1},
+                    "matches": [
+                        {
+                            "channel": {"id": "C1", "name": "general", "is_private": False},
+                            "ts": "1.0",
+                            "username": "alice",
+                            "text": "the report",
+                            "files": [
+                                {
+                                    "id": "F_REPORT",
+                                    "name": "report.csv",
+                                    "mimetype": "text/csv",
+                                    "size": 12,
+                                    "url_private": "https://files.slack.com/x",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+        )
+        result = await _slack_search_messages_impl(runtime, auth, content="report", limit=10)
+
+    (match,) = result.matches
+    (file,) = match.files
+    assert file.name == "report.csv"
+    assert file.url is not None and file.url.startswith("https://mcp.example.com/slack/file/"), (
+        "a search hit's file must be fetchable the same way a read hit's is"
+    )

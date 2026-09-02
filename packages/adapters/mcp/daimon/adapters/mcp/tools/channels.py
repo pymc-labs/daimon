@@ -85,7 +85,9 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         pagination parameter — the other is rejected. Discord: at most 200
         messages per call; use before to fetch older messages. Slack: at most
         999 per call, and some workspaces cap a single call at 15 whatever
-        limit is asked for; use cursor to fetch the next page.
+        limit is asked for; use cursor to fetch the next page. Files on a
+        Slack message are listed in ``files``; each ``url`` is a fetchable
+        link that expires in about a day (curl it to read the bytes).
         """
         auth = await _auth(ctx)
         # MCP clients often send "" for an optional param they mean to omit —
@@ -120,7 +122,8 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         most 999 per page (some workspaces cap a page at 15 whatever limit is
         asked for). has_more=true means newer replies exist; pass the returned
         next_cursor as cursor to read them. before is Discord-only and cursor
-        is Slack-only.
+        is Slack-only. Files on a message are listed in ``files`` with a
+        fetchable ``url`` that expires in about a day.
         """
         auth = await _auth(ctx)
         before = before or None
@@ -143,7 +146,11 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel_id: str,
         message_id: str,
     ) -> MessageRow | SlackMessageRow:
-        """Fetch a single message by channel and message id (Slack: the message ts)."""
+        """Fetch a single message by channel and message id (Slack: the message ts).
+
+        Attached files come back in ``files`` (Slack) or ``attachments``
+        (Discord), each with a url you can fetch.
+        """
         auth = await _auth(ctx)
         if auth.platform == "slack":
             return await _slack_get_message_impl(
