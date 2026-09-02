@@ -28,15 +28,31 @@ carry no `shares` block, so reading the ts back would need a `files.info`
 poll with no bound on when the share appears. Two calls with a known ts beat
 one call with a guessed one. The cost is that an upload failure leaves the
 text already posted; the error says so, so the agent does not re-send it.
+
+``attachments`` on Slack take the signed ``/slack/file/{token}`` links the
+read tools hand out, never a raw ``url_private`` (the agent is never shown
+one, and could not fetch it without the bot token anyway). The token is
+verified with the same secret the proxy route uses and must name the
+caller's own workspace, so a link minted for one install cannot relay a
+file into another. Authorization is inherited from the read that produced
+the link: the requester could see that message, so they may re-post its
+file.
 """
 
 from __future__ import annotations
 
+import time
 from typing import Any, cast
 
+import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._file_handles import ResolvedUpload, resolve_file_handles
+from daimon.adapters.mcp.slack_file_proxy import fetch_slack_file
+from daimon.adapters.mcp.tools._file_handles import (
+    MAX_ATTACHMENTS_PER_MESSAGE,
+    ResolvedUpload,
+    resolve_file_handles,
+)
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
@@ -47,6 +63,8 @@ from daimon.adapters.mcp.tools.slack._visibility import (
     check_channel_access,
     map_slack_api_error,
 )
+from daimon.core.output_delivery import MAX_BYTES_PER_FILE
+from daimon.core.slack_file_token import SlackFileRef, verify_file_token
 from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError, SlackRequestError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -66,10 +84,17 @@ _OVER_LENGTH_MSG = (
     "(thread replies work well for parts)"
 )
 _NOT_IN_CHANNEL_MSG = "daimon isn't in that channel — ask a member to /invite @daimon"
-_ATTACHMENTS_UNSUPPORTED_MSG = (
-    "attachments by url are Discord-only — on Slack, upload the file with "
-    "create_file_upload_url and pass its handle in file_handles"
+_ATTACHMENT_NOT_A_FILE_LINK_MSG = (
+    "on Slack an attachment url must be a file link from read_thread, read_channel, "
+    "get_message or search_messages (…/slack/file/<token>) — to post a file you made "
+    "yourself, use create_file_upload_url and file_handles"
 )
+_ATTACHMENT_LINK_REJECTED_MSG = (
+    "that file link has expired or belongs to another workspace — read the message "
+    "again to get a fresh one"
+)
+_ATTACHMENT_TOO_LARGE_MSG = f"attachment exceeds {MAX_BYTES_PER_FILE // (1024 * 1024)} MiB"
+_TOO_MANY_FILES_MSG = f"max {MAX_ATTACHMENTS_PER_MESSAGE} attachments per message"
 _FILES_NEED_CONTENT_MSG = (
     "Slack attaches files to a message, so content cannot be empty when "
     "file_handles is given — pass a short caption"
@@ -162,6 +187,48 @@ async def _post_message(
     return cast(dict[str, Any], resp.data)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # slack_sdk response is dict-like
 
 
+def _resolve_attachment_ref(runtime: McpRuntime, *, url: str, team_id: str) -> SlackFileRef:
+    """Verify a proxy link and return the file it names, refusing anything else."""
+    base_url = runtime.settings.mcp.app_root_url
+    secret = runtime.settings.mcp.jwt_secret
+    if base_url is None or secret is None:
+        raise ToolError(
+            "this deployment has no public URL configured, so file links cannot be "
+            "resolved — use create_file_upload_url and file_handles instead"
+        )
+    prefix = f"{base_url.rstrip('/')}/slack/file/"
+    if not url.startswith(prefix):
+        raise ToolError(_ATTACHMENT_NOT_A_FILE_LINK_MSG)
+    token = url[len(prefix) :].split("?", 1)[0]
+    ref = verify_file_token(token, secret=secret.get_secret_value(), now=int(time.time()))
+    if ref is None or ref.team_id != team_id:
+        raise ToolError(_ATTACHMENT_LINK_REJECTED_MSG)
+    return ref
+
+
+async def _fetch_attachments(
+    http_client: httpx.AsyncClient,
+    *,
+    bot_token: str,
+    specs: list[dict[str, str]],
+    refs: list[SlackFileRef],
+) -> list[ResolvedUpload]:
+    uploads: list[ResolvedUpload] = []
+    for spec, ref in zip(specs, refs, strict=True):
+        try:
+            content, _, fetched_name = await fetch_slack_file(
+                http_client, bot_token=bot_token, file_id=ref.file_id
+            )
+        except httpx.HTTPError as exc:
+            raise ToolError(f"failed to fetch attachment {ref.file_id!r}: {exc}") from exc
+        if len(content) > MAX_BYTES_PER_FILE:
+            raise ToolError(_ATTACHMENT_TOO_LARGE_MSG)
+        uploads.append(
+            ResolvedUpload(filename=spec.get("filename") or fetched_name, content=content)
+        )
+    return uploads
+
+
 async def _upload_files(
     client: AsyncWebClient,
     *,
@@ -205,27 +272,50 @@ async def _slack_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
     content: str,
     attachments: list[dict[str, str]] | None,
     file_handles: list[str] | None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> SlackMessageRow:
-    if attachments:
-        raise ToolError(_ATTACHMENTS_UNSUPPORTED_MSG)
     if len(content) > _MAX_CONTENT_CHARS:
         raise ToolError(_OVER_LENGTH_MSG)
-    uploads: list[ResolvedUpload] = []
-    if file_handles:
-        if not content.strip():
-            raise ToolError(_FILES_NEED_CONTENT_MSG)
-        uploads = await resolve_file_handles(
-            file_handles, session_factory=runtime.session_factory, tenant_id=auth.tenant_id
-        )
+    if (len(attachments or []) + len(file_handles or [])) > MAX_ATTACHMENTS_PER_MESSAGE:
+        raise ToolError(_TOO_MANY_FILES_MSG)
+    if (attachments or file_handles) and not content.strip():
+        raise ToolError(_FILES_NEED_CONTENT_MSG)
 
     target_channel_id, thread_ts = _split_send_target(channel_id)
     requester_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
-    client = await slack_web_client(runtime, team_id=team_id)
 
+    # Everything that can be checked without a network call goes first, so a
+    # bad handle or a stale link costs nothing and posts nothing.
+    refs = [
+        _resolve_attachment_ref(runtime, url=spec.get("url", ""), team_id=team_id)
+        for spec in (attachments or [])
+    ]
+    uploads: list[ResolvedUpload] = []
+    if file_handles:
+        uploads.extend(
+            await resolve_file_handles(
+                file_handles, session_factory=runtime.session_factory, tenant_id=auth.tenant_id
+            )
+        )
+
+    client = await slack_web_client(runtime, team_id=team_id)
     await _validate_channel_access(client, channel_id=target_channel_id, requester_id=requester_id)
     if thread_ts is not None:
         await _validate_thread_target(client, channel_id=target_channel_id, thread_ts=thread_ts)
+
+    if refs:
+        bot_token = str(client.token)
+        if http_client is not None:
+            fetched = await _fetch_attachments(
+                http_client, bot_token=bot_token, specs=attachments or [], refs=refs
+            )
+        else:
+            async with httpx.AsyncClient(timeout=30.0) as owned_client:
+                fetched = await _fetch_attachments(
+                    owned_client, bot_token=bot_token, specs=attachments or [], refs=refs
+                )
+        uploads = fetched + uploads
 
     resp = await _post_message(
         client, channel_id=target_channel_id, content=content, thread_ts=thread_ts

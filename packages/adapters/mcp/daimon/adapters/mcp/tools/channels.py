@@ -254,9 +254,11 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         paragraphs above together or you will conclude, wrongly, that you
         should hand a file back "in your reply" and silently deliver nothing.
 
-        ``attachments=[{url, filename}]`` fetches over https, restricted to
-        Discord's own CDN hosts — an arbitrary external URL will be refused
-        (<=25 MiB each). ``file_handles=[handle_id, ...]`` references any
+        ``attachments=[{url, filename}]`` re-posts a file that is already in
+        the chat: on Discord a url on Discord's own CDN (<=25 MiB each), on
+        Slack a file ``url`` from read_thread / read_channel / get_message /
+        search_messages (<=20 MiB each). An arbitrary external URL is
+        refused on both. ``file_handles=[handle_id, ...]`` references any
         file daimon is already holding — this is how you post a file
         you produced yourself, not only output from a built-in tool. Any
         tool that stores a file and returns a handle works here (e.g.
@@ -270,10 +272,9 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``C0123456789:1717171717.123456``) to post into a thread. Content is
         sent as-is — nothing is escaped, so ``<@U…>`` mentions work — and is
         capped at 12,000 characters. daimon must already be in the channel
-        (a member can run ``/invite @daimon``). ``file_handles`` works;
-        ``attachments`` by url does not (there is no Slack CDN to fetch from).
-        Files post as replies under the message, so ``content`` cannot be
-        empty when files are given — use it as the caption.
+        (a member can run ``/invite @daimon``). Files post as replies under
+        the message, so ``content`` cannot be empty when files are given —
+        use it as the caption.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
