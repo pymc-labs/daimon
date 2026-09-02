@@ -250,15 +250,16 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         To post a file you made in your sandbox, call
         ``create_file_upload_url`` first and PUT the bytes to the URL it
         returns — never base64 a file into a tool argument. Combined
-        cap of 10 attachments per message. Both FILES paragraphs are
-        Discord-only for now — Slack file posting needs a scope this
-        install does not have.
+        cap of 10 attachments per message.
 
         Slack: ``channel_id`` may be ``channel_id:thread_ts`` (e.g.
         ``C0123456789:1717171717.123456``) to post into a thread. Content is
         sent as-is — nothing is escaped, so ``<@U…>`` mentions work — and is
         capped at 12,000 characters. daimon must already be in the channel
-        (a member can run ``/invite @daimon``).
+        (a member can run ``/invite @daimon``). ``file_handles`` works;
+        ``attachments`` by url does not (there is no Slack CDN to fetch from).
+        Files post as replies under the message, so ``content`` cannot be
+        empty when files are given — use it as the caption.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":

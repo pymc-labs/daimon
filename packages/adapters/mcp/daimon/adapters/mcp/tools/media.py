@@ -6,8 +6,8 @@
 
 Agent-produced files cannot travel as a tool argument — the model would have to
 emit the whole file as base64 — so ``create_file_upload_url`` mints a one-time
-URL the sandbox PUTs to, and the bytes land in Postgres. Discord
-``send_message`` resolves them via the ``file_handles`` parameter.
+URL the sandbox PUTs to, and the bytes land in Postgres. ``send_message``
+resolves them via the ``file_handles`` parameter on both platforms.
 """
 
 from __future__ import annotations
@@ -166,10 +166,10 @@ def register_upload_tool(mcp: FastMCP, *, runtime: McpRuntime) -> None:
         title: str,
         mime_type: str,
     ) -> str:
-        """Attach, post, send, or share a file in Discord — step 1 of 2.
+        """Attach, post, send, or share a file in the chat — step 1 of 2.
 
         This is the ONLY way to put a file you produced (a chart, a table, an
-        image, a data file) into Discord as an attachment. Your reply text
+        image, a data file) into Discord or Slack as an attachment. Your reply text
         delivers itself; a file never does. Reading a file, or copying it to
         /mnt/session/outputs/, does not send it anywhere.
 

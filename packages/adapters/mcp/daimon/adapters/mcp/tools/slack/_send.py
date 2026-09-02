@@ -18,6 +18,16 @@ it, and posts the message at the channel root instead of erroring — so the
 post itself can never surface a bad thread target; only a pre-flight check
 can. The composite `channel_id:thread_ts` form is how a caller aims a reply
 at a specific thread.
+
+Files ride as a second step: the text posts first, then every handle goes
+up in one `files_upload_v2` call threaded under that text (or under the
+target thread, which is the same place when the caller aimed at one). Slack
+has no single call that posts text plus files AND returns the message ts —
+`files.completeUploadExternal` shares asynchronously and its file objects
+carry no `shares` block, so reading the ts back would need a `files.info`
+poll with no bound on when the share appears. Two calls with a known ts beat
+one call with a guessed one. The cost is that an upload failure leaves the
+text already posted; the error says so, so the agent does not re-send it.
 """
 
 from __future__ import annotations
@@ -26,6 +36,7 @@ from typing import Any, cast
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._file_handles import ResolvedUpload, resolve_file_handles
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
@@ -37,7 +48,7 @@ from daimon.adapters.mcp.tools.slack._visibility import (
     map_slack_api_error,
 )
 from fastmcp.exceptions import ToolError
-from slack_sdk.errors import SlackApiError
+from slack_sdk.errors import SlackApiError, SlackRequestError
 from slack_sdk.web.async_client import AsyncWebClient
 
 # Slack's {"type": "markdown"} block cap is 12,000 CHARACTERS (not bytes);
@@ -55,10 +66,19 @@ _OVER_LENGTH_MSG = (
     "(thread replies work well for parts)"
 )
 _NOT_IN_CHANNEL_MSG = "daimon isn't in that channel — ask a member to /invite @daimon"
-_FILES_UNSUPPORTED_MSG = (
-    "file posting is not available on Slack yet — this workspace's bot token "
-    "has no files:write scope"
+_ATTACHMENTS_UNSUPPORTED_MSG = (
+    "attachments by url are Discord-only — on Slack, upload the file with "
+    "create_file_upload_url and pass its handle in file_handles"
 )
+_FILES_NEED_CONTENT_MSG = (
+    "Slack attaches files to a message, so content cannot be empty when "
+    "file_handles is given — pass a short caption"
+)
+_MISSING_FILES_SCOPE_MSG = (
+    "this workspace's daimon install has no files:write scope — a workspace "
+    "admin must reinstall daimon from the install link before files can be posted"
+)
+_UPLOAD_FAILED_SUFFIX = " — the message text was already posted, do not send it again"
 _THREAD_NOT_FOUND_MSG = "that thread does not exist — check the thread_ts and try again"
 
 
@@ -142,6 +162,41 @@ async def _post_message(
     return cast(dict[str, Any], resp.data)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # slack_sdk response is dict-like
 
 
+async def _upload_files(
+    client: AsyncWebClient,
+    *,
+    channel_id: str,
+    thread_ts: str,
+    uploads: list[ResolvedUpload],
+) -> None:
+    try:
+        # No content_type: files_upload_v2 forwards it into the
+        # files.completeUploadExternal query string, where it is a silent
+        # no-op — Slack derives the preview from the filename extension.
+        await client.files_upload_v2(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+            channel=channel_id,
+            thread_ts=thread_ts,
+            file_uploads=[
+                {"content": upload.content, "filename": upload.filename, "title": upload.filename}
+                for upload in uploads
+            ],
+        )
+    except SlackApiError as err:
+        code = _slack_error_code(err)
+        if code == "missing_scope":
+            raise ToolError(_MISSING_FILES_SCOPE_MSG + _UPLOAD_FAILED_SUFFIX) from err
+        if code == "not_in_channel":
+            raise ToolError(_NOT_IN_CHANNEL_MSG + _UPLOAD_FAILED_SUFFIX) from err
+        mapped = map_slack_api_error(err)
+        if mapped is not None:
+            raise ToolError(str(mapped) + _UPLOAD_FAILED_SUFFIX) from err
+        raise ToolError(f"file upload failed ({code}){_UPLOAD_FAILED_SUFFIX}") from err
+    except SlackRequestError as err:
+        # The middle leg of the upload flow is a plain HTTP PUT to
+        # files.slack.com; a non-200 there surfaces as this, not as an API error.
+        raise ToolError(f"file upload failed ({err}){_UPLOAD_FAILED_SUFFIX}") from err
+
+
 async def _slack_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -151,10 +206,17 @@ async def _slack_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
     attachments: list[dict[str, str]] | None,
     file_handles: list[str] | None,
 ) -> SlackMessageRow:
-    if attachments or file_handles:
-        raise ToolError(_FILES_UNSUPPORTED_MSG)
+    if attachments:
+        raise ToolError(_ATTACHMENTS_UNSUPPORTED_MSG)
     if len(content) > _MAX_CONTENT_CHARS:
         raise ToolError(_OVER_LENGTH_MSG)
+    uploads: list[ResolvedUpload] = []
+    if file_handles:
+        if not content.strip():
+            raise ToolError(_FILES_NEED_CONTENT_MSG)
+        uploads = await resolve_file_handles(
+            file_handles, session_factory=runtime.session_factory, tenant_id=auth.tenant_id
+        )
 
     target_channel_id, thread_ts = _split_send_target(channel_id)
     requester_id = _require_slack_identity(auth)
@@ -168,6 +230,13 @@ async def _slack_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
     resp = await _post_message(
         client, channel_id=target_channel_id, content=content, thread_ts=thread_ts
     )
+    if uploads:
+        await _upload_files(
+            client,
+            channel_id=target_channel_id,
+            thread_ts=thread_ts or str(resp["ts"]),
+            uploads=uploads,
+        )
     message = cast(dict[str, Any], resp.get("message") or {})
     response_thread_ts = message.get("thread_ts")
     response_user_id = message.get("user")
