@@ -50,11 +50,18 @@ from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
-# Slack's ceiling for non-Marketplace apps on conversations.history and
-# conversations.replies: at most 15 objects per call and one call per minute.
-# Larger limits are clamped server-side, so asking for more only misleads the
-# caller about how much of the channel or thread they were shown.
-_HISTORY_LIMIT_CAP = 15
+# Largest ``limit`` conversations.history accepts; conversations.replies takes
+# 1000 but one ceiling keeps both reads on the same bound. Above it Slack
+# answers ``invalid_limit`` rather than clamping, unlike the per-workspace
+# 15-object clamp, which it applies silently and reports through ``has_more``.
+_HISTORY_PAGE_CEILING = 999
+
+# Page size for the replies lookup that locates one message by ts.
+_MESSAGE_LOOKUP_PAGE = 200
+
+
+def _bounded_page(limit: int) -> int:
+    return max(1, min(limit, _HISTORY_PAGE_CEILING))
 
 
 def _reraise_mapped(err: SlackApiError, *, as_user: bool = False) -> ToolError:
@@ -240,7 +247,7 @@ async def _fetch_channel_history(
     client: AsyncWebClient, *, channel_id: str, limit: int, cursor: str | None
 ) -> SlackChannelResult:
     resp = await client.conversations_history(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-        channel=channel_id, limit=max(1, min(limit, _HISTORY_LIMIT_CAP)), cursor=cursor
+        channel=channel_id, limit=_bounded_page(limit), cursor=cursor
     )
     raw = cast(list[dict[str, Any]], resp["messages"])
     raw.reverse()  # Slack returns newest-first; tools return oldest-first
@@ -322,13 +329,17 @@ def _split_thread_id(thread_id: str) -> tuple[str, str]:
 
 
 async def _fetch_thread_replies(
-    client: AsyncWebClient, *, channel_id: str, thread_ts: str, limit: int
+    client: AsyncWebClient,
+    *,
+    channel_id: str,
+    thread_ts: str,
+    limit: int,
+    cursor: str | None,
 ) -> SlackThreadResult:
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-        channel=channel_id, ts=thread_ts, limit=max(1, min(limit, _HISTORY_LIMIT_CAP))
+        channel=channel_id, ts=thread_ts, limit=_bounded_page(limit), cursor=cursor
     )
     raw = cast(list[dict[str, Any]], resp["messages"])  # already oldest-first
-    has_more = bool(resp.get("has_more"))
     result_thread_ts = thread_ts
 
     # A reply's ts identifies its thread, matching how send treats a thread
@@ -341,10 +352,23 @@ async def _fetch_thread_replies(
             resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                 channel=channel_id,
                 ts=result_thread_ts,
-                limit=max(1, min(limit, _HISTORY_LIMIT_CAP)),
+                limit=_bounded_page(limit),
+                cursor=cursor,
             )
             raw = cast(list[dict[str, Any]], resp["messages"])
-            has_more = bool(resp.get("has_more"))
+
+    # Replies page oldest-first, so the continuation reaches NEWER messages.
+    # has_more stays the authority: Slack can send a next_cursor that only
+    # points past the end, and (rarely) report has_more without a cursor.
+    has_more = bool(resp.get("has_more"))
+    metadata = cast(dict[str, Any], resp.get("response_metadata") or {})
+    next_cursor = (str(metadata.get("next_cursor") or "") or None) if has_more else None
+    if next_cursor is not None:
+        hint = f"more replies available — pass cursor={next_cursor} to read newer messages"
+    elif has_more:
+        hint = "more replies exist, but Slack returned no continuation cursor"
+    else:
+        hint = None
 
     usernames = await _resolve_usernames(client, _author_ids(raw))
     return SlackThreadResult(
@@ -352,11 +376,18 @@ async def _fetch_thread_replies(
         thread_ts=result_thread_ts,
         messages=_to_message_rows(raw, usernames),
         has_more=has_more,
+        next_cursor=next_cursor,
+        hint=hint,
     )
 
 
 async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
-    runtime: McpRuntime, auth: AuthIdentity, *, thread_id: str, limit: int
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    thread_id: str,
+    limit: int,
+    cursor: str | None = None,
 ) -> SlackThreadResult:
     channel_id, thread_ts = _split_thread_id(thread_id)
     user_id = _require_slack_identity(auth)
@@ -368,7 +399,7 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
             channel = await _channel_info(rc.client, channel_id=channel_id)
             await _gate_user_source(runtime, auth, channel=channel)
             return await _fetch_thread_replies(
-                rc.client, channel_id=channel_id, thread_ts=thread_ts, limit=limit
+                rc.client, channel_id=channel_id, thread_ts=thread_ts, limit=limit, cursor=cursor
             )
         except SlackApiError as err:
             # Any not_in_channel from the user token (typically a public channel
@@ -385,7 +416,7 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
         channel = await _channel_info(bot_client, channel_id=channel_id)
         await check_channel_access(bot_client, channel=channel, user_id=user_id)
         return await _fetch_thread_replies(
-            bot_client, channel_id=channel_id, thread_ts=thread_ts, limit=limit
+            bot_client, channel_id=channel_id, thread_ts=thread_ts, limit=limit, cursor=cursor
         )
     except ToolError as terr:
         if rc.runs_as_user:
@@ -417,7 +448,7 @@ async def _fetch_single_message(
         # mapping (or an opaque raw SlackApiError).
         try:
             resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                channel=channel_id, ts=message_id, limit=_HISTORY_LIMIT_CAP
+                channel=channel_id, ts=message_id, limit=_MESSAGE_LOOKUP_PAGE
             )
         except SlackApiError as err:
             error_code = _slack_error_code(err)

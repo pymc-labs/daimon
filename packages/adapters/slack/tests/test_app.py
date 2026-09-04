@@ -28,7 +28,7 @@ import aiohttp
 import httpx
 import pytest
 import structlog.testing
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, NotFoundError
 from anthropic.types.beta import (
     BetaManagedAgentsModelConfig,
     BetaManagedAgentsSession,
@@ -40,7 +40,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
 from daimon.core.defaults.provisioning import provision_tenant
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, TurnError
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -161,6 +161,7 @@ def _make_app(
     else:
         settings.crypto.keys = ()
     settings.slack.max_concurrent_turns_per_tenant = 3
+    settings.slack.history_page_limit = 200
 
     if sessionmaker is None:
         # Provide a factory that returns an AsyncMock context manager when
@@ -736,6 +737,7 @@ def _make_orchestrate_app(
     settings = MagicMock()
     settings.crypto.keys = (SecretStr(crypto_key),) if crypto_key is not None else ()
     settings.slack.max_concurrent_turns_per_tenant = max_concurrent_turns_per_tenant
+    settings.slack.history_page_limit = 200
     settings.mcp.public_url = None
     # app_root_url=None short-circuits _maybe_post_connect_nudge (Task 11) — these
     # orchestration tests don't exercise the connect-nudge flow.
@@ -1036,6 +1038,10 @@ async def test_orchestrate_continuation_when_live_session_exists_calls_build_del
         f"build_delta_xml must be called with watermark_ts={prior_watermark!r}, "
         f"got {call_kwargs.get('watermark_ts')!r}"
     )
+    assert call_kwargs.get("page_limit") == 200, (
+        "the configured page size must reach the replay call; hardcoding the "
+        "clamped ceiling denies unclamped workspaces their depth"
+    )
 
     # Assert watermark was updated in the DB.
     async with db_session_factory() as s:
@@ -1049,6 +1055,138 @@ async def test_orchestrate_continuation_when_live_session_exists_calls_build_del
     assert row is not None, "thread_sessions row must still exist"
     assert row.watermark_message_id != prior_watermark, (
         "watermark must be updated after the continuation turn"
+    )
+
+
+async def test_dead_session_reseed_requests_the_configured_page_size(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The recovery re-seed replays history with the same page size as the first turn.
+
+    The setting is deliberately not 200 here: the reseed call falling back to
+    the module default would otherwise be indistinguishable from honouring it.
+    """
+    from daimon.core.stores.identity import get_or_create_platform_principal
+
+    team_id = "T_ORCH_80_RESEED"
+    channel = "C_TEST"
+    thread_ts = "9000000003.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+
+    await provision_tenant(
+        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    )
+    async with db_session_factory() as s:
+        principal = await get_or_create_platform_principal(
+            s, tenant_id=tenant_id, platform="slack", external_id="U_TEST_RESEED"
+        )
+        await create_thread_session(
+            s,
+            tenant_id=tenant_id,
+            platform="slack",
+            thread_id=thread_ts,
+            account_id=principal.account_id,
+            ma_session_id="sess-reseed-dead",
+            watermark_message_id=None,
+        )
+        await s.commit()
+
+    app, _ = _make_orchestrate_app(db_session_factory)
+    app.runtime.settings.slack.history_page_limit = 350
+
+    dead = TurnState(
+        error=TurnError(
+            kind="upstream",
+            message="session gone",
+            cause=NotFoundError(
+                "session gone",
+                response=httpx.Response(404, request=httpx.Request("POST", "https://ma.test")),
+                body=None,
+            ),
+        ),
+    )
+    outcomes = iter([dead, None])
+
+    async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
+        if (state := next(outcomes)) is not None:
+            return state
+        ok = TurnState(content=[TextBlock(kind="text", text="Recovered!")])
+        await lifecycle.on_terminal_success(ok)
+        return ok
+
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": "9000000003.000002",
+        "thread_ts": thread_ts,
+        "event_ts": "9000000003.000002",
+        "channel": channel,
+        "user": "U_TEST_RESEED",
+        "text": "<@U_BOT> still there?",
+    }
+
+    _now = datetime.now(UTC)
+    _fake_session = BetaManagedAgentsSession(
+        outcome_evaluations=[],
+        id="sess-reseed-fresh",
+        agent=BetaManagedAgentsSessionAgent(
+            id="agent_test_id",
+            mcp_servers=[],
+            model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
+            name="test-agent",
+            skills=[],
+            tools=[],
+            type="agent",
+            version=1,
+        ),
+        created_at=_now,
+        environment_id="env_test_id",
+        metadata={},
+        resources=[],
+        stats=BetaManagedAgentsSessionStats(),
+        status="idle",
+        type="session",
+        updated_at=_now,
+        usage=BetaManagedAgentsSessionUsage(),
+        vault_ids=[],
+    )
+
+    with (
+        patch(
+            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
+        ) as mock_resolve_agent,
+        patch(
+            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+        ) as mock_resolve_env,
+        patch(
+            "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
+        ) as mock_create_session,
+        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+    ):
+        mock_resolve_agent.return_value = "agent_test_id"
+        mock_resolve_env.return_value = "env_test_id"
+        mock_create_session.return_value = _fake_session
+        mock_run_turn.side_effect = _fake_run_turn
+
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event,
+            team_id=team_id,
+            channel=channel,
+            event_ts="9000000003.000002",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+    assert mock_run_turn.await_count == 2, "the dead session must be recovered exactly once"
+    requested = [
+        str(url.query["limit"])
+        for (method, url), _ in fake_slack_web_client.mock.requests.items()
+        if method == "GET" and url.path == "/api/conversations.replies"
+    ]
+    assert requested == ["350"], (
+        "the re-seed after recovery is the only history replay on a reused session, "
+        f"and it must carry the configured page size; saw {requested}"
     )
 
 
@@ -3614,6 +3752,7 @@ async def test_run_thread_turn_pump_phase_ceiling_renders_terminal_error_in_thre
             tenant_id=tenant_id,
             thread_id=thread_ts,
             team_id=team_id,
+            page_limit=200,
         )
 
     update_calls = [

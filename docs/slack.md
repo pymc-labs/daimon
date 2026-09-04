@@ -22,6 +22,12 @@ lose thread previews and the upload buffers the whole payload in memory), and
 re-running the install flow. A workspace that has hit its Slack file-storage
 limit gets one in-thread notice and no deliveries until space is freed.
 
+Agents can also post a file deliberately, mid-turn, through the MCP
+`send_message` tool's `file_handles` argument. The text posts first and the
+files follow as replies under it, so a file always has a caption. This uses
+the same `files:write` scope, and a workspace without it gets a tool error
+naming the reinstall step instead of a silent drop.
+
 ### Per-user Slack access (optional)
 
 By default daimon reads only channels the bot is invited to. Members can
