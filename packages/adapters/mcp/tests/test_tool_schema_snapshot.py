@@ -42,6 +42,7 @@ pytestmark = pytest.mark.asyncio
 # leaves a group unconfigured) — checked before the snapshot comparison so
 # that failure mode is loud rather than a quietly smaller snapshot.
 _MUST_CONTAIN = {
+    "cancel_turn",
     "create_environment",
     "send_message",
     "sync_skills",

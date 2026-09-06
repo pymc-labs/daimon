@@ -583,6 +583,7 @@ async def test_interrupt_mid_consume_posts_user_interrupt_and_ends_clean_on_ack(
         [YieldEvent(pre), BlockForever()],
         [YieldEvent(make_status_idle(event_id="ack", stop_reason=make_end_turn()))],
     ]
+    fa.beta.sessions.retrieve_statuses = ["running", "running", "idle"]
     cancel = asyncio.Event()
     lc = RecordingLifecycle()
 
@@ -620,6 +621,7 @@ async def test_interrupt_mid_consume_timeout_surfaces_interrupt_timeout() -> Non
         [BlockForever()],
         [BlockForever()],  # ack-waiter never sees terminal idle
     ]
+    fa.beta.sessions.retrieve_statuses = ["running", "running", "running"]
     cancel = asyncio.Event()
     lc = RecordingLifecycle()
 

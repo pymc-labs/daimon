@@ -21,7 +21,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import anthropic
 import httpx
@@ -128,6 +128,7 @@ StreamAction = (
     | RaiseReadTimeout
     | DelayThenYield
 )
+SessionStatus = Literal["rescheduling", "running", "idle", "terminated"]
 
 
 @dataclass
@@ -225,7 +226,7 @@ class _FakeEventList:
             yield e
 
 
-def _make_session(*, session_id: str, status: str) -> BetaManagedAgentsSession:
+def _make_session(*, session_id: str, status: SessionStatus) -> BetaManagedAgentsSession:
     """Build a real `BetaManagedAgentsSession` with fixed, obviously-fake
     values, via the SDK's own validated Pydantic construction -- see
     `guideline:testing`'s validated-construction rule for why unvalidated
@@ -234,7 +235,7 @@ def _make_session(*, session_id: str, status: str) -> BetaManagedAgentsSession:
     return BetaManagedAgentsSession(
         id=session_id,
         type="session",
-        status=status,  # pyright: ignore[reportArgumentType]
+        status=status,
         agent=BetaManagedAgentsSessionAgent(
             id="agent_fake",
             type="agent",
@@ -272,7 +273,7 @@ class FakeSessionsBeta:
     """
 
     events: FakeEventsResource = field(default_factory=FakeEventsResource)
-    retrieve_statuses: list[str] = field(default_factory=list[str])
+    retrieve_statuses: list[SessionStatus] = field(default_factory=list[SessionStatus])
     retrieve_calls: list[str] = field(default_factory=list[str])
     retrieve_raises: Exception | None = None
 

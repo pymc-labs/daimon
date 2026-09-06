@@ -19,6 +19,11 @@ Headless loop (primitives plus the bounded ``ask`` convenience tool):
   a session.
 - ``continue_turn`` sends a follow-up ``user.message``. Admission-gated,
   same as ``start_turn``.
+- ``cancel_turn`` cooperatively interrupts the active provider turn and waits
+  for observed terminal idle. An unconfirmed request returns
+  ``cancel_requested`` rather than claiming cancellation. It is owner-gated
+  but not admission-gated: stopping work must remain possible after a balance
+  or cap is reached.
 - ``get_session`` returns status/metadata (poll until idle). Read-only, not
   gated.
 - ``list_events`` returns the transcript; the caller reads the reply from the
@@ -60,6 +65,7 @@ from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
+from daimon.core.ma import cancel_turn as cancel_session_turn
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ScopeContext
 from daimon.core.sessions import create_session
@@ -71,11 +77,18 @@ from fastmcp.tools import ToolResult
 from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
 
-from mcp.types import ImageContent, TextContent
+from mcp.types import ImageContent, TextContent, ToolAnnotations
 
 # Each transcript page costs two upstream calls (ownership retrieve + events
 # list), so an uncapped walk on a long session can outlast any client timeout.
 _MAX_EVENT_PAGES = 20
+
+_CANCEL_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
+    idempotentHint=False,
+    openWorldHint=False,
+)
 
 
 class AgentDescription(BaseModel):
@@ -334,6 +347,25 @@ async def _continue_turn_impl(
     return {"handle": handle}
 
 
+async def _cancel_turn_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    session_id: str,
+) -> dict[str, str]:
+    """Owner-gated adapter boundary for the core cancellation primitive."""
+    await _verify_agent_owns_session(runtime, auth, session_id)
+    result = await cancel_session_turn(
+        runtime.client,
+        session_id=session_id,
+        requested_by=str(auth.account_id),
+    )
+    return {
+        "session_id": result.session_id,
+        "outcome": result.outcome,
+        "status": result.status,
+    }
+
+
 async def _list_sessions_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -573,7 +605,8 @@ def register_agent_chat_tools(
     caller's agent. ``ask`` composes the same primitives into one bounded
     hosted-client call and adds chart delivery after the session becomes idle.
     ``deliver_turn_charts`` provides the same delivery for clients that poll
-    and read the primitives themselves.
+    and read the primitives themselves. The scoped surface includes
+    ``cancel_turn`` alongside the existing session/event tools.
 
     ``list_sessions``/``get_session`` are registered as ``list_my_sessions``/
     ``get_my_session`` to avoid a name collision with the tenant-scoped
@@ -582,9 +615,11 @@ def register_agent_chat_tools(
 
     ``start_turn``, ``continue_turn``, and ``ask`` run the shared
     ``_check_admission`` gate (the same balance/cap checks the media tools run)
-    before creating a session or sending an event. The four read-only tools and
-    ``deliver_turn_charts`` stay on bare ``_auth``; the latter performs a
-    bounded artifact-store write when optional link delivery is configured.
+    before creating a session or sending an event. ``cancel_turn``, the four
+    read-only tools, and ``deliver_turn_charts`` stay on bare ``_auth`` so
+    cancellation remains available after a billing limit is reached; chart
+    delivery performs a bounded artifact-store write when optional link
+    delivery is configured.
     """
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
@@ -655,6 +690,22 @@ def register_agent_chat_tools(
             tool_name="continue_turn",
         )
         return await _continue_turn_impl(runtime, auth, handle, message)
+
+    @mcp.tool(  # pyright: ignore[reportArgumentType]
+        tags={"agent-chat"},
+        annotations=_CANCEL_ANNOTATIONS,
+    )
+    async def cancel_turn(ctx: Context, session_id: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+        """Stop the active turn in a session owned by this caller's agent.
+        Cancellation is cooperative at the Managed Agents interrupt boundary,
+        so an in-flight tool operation may finish before the stop takes effect.
+        The call waits for observed terminal idle, leaves the session readable
+        and continuable, and is an idempotent no-op when the session is already
+        terminal. An unconfirmed timeout returns ``cancel_requested``. Charges
+        for completed ``span.model_request_end`` events stand; there is no
+        reserve or refund, and the cancel request itself adds no usage event.
+        """
+        return await _cancel_turn_impl(runtime, await _auth(ctx), session_id)
 
     @mcp.tool(tags={"agent-chat"}, name="get_my_session")  # pyright: ignore[reportArgumentType]
     async def get_my_session(ctx: Context, handle: str) -> SessionInfo:  # pyright: ignore[reportUnusedFunction]
