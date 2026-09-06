@@ -142,6 +142,50 @@ class McpSettings(BaseModel):
         return str(self.public_url).rstrip("/").removesuffix("/mcp").rstrip("/")
 
 
+class HubSettings(BaseModel):
+    """OAuth-login MCP mounts for coding-agent clients.
+
+    A platform's mount appears only when both its client id and secret are
+    set; a deployment that sets neither runs exactly as before. The signing
+    key is shared by both mounts and must be a base64url 32-byte key, the same
+    shape as a Fernet key, so the proxy uses it directly rather than deriving
+    one from the client secret (rotating a client secret would otherwise
+    invalidate every issued login).
+    """
+
+    slack_client_id: str | None = Field(
+        default=None,
+        description="Slack OAuth app client ID for the /slack/mcp login mount.",
+    )
+    slack_client_secret: SecretStr | None = Field(
+        default=None,
+        description="Slack OAuth app client secret for the /slack/mcp login mount.",
+    )
+    discord_client_id: str | None = Field(
+        default=None,
+        description="Discord OAuth app client ID for the /discord/mcp login mount.",
+    )
+    discord_client_secret: SecretStr | None = Field(
+        default=None,
+        description="Discord OAuth app client secret for the /discord/mcp login mount.",
+    )
+    jwt_signing_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Base64url 32-byte key that signs hub login tokens. Required when "
+            "any hub mount is configured. Generate with Fernet.generate_key()."
+        ),
+    )
+
+    @property
+    def slack_configured(self) -> bool:
+        return self.slack_client_id is not None and self.slack_client_secret is not None
+
+    @property
+    def discord_configured(self) -> bool:
+        return self.discord_client_id is not None and self.discord_client_secret is not None
+
+
 class DiscordSettings(BaseModel):
     """Discord adapter config.
 
@@ -636,6 +680,7 @@ class Settings(BaseSettings):
     cli: CLISettings = Field(default_factory=CLISettings)
     log: LogSettings = Field(default_factory=LogSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
+    hub: HubSettings = Field(default_factory=HubSettings)
     discord: DiscordSettings | None = None
     slack: SlackSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)

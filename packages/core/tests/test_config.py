@@ -4,8 +4,16 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from daimon.core.config import ArtifactsSettings, McpSettings, Settings, load_settings
-from pydantic import HttpUrl, ValidationError
+from daimon.core.config import (
+    AnthropicSettings,
+    ArtifactsSettings,
+    DatabaseSettings,
+    HubSettings,
+    McpSettings,
+    Settings,
+    load_settings,
+)
+from pydantic import HttpUrl, PostgresDsn, SecretStr, ValidationError
 
 
 def test_load_settings_parses_nested_delimiter_when_env_provided(
@@ -575,3 +583,36 @@ def test_slack_settings_max_concurrent_turns_per_tenant_defaults_to_3(
     assert settings.slack.max_concurrent_turns_per_tenant == 3, (
         "max_concurrent_turns_per_tenant must default to 3 (STURN-06 per-tenant cap)"
     )
+
+
+# --- HubSettings tests ---
+
+
+def test_hub_settings_default_to_unconfigured() -> None:
+    settings = Settings(
+        database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+        anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+    )
+    assert settings.hub.slack_configured is False, (
+        f"slack hub must be unconfigured by default, got {settings.hub!r}"
+    )
+    assert settings.hub.discord_configured is False, (
+        f"discord hub must be unconfigured by default, got {settings.hub!r}"
+    )
+
+
+def test_hub_settings_platform_configured_requires_both_id_and_secret() -> None:
+    hub = HubSettings(discord_client_id="123")
+    assert hub.discord_configured is False, "client id alone must not count as configured"
+    hub = HubSettings(discord_client_id="123", discord_client_secret=SecretStr("s"))
+    assert hub.discord_configured is True, "id plus secret must count as configured"
+
+
+def test_hub_settings_read_from_nested_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_HUB__SLACK_CLIENT_ID", "slack-id")
+    monkeypatch.setenv("DAIMON_HUB__SLACK_CLIENT_SECRET", "slack-secret")
+    settings = load_settings(_env_file=None)
+    assert settings.hub.slack_client_id == "slack-id", f"got {settings.hub.slack_client_id!r}"
+    assert settings.hub.slack_configured is True, "env-provided id+secret must configure slack"
