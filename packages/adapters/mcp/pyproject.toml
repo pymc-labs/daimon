@@ -22,6 +22,7 @@ dependencies = [
     "google-genai>=2.5,<3",
     "imageio-ffmpeg>=0.6",
     "slack-sdk>=3.42,<4",
+    "py-key-value-aio[postgresql]>=0.4.4",
 ]
 
 [project.optional-dependencies]
