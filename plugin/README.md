@@ -36,6 +36,14 @@ locally. A server you never authenticate simply has no daimons to list.
   reachable through it, without asking any of them a question. Use it to check what's
   connected before asking something.
 
+## Billing
+
+A hub turn runs the same balance and cap admission check as the existing `/mcp`
+tools: a workspace with a depleted balance or an exhausted monthly cap refuses the
+turn before it starts. Like those tools today, a hub turn does not record a metered
+usage debit against the workspace once it completes — usage metering for
+MCP-initiated turns is tracked as a separate piece of work.
+
 ## Self-hosted deployments
 
 By default the plugin points at `https://daimon.decision.ai`. If you run your own daimon
