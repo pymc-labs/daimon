@@ -42,6 +42,7 @@ from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
+from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
 from daimon.core.logging_setup import configure_log_level
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
@@ -337,6 +338,16 @@ async def _sweep_slack_event_dedup(sm: async_sessionmaker[AsyncSession]) -> None
         log.exception("scheduler.slack_event_dedup_sweep.failed")
 
 
+async def _sweep_hub_oauth_kv(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Prune expired hub login rows once. Boundary catch: a sweep failure
+    must not kill the scheduler loop; the next tick retries. No upstream call.
+    """
+    try:
+        await sweep_expired_hub_oauth_kv(sm, now=datetime.now(UTC))
+    except SQLAlchemyError:
+        log.exception("scheduler.hub_oauth_kv_sweep.failed")
+
+
 def _validate_mcp_settings(settings: Settings) -> None:
     """Single-tenant deployments require both ``settings.mcp.jwt_secret`` and
     ``settings.mcp.public_url`` so each routine fire can bind the daimon-mcp
@@ -456,6 +467,7 @@ async def run(
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
+            await _sweep_hub_oauth_kv(sm)
             return 0
 
         while not stop_event.is_set():
@@ -472,6 +484,7 @@ async def run(
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
+            await _sweep_hub_oauth_kv(sm)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
                     stop_event.wait(), timeout=scheduler_settings.tick_interval_s
