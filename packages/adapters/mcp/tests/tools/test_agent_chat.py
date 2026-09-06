@@ -2835,3 +2835,97 @@ async def test_get_turn_cost_rejects_a_sibling_agents_session_and_lists_no_event
         )
 
     assert events_calls == [], "a rejected ownership check must issue no events.list call"
+
+
+# ---------------------------------------------------------------------------
+# Task 8: AgentDescription platform fields and ask resume via handle
+# ---------------------------------------------------------------------------
+
+
+async def test_describe_agent_reports_platform_and_workspace_id(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """describe_agent surfaces the auth claim's platform and external_id as workspace_id."""
+    client = build_fake_anthropic(_describe_agent_router().dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=_TENANT_ID,
+        role=Role.USER,
+        agent_id=_AGENT_UUID,
+        platform="discord",
+        external_id="guild-1",
+    )
+
+    description = await _describe_agent_impl(runtime, auth)
+
+    assert description.platform == "discord", f"got {description.platform!r}"
+    assert description.workspace_id == "guild-1", f"got {description.workspace_id!r}"
+    assert description.workspace is None, "the JWT surface has no workspace name to report"
+
+
+async def test_ask_with_handle_continues_instead_of_starting(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """With a handle, ask sends continue_turn on that session and never creates a new one."""
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _r, _m: list_response(
+            [
+                make_ma_agent(
+                    id=_MA_AGENT_ID,
+                    name="test-agent",
+                    metadata={
+                        "daimon_tenant": str(_TENANT_ID),
+                        "daimon_name": "test-agent",
+                    },
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, m: httpx.Response(
+            200, json=_make_fake_session(session_id=m.group(1), status="idle")
+        ),
+    )
+    sent: list[str] = []
+
+    def _send(r: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        sent.append(m.group(1))
+        return send_events_response(
+            data=[
+                BetaManagedAgentsUserMessageEvent(
+                    id="sevt_continue_boundary",
+                    content=[BetaManagedAgentsTextBlock(type="text", text="follow up")],
+                    type="user.message",
+                    processed_at=dt.datetime(2026, 6, 23, 0, 0, tzinfo=dt.UTC),
+                ).model_dump(mode="json")
+            ]
+        )
+
+    router.add("POST", r"/v1/sessions/([^/]+)/events", _send)
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: httpx.Response(
+            200,
+            json={"data": [_make_agent_message_event("done")], "next_page": None},
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+
+    with patch(
+        "daimon.adapters.mcp.tools.agent_chat.create_session",
+        new=AsyncMock(side_effect=AssertionError("must not create")),
+    ):
+        result = await _ask_impl(runtime, _auth(), "follow up", handle="sess_existing")
+
+    assert result.handle == "sess_existing" and sent == ["sess_existing"], (
+        f"got {result!r} sent={sent!r}"
+    )
+    assert result.message == "done", f"got {result.message!r}"

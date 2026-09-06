@@ -64,11 +64,23 @@
         persistent turn, waits up to about 120 seconds for idle, and
         returns the final text plus a resumable handle. Chart images are
         embedded by default; short-lived download links are added when private
-        artifact storage is configured.
+        artifact storage is configured. Pass ``handle`` from a previous result to
+        continue that conversation instead of starting a new one.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'handle': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'message': dict({
             'type': 'string',
           }),

@@ -127,6 +127,9 @@ class AgentDescription(BaseModel):
     skill_names: list[str]
     repo_url: str | None
     environment_name: str | None
+    platform: str | None = None
+    workspace_id: str | None = None
+    workspace: str | None = None
 
 
 class AskResult(BaseModel):
@@ -278,6 +281,8 @@ async def _describe_agent_impl(
         skill_names=skill_names,
         repo_url=repo_url,
         environment_name=env_name,
+        platform=auth.platform,
+        workspace_id=auth.external_id,
     )
 
 
@@ -736,16 +741,21 @@ async def _ask_impl(
     auth: AuthIdentity,
     message: str,
     *,
+    handle: str | None = None,
     timeout_seconds: float = 120.0,
     poll_interval_seconds: float = 1.0,
     clock: Callable[[], float] = monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> AskResult:
-    """Start a turn, wait boundedly for idle, and return its final reply."""
+    """Start a turn (or continue one given ``handle``), wait boundedly for idle, and
+    return its final reply."""
     turn_started_at = now()
-    started = await _start_turn_impl(runtime, auth, message)
-    handle = started["handle"]
+    if handle is None:
+        started = await _start_turn_impl(runtime, auth, message)
+        handle = started["handle"]
+    else:
+        await _continue_turn_impl(runtime, auth, handle, message)
     deadline = clock() + timeout_seconds
 
     while True:
@@ -886,12 +896,15 @@ def register_agent_chat_tools(
         return await _start_turn_impl(runtime, auth, message, bundle)
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
-    async def ask(ctx: Context, message: str) -> AskResult:  # pyright: ignore[reportUnusedFunction]
+    async def ask(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, message: str, handle: str | None = None
+    ) -> AskResult:
         """Ask one question and wait for the final answer and any chart images. Starts a
         persistent turn, waits up to about 120 seconds for idle, and
         returns the final text plus a resumable handle. Chart images are
         embedded by default; short-lived download links are added when private
-        artifact storage is configured.
+        artifact storage is configured. Pass ``handle`` from a previous result to
+        continue that conversation instead of starting a new one.
         """
         auth = await _check_admission(
             ctx,
@@ -900,7 +913,7 @@ def register_agent_chat_tools(
             tool_name="ask",
         )
         return _ask_tool_result(  # type: ignore[return-value]
-            await _ask_impl(runtime, auth, message)
+            await _ask_impl(runtime, auth, message, handle=handle)
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
