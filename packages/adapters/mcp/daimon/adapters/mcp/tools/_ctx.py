@@ -39,16 +39,19 @@ def _require_admin(auth: AuthIdentity) -> None:  # pyright: ignore[reportUnusedF
         )
 
 
-async def _check_admission(  # pyright: ignore[reportUnusedFunction]
-    ctx: Context,
+async def _admit(  # pyright: ignore[reportUnusedFunction]
+    auth: AuthIdentity,
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
     billing_config: BillingConfig | None,
     tool_name: str,
 ) -> AuthIdentity:
-    """Shared admission gate for the billed media and agent-chat turn tools.
+    """Balance and cap gate for an already-resolved identity.
 
-    Resolves the caller's identity, then:
+    ``_check_admission`` wraps this for tools whose identity is the request's
+    own; the hub mounts call it directly because their identity is chosen per
+    call from the daimon being addressed.
+
     - ``platform_user_id is None`` is the trusted, fully-unbilled path:
       CLI-only/internal operator tokens run with no balance/cap checks, no
       usage row, no debit. This is intentional, not an oversight — never add
@@ -58,7 +61,6 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
       a deny event carrying only ids (tenant/user/tool/gate) — never prompt
       content or raw Gemini text (Pitfall 9).
     """
-    auth = await _auth(ctx)
     if auth.platform_user_id is None:
         return auth
 
@@ -95,3 +97,19 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
         )
 
     return auth
+
+
+async def _check_admission(  # pyright: ignore[reportUnusedFunction]
+    ctx: Context,
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    billing_config: BillingConfig | None,
+    tool_name: str,
+) -> AuthIdentity:
+    """Shared admission gate for the billed media and agent-chat turn tools. See ``_admit``."""
+    return await _admit(
+        await _auth(ctx),
+        sessionmaker=sessionmaker,
+        billing_config=billing_config,
+        tool_name=tool_name,
+    )
