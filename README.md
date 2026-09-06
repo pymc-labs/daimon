@@ -161,6 +161,12 @@ stored objects, so configure a bucket lifecycle rule for the retention period
 your deployment requires. See `.env.example` for the optional region, URL
 lifetime, and image-embedding controls.
 
+Coding-agent clients such as Claude Code connect through the plugin in
+[`plugin/`](plugin/) instead of a per-agent token: it logs in via Slack or
+Discord OAuth and reaches every daimon install the logged-in person belongs
+to. This needs `DAIMON_HUB__*` configured on the server in addition to the
+settings above.
+
 ### 2. Create the Discord application
 
 1. Create an application in the

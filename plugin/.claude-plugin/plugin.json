@@ -1,0 +1,6 @@
+{
+  "name": "daimon",
+  "version": "0.1.0",
+  "description": "Ask the daimons in your Slack workspace and Discord servers from Claude Code.",
+  "author": { "name": "PyMC Labs" }
+}
