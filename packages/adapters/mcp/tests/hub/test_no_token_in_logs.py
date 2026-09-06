@@ -4,106 +4,21 @@ from __future__ import annotations
 
 import logging
 import uuid
-from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
 import pytest
 from daimon.adapters.mcp.hub.app import build_hub_app
 from daimon.adapters.mcp.hub.claims import encode_hub_claims
-from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.core.config import (
-    AnthropicSettings,
-    DatabaseSettings,
-    HubSettings,
-    McpSettings,
-    Settings,
-)
-from daimon.core.defaults.loader import DeploymentDefault
 from daimon.core.hub_identity import HubTenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
-from pydantic import HttpUrl, PostgresDsn, SecretStr
 from starlette.applications import Starlette
+
+from .test_app import _lifespan, _runtime, _tools_list
 
 pytestmark = pytest.mark.asyncio
 
 SENTINEL = "hub-sentinel-upstream-token-DO-NOT-LOG"
-
-# _settings, _runtime, _lifespan and _tools_list are mirrored from
-# tests/hub/test_app.py rather than imported: hub/ carries an __init__.py
-# (unlike its sibling test dirs), so under --import-mode=importlib pytest
-# resolves that module as "hub.test_app" and never registers a bare
-# "test_app" name for `from test_app import ...` to find, even when this
-# whole directory is collected together. Keep these in sync with test_app.py
-# if it changes.
-
-
-def _settings() -> Settings:
-    return Settings(
-        database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
-        anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
-        mcp=McpSettings(
-            public_url=HttpUrl("https://t.example.com/mcp"), jwt_secret=SecretStr("x" * 32)
-        ),
-        hub=HubSettings(),
-    )
-
-
-def _runtime(sessionmaker: Any) -> McpRuntime:
-    router = MARouter()
-    router.add("GET", r"/v1/agents", lambda _r, _m: list_response([]))
-    return McpRuntime(
-        session_factory=sessionmaker,
-        client=build_fake_anthropic(router.dispatch),
-        settings=_settings(),
-        deployment_default=DeploymentDefault(environment_name=None),
-    )
-
-
-@asynccontextmanager
-async def _lifespan(app: Starlette):
-    async with app.router.lifespan_context(app):
-        yield
-
-
-async def _tools_list(app: Starlette, path: str, token: str) -> set[str]:
-    async with (
-        _lifespan(app),
-        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c,
-    ):
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json, text/event-stream",
-            "Content-Type": "application/json",
-        }
-        init = await c.post(
-            path,
-            headers=headers,
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": "t", "version": "0"},
-                },
-            },
-        )
-        assert init.status_code == 200, init.text
-        assert "mcp-session-id" not in init.headers, (
-            f"hub app must be stateless, got session {init.headers['mcp-session-id']!r}"
-        )
-        resp = await c.post(
-            path,
-            headers=headers,
-            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
-        )
-        assert resp.headers["content-type"].startswith("application/json"), (
-            f"expected JSON response, got {resp.headers['content-type']!r}"
-        )
-        return {t["name"] for t in resp.json()["result"]["tools"]}
 
 
 async def _call_list_daimons(app: Starlette, path: str, token: str) -> list[dict[str, Any]]:

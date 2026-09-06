@@ -1,9 +1,12 @@
-"""A hub ask bills the same usage event a chat turn does, against the addressed tenant."""
+"""A hub ask creates its MA session as the caller's account in the addressed tenant,
+the same attribution a chat driver's turn carries. MCP turns record no usage row today
+(that write happens only in the Discord/Slack SSE-driven ``run_turn`` path), so billing
+parity itself isn't something this test can verify -- only the attribution that would
+feed it."""
 
 from __future__ import annotations
 
 import uuid
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -67,6 +70,8 @@ from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
+
+from .test_app import _lifespan
 
 pytestmark = pytest.mark.asyncio
 
@@ -216,12 +221,6 @@ def _runtime(client: AsyncAnthropic, session_factory: Any) -> McpRuntime:
         settings=settings,
         deployment_default=DeploymentDefault(environment_name="test-env"),
     )
-
-
-@asynccontextmanager
-async def _lifespan(app: Starlette):
-    async with app.router.lifespan_context(app):
-        yield
 
 
 async def _call_tool(
