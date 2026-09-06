@@ -21,6 +21,7 @@ from typing import Any
 
 import httpx
 import pytest
+from anthropic import InternalServerError
 from anthropic.types.beta import BetaManagedAgentsModelConfig, BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
@@ -29,7 +30,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
-from daimon.core._models import UsageEvent
+from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
 from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.testing.factories import make_platform_principal
@@ -51,8 +52,8 @@ NOW = datetime(2026, 6, 24, 12, 0, 0, tzinfo=UTC)
 def _session_dict(
     *,
     session_id: str,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
+    tenant_id: uuid.UUID | str,
+    account_id: uuid.UUID | str,
     model: str = "claude-sonnet-4-6",
 ) -> dict[str, Any]:
     """A headless MA session tagged the way create_session tags it."""
@@ -328,3 +329,201 @@ async def test_sweep_records_with_null_platform_user_when_account_has_no_discord
     assert len(rows) == 1, "usage is recorded even without a resolvable platform user"
     assert rows[0].platform_user_id is None, "platform_user_id is None when no discord principal"
     assert rows[0].tenant_id == account.tenant_id, "tenant attribution still correct"
+
+
+async def test_sweep_skips_malformed_tenant_and_records_later_session(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="user-later"
+    )
+    sessions = [
+        _session_dict(
+            session_id="sesn_invalid_tenant",
+            tenant_id="not-a-tenant-uuid",
+            account_id=principal.account_id,
+        ),
+        _session_dict(
+            session_id="sesn_later",
+            tenant_id=principal.tenant_id,
+            account_id=principal.account_id,
+        ),
+    ]
+    event_requests: list[str] = []
+
+    def events(req: httpx.Request, m: Any) -> httpx.Response:
+        event_requests.append(req.url.path)
+        return list_response(
+            [_model_request_end_dict(event_id="evt_later", input_tokens=100, output_tokens=50)]
+        )
+
+    router = MARouter()
+    router.add("GET", r"/v1/sessions", lambda req, m: list_response(sessions))
+    router.add("GET", r"/v1/sessions/[^/]+/events", events)
+    async with build_fake_anthropic(router.dispatch) as client:
+        recorded = await sweep_headless_usage(client, db_session_factory, markup=Decimal("2.0"))
+
+    assert event_requests == ["/v1/sessions/sesn_later/events"], (
+        "malformed tenant sessions must be skipped before requesting events"
+    )
+    assert recorded == 1
+    row = (await db_session.execute(select(UsageEvent))).scalar_one()
+    assert (row.managed_session_id, row.event_id) == ("sesn_later", "evt_later")
+    assert row.tenant_id == principal.tenant_id
+    assert row.platform_user_id == "user-later"
+    assert (row.input_tokens, row.output_tokens) == (100, 50)
+    debit = (await db_session.execute(select(TenantLedger))).scalar_one()
+    assert debit.tenant_id == principal.tenant_id
+    assert debit.idempotency_key == "turn:sesn_later:evt_later"
+    assert debit.reason == "turn_debit"
+    # Sonnet: 100 * $3/M + 50 * $15/M, with 2x markup.
+    assert debit.delta_usd == Decimal("-0.002100")
+
+
+async def test_sweep_malformed_account_preserves_debit_and_later_attribution_on_retry(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="user-attributed"
+    )
+    sessions = [
+        _session_dict(
+            session_id="sesn_invalid_account",
+            tenant_id=principal.tenant_id,
+            account_id="not-an-account-uuid",
+        ),
+        _session_dict(
+            session_id="sesn_normal",
+            tenant_id=principal.tenant_id,
+            account_id=principal.account_id,
+        ),
+    ]
+    router = MARouter()
+    router.add("GET", r"/v1/sessions", lambda req, m: list_response(sessions))
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+/events",
+        lambda req, m: list_response(
+            [_model_request_end_dict(event_id="evt_usage", input_tokens=100, output_tokens=50)]
+        ),
+    )
+    async with build_fake_anthropic(router.dispatch) as client:
+        for _ in range(2):
+            recorded = await sweep_headless_usage(client, db_session_factory, markup=Decimal("2.0"))
+            assert recorded == 2, "both sessions must be replayed on each sweep"
+            rows = (await db_session.execute(select(UsageEvent))).scalars().all()
+            assert len(rows) == 2, "retries must not duplicate usage"
+            assert {row.managed_session_id: row.platform_user_id for row in rows} == {
+                "sesn_invalid_account": None,
+                "sesn_normal": "user-attributed",
+            }
+            assert all(row.tenant_id == principal.tenant_id for row in rows)
+            assert all(row.event_id == "evt_usage" for row in rows)
+            assert all((row.input_tokens, row.output_tokens) == (100, 50) for row in rows)
+            debits = (await db_session.execute(select(TenantLedger))).scalars().all()
+            assert len(debits) == 2, "retries must not duplicate tenant debits"
+            assert {debit.idempotency_key for debit in debits} == {
+                "turn:sesn_invalid_account:evt_usage",
+                "turn:sesn_normal:evt_usage",
+            }
+            assert all(debit.tenant_id == principal.tenant_id for debit in debits)
+            assert all(debit.reason == "turn_debit" for debit in debits)
+            assert all(debit.delta_usd == Decimal("-0.002100") for debit in debits)
+
+
+async def test_sweep_records_without_account_tag(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="user-tag"
+    )
+    session = _session_dict(
+        session_id="sesn_no_account", tenant_id=principal.tenant_id, account_id=principal.account_id
+    )
+    del session["metadata"][MA_METADATA_KEY_ACCOUNT]
+    router = MARouter()
+    router.add("GET", r"/v1/sessions", lambda req, m: list_response([session]))
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+/events",
+        lambda req, m: list_response(
+            [_model_request_end_dict(event_id="evt_no_account", input_tokens=100, output_tokens=50)]
+        ),
+    )
+    async with build_fake_anthropic(router.dispatch) as client:
+        assert await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.0")) == 1
+    row = (await db_session.execute(select(UsageEvent))).scalar_one()
+    assert row.platform_user_id is None
+    assert row.tenant_id == principal.tenant_id
+    debit = (await db_session.execute(select(TenantLedger))).scalar_one()
+    assert debit.tenant_id == principal.tenant_id
+    assert debit.delta_usd == Decimal("-0.001050")
+
+
+@pytest.mark.parametrize("endpoint", ["sessions", "events"])
+async def test_sweep_propagates_provider_errors(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    endpoint: str,
+) -> None:
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="user-api"
+    )
+    session = _session_dict(
+        session_id="sesn_api", tenant_id=principal.tenant_id, account_id=principal.account_id
+    )
+    error = httpx.Response(
+        500, json={"type": "error", "error": {"type": "api_error", "message": "provider failure"}}
+    )
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions",
+        lambda req, m: error if endpoint == "sessions" else list_response([session]),
+    )
+    router.add("GET", r"/v1/sessions/sesn_api/events", lambda req, m: error)
+    async with build_fake_anthropic(router.dispatch) as client:
+        with pytest.raises(InternalServerError, match="provider failure"):
+            await sweep_headless_usage(
+                client.with_options(max_retries=0), db_session_factory, markup=Decimal("1.0")
+            )
+
+
+@pytest.mark.parametrize(
+    "store_function",
+    ["daimon.core.usage_sweep.get_account_with_tenant", "daimon.core.stores.usage_events.record"],
+)
+async def test_sweep_propagates_store_value_errors(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    store_function: str,
+) -> None:
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="user-store"
+    )
+    session = _session_dict(
+        session_id="sesn_store", tenant_id=principal.tenant_id, account_id=principal.account_id
+    )
+    failure = ValueError("store failure is not malformed metadata")
+
+    async def fail(*args: object, **kwargs: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(store_function, fail)
+    router = MARouter()
+    router.add("GET", r"/v1/sessions", lambda req, m: list_response([session]))
+    router.add(
+        "GET",
+        r"/v1/sessions/sesn_store/events",
+        lambda req, m: list_response(
+            [_model_request_end_dict(event_id="evt_store", input_tokens=100, output_tokens=50)]
+        ),
+    )
+    async with build_fake_anthropic(router.dispatch) as client:
+        with pytest.raises(ValueError) as exc:
+            await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.0"))
+    assert exc.value is failure, "only UUID parsing errors may be handled as malformed metadata"
