@@ -2948,10 +2948,32 @@
         this turn's first event: poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard everything up to and
         including ``turn_event_id`` to read only this turn's transcript.
+        
+        ``bundle`` is an opaque handle returned by the bundle upload route.
+        Passing it mounts that archive read-only in the session's uploads
+        directory instead of the normal vault/repo/env mounts, and requires
+        an isolated agent — a non-isolated agent is refused outright with
+        the message 'bundle requires an isolated agent'. A handle that fails
+        verification for any reason (tampered, expired, wrong tenant, wrong
+        agent) is refused with the message 'bundle not found', one wording
+        for every cause. A handle whose underlying file is gone is refused
+        with the message 'bundle expired; re-upload' — that one specifically
+        means push the archive again.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'bundle': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'message': dict({
             'type': 'string',
           }),

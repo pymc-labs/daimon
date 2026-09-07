@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsSession
+from anthropic.types.beta import BetaManagedAgentsSession, FileMetadata
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsSpanModelRequestEndEvent,
     BetaManagedAgentsSpanModelUsage,
@@ -65,6 +65,7 @@ from daimon.adapters.mcp.tools.agent_chat import (
     register_agent_chat_tools,
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut
+from daimon.core import bundle_handle
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import DeploymentDefault
@@ -87,11 +88,13 @@ from fastmcp.server.transforms import Visibility
 from fastmcp.server.transforms.search.base import serialize_tools_for_output_markdown
 from fastmcp.tools import ToolResult
 from mcp.types import ImageContent
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp, Message
 
 pytestmark = pytest.mark.asyncio
 
+_BUNDLE_SECRET = "test-bundle-handle-secret"
 _TENANT_ID = uuid.uuid4()
 _MA_AGENT_ID = "ag_test001"
 _AGENT_UUID = derive_agent_uuid(tenant_id=_TENANT_ID, ma_agent_id=_MA_AGENT_ID)
@@ -1779,10 +1782,359 @@ def _agent_and_env_router() -> MARouter:
     return router
 
 
+def _isolated_agent_and_env_router(*, ma_agent_id: str = _MA_AGENT_ID) -> MARouter:
+    """Router with one ISOLATED agent (``daimon_isolated="true"``) + one environment."""
+    env_payload = {
+        "id": _ENV_ID,
+        "type": "environment",
+        "name": _ENV_NAME,
+        "config": EMPTY_CLOUD_CONFIG.model_dump(mode="json"),
+        "description": "",
+        "metadata": {
+            "daimon_tenant": str(_TENANT_ID),
+            "daimon_name": _ENV_NAME,
+        },
+        "created_at": "2026-06-23T00:00:00Z",
+        "updated_at": "2026-06-23T00:00:00Z",
+    }
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _r, _m: list_response(
+            [
+                make_ma_agent(
+                    id=ma_agent_id,
+                    name="reader-agent",
+                    metadata={
+                        "daimon_tenant": str(_TENANT_ID),
+                        "daimon_name": "reader-agent",
+                        "daimon_isolated": "true",
+                    },
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add("GET", r"/v1/environments", lambda _r, _m: list_response([env_payload]))
+    return router
+
+
+def _file_metadata_payload(file_id: str) -> dict[str, Any]:
+    """A minimal valid ``FileMetadata`` payload for a ``retrieve_metadata`` fake."""
+    return FileMetadata.model_validate(
+        {
+            "id": file_id,
+            "created_at": "2026-09-01T00:00:00Z",
+            "filename": "bundle.tar.gz",
+            "mime_type": "application/gzip",
+            "size_bytes": 1024,
+            "type": "file",
+        }
+    ).model_dump(mode="json")
+
+
+def _mint_bundle(
+    *,
+    secret: str = _BUNDLE_SECRET,
+    file_id: str = "file_bundle_001",
+    tenant_id: uuid.UUID = _TENANT_ID,
+    agent_id: uuid.UUID = _AGENT_UUID,
+) -> str:
+    return bundle_handle.mint(
+        secret,
+        file_id=file_id,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        sha256="a" * 64,
+        now=dt.datetime(2026, 9, 1, tzinfo=dt.UTC),
+        ttl_days=7,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 21-07: start_turn(bundle=) — verified mount, three refusals
+# ---------------------------------------------------------------------------
+
+
+async def test_start_turn_with_bundle_mounts_the_single_resource_on_an_isolated_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A verified bundle mounts as the ONLY resource, no vault_ids key at all."""
+    create_bodies: list[dict[str, Any]] = []
+
+    def on_create(request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        create_bodies.append(json_body(request))
+        return httpx.Response(200, json=_make_fake_session(status="running"))
+
+    router = _isolated_agent_and_env_router()
+    router.add("POST", r"/v1/sessions", on_create)
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)",
+        lambda _r, m: httpx.Response(200, json=_file_metadata_payload(m.group(1))),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: send_events_response(
+            data=[
+                BetaManagedAgentsUserMessageEvent(
+                    id="sevt_bundle_boundary",
+                    content=[
+                        BetaManagedAgentsTextBlock(type="text", text="what does this report say?")
+                    ],
+                    type="user.message",
+                    processed_at=dt.datetime(2026, 9, 1, 10, 0, tzinfo=dt.UTC),
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    runtime.settings.mcp.jwt_secret = SecretStr(_BUNDLE_SECRET)
+    auth = _auth()
+    handle = _mint_bundle(file_id="file_bundle_001")
+
+    await _start_turn_impl(runtime, auth, "what does this report say?", handle)
+
+    assert len(create_bodies) == 1, "exactly one session-create call should reach MA"
+    body = create_bodies[0]
+    assert body["resources"] == [
+        {"type": "file", "file_id": "file_bundle_001", "mount_path": "/bundle.tar.gz"}
+    ], f"the mounted resource must be exactly the bundle file, absolute path; got {body!r}"
+    assert "vault_ids" not in body, "an isolated bundle session must never carry a vault_ids key"
+
+
+async def test_start_turn_with_bundle_preserves_the_boundary_return_shape(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The bundle branch must not regress the plan 21-05 boundary return shape."""
+    router = _isolated_agent_and_env_router()
+    router.add(
+        "POST", r"/v1/sessions", lambda _r, _m: httpx.Response(200, json=_make_fake_session())
+    )
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)",
+        lambda _r, m: httpx.Response(200, json=_file_metadata_payload(m.group(1))),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: send_events_response(
+            data=[
+                BetaManagedAgentsUserMessageEvent(
+                    id="sevt_bundle_boundary_2",
+                    content=[BetaManagedAgentsTextBlock(type="text", text="hi")],
+                    type="user.message",
+                    processed_at=dt.datetime(2026, 9, 1, 10, 0, tzinfo=dt.UTC),
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    runtime.settings.mcp.jwt_secret = SecretStr(_BUNDLE_SECRET)
+    auth = _auth()
+    handle = _mint_bundle()
+
+    result = await _start_turn_impl(runtime, auth, "hi", handle)
+
+    assert set(result) == {"handle", "turn_event_id", "turn_started_at"}, (
+        f"bundle branch must return the same three-key boundary shape; got {result!r}"
+    )
+    assert result["turn_event_id"] == "sevt_bundle_boundary_2"
+    assert result["turn_started_at"] == dt.datetime(2026, 9, 1, 10, 0, tzinfo=dt.UTC).isoformat()
+
+
+def _zero_upstream_router() -> tuple[MARouter, list[str], list[str]]:
+    """An isolated-agent router with counting (never-should-fire) session-create and
+    files.retrieve_metadata routes, for the four handle-refusal tests."""
+    create_calls: list[str] = []
+    metadata_calls: list[str] = []
+    router = _isolated_agent_and_env_router()
+    router.add(
+        "POST",
+        r"/v1/sessions",
+        lambda r, _m: (create_calls.append(json_body(r).get("agent", "")), httpx.Response(200))[1],
+    )
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)",
+        lambda _r, m: (metadata_calls.append(m.group(1)), httpx.Response(200))[1],
+    )
+    return router, create_calls, metadata_calls
+
+
+async def test_start_turn_with_bundle_from_different_tenant_is_refused_as_not_found(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    router, create_calls, metadata_calls = _zero_upstream_router()
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    runtime.settings.mcp.jwt_secret = SecretStr(_BUNDLE_SECRET)
+    auth = _auth()
+    handle = _mint_bundle(tenant_id=uuid.uuid4())
+
+    with pytest.raises(ToolError, match="bundle not found"):
+        await _start_turn_impl(runtime, auth, "hi", handle)
+
+    assert create_calls == [], "a wrong-tenant handle must never reach session creation"
+    assert metadata_calls == [], "a wrong-tenant handle must never reach the Files API"
+
+
+async def test_start_turn_with_bundle_from_different_agent_is_refused_as_not_found(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    router, create_calls, metadata_calls = _zero_upstream_router()
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    runtime.settings.mcp.jwt_secret = SecretStr(_BUNDLE_SECRET)
+    auth = _auth()
+    handle = _mint_bundle(agent_id=uuid.uuid4())
+
+    with pytest.raises(ToolError, match="bundle not found"):
+        await _start_turn_impl(runtime, auth, "hi", handle)
+
+    assert create_calls == [], "a wrong-agent handle must never reach session creation"
+    assert metadata_calls == [], "a wrong-agent handle must never reach the Files API"
+
+
+async def test_start_turn_with_tampered_bundle_signature_is_refused_as_not_found(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    router, create_calls, metadata_calls = _zero_upstream_router()
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    runtime.settings.mcp.jwt_secret = SecretStr(_BUNDLE_SECRET)
+    auth = _auth()
+    valid = _mint_bundle()
+    payload_b64, sig_b64 = valid.split(".")
+    flipped_char = "a" if sig_b64[0] != "a" else "b"
+    tampered = f"{payload_b64}.{flipped_char}{sig_b64[1:]}"
+
+    with pytest.raises(ToolError, match="bundle not found"):
+        await _start_turn_impl(runtime, auth, "hi", tampered)
+
+    assert create_calls == [], "a tampered signature must never reach session creation"
+    assert metadata_calls == [], "a tampered signature must never reach the Files API"
+
+
+async def test_start_turn_with_expired_bundle_is_refused_as_not_found(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    router, create_calls, metadata_calls = _zero_upstream_router()
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    runtime.settings.mcp.jwt_secret = SecretStr(_BUNDLE_SECRET)
+    auth = _auth()
+    handle = bundle_handle.mint(
+        _BUNDLE_SECRET,
+        file_id="file_bundle_001",
+        tenant_id=_TENANT_ID,
+        agent_id=_AGENT_UUID,
+        sha256="a" * 64,
+        now=dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
+        ttl_days=1,
+    )
+
+    with pytest.raises(ToolError, match="bundle not found"):
+        await _start_turn_impl(runtime, auth, "hi", handle)
+
+    assert create_calls == [], "an expired handle must never reach session creation"
+    assert metadata_calls == [], "an expired handle must never reach the Files API"
+
+
+async def test_start_turn_with_bundle_whose_file_is_gone_is_refused_as_expired(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The Files API says the object is gone: a distinct, actionable message."""
+    create_calls: list[str] = []
+    router = _isolated_agent_and_env_router()
+    router.add(
+        "POST",
+        r"/v1/sessions",
+        lambda r, _m: (create_calls.append(json_body(r).get("agent", "")), httpx.Response(200))[1],
+    )
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)",
+        lambda _r, _m: httpx.Response(
+            404,
+            json={
+                "type": "error",
+                "error": {"type": "not_found_error", "message": "file already gone"},
+            },
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    runtime.settings.mcp.jwt_secret = SecretStr(_BUNDLE_SECRET)
+    auth = _auth()
+    handle = _mint_bundle(file_id="file_gone")
+
+    with pytest.raises(ToolError, match="bundle expired; re-upload"):
+        await _start_turn_impl(runtime, auth, "hi", handle)
+
+    assert create_calls == [], "a gone bundle object must never reach session creation"
+
+
+async def test_start_turn_with_bundle_on_non_isolated_agent_is_refused_before_verifying_handle(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The isolation check fires BEFORE handle verification — proven with a bad
+    handle: if the isolation check ran second, this handle would fail
+    ``bundle_handle.verify`` first and raise "bundle not found" instead. Only
+    checking isolation FIRST produces "bundle requires an isolated agent" here.
+    Also proven by a mutation: moving the isolation check after
+    ``bundle_handle.verify`` makes the metadata_calls assertion below fail too,
+    since a wrong-tenant handle would then be rejected before ever reaching
+    this assertion's message check."""
+    metadata_calls: list[str] = []
+    router = _agent_and_env_router()  # NOT isolated — no daimon_isolated metadata
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)",
+        lambda _r, m: (metadata_calls.append(m.group(1)), httpx.Response(200))[1],
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    runtime.settings.mcp.jwt_secret = SecretStr(_BUNDLE_SECRET)
+    auth = _auth()
+    handle = _mint_bundle(tenant_id=uuid.uuid4())  # a BAD handle — proves the order
+
+    with pytest.raises(ToolError, match="bundle requires an isolated agent"):
+        await _start_turn_impl(runtime, auth, "hi", handle)
+
+    assert metadata_calls == [], (
+        "the isolation check must fire before the handle is ever verified against the Files API"
+    )
+
+
+async def test_start_turn_with_bundle_when_jwt_secret_unset_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An unverifiable handle (no configured secret) must never be accepted."""
+    router = _isolated_agent_and_env_router()
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    assert runtime.settings.mcp.jwt_secret is None
+    auth = _auth()
+    handle = _mint_bundle()
+
+    with pytest.raises(ToolError, match="not configured"):
+        await _start_turn_impl(runtime, auth, "hi", handle)
+
+
 async def test_start_turn_returns_the_accepted_events_boundary(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """turn_event_id/turn_started_at come from events.send's data[0], not a guess."""
+    """turn_event_id/turn_started_at come from events.send's data[0], not a guess.
+
+    Also proves branch B (no ``bundle``) is untouched by the 21-07 bundle
+    branch: ``create_session`` still receives the full vault/repo/env
+    argument set, not the isolated path's stripped-down call.
+    """
     accepted_at = dt.datetime(2026, 9, 1, 10, 0, tzinfo=dt.UTC)
     router = _agent_and_env_router()
     router.add(
@@ -1807,7 +2159,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
     with patch(
         "daimon.adapters.mcp.tools.agent_chat.create_session",
         new=AsyncMock(return_value=fake_session),
-    ):
+    ) as mock_create_session:
         result = await _start_turn_impl(runtime, auth, "hi")
 
     assert result["turn_event_id"] == "sevt_boundary_001", (
@@ -1816,6 +2168,21 @@ async def test_start_turn_returns_the_accepted_events_boundary(
     assert result["turn_started_at"] == accepted_at.isoformat(), (
         f"turn_started_at should be the accepted event's processed_at, isoformat()'d; got {result!r}"
     )
+    assert mock_create_session.await_args is not None, "create_session should be awaited once"
+    call_kwargs = mock_create_session.await_args.kwargs
+    assert set(call_kwargs) == {
+        "agent",
+        "environment",
+        "mcp_settings",
+        "account_id",
+        "tenant_id",
+        "agent_uuid",
+        "session_factory",
+        "fernet",
+        "github_fallback_pat",
+        "github_app_id",
+        "github_app_private_key",
+    }, f"the non-bundle path must keep passing its full argument set; got {sorted(call_kwargs)!r}"
 
 
 async def test_continue_turn_returns_boundary_from_its_own_send() -> None:
