@@ -575,3 +575,27 @@ def test_build_authoring_params_drops_response_fields_the_sdk_does_not_declare()
     assert spec.tools is not None and spec.tools[0]["type"] == "agent_toolset_20260401", (
         "pruned params validate against the extra=forbid authoring spec"
     )
+
+
+def test_agent_spec_isolated_defaults_false_and_round_trips_when_true() -> None:
+    """`isolated` is a daimon-local field (like `skills`): extra="forbid" does
+    not reject it, and it round-trips through model_validate."""
+    default_spec = AgentSpec.model_validate({"name": "daimon", "model": "claude-sonnet-4-6"})
+    assert default_spec.isolated is False, "isolated defaults to False"
+
+    isolated_spec = AgentSpec.model_validate(
+        {"name": "reader", "model": "claude-sonnet-4-6", "isolated": True}
+    )
+    assert isolated_spec.isolated is True, "isolated=true in the mapping must round-trip"
+
+
+def test_dump_agent_spec_excludes_isolated_from_ma_payload() -> None:
+    """`isolated` must never reach the MA create/update payload — it is
+    declared `Field(exclude=True)` exactly like `skills`/`skill_repos`.
+    Deleting `exclude=True` from the field declaration makes this fail."""
+    spec = AgentSpec(name="reader", model="claude-sonnet-4-6", isolated=True)
+    dumped = dump_agent_spec(spec)
+    assert "isolated" not in dumped, (
+        "isolated must be excluded from dump_agent_spec output — an unexcluded "
+        "field would be sent to MA as an unknown create/update parameter"
+    )
