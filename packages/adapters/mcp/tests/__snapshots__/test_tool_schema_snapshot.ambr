@@ -36,6 +36,28 @@
         'type': 'object',
       }),
     }),
+    'archive_my_session': dict({
+      'description': '''
+        Archive a session when its conversation is finished.
+        
+        An archived session is no longer live and stops being re-read by
+        usage collection. This is NOT a cancel — to stop a running turn, use
+        the cancel tool instead. Returns ``{"handle": "<session_id>",
+        "archived": "true"}``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'handle': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'handle',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'ask': dict({
       'description': '''
         Ask one question and wait for the final answer and any chart images. Starts a
@@ -149,7 +171,12 @@
         Send a follow-up message on an existing session.
         
         Use this to continue a multi-turn conversation. Returns
-        ``{"handle": "<session_id>"}`` unchanged for chaining.
+        ``{"handle": "<session_id>", "turn_event_id": "<event_id>",
+        "turn_started_at": "<iso8601>"}`` — the same three-key shape as
+        ``start_turn``, with the boundary taken from THIS message's send, not
+        the session's earlier turns. Poll ``list_events`` with
+        ``created_at_gte=turn_started_at`` and discard events up to and
+        including ``turn_event_id`` to read only this turn's transcript.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1649,10 +1676,31 @@
         
         The agent's reply is in the ``agent.message`` events. Call this once
         ``get_session`` reports the session is idle to read what the agent said.
+        
+        A poller reading one turn should pass
+        ``types=["agent.message", "session.status_idle"]``,
+        ``created_at_gte=<the turn_started_at from start_turn/continue_turn>``,
+        and ``order="asc"``, then discard events up to and including the
+        ``turn_event_id`` it was given, locally. A turn is finished only when
+        a ``session.status_idle`` event appears AFTER the boundary, or
+        ``get_my_session`` reports the session ``terminated`` — a bare
+        ``idle`` status read right after a send may be the PREVIOUS turn's
+        state and must not be trusted. ``rescheduling`` counts as running.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'created_at_gte': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'handle': dict({
             'type': 'string',
           }),
@@ -1686,6 +1734,20 @@
             'anyOf': list([
               dict({
                 'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'types': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
               }),
               dict({
                 'type': 'null',
@@ -2818,8 +2880,13 @@
         Start a new conversation turn with the agent and return a handle.
         
         Creates a persistent MA session with vault/repo/env parity and sends
-        the first user message. Returns ``{"handle": "<session_id>"}`` which
-        you pass to ``get_session``, ``list_events``, and ``continue_turn``.
+        the first user message. Returns ``{"handle": "<session_id>",
+        "turn_event_id": "<event_id>", "turn_started_at": "<iso8601>"}``.
+        ``handle`` is passed to ``get_session``, ``list_events``, and
+        ``continue_turn``. ``turn_event_id`` and ``turn_started_at`` identify
+        this turn's first event: poll ``list_events`` with
+        ``created_at_gte=turn_started_at`` and discard everything up to and
+        including ``turn_event_id`` to read only this turn's transcript.
       ''',
       'parameters': dict({
         'additionalProperties': False,

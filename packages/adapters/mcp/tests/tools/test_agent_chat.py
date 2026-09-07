@@ -28,6 +28,10 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
+from anthropic.types.beta.sessions import (
+    BetaManagedAgentsTextBlock,
+    BetaManagedAgentsUserMessageEvent,
+)
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.hosted_artifacts import ChartUrl, HostedChartDelivery
 from daimon.adapters.mcp.middleware.mcp_identity import (
@@ -43,6 +47,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
 from daimon.adapters.mcp.tools.agent_chat import (
     AskResult,
+    _archive_my_session_impl,
     _ask_impl,
     _ask_tool_result,
     _continue_turn_impl,
@@ -347,6 +352,7 @@ async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools() -> None:
         "deliver_turn_charts",
         "get_my_session",
         "list_events",
+        "archive_my_session",
     }
     assert set(tool_names) == expected, (
         f"agent_id-claim token should see ONLY the agent-chat tools; got: {sorted(tool_names)}"
@@ -434,6 +440,7 @@ async def test_narrowing_lists_agent_chat_tools_through_bm25_search_transform() 
         "deliver_turn_charts",
         "get_my_session",
         "list_events",
+        "archive_my_session",
     }
     assert set(tool_names) == expected, (
         "narrowed agent token must list exactly the agent-chat tools through the "
@@ -536,7 +543,16 @@ async def test_start_turn_then_poll_get_session_and_read_transcript(
     router.add(
         "POST",
         r"/v1/sessions/([^/]+)/events",
-        lambda _r, _m: send_events_response(data=None),
+        lambda _r, _m: send_events_response(
+            data=[
+                BetaManagedAgentsUserMessageEvent(
+                    id="sevt_start_boundary",
+                    content=[BetaManagedAgentsTextBlock(type="text", text="Say hello")],
+                    type="user.message",
+                    processed_at=dt.datetime(2026, 6, 23, 0, 0, tzinfo=dt.UTC),
+                ).model_dump(mode="json")
+            ]
+        ),
     )
     router.add(
         "GET",
@@ -1158,7 +1174,16 @@ async def test_start_turn_resolves_env_from_deployment_default_when_no_tenant_ro
     router.add(
         "POST",
         r"/v1/sessions/([^/]+)/events",
-        lambda _r, _m: send_events_response(data=None),
+        lambda _r, _m: send_events_response(
+            data=[
+                BetaManagedAgentsUserMessageEvent(
+                    id="sevt_start_boundary",
+                    content=[BetaManagedAgentsTextBlock(type="text", text="Say hello")],
+                    type="user.message",
+                    processed_at=dt.datetime(2026, 6, 23, 0, 0, tzinfo=dt.UTC),
+                ).model_dump(mode="json")
+            ]
+        ),
     )
     client = build_fake_anthropic(router.dispatch)
     # No tenant-scope config row is ever written to db_session_factory's schema
@@ -1362,6 +1387,7 @@ async def test_agent_chat_tools_have_no_agent_id_parameter() -> None:
         "deliver_turn_charts",
         "get_my_session",
         "list_events",
+        "archive_my_session",
     }
 
     for tool_name in agent_chat_names:
@@ -1695,3 +1721,312 @@ async def test_turn_tools_refuse_over_balance_tenant_before_creating_session(
     assert "TERMINAL ERROR" in content, f"refusal should be a TERMINAL ERROR; got {content!r}"
     assert "/billing" in content, f"refusal should name /billing; got {content!r}"
     mock_create_session.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Task 3: turn boundary (start_turn/continue_turn), list_events passthrough,
+# archive_my_session
+# ---------------------------------------------------------------------------
+
+
+def _agent_and_env_router() -> MARouter:
+    """Router with one agent + one environment, for start_turn's happy path."""
+    env_payload = {
+        "id": _ENV_ID,
+        "type": "environment",
+        "name": _ENV_NAME,
+        "config": EMPTY_CLOUD_CONFIG.model_dump(mode="json"),
+        "description": "",
+        "metadata": {
+            "daimon_tenant": str(_TENANT_ID),
+            "daimon_name": _ENV_NAME,
+        },
+        "created_at": "2026-06-23T00:00:00Z",
+        "updated_at": "2026-06-23T00:00:00Z",
+    }
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _r, _m: list_response(
+            [
+                make_ma_agent(
+                    id=_MA_AGENT_ID,
+                    name="test-agent",
+                    metadata={
+                        "daimon_tenant": str(_TENANT_ID),
+                        "daimon_name": "test-agent",
+                    },
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add("GET", r"/v1/environments", lambda _r, _m: list_response([env_payload]))
+    return router
+
+
+async def test_start_turn_returns_the_accepted_events_boundary(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """turn_event_id/turn_started_at come from events.send's data[0], not a guess."""
+    accepted_at = dt.datetime(2026, 9, 1, 10, 0, tzinfo=dt.UTC)
+    router = _agent_and_env_router()
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: send_events_response(
+            data=[
+                BetaManagedAgentsUserMessageEvent(
+                    id="sevt_boundary_001",
+                    content=[BetaManagedAgentsTextBlock(type="text", text="hi")],
+                    type="user.message",
+                    processed_at=accepted_at,
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    auth = _auth()
+    fake_session = BetaManagedAgentsSession.model_validate(_make_fake_session(status="running"))
+
+    with patch(
+        "daimon.adapters.mcp.tools.agent_chat.create_session",
+        new=AsyncMock(return_value=fake_session),
+    ):
+        result = await _start_turn_impl(runtime, auth, "hi")
+
+    assert result["turn_event_id"] == "sevt_boundary_001", (
+        f"turn_event_id should be the send response's accepted event id; got {result!r}"
+    )
+    assert result["turn_started_at"] == accepted_at.isoformat(), (
+        f"turn_started_at should be the accepted event's processed_at, isoformat()'d; got {result!r}"
+    )
+
+
+async def test_continue_turn_returns_boundary_from_its_own_send() -> None:
+    """continue_turn's boundary is THIS send's accepted event, not session history."""
+    own_send_at = dt.datetime(2026, 9, 1, 11, 0, tzinfo=dt.UTC)
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_make_fake_session(status="idle")),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: send_events_response(
+            data=[
+                BetaManagedAgentsUserMessageEvent(
+                    id="sevt_continue_boundary",
+                    content=[BetaManagedAgentsTextBlock(type="text", text="again")],
+                    type="user.message",
+                    processed_at=own_send_at,
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    result = await _continue_turn_impl(runtime, auth, "ses_test001", "again")
+
+    assert result == {
+        "handle": "ses_test001",
+        "turn_event_id": "sevt_continue_boundary",
+        "turn_started_at": own_send_at.isoformat(),
+    }
+
+
+async def test_start_turn_raises_when_send_accepts_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A send response with data=None means nothing was accepted — not a started turn."""
+    router = _agent_and_env_router()
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: send_events_response(data=None),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    auth = _auth()
+    fake_session = BetaManagedAgentsSession.model_validate(_make_fake_session(status="running"))
+
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat.create_session",
+            new=AsyncMock(return_value=fake_session),
+        ),
+        pytest.raises(ToolError, match="send returned no accepted event"),
+    ):
+        await _start_turn_impl(runtime, auth, "hi")
+
+
+async def test_start_turn_falls_back_to_now_when_processed_at_is_missing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A missing processed_at still returns a parseable ISO timestamp, not a raise."""
+    router = _agent_and_env_router()
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: send_events_response(
+            data=[
+                BetaManagedAgentsUserMessageEvent(
+                    id="sevt_no_timestamp",
+                    content=[BetaManagedAgentsTextBlock(type="text", text="hi")],
+                    type="user.message",
+                    processed_at=None,
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    auth = _auth()
+    fake_session = BetaManagedAgentsSession.model_validate(_make_fake_session(status="running"))
+
+    with patch(
+        "daimon.adapters.mcp.tools.agent_chat.create_session",
+        new=AsyncMock(return_value=fake_session),
+    ):
+        result = await _start_turn_impl(runtime, auth, "hi")
+
+    assert result["turn_event_id"] == "sevt_no_timestamp"
+    # Must be a parseable ISO timestamp (the log.warning'd clock fallback), not a raise.
+    dt.datetime.fromisoformat(result["turn_started_at"])
+
+
+async def test_list_events_forwards_created_at_gte_and_types() -> None:
+    """created_at_gte and types both reach the SDK request when given."""
+    captured: list[httpx.Request] = []
+
+    def on_events(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        captured.append(req)
+        return httpx.Response(200, json={"data": [], "next_page": None})
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_make_fake_session(status="idle")),
+    )
+    router.add("GET", r"/v1/sessions/([^/]+)/events", on_events)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    await _list_events_impl(
+        runtime,
+        auth,
+        "ses_test001",
+        None,
+        None,
+        "asc",
+        "2026-09-01T10:00:00Z",
+        ["agent.message", "session.status_idle"],
+    )
+
+    assert len(captured) == 1, f"expected exactly one events.list call; got {len(captured)}"
+    query = captured[0].url.params
+    assert query.get("created_at[gte]") == "2026-09-01T10:00:00Z", (
+        f"created_at_gte should reach the wire as created_at[gte]; got {dict(query)!r}"
+    )
+    assert query.get_list("types[]") == ["agent.message", "session.status_idle"], (
+        f"types should reach the wire as repeated types[] params; got {dict(query)!r}"
+    )
+
+
+async def test_list_events_forwards_neither_when_not_given() -> None:
+    """Without created_at_gte/types, neither key reaches the SDK request (conditional, like page/limit/order)."""
+    captured: list[httpx.Request] = []
+
+    def on_events(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        captured.append(req)
+        return httpx.Response(200, json={"data": [], "next_page": None})
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_make_fake_session(status="idle")),
+    )
+    router.add("GET", r"/v1/sessions/([^/]+)/events", on_events)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    await _list_events_impl(runtime, auth, "ses_test001", None, None, None)
+
+    assert len(captured) == 1
+    query = captured[0].url.params
+    assert "created_at[gte]" not in query, (
+        f"unset created_at_gte must not be forwarded; got {dict(query)!r}"
+    )
+    assert "types[]" not in query, f"unset types must not be forwarded; got {dict(query)!r}"
+
+
+async def test_archive_my_session_rejects_a_sibling_agents_session_and_issues_no_archive_call() -> (
+    None
+):
+    """Ownership is checked before archiving — a sibling's session is refused with
+    zero archive calls (T-21-05-A)."""
+    archive_calls: list[str] = []
+
+    def on_archive(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        archive_calls.append(m.group(1))
+        return httpx.Response(
+            200,
+            json=_make_fake_session(
+                session_id="ses_sibling", agent_id="ag_sibling", status="terminated"
+            ),
+        )
+
+    router = _sibling_tenant_agents_router()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=_make_fake_session(session_id="ses_sibling", agent_id="ag_sibling", status="idle"),
+        ),
+    )
+    router.add("POST", r"/v1/sessions/([^/]+)/archive", on_archive)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    with pytest.raises(ToolError, match="session not found"):
+        await _archive_my_session_impl(runtime, auth, "ses_sibling")
+
+    assert archive_calls == [], "a rejected ownership check must issue no archive call"
+
+
+async def test_archive_my_session_archives_an_owned_session_exactly_once() -> None:
+    """An owned session is archived with exactly one call to the archive endpoint."""
+    archive_calls: list[str] = []
+
+    def on_archive(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        archive_calls.append(m.group(1))
+        return httpx.Response(200, json=_make_fake_session(status="terminated"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_make_fake_session(status="idle")),
+    )
+    router.add("POST", r"/v1/sessions/([^/]+)/archive", on_archive)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    result = await _archive_my_session_impl(runtime, auth, "ses_test001")
+
+    assert result == {"handle": "ses_test001", "archived": "true"}
+    assert archive_calls == ["ses_test001"], (
+        f"expected exactly one archive call; got {archive_calls!r}"
+    )

@@ -33,6 +33,9 @@ Headless loop (primitives plus the bounded ``ask`` convenience tool):
 - ``deliver_turn_charts`` finds the newest completed reply and delivers charts
   from that turn. It performs a bounded artifact-store write when optional
   link delivery is configured; it is not admission-gated.
+- ``archive_my_session`` archives a finished session so it stops being a live
+  session forever (a reader thread that never archives would otherwise be
+  re-read by every usage-sweep tick). Read-only ownership check, not gated.
 """
 
 from __future__ import annotations
@@ -44,11 +47,13 @@ from collections.abc import Awaitable, Callable
 from time import monotonic
 from typing import Any, Literal
 
+import structlog
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
     BetaManagedAgentsSession,
 )
+from anthropic.types.beta.sessions import BetaManagedAgentsSendSessionEvents
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.hosted_artifacts import ChartUrl, deliver_hosted_charts
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -73,9 +78,33 @@ from pydantic.json_schema import SkipJsonSchema
 
 from mcp.types import ImageContent, TextContent
 
+log = structlog.get_logger(__name__)
+
 # Each transcript page costs two upstream calls (ownership retrieve + events
 # list), so an uncapped walk on a long session can outlast any client timeout.
 _MAX_EVENT_PAGES = 20
+
+
+def _turn_boundary(sent: BetaManagedAgentsSendSessionEvents, *, handle: str) -> tuple[str, str]:
+    """Read the turn boundary (event id, ISO timestamp) off a send response.
+
+    The accepted event IS the boundary (SPEC D-07): a caller reads events at
+    or after ``turn_started_at`` and discards everything up to and including
+    ``turn_event_id``, instead of guessing the boundary from its own clock.
+    Raises when the send accepted nothing — a send with no accepted event is
+    not a started turn and must not return a half-answer.
+    """
+    if not sent.data:
+        raise ToolError("send returned no accepted event")
+    event = sent.data[0]
+    if event.processed_at is None:
+        log.warning(
+            "agent_chat.turn_boundary.processed_at_missing", handle=handle, event_id=event.id
+        )
+        timestamp = dt.datetime.now(dt.UTC)
+    else:
+        timestamp = event.processed_at
+    return event.id, timestamp.isoformat()
 
 
 class AgentDescription(BaseModel):
@@ -249,8 +278,12 @@ async def _start_turn_impl(
 ) -> dict[str, str]:
     """Create a new MA session for the caller's agent and send the first message.
 
-    Returns ``{"handle": session_id}`` — the caller passes ``handle`` to
-    subsequent ``continue_turn``, ``get_session``, and ``list_events`` calls.
+    Returns ``{"handle": session_id, "turn_event_id": ..., "turn_started_at": ...}``.
+    ``turn_event_id`` and ``turn_started_at`` identify this turn's first event
+    (the accepted ``user.message``), taken from the ``events.send`` response.
+    A caller reading the transcript should ask ``list_events`` for events at
+    or after ``turn_started_at`` and discard everything up to and including
+    ``turn_event_id`` — this is the turn boundary, not the caller's own clock.
 
     Environment resolution (fail-closed):
     - Resolve ``environment_name`` via the shared channel/tenant/deployment
@@ -297,7 +330,7 @@ async def _start_turn_impl(
         github_app_private_key=github_app_private_key,
     )
 
-    await runtime.client.beta.sessions.events.send(
+    sent = await runtime.client.beta.sessions.events.send(
         session.id,
         events=[
             {
@@ -306,8 +339,13 @@ async def _start_turn_impl(
             }
         ],
     )
+    turn_event_id, turn_started_at = _turn_boundary(sent, handle=session.id)
 
-    return {"handle": session.id}
+    return {
+        "handle": session.id,
+        "turn_event_id": turn_event_id,
+        "turn_started_at": turn_started_at,
+    }
 
 
 async def _continue_turn_impl(
@@ -318,11 +356,14 @@ async def _continue_turn_impl(
 ) -> dict[str, str]:
     """Send a follow-up message on an existing session.
 
+    Returns ``{"handle": handle, "turn_event_id": ..., "turn_started_at": ...}``,
+    the same three-key shape as ``start_turn`` — the boundary is taken from
+    THIS call's ``events.send`` response, not the session's earlier events.
     ``_verify_agent_owns_session`` guards against cross-tenant AND
     same-tenant cross-agent handles (Tampering threat mitigation, WR-03).
     """
     await _verify_agent_owns_session(runtime, auth, handle)
-    await runtime.client.beta.sessions.events.send(
+    sent = await runtime.client.beta.sessions.events.send(
         handle,
         events=[
             {
@@ -331,7 +372,12 @@ async def _continue_turn_impl(
             }
         ],
     )
-    return {"handle": handle}
+    turn_event_id, turn_started_at = _turn_boundary(sent, handle=handle)
+    return {
+        "handle": handle,
+        "turn_event_id": turn_event_id,
+        "turn_started_at": turn_started_at,
+    }
 
 
 async def _list_sessions_impl(
@@ -365,6 +411,24 @@ async def _get_session_impl(
     return SessionInfo.from_ma(s)
 
 
+async def _archive_my_session_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+) -> dict[str, str]:
+    """Archive a finished session so it stops being a live session forever.
+
+    Without this, every reader thread accumulates as a live MA session and
+    the usage sweep re-reads all of them on every tick. Not a cancel — a
+    running turn is stopped with the cancel tool, not this one.
+    ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
+    cross-agent handles (WR-03).
+    """
+    await _verify_agent_owns_session(runtime, auth, handle)
+    await runtime.client.beta.sessions.archive(handle)
+    return {"handle": handle, "archived": "true"}
+
+
 async def _list_events_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -372,12 +436,20 @@ async def _list_events_impl(
     page: str | None,
     limit: int | None,
     order: Literal["asc", "desc"] | None,
+    created_at_gte: str | None = None,
+    types: list[str] | None = None,
 ) -> Page[SessionEventOut]:
     """List a session's events (the transcript) for the caller to read.
 
     This is how a primitives-only caller reads the agent's reply: fold the
     ``agent.message`` events client-side. ``_verify_agent_owns_session``
     guards cross-tenant AND same-tenant cross-agent handles (WR-03).
+
+    ``created_at_gte`` and ``types`` let a poller read one turn instead of
+    the whole transcript: pass the ``turn_started_at`` from ``start_turn``/
+    ``continue_turn`` as ``created_at_gte`` and
+    ``types=["agent.message", "session.status_idle"]`` to see only this
+    turn's reply and completion signal.
     """
     await _verify_agent_owns_session(runtime, auth, handle)
     list_kwargs: dict[str, Any] = {}
@@ -387,6 +459,10 @@ async def _list_events_impl(
         list_kwargs["limit"] = limit
     if order is not None:
         list_kwargs["order"] = order
+    if created_at_gte is not None:
+        list_kwargs["created_at_gte"] = created_at_gte
+    if types is not None:
+        list_kwargs["types"] = types
     cursor = await runtime.client.beta.sessions.events.list(handle, **list_kwargs)
     return Page[SessionEventOut](
         items=[
@@ -612,8 +688,13 @@ def register_agent_chat_tools(
         """Start a new conversation turn with the agent and return a handle.
 
         Creates a persistent MA session with vault/repo/env parity and sends
-        the first user message. Returns ``{"handle": "<session_id>"}`` which
-        you pass to ``get_session``, ``list_events``, and ``continue_turn``.
+        the first user message. Returns ``{"handle": "<session_id>",
+        "turn_event_id": "<event_id>", "turn_started_at": "<iso8601>"}``.
+        ``handle`` is passed to ``get_session``, ``list_events``, and
+        ``continue_turn``. ``turn_event_id`` and ``turn_started_at`` identify
+        this turn's first event: poll ``list_events`` with
+        ``created_at_gte=turn_started_at`` and discard everything up to and
+        including ``turn_event_id`` to read only this turn's transcript.
         """
         auth = await _check_admission(
             ctx,
@@ -646,7 +727,12 @@ def register_agent_chat_tools(
         """Send a follow-up message on an existing session.
 
         Use this to continue a multi-turn conversation. Returns
-        ``{"handle": "<session_id>"}`` unchanged for chaining.
+        ``{"handle": "<session_id>", "turn_event_id": "<event_id>",
+        "turn_started_at": "<iso8601>"}`` — the same three-key shape as
+        ``start_turn``, with the boundary taken from THIS message's send, not
+        the session's earlier turns. Poll ``list_events`` with
+        ``created_at_gte=turn_started_at`` and discard events up to and
+        including ``turn_event_id`` to read only this turn's transcript.
         """
         auth = await _check_admission(
             ctx,
@@ -667,19 +753,44 @@ def register_agent_chat_tools(
         return await _get_session_impl(runtime, await _auth(ctx), handle)
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
+    async def archive_my_session(ctx: Context, handle: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+        """Archive a session when its conversation is finished.
+
+        An archived session is no longer live and stops being re-read by
+        usage collection. This is NOT a cancel — to stop a running turn, use
+        the cancel tool instead. Returns ``{"handle": "<session_id>",
+        "archived": "true"}``.
+        """
+        return await _archive_my_session_impl(runtime, await _auth(ctx), handle)
+
+    @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def list_events(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         handle: str,
         page: str | None = None,
         limit: int | None = None,
         order: Literal["asc", "desc"] | None = None,
+        created_at_gte: str | None = None,
+        types: list[str] | None = None,
     ) -> Page[SessionEventOut]:
         """List a session's events — the transcript.
 
         The agent's reply is in the ``agent.message`` events. Call this once
         ``get_session`` reports the session is idle to read what the agent said.
+
+        A poller reading one turn should pass
+        ``types=["agent.message", "session.status_idle"]``,
+        ``created_at_gte=<the turn_started_at from start_turn/continue_turn>``,
+        and ``order="asc"``, then discard events up to and including the
+        ``turn_event_id`` it was given, locally. A turn is finished only when
+        a ``session.status_idle`` event appears AFTER the boundary, or
+        ``get_my_session`` reports the session ``terminated`` — a bare
+        ``idle`` status read right after a send may be the PREVIOUS turn's
+        state and must not be trusted. ``rescheduling`` counts as running.
         """
-        return await _list_events_impl(runtime, await _auth(ctx), handle, page, limit, order)
+        return await _list_events_impl(
+            runtime, await _auth(ctx), handle, page, limit, order, created_at_gte, types
+        )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def deliver_turn_charts(  # pyright: ignore[reportUnusedFunction]
