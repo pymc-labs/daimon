@@ -29,10 +29,12 @@ def test_agent_spec_mirrors_sdk() -> None:
     # metadata synthesized at upload; betas not author-facing; skills is the
     # identity-reference exception (authoring names, not SDK skill params).
     exempt = {"metadata", "betas"}
-    # The spec's `skills` and `skill_repos` are sibling authoring fields not
-    # sent to the SDK (skills resolved at upload; skill_repos consumed by
-    # the sync subsystem). Excluded from the mirror comparison.
-    sibling = {"skills", "skill_repos"}
+    # The spec's `skills`, `skill_repos`, and `isolated` are sibling authoring
+    # fields not sent to the SDK (skills resolved at upload; skill_repos
+    # consumed by the sync subsystem; isolated is a daimon-side authoring
+    # property excluded via Field(exclude=True) — see AgentSpec's docstring).
+    # Excluded from the mirror comparison.
+    sibling = {"skills", "skill_repos", "isolated"}
     assert spec_fields - sibling == sdk_fields - exempt - sibling, (
         "AgentSpec drifted from the SDK. "
         f"spec-minus-sibling={spec_fields - sibling}, "
