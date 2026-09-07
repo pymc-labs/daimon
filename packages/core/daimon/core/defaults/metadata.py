@@ -13,6 +13,11 @@ MA_METADATA_KEY_ACCOUNT = "daimon_account"
 MA_METADATA_KEY_MANAGED = "daimon_managed"
 MA_METADATA_KEY_SPEC_HASH = "daimon_spec_hash"
 MA_METADATA_KEY_ISOLATED = "daimon_isolated"
+# Stamped on a reader variant (see `daimon.core.reader_agent`) with the
+# source agent's spec-hash-or-fallback fingerprint, so a subsequent publish
+# can tell "unchanged source, reuse the variant" from "source moved, update
+# it" without re-deriving the whole spec first.
+MA_METADATA_KEY_READER_OF = "daimon_reader_of"
 
 # Marks a whole MA workspace as a throwaway one that the test-only workspace
 # nuke is allowed to empty. Stamped on a single sentinel agent, never on a

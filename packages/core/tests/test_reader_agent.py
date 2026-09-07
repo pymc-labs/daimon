@@ -1,9 +1,34 @@
 from __future__ import annotations
 
+import re
+import uuid
 from typing import Any
 
-from daimon.core.reader_agent import READER_BLOCK, READER_SKILL_NAME, derive_reader_spec
+import httpx
+import pytest
+from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ISOLATED,
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_READER_OF,
+    MA_METADATA_KEY_SPEC_HASH,
+    MA_METADATA_KEY_TENANT,
+    compute_spec_fingerprint,
+    tenant_scoped_display_title,
+)
+from daimon.core.errors import DaimonError
+from daimon.core.reader_agent import (
+    READER_BLOCK,
+    READER_SKILL_NAME,
+    derive_reader_spec,
+    ensure_reader_variant,
+)
 from daimon.core.specs import AgentSpec, SkillRef
+from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
+
+TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
+ACCOUNT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000a2")
 
 
 def _agent_spec(**overrides: object) -> AgentSpec:
@@ -116,3 +141,286 @@ def test_derive_reader_spec_does_not_mutate_source() -> None:
 
     assert source.mcp_servers is not None, "source spec must be untouched by derivation"
     assert source.isolated is False
+
+
+# ---------------------------------------------------------------------------
+# ensure_reader_variant — find, create or update, keyed by the source's shape
+# ---------------------------------------------------------------------------
+
+
+def _source_agent_dict(
+    *,
+    id_: str,
+    name: str = "alpha",
+    tenant_id: uuid.UUID = TENANT_ID,
+    spec_hash: str | None = "src-hash-1",
+    version: int = 1,
+    system: str = "You are alpha, a data analyst.",
+) -> dict[str, Any]:
+    metadata: dict[str, str] = {
+        MA_METADATA_KEY_TENANT: str(tenant_id),
+        MA_METADATA_KEY_NAME: name,
+    }
+    if spec_hash is not None:
+        metadata[MA_METADATA_KEY_SPEC_HASH] = spec_hash
+    return BetaManagedAgentsAgent.model_validate(
+        {
+            "id": id_,
+            "type": "agent",
+            "name": name,
+            "model": {"id": "claude-sonnet-4-6"},
+            "metadata": metadata,
+            "description": None,
+            "archived_at": None,
+            "created_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-01T00:00:00Z",
+            "version": version,
+            "mcp_servers": [],
+            "skills": [],
+            "tools": [],
+            "system": system,
+        }
+    ).model_dump(mode="json")
+
+
+def _reader_agent_dict(
+    *,
+    id_: str,
+    name: str,
+    tenant_id: uuid.UUID,
+    metadata_extra: dict[str, str],
+    version: int = 1,
+) -> dict[str, Any]:
+    metadata: dict[str, str] = {
+        MA_METADATA_KEY_TENANT: str(tenant_id),
+        MA_METADATA_KEY_NAME: name,
+        **metadata_extra,
+    }
+    return BetaManagedAgentsAgent.model_validate(
+        {
+            "id": id_,
+            "type": "agent",
+            "name": name,
+            "model": {"id": "claude-sonnet-4-6"},
+            "metadata": metadata,
+            "description": None,
+            "archived_at": None,
+            "created_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-01T00:00:00Z",
+            "version": version,
+            "mcp_servers": [],
+            "skills": [{"type": "custom", "skill_id": "sk_reader_resolved", "version": "1"}],
+            "tools": [],
+            "system": "",
+        }
+    ).model_dump(mode="json")
+
+
+def _router(agents: list[dict[str, Any]]) -> MARouter:
+    """List + per-id retrieve + a skills list that resolves the report-reader ref."""
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response(agents))
+
+    def _retrieve(req: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        agent_id = match.group(1)
+        for agent in agents:
+            if agent["id"] == agent_id:
+                return httpx.Response(200, json=agent)
+        return httpx.Response(
+            404,
+            json={"type": "error", "error": {"type": "not_found_error", "message": "not found"}},
+        )
+
+    router.add("GET", r"/v1/agents/([^/]+)", _retrieve)
+    canonical_title = tenant_scoped_display_title(tenant_id=TENANT_ID, name=READER_SKILL_NAME)
+    router.add(
+        "GET",
+        r"/v1/skills",
+        lambda req, _m: list_response(
+            [
+                SkillListResponse(
+                    id="sk_reader_resolved",
+                    type="custom",
+                    display_title=canonical_title,
+                    latest_version="1",
+                    created_at="2026-09-01T00:00:00Z",
+                    updated_at="2026-09-01T00:00:00Z",
+                    source="custom",
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    return router
+
+
+def _add_create_route(router: MARouter, captured: dict[str, Any]) -> None:
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        captured.update(json_body(req))
+        return httpx.Response(
+            200,
+            json=_reader_agent_dict(
+                id_="ag_reader",
+                name="alpha-reader",
+                tenant_id=TENANT_ID,
+                metadata_extra=captured["metadata"],
+            ),
+        )
+
+    router.add("POST", r"/v1/agents", on_create)
+
+
+async def test_ensure_reader_variant_creates_when_no_existing_variant() -> None:
+    """No existing variant -> exactly one agents.create, stamped isolated/unmanaged."""
+    source = _source_agent_dict(id_="ag_src", spec_hash="src-hash-1")
+    router = _router([source])
+    created: dict[str, Any] = {}
+    _add_create_route(router, created)
+    client = build_fake_anthropic(router.dispatch)
+
+    result = await ensure_reader_variant(
+        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
+    )
+
+    assert result.id == "ag_reader"
+    md = created["metadata"]
+    assert md[MA_METADATA_KEY_ISOLATED] == "true"
+    assert MA_METADATA_KEY_MANAGED not in md, "a reader variant must never be stamped managed"
+    assert md[MA_METADATA_KEY_READER_OF] == "src-hash-1"
+
+
+async def test_ensure_reader_variant_reuses_on_unchanged_source() -> None:
+    """Second call against an unchanged source issues zero create/update calls."""
+    source = _source_agent_dict(id_="ag_src", spec_hash="src-hash-1")
+    router = _router([source])
+    created: dict[str, Any] = {}
+    _add_create_route(router, created)
+    client = build_fake_anthropic(router.dispatch)
+    first = await ensure_reader_variant(
+        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
+    )
+
+    # No POST route registered at all on this router — any create or update
+    # attempt raises AssertionError from MARouter, failing the test.
+    reader_variant = _reader_agent_dict(
+        id_="ag_reader", name="alpha-reader", tenant_id=TENANT_ID, metadata_extra=first.metadata
+    )
+    router2 = _router([source, reader_variant])
+    client2 = build_fake_anthropic(router2.dispatch)
+
+    second = await ensure_reader_variant(
+        client2, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
+    )
+
+    assert second.id == "ag_reader"
+
+
+async def test_ensure_reader_variant_updates_when_source_spec_hash_changes() -> None:
+    """A changed source spec hash issues exactly one agents.update, zero agents.create."""
+    source = _source_agent_dict(id_="ag_src", spec_hash="src-hash-1")
+    router = _router([source])
+    created: dict[str, Any] = {}
+    _add_create_route(router, created)
+    client = build_fake_anthropic(router.dispatch)
+    first = await ensure_reader_variant(
+        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
+    )
+
+    changed_source = _source_agent_dict(id_="ag_src", spec_hash="src-hash-2")
+    reader_variant = _reader_agent_dict(
+        id_="ag_reader",
+        name="alpha-reader",
+        tenant_id=TENANT_ID,
+        metadata_extra=first.metadata,
+        version=first.version,
+    )
+    router2 = _router([changed_source, reader_variant])
+    updated: dict[str, Any] = {}
+
+    def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        updated.update(json_body(req))
+        return httpx.Response(
+            200,
+            json=_reader_agent_dict(
+                id_="ag_reader",
+                name="alpha-reader",
+                tenant_id=TENANT_ID,
+                metadata_extra=updated["metadata"],
+                version=first.version + 1,
+            ),
+        )
+
+    # No POST /v1/agents (create) route on this router — a stray create call
+    # raises AssertionError from MARouter, failing the test.
+    router2.add("POST", r"/v1/agents/ag_reader", on_update)
+    client2 = build_fake_anthropic(router2.dispatch)
+
+    second = await ensure_reader_variant(
+        client2, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
+    )
+
+    assert updated["version"] == first.version, "update must use MA's version, not a stale one"
+    assert updated["metadata"][MA_METADATA_KEY_READER_OF] == "src-hash-2"
+    assert second.version == first.version + 1
+
+
+async def test_ensure_reader_variant_reader_of_fallback_changes_with_source_version() -> None:
+    """No daimon_spec_hash on the source -> reader_of falls back to (id, version); bumping
+    version changes it, forcing an update even though nothing else about the source moved."""
+    source_v1 = _source_agent_dict(id_="ag_src", spec_hash=None, version=1)
+    router = _router([source_v1])
+    created: dict[str, Any] = {}
+    _add_create_route(router, created)
+    client = build_fake_anthropic(router.dispatch)
+    first = await ensure_reader_variant(
+        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
+    )
+
+    expected_reader_of_v1 = compute_spec_fingerprint({"agent_id": "ag_src", "version": 1})
+    assert first.metadata[MA_METADATA_KEY_READER_OF] == expected_reader_of_v1
+
+    source_v2 = _source_agent_dict(id_="ag_src", spec_hash=None, version=2)
+    reader_variant = _reader_agent_dict(
+        id_="ag_reader",
+        name="alpha-reader",
+        tenant_id=TENANT_ID,
+        metadata_extra=first.metadata,
+        version=first.version,
+    )
+    router2 = _router([source_v2, reader_variant])
+    updated: dict[str, Any] = {}
+
+    def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        updated.update(json_body(req))
+        return httpx.Response(
+            200,
+            json=_reader_agent_dict(
+                id_="ag_reader",
+                name="alpha-reader",
+                tenant_id=TENANT_ID,
+                metadata_extra=updated["metadata"],
+                version=first.version + 1,
+            ),
+        )
+
+    router2.add("POST", r"/v1/agents/ag_reader", on_update)
+    client2 = build_fake_anthropic(router2.dispatch)
+
+    await ensure_reader_variant(
+        client2, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
+    )
+
+    expected_reader_of_v2 = compute_spec_fingerprint({"agent_id": "ag_src", "version": 2})
+    assert expected_reader_of_v2 != expected_reader_of_v1
+    assert updated["metadata"][MA_METADATA_KEY_READER_OF] == expected_reader_of_v2
+
+
+async def test_ensure_reader_variant_raises_for_unknown_source() -> None:
+    """Unknown source_name raises DaimonError and issues no create/update calls."""
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    client = build_fake_anthropic(router.dispatch)
+
+    with pytest.raises(DaimonError, match="ghost"):
+        await ensure_reader_variant(
+            client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="ghost"
+        )

@@ -111,6 +111,8 @@ ALLOWLIST_T5=(
   "slack/agent_setup/write.py"
   # preflight probe agents are archived immediately — never host sessions/skills.
   "core/defaults/preflight.py"
+  # reader variant create/update both go through dump_agent_spec(reader_spec).
+  "core/reader_agent.py"
 )
 # get_earliest_tenant is fully retired — the oldest-tenant
 # path no longer exists anywhere. Zero allowlist: any occurrence fails.

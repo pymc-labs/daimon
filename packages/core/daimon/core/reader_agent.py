@@ -20,7 +20,26 @@ Split in two, functional-core/imperative-shell:
 
 from __future__ import annotations
 
-from daimon.core.specs import AgentSpec, SkillRef
+import uuid
+from typing import cast
+
+from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
+from anthropic.types.beta.agent_create_params import Tool
+from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
+    BetaManagedAgentsURLMCPServerParams,
+)
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, find_agents_by_daimon_tag
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_READER_OF,
+    MA_METADATA_KEY_SPEC_HASH,
+    build_metadata,
+    compute_spec_fingerprint,
+)
+from daimon.core.defaults.skills import resolve_refs
+from daimon.core.errors import DaimonError
+from daimon.core.ma import update_agent_with_version_retry
+from daimon.core.specs import AgentSpec, SkillRef, dump_agent_spec
 
 # Skill seeded from the defaults tree (its SKILL.md lands in a later plan)
 # that teaches the model how to unpack and read the mounted report bundle.
@@ -86,3 +105,127 @@ def derive_reader_spec(source: AgentSpec) -> AgentSpec:
             "system": system,
         }
     )
+
+
+async def ensure_reader_variant(
+    anthropic: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    source_name: str,
+) -> BetaManagedAgentsAgent:
+    """Find, create or update the reader variant of `source_name`, on MA only.
+
+    Deliberate deviation from SPEC §1.7's literal signature: the spec writes
+    `ensure_reader_variant(anthropic, session_factory, *, ...)`, but nothing
+    in this function's work touches the database — resolving the source,
+    deriving the spec, resolving skill refs and creating or updating the
+    agent are all Managed Agents calls. `guideline:architecture` forbids
+    taking a collaborator you do not use, so `session_factory` is omitted.
+
+    Reuse is keyed on `daimon_reader_of`, a fingerprint of the *source's*
+    shape: `daimon_spec_hash` off the source's own metadata when it carries
+    one (every defaults-reconciled agent does), else a fingerprint of the
+    source's `(id, version)` pair. Both change exactly when the source
+    changes — a reconciled agent's spec hash moves on edit, and MA bumps
+    `version` on every update regardless of how the agent got created — so
+    either branch is a stable "has the source changed" signal.
+
+    Raises `DaimonError` when `source_name` does not resolve to an agent on
+    MA — fails loudly rather than silently falling back to a different
+    agent.
+    """
+    source_ma = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=source_name)
+    if source_ma is None:
+        raise DaimonError(f"agent {source_name!r} not found")
+
+    reader_of = source_ma.metadata.get(MA_METADATA_KEY_SPEC_HASH) or compute_spec_fingerprint(
+        {"agent_id": source_ma.id, "version": source_ma.version}
+    )
+
+    # The source's skills are already resolved MA skill params (real skill
+    # ids, not authoring names) — reconstructed as SkillRef only so
+    # `derive_reader_spec` can run its dedup check against them. They are
+    # never re-resolved through `resolve_refs` (see below): a custom skill's
+    # already-resolved id would not match any tenant display_title.
+    source_skills = [
+        SkillRef(type=skill.type, skill_id=skill.skill_id) for skill in source_ma.skills
+    ]
+    source_spec = AgentSpec(
+        name=source_ma.name,
+        model=source_ma.model.id,
+        description=source_ma.description,
+        system=source_ma.system,
+        tools=cast(
+            "list[Tool] | None",
+            [tool.model_dump(mode="json") for tool in source_ma.tools] or None,
+        ),
+        mcp_servers=cast(
+            "list[BetaManagedAgentsURLMCPServerParams] | None",
+            [server.model_dump(mode="json") for server in source_ma.mcp_servers] or None,
+        ),
+        skills=source_skills,
+    )
+    reader_spec = derive_reader_spec(source_spec)
+
+    # Only the newly-derived `report-reader` ref is an authoring name that
+    # needs resolving; every other entry in `reader_spec.skills` came
+    # straight off `source_ma.skills` above and is already a resolved MA
+    # skill param — pass it through unchanged instead of routing it through
+    # `resolve_refs`'s display_title lookup (see `source_skills` comment).
+    resolved_skills: list[BetaManagedAgentsSkillParams] = []
+    new_refs: list[SkillRef] = []
+    for ref in reader_spec.skills:
+        if ref.skill_id == READER_SKILL_NAME:
+            new_refs.append(ref)
+        else:
+            resolved_skills.append(
+                cast("BetaManagedAgentsSkillParams", {"type": ref.type, "skill_id": ref.skill_id})
+            )
+    resolved_skills.extend(await resolve_refs(anthropic, refs=new_refs, tenant_id=tenant_id))
+
+    reader_spec_dump = dump_agent_spec(reader_spec, mode="json")
+    reader_spec_hash = compute_spec_fingerprint(
+        {"spec": reader_spec_dump, "skills": resolved_skills}
+    )
+    # managed=False is load-bearing: a variant stamped managed would be
+    # archived by the next `defaults apply` sweep because it is not in the
+    # seeded spec list (threat T-21-03-C).
+    metadata = build_metadata(
+        tenant_id=tenant_id,
+        name=reader_spec.name,
+        account_id=account_id,
+        managed=False,
+        spec_hash=reader_spec_hash,
+        isolated=True,
+    )
+    metadata[MA_METADATA_KEY_READER_OF] = reader_of
+
+    matches = await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=reader_spec.name)
+    match = matches[0] if matches else None
+
+    if match is None:
+        return await anthropic.beta.agents.create(
+            **dump_agent_spec(reader_spec),
+            skills=resolved_skills,
+            metadata=metadata,
+        )
+
+    if (
+        match.metadata.get(MA_METADATA_KEY_READER_OF) == reader_of
+        and match.metadata.get(MA_METADATA_KEY_SPEC_HASH) == reader_spec_hash
+    ):
+        # Reuse across publishes: neither the source nor the derived shape
+        # changed since the variant was last written. No MA write.
+        return match
+
+    async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
+        return await anthropic.beta.agents.update(
+            fresh.id,
+            version=fresh.version,
+            **dump_agent_spec(reader_spec),
+            skills=resolved_skills,
+            metadata=cast("dict[str, str | None]", metadata),
+        )
+
+    return await update_agent_with_version_retry(anthropic, match.id, _apply)
