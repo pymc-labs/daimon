@@ -20,6 +20,7 @@ def test_mcp_runtime_is_frozen_dataclass_with_required_fields() -> None:
         "deployment_default",
         "gemini_client",
         "notebook_rate_limiter",
+        "bundle_rate_limiter",
         "fernet",
         "artifact_store",
     }, (
