@@ -36,6 +36,13 @@ Headless loop (primitives plus the bounded ``ask`` convenience tool):
 - ``archive_my_session`` archives a finished session so it stops being a live
   session forever (a reader thread that never archives would otherwise be
   re-read by every usage-sweep tick). Read-only ownership check, not gated.
+- ``cancel_turn`` sends one unconditional ``user.interrupt`` and reports the
+  status observed right after — no read-then-send race. Read-only ownership
+  check, not gated (a caller over balance must still be able to stop a turn).
+- ``get_turn_cost`` folds one finished turn's ``span.model_request_end``
+  events into a pre-markup USD cost. A separate tool, not a field on
+  ``get_session`` — the host polls status every two seconds and reads cost
+  once per terminal. Read-only ownership check, not gated.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ import asyncio
 import datetime as dt
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 from time import monotonic
 from typing import Any, Literal
 
@@ -66,6 +74,7 @@ from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
 from daimon.core.sessions import create_session
 from daimon.core.stores.agent_repo_binding import get_binding
@@ -429,6 +438,111 @@ async def _archive_my_session_impl(
     return {"handle": handle, "archived": "true"}
 
 
+async def _cancel_turn_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+) -> dict[str, str]:
+    """Stop a running turn with one unconditional interrupt, then report status.
+
+    Sends ``user.interrupt`` unconditionally — no read-then-send: a status
+    read before the send would race the session's own state (it can change
+    between the read and the send), and the interrupt is safe to send at any
+    status anyway, including an already-idle or already-terminated session
+    (harmless no-op). This call returns immediately; it does not wait for the
+    interrupt to take effect — poll ``get_my_session`` to see the session
+    reach ``idle`` or ``terminated`` (contrast ``daimon.core.ma.
+    send_interrupt_and_wait``, which sends the same event and then blocks on
+    the SSE stream for a terminal ``session.status_idle``; this tool is
+    fire-and-return, not fire-and-wait).
+
+    An interrupted turn is still billed for what it already consumed before
+    the interrupt landed — the model work already done is real work and is
+    not refunded. The report host surfaces that to the reader.
+
+    ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
+    cross-agent handles (WR-03) before any send.
+    """
+    await _verify_agent_owns_session(runtime, auth, handle)
+    await runtime.client.beta.sessions.events.send(handle, events=[{"type": "user.interrupt"}])
+    session = await runtime.client.beta.sessions.retrieve(handle)
+    return {"handle": handle, "status": session.status}
+
+
+async def _get_turn_cost_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+    turn_started_at: str,
+    turn_event_id: str,
+) -> dict[str, object]:
+    """Fold one finished turn's model-request cost — the RAW PROVIDER COST
+    BEFORE MARKUP.
+
+    This is NOT expected to equal the tenant ledger's debit for the same
+    turn: the ledger applies ``settings.billing.markup`` on top of this
+    figure (``daimon.core.tenant_balance.debit_amount``). An integrator who
+    assumes the two match will build a reconciliation that never balances.
+
+    Pass the ``turn_started_at``/``turn_event_id`` returned by ``start_turn``
+    or ``continue_turn``. Pages ``span.model_request_end`` events at or after
+    ``turn_started_at`` and folds each into
+    ``Decimal(str(cost_of(event.model_usage, pricing))).quantize(Decimal("0.000001"))``,
+    summed. The boundary event itself (``turn_event_id``) is never folded in,
+    even if it were ever echoed back by this filtered listing.
+
+    Returns ``{"cost_usd": <str(Decimal) or None>, "event_count": <int>}``.
+    ``cost_usd`` is serialised as a string, never a float — a float
+    round-trip is exactly the drift ``debit_amount``'s ``Decimal(str(...))``
+    conversion exists to avoid. ``cost_usd`` is ``None`` (NOT zero) when the
+    session's model has no pricing row: a zero would falsely claim the turn
+    was free. A turn with pricing but no model-request events yet returns a
+    real zero cost, distinguishable from the unpriced ``None`` case.
+
+    ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
+    cross-agent handles (WR-03); the session it returns is reused for the
+    pricing lookup rather than retrieved twice.
+    """
+    session = await _verify_agent_owns_session(runtime, auth, handle)
+    model_id = session.agent.model.id
+    pricing = MODEL_PRICING.get(model_id)
+    if pricing is None:
+        log.warning("agent_chat.get_turn_cost.unpriced_model", handle=handle, model_id=model_id)
+
+    total = Decimal("0")
+    event_count = 0
+    page: str | None = None
+    for _ in range(_MAX_EVENT_PAGES):
+        list_kwargs: dict[str, Any] = {
+            "created_at_gte": turn_started_at,
+            "types": ["span.model_request_end"],
+            "order": "asc",
+        }
+        if page is not None:
+            list_kwargs["page"] = page
+        cursor = await runtime.client.beta.sessions.events.list(handle, **list_kwargs)
+        for event in cursor.data:
+            if event.id == turn_event_id:
+                continue
+            if event.type != "span.model_request_end":
+                continue
+            event_count += 1
+            if pricing is None:
+                continue
+            cost = cost_of(event.model_usage, pricing)
+            if cost is None:
+                continue
+            total += Decimal(str(cost)).quantize(Decimal("0.000001"))
+        if cursor.next_page is None:
+            break
+        page = cursor.next_page
+
+    return {
+        "cost_usd": str(total) if pricing is not None else None,
+        "event_count": event_count,
+    }
+
+
 async def _list_events_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -658,9 +772,10 @@ def register_agent_chat_tools(
 
     ``start_turn``, ``continue_turn``, and ``ask`` run the shared
     ``_check_admission`` gate (the same balance/cap checks the media tools run)
-    before creating a session or sending an event. The four read-only tools and
-    ``deliver_turn_charts`` stay on bare ``_auth``; the latter performs a
-    bounded artifact-store write when optional link delivery is configured.
+    before creating a session or sending an event. Every other tool —
+    including ``cancel_turn`` and ``get_turn_cost`` — stays on bare ``_auth``;
+    ``deliver_turn_charts`` is the one exception that performs a bounded
+    artifact-store write when optional link delivery is configured.
     """
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
@@ -762,6 +877,44 @@ def register_agent_chat_tools(
         "archived": "true"}``.
         """
         return await _archive_my_session_impl(runtime, await _auth(ctx), handle)
+
+    @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
+    async def cancel_turn(ctx: Context, handle: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+        """Stop a running turn immediately.
+
+        Sends an interrupt regardless of the session's current status —
+        sending one to an already-idle session is harmless. Returns
+        ``{"handle": "<session_id>", "status": "<observed_status>"}``
+        immediately; it does not wait for the interrupt to take effect, so
+        poll ``get_my_session`` to see the session reach ``idle`` or
+        ``terminated``. An interrupted turn is still billed for what it
+        already consumed before the interrupt landed: the model work already
+        done is real work and is not refunded.
+        """
+        return await _cancel_turn_impl(runtime, await _auth(ctx), handle)
+
+    @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
+    async def get_turn_cost(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        handle: str,
+        turn_started_at: str,
+        turn_event_id: str,
+    ) -> dict[str, object]:
+        """Return one finished turn's raw provider cost, before markup.
+
+        Pass the ``turn_started_at``/``turn_event_id`` returned by
+        ``start_turn`` or ``continue_turn``. Call this once per terminal —
+        the host polls status every two seconds and should read cost once,
+        not on every poll. Returns ``{"cost_usd": "<decimal string>" | None,
+        "event_count": <int>}``. ``cost_usd`` is ``None`` when the session's
+        model has no pricing row (never zero — zero would falsely claim the
+        turn was free). This figure is NOT expected to equal the tenant
+        ledger's debit for the same turn: the ledger applies
+        ``settings.billing.markup`` on top of it.
+        """
+        return await _get_turn_cost_impl(
+            runtime, await _auth(ctx), handle, turn_started_at, turn_event_id
+        )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def list_events(  # pyright: ignore[reportUnusedFunction]
