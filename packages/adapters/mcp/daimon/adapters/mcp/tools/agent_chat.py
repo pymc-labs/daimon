@@ -55,12 +55,14 @@ from decimal import Decimal
 from time import monotonic
 from typing import Any, Literal
 
+import anthropic
 import structlog
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
     BetaManagedAgentsSession,
 )
+from anthropic.types.beta.session_create_params import Resource
 from anthropic.types.beta.sessions import BetaManagedAgentsSendSessionEvents
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.hosted_artifacts import ChartUrl, deliver_hosted_charts
@@ -71,12 +73,14 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
+from daimon.core import bundle_handle
 from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
-from daimon.core.sessions import create_session
+from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.scoped_config_read import resolve
 from fastmcp import Context, FastMCP
@@ -284,6 +288,7 @@ async def _start_turn_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     message: str,
+    bundle: str | None = None,
 ) -> dict[str, str]:
     """Create a new MA session for the caller's agent and send the first message.
 
@@ -299,6 +304,11 @@ async def _start_turn_impl(
       cascade (``resolve()``, MPP-01 — same as Discord).
     - Look it up on MA via ``find_environment_by_daimon_tag``.
     - Raise ``ToolError("environment not found")`` if either step fails.
+
+    When ``bundle`` is given, the session is created on the isolated path
+    (``create_isolated_session``) with the bundle mounted as its only
+    resource, instead of the normal vault/repo/env-mounted ``create_session``
+    path. See ``bundle_handle`` and SPEC §1.1 for the verification steps.
     """
     ma_agent = await _resolve_ma_agent(runtime, auth)
 
@@ -312,32 +322,68 @@ async def _start_turn_impl(
     if environment is None:
         raise ToolError("environment not found")
 
-    github_fallback_pat: str | None = (
-        runtime.settings.github.fallback_pat.get_secret_value()
-        if runtime.settings.github.fallback_pat is not None
-        else None
-    )
-    github_app_id: str | None = runtime.settings.github.app_id
-    github_app_private_key: str | None = (
-        runtime.settings.github.app_private_key.get_secret_value()
-        if runtime.settings.github.app_private_key is not None
-        else None
-    )
+    is_isolated = ma_agent.metadata.get(MA_METADATA_KEY_ISOLATED) == "true"
 
-    session = await create_session(
-        runtime.client,
-        agent=ma_agent,
-        environment=environment,
-        mcp_settings=runtime.settings.mcp,
-        account_id=auth.account_id,
-        tenant_id=auth.tenant_id,
-        agent_uuid=auth.agent_id,
-        session_factory=runtime.session_factory,
-        fernet=runtime.fernet,
-        github_fallback_pat=github_fallback_pat,
-        github_app_id=github_app_id,
-        github_app_private_key=github_app_private_key,
-    )
+    if bundle is not None:
+        if not is_isolated:
+            raise ToolError("bundle requires an isolated agent")
+        if runtime.settings.mcp.jwt_secret is None:
+            raise ToolError("bundle upload is not configured on this deployment")
+        claims = (
+            bundle_handle.verify(
+                runtime.settings.mcp.jwt_secret.get_secret_value(),
+                bundle,
+                tenant_id=auth.tenant_id,
+                agent_id=auth.agent_id,
+                now=dt.datetime.now(dt.UTC),
+            )
+            if auth.agent_id is not None
+            else None
+        )
+        if claims is None:
+            raise ToolError("bundle not found")
+        try:
+            await runtime.client.beta.files.retrieve_metadata(claims.file_id)
+        except anthropic.NotFoundError as err:
+            raise ToolError("bundle expired; re-upload") from err
+        resources: list[Resource] = [
+            {"type": "file", "file_id": claims.file_id, "mount_path": "/bundle.tar.gz"}
+        ]
+        session = await create_isolated_session(
+            runtime.client,
+            agent=ma_agent,
+            environment=environment,
+            account_id=auth.account_id,
+            tenant_id=auth.tenant_id,
+            resources=resources,
+        )
+    else:
+        github_fallback_pat: str | None = (
+            runtime.settings.github.fallback_pat.get_secret_value()
+            if runtime.settings.github.fallback_pat is not None
+            else None
+        )
+        github_app_id: str | None = runtime.settings.github.app_id
+        github_app_private_key: str | None = (
+            runtime.settings.github.app_private_key.get_secret_value()
+            if runtime.settings.github.app_private_key is not None
+            else None
+        )
+
+        session = await create_session(
+            runtime.client,
+            agent=ma_agent,
+            environment=environment,
+            mcp_settings=runtime.settings.mcp,
+            account_id=auth.account_id,
+            tenant_id=auth.tenant_id,
+            agent_uuid=auth.agent_id,
+            session_factory=runtime.session_factory,
+            fernet=runtime.fernet,
+            github_fallback_pat=github_fallback_pat,
+            github_app_id=github_app_id,
+            github_app_private_key=github_app_private_key,
+        )
 
     sent = await runtime.client.beta.sessions.events.send(
         session.id,
@@ -799,7 +845,9 @@ def register_agent_chat_tools(
         return await _list_sessions_impl(runtime, await _auth(ctx))
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
-    async def start_turn(ctx: Context, message: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+    async def start_turn(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, message: str, bundle: str | None = None
+    ) -> dict[str, str]:
         """Start a new conversation turn with the agent and return a handle.
 
         Creates a persistent MA session with vault/repo/env parity and sends
@@ -810,6 +858,17 @@ def register_agent_chat_tools(
         this turn's first event: poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard everything up to and
         including ``turn_event_id`` to read only this turn's transcript.
+
+        ``bundle`` is an opaque handle returned by the bundle upload route.
+        Passing it mounts that archive read-only in the session's uploads
+        directory instead of the normal vault/repo/env mounts, and requires
+        an isolated agent — a non-isolated agent is refused outright with
+        the message 'bundle requires an isolated agent'. A handle that fails
+        verification for any reason (tampered, expired, wrong tenant, wrong
+        agent) is refused with the message 'bundle not found', one wording
+        for every cause. A handle whose underlying file is gone is refused
+        with the message 'bundle expired; re-upload' — that one specifically
+        means push the archive again.
         """
         auth = await _check_admission(
             ctx,
@@ -817,7 +876,7 @@ def register_agent_chat_tools(
             billing_config=billing_config,
             tool_name="start_turn",
         )
-        return await _start_turn_impl(runtime, auth, message)
+        return await _start_turn_impl(runtime, auth, message, bundle)
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def ask(ctx: Context, message: str) -> AskResult:  # pyright: ignore[reportUnusedFunction]
