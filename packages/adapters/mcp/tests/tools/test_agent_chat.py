@@ -21,6 +21,7 @@ import json
 import re
 import uuid
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,6 +30,8 @@ import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.sessions import (
+    BetaManagedAgentsSpanModelRequestEndEvent,
+    BetaManagedAgentsSpanModelUsage,
     BetaManagedAgentsTextBlock,
     BetaManagedAgentsUserMessageEvent,
 )
@@ -50,10 +53,12 @@ from daimon.adapters.mcp.tools.agent_chat import (
     _archive_my_session_impl,
     _ask_impl,
     _ask_tool_result,
+    _cancel_turn_impl,
     _continue_turn_impl,
     _deliver_turn_charts_impl,
     _describe_agent_impl,
     _get_session_impl,
+    _get_turn_cost_impl,
     _list_events_impl,
     _list_sessions_impl,
     _start_turn_impl,
@@ -61,13 +66,16 @@ from daimon.adapters.mcp.tools.agent_chat import (
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.agent_repo_binding import set_binding
+from daimon.core.tenant_balance import debit_amount
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
     EMPTY_CLOUD_CONFIG,
     MARouter,
     build_fake_anthropic,
+    json_body,
     list_response,
     send_events_response,
 )
@@ -353,6 +361,8 @@ async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools() -> None:
         "get_my_session",
         "list_events",
         "archive_my_session",
+        "cancel_turn",
+        "get_turn_cost",
     }
     assert set(tool_names) == expected, (
         f"agent_id-claim token should see ONLY the agent-chat tools; got: {sorted(tool_names)}"
@@ -441,6 +451,8 @@ async def test_narrowing_lists_agent_chat_tools_through_bm25_search_transform() 
         "get_my_session",
         "list_events",
         "archive_my_session",
+        "cancel_turn",
+        "get_turn_cost",
     }
     assert set(tool_names) == expected, (
         "narrowed agent token must list exactly the agent-chat tools through the "
@@ -1388,6 +1400,8 @@ async def test_agent_chat_tools_have_no_agent_id_parameter() -> None:
         "get_my_session",
         "list_events",
         "archive_my_session",
+        "cancel_turn",
+        "get_turn_cost",
     }
 
     for tool_name in agent_chat_names:
@@ -2030,3 +2044,372 @@ async def test_archive_my_session_archives_an_owned_session_exactly_once() -> No
     assert archive_calls == ["ses_test001"], (
         f"expected exactly one archive call; got {archive_calls!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# cancel_turn — one unconditional interrupt, then report status
+# ---------------------------------------------------------------------------
+
+
+async def test_cancel_turn_sends_exactly_one_user_interrupt_event() -> None:
+    """The send the fake receives has exactly one event, and its type is
+    ``user.interrupt`` — asserted on the captured request body."""
+    captured: list[dict[str, Any]] = []
+
+    def on_send(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        captured.append(json_body(req))
+        return send_events_response(data=[])
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_make_fake_session(status="running")),
+    )
+    router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    await _cancel_turn_impl(runtime, auth, "ses_test001")
+
+    assert len(captured) == 1, f"expected exactly one send call; got {len(captured)}"
+    assert captured[0]["events"] == [{"type": "user.interrupt"}], (
+        f"cancel_turn must send exactly one user.interrupt event; got {captured[0]!r}"
+    )
+
+
+async def test_cancel_turn_issues_no_status_precheck_between_ownership_and_send() -> None:
+    """No read-then-send race (T-21-06-B): the recorded call order is
+    ownership-retrieve, send, status-retrieve — never an extra status read
+    wedged in front of the send."""
+    calls: list[str] = []
+
+    def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        calls.append("retrieve")
+        return httpx.Response(200, json=_make_fake_session(status="running"))
+
+    def on_send(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        calls.append("send")
+        return send_events_response(data=[])
+
+    router = MARouter()
+    router.add("GET", r"/v1/sessions/([^/]+)", on_retrieve)
+    router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    result = await _cancel_turn_impl(runtime, auth, "ses_test001")
+
+    assert calls == ["retrieve", "send", "retrieve"], (
+        "expected ownership-retrieve, send, status-retrieve in that order with no "
+        f"extra status read between the ownership check and the send; got {calls!r}"
+    )
+    assert result == {"handle": "ses_test001", "status": "running"}
+
+
+async def test_cancel_turn_rejects_a_sibling_agents_session_and_issues_zero_sends() -> None:
+    """Ownership is checked before any send — a sibling's session is refused
+    with zero interrupt sends (T-21-06-A)."""
+    send_calls: list[str] = []
+
+    def on_send(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        send_calls.append(m.group(1))
+        return send_events_response(data=[])
+
+    router = _sibling_tenant_agents_router()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=_make_fake_session(
+                session_id="ses_sibling", agent_id="ag_sibling", status="running"
+            ),
+        ),
+    )
+    router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    with pytest.raises(ToolError, match="session not found"):
+        await _cancel_turn_impl(runtime, auth, "ses_sibling")
+
+    assert send_calls == [], "a rejected ownership check must issue no interrupt send"
+
+
+async def test_cancel_turn_on_already_idle_session_returns_idle_without_raising() -> None:
+    """Sending an interrupt to an already-idle session is harmless — no raise."""
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_make_fake_session(status="idle")),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: send_events_response(data=[]),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    result = await _cancel_turn_impl(runtime, auth, "ses_test001")
+
+    assert result == {"handle": "ses_test001", "status": "idle"}
+
+
+# ---------------------------------------------------------------------------
+# get_turn_cost — fold one turn's model-request events, pre-markup
+# ---------------------------------------------------------------------------
+
+
+def _cost_event(
+    *,
+    event_id: str,
+    usage: BetaManagedAgentsSpanModelUsage,
+    processed_at: dt.datetime,
+) -> dict[str, Any]:
+    """Build a real ``span.model_request_end`` event payload inline."""
+    return BetaManagedAgentsSpanModelRequestEndEvent(
+        id=event_id,
+        model_request_start_id=f"{event_id}_start",
+        model_usage=usage,
+        processed_at=processed_at,
+        type="span.model_request_end",
+    ).model_dump(mode="json")
+
+
+async def test_get_turn_cost_folds_events_to_the_same_figure_as_debit_amount_at_markup_one() -> (
+    None
+):
+    """The fold equals sum(debit_amount(cost_of(usage, rates), markup=1)) over
+    the same events — the pre-markup cross-check SPEC 1.4 asks for."""
+    rates = MODEL_PRICING["claude-sonnet-4-6"]
+    usage_a = BetaManagedAgentsSpanModelUsage(
+        input_tokens=1000,
+        output_tokens=500,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=0,
+    )
+    usage_b = BetaManagedAgentsSpanModelUsage(
+        input_tokens=2000,
+        output_tokens=100,
+        cache_creation_input_tokens=50,
+        cache_read_input_tokens=10,
+    )
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_make_fake_session(status="idle")),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: list_response(
+            [
+                _cost_event(
+                    event_id="sevt_cost_a",
+                    usage=usage_a,
+                    processed_at=dt.datetime(2026, 9, 1, 10, 0, 1, tzinfo=dt.UTC),
+                ),
+                _cost_event(
+                    event_id="sevt_cost_b",
+                    usage=usage_b,
+                    processed_at=dt.datetime(2026, 9, 1, 10, 0, 2, tzinfo=dt.UTC),
+                ),
+            ]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    result = await _get_turn_cost_impl(
+        runtime, auth, "ses_test001", "2026-09-01T10:00:00Z", "sevt_boundary"
+    )
+
+    expected = sum(
+        (debit_amount(cost_of(usage, rates), markup=Decimal(1)) for usage in (usage_a, usage_b)),
+        start=Decimal("0"),
+    )
+    assert result["cost_usd"] == str(expected), (
+        f"fold should equal sum(debit_amount(cost_of(usage, rates), markup=1)); got {result!r}"
+    )
+    assert result["event_count"] == 2
+
+
+async def test_get_turn_cost_excludes_the_boundary_event_itself() -> None:
+    """Events at or before ``turn_event_id`` are excluded: of three seeded
+    events, one IS the boundary, so ``event_count`` is 2, not 3."""
+    usage = BetaManagedAgentsSpanModelUsage(
+        input_tokens=100,
+        output_tokens=50,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=0,
+    )
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_make_fake_session(status="idle")),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: list_response(
+            [
+                _cost_event(
+                    event_id="sevt_boundary",
+                    usage=usage,
+                    processed_at=dt.datetime(2026, 9, 1, 10, 0, 0, tzinfo=dt.UTC),
+                ),
+                _cost_event(
+                    event_id="sevt_a",
+                    usage=usage,
+                    processed_at=dt.datetime(2026, 9, 1, 10, 0, 1, tzinfo=dt.UTC),
+                ),
+                _cost_event(
+                    event_id="sevt_b",
+                    usage=usage,
+                    processed_at=dt.datetime(2026, 9, 1, 10, 0, 2, tzinfo=dt.UTC),
+                ),
+            ]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    result = await _get_turn_cost_impl(
+        runtime, auth, "ses_test001", "2026-09-01T10:00:00Z", "sevt_boundary"
+    )
+
+    assert result["event_count"] == 2, (
+        f"the boundary event itself must be excluded from the fold; got {result!r}"
+    )
+
+
+async def test_get_turn_cost_returns_none_but_still_counts_events_for_unpriced_model() -> None:
+    """No pricing row -> cost_usd is None (never zero — zero would falsely
+    claim the turn was free); event_count still counts the events (T-21-06-D)."""
+    session_json = BetaManagedAgentsSession.model_validate(
+        {
+            "id": "ses_test001",
+            "type": "session",
+            "agent": {
+                "id": _MA_AGENT_ID,
+                "name": "test-agent",
+                "version": 1,
+                "type": "agent",
+                "model": {"id": "claude-unpriced-model-x"},
+                "mcp_servers": [],
+                "skills": [],
+                "tools": [],
+            },
+            "archived_at": None,
+            "created_at": "2026-06-23T00:00:00Z",
+            "updated_at": "2026-06-23T00:00:00Z",
+            "outcome_evaluations": [],
+            "environment_id": _ENV_ID,
+            "metadata": {},
+            "resources": [],
+            "stats": {},
+            "status": "idle",
+            "title": None,
+            "usage": {},
+            "vault_ids": [],
+        }
+    ).model_dump(mode="json")
+    usage = BetaManagedAgentsSpanModelUsage(
+        input_tokens=100,
+        output_tokens=50,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=0,
+    )
+    router = MARouter()
+    router.add(
+        "GET", r"/v1/sessions/([^/]+)", lambda _r, _m: httpx.Response(200, json=session_json)
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: list_response(
+            [
+                _cost_event(
+                    event_id="sevt_unpriced",
+                    usage=usage,
+                    processed_at=dt.datetime(2026, 9, 1, 10, 0, 1, tzinfo=dt.UTC),
+                )
+            ]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    result = await _get_turn_cost_impl(
+        runtime, auth, "ses_test001", "2026-09-01T10:00:00Z", "sevt_boundary"
+    )
+
+    assert result == {"cost_usd": None, "event_count": 1}, (
+        f"an unpriced model must yield None cost while still counting events; got {result!r}"
+    )
+
+
+async def test_get_turn_cost_returns_a_real_zero_when_priced_model_has_no_events_yet() -> None:
+    """A priced model with no span.model_request_end events yet returns a
+    real zero — distinct from the unpriced None case."""
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_make_fake_session(status="idle")),
+    )
+    router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    result = await _get_turn_cost_impl(
+        runtime, auth, "ses_test001", "2026-09-01T10:00:00Z", "sevt_boundary"
+    )
+
+    assert result == {"cost_usd": "0", "event_count": 0}, (
+        f"a priced model with no events yet must return a real zero, not None; got {result!r}"
+    )
+
+
+async def test_get_turn_cost_rejects_a_sibling_agents_session_and_lists_no_events() -> None:
+    """Ownership is checked before any events read — a sibling's session is
+    refused with zero events.list calls."""
+    events_calls: list[str] = []
+
+    def on_events(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        events_calls.append(m.group(1))
+        return list_response([])
+
+    router = _sibling_tenant_agents_router()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=_make_fake_session(session_id="ses_sibling", agent_id="ag_sibling", status="idle"),
+        ),
+    )
+    router.add("GET", r"/v1/sessions/([^/]+)/events", on_events)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client)
+    auth = _auth()
+
+    with pytest.raises(ToolError, match="session not found"):
+        await _get_turn_cost_impl(
+            runtime, auth, "ses_sibling", "2026-09-01T10:00:00Z", "sevt_boundary"
+        )
+
+    assert events_calls == [], "a rejected ownership check must issue no events.list call"

@@ -121,6 +121,32 @@
         'type': 'object',
       }),
     }),
+    'cancel_turn': dict({
+      'description': '''
+        Stop a running turn immediately.
+        
+        Sends an interrupt regardless of the session's current status —
+        sending one to an already-idle session is harmless. Returns
+        ``{"handle": "<session_id>", "status": "<observed_status>"}``
+        immediately; it does not wait for the interrupt to take effect, so
+        poll ``get_my_session`` to see the session reach ``idle`` or
+        ``terminated``. An interrupted turn is still billed for what it
+        already consumed before the interrupt landed: the model work already
+        done is real work and is not refunded.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'handle': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'handle',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'clear_agent_default': dict({
       'description': '''
         Remove the agent default from a channel or the whole workspace.
@@ -1584,6 +1610,41 @@
         }),
         'required': list([
           'name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'get_turn_cost': dict({
+      'description': '''
+        Return one finished turn's raw provider cost, before markup.
+        
+        Pass the ``turn_started_at``/``turn_event_id`` returned by
+        ``start_turn`` or ``continue_turn``. Call this once per terminal —
+        the host polls status every two seconds and should read cost once,
+        not on every poll. Returns ``{"cost_usd": "<decimal string>" | None,
+        "event_count": <int>}``. ``cost_usd`` is ``None`` when the session's
+        model has no pricing row (never zero — zero would falsely claim the
+        turn was free). This figure is NOT expected to equal the tenant
+        ledger's debit for the same turn: the ledger applies
+        ``settings.billing.markup`` on top of it.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'handle': dict({
+            'type': 'string',
+          }),
+          'turn_event_id': dict({
+            'type': 'string',
+          }),
+          'turn_started_at': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'handle',
+          'turn_started_at',
+          'turn_event_id',
         ]),
         'type': 'object',
       }),
