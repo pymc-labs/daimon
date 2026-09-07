@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
 
-__all__ = ["create_session"]
+__all__ = ["create_session", "create_isolated_session"]
 
 
 async def create_session(
@@ -269,4 +269,51 @@ async def create_session(
         metadata=metadata if metadata else omit,
         vault_ids=[vault_id] if vault_id is not None else omit,
         resources=resources if resources else omit,
+    )
+
+
+async def create_isolated_session(
+    anthropic: AsyncAnthropic,
+    *,
+    agent: BetaManagedAgentsAgent,
+    environment: BetaEnvironment,
+    account_id: uuid.UUID | None,
+    tenant_id: uuid.UUID | None,
+    resources: list[Resource],
+) -> BetaManagedAgentsSession:
+    """Create an MA session for an isolated agent — `create_session` with every
+    optional mount removed.
+
+    This is the DEGENERATE sibling of `create_session`, not a smaller version
+    of it: it has no `mcp_settings`, no `agent_uuid`, no `session_factory`, no
+    `fernet`, and no `github_*` parameter, and it must never grow one "for
+    symmetry" — the absent parameters are the security property. It attaches
+    no credential vault (so no session-create kwarg for one is passed at
+    all — not even the SDK's omit sentinel), mounts no tenant secrets file,
+    and provisions no per-agent long-lived store. There is simply no branch
+    in this function that could reach for any of those.
+
+    Contrast with `create_session`'s two optional-mount branches: its memory
+    mount is degrade-not-block (a provisioning failure is logged and
+    swallowed) and its MCP credential mirror hard-fails the turn on error.
+    This function has neither branch, and therefore no degrade path at all —
+    there is nothing optional left to degrade. A caller gets exactly the
+    `resources` it passed and nothing else: no vault, no env file, no memory
+    store, no repo. `resources` is passed unconditionally (never omitted);
+    an isolated session with an empty resource list is a caller bug, not a
+    degraded mode.
+
+    On MA failure: `anthropic.APIError` propagates uncaught.
+    """
+    metadata: dict[str, str] = {}
+    if account_id is not None:
+        metadata[MA_METADATA_KEY_ACCOUNT] = str(account_id)
+    if tenant_id is not None:
+        metadata[MA_METADATA_KEY_TENANT] = str(tenant_id)
+
+    return await anthropic.beta.sessions.create(
+        agent=agent.id,
+        environment_id=environment.id,
+        metadata=metadata if metadata else omit,
+        resources=resources,
     )
