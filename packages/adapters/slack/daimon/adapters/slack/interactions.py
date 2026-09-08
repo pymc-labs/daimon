@@ -24,11 +24,12 @@ def build_retry_handlers() -> list[AsyncRetryHandler]:
     """Retry handlers for every AsyncWebClient we construct.
 
     slack_sdk's default is connection-error retries only, so a 429 surfaces
-    immediately as ``SlackApiError``. Slack caps non-Marketplace apps at one
-    ``conversations.history``/``conversations.replies`` call per minute, and
-    the listener boundary posts nothing on failure, so an unretried 429 reads
-    as a dead bot. ``AsyncRateLimitErrorRetryHandler`` honours ``Retry-After``;
-    its default single retry is deliberate, since that wait can be 60s.
+    immediately as ``SlackApiError``. Slack caps apps commercially distributed
+    outside the Marketplace at one ``conversations.history``/
+    ``conversations.replies`` call per minute, and the listener boundary posts
+    nothing on failure, so an unretried 429 reads as a dead bot.
+    ``AsyncRateLimitErrorRetryHandler`` honours ``Retry-After``; its default
+    single retry is deliberate, since that wait can be 60s.
     """
     return [*async_default_handlers(), AsyncRateLimitErrorRetryHandler()]
 

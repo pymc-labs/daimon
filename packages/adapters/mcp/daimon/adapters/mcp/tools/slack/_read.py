@@ -50,11 +50,18 @@ from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
-# Slack's ceiling for non-Marketplace apps on conversations.history and
-# conversations.replies: at most 15 objects per call and one call per minute.
-# Larger limits are clamped server-side, so asking for more only misleads the
-# caller about how much of the channel or thread they were shown.
-_HISTORY_LIMIT_CAP = 15
+# Largest ``limit`` conversations.history accepts; conversations.replies takes
+# 1000 but one ceiling keeps both reads on the same bound. Above it Slack
+# answers ``invalid_limit`` rather than clamping, unlike the per-workspace
+# 15-object clamp, which it applies silently and reports through ``has_more``.
+_HISTORY_PAGE_CEILING = 999
+
+# Page size for the replies lookup that locates one message by ts.
+_MESSAGE_LOOKUP_PAGE = 200
+
+
+def _bounded_page(limit: int) -> int:
+    return max(1, min(limit, _HISTORY_PAGE_CEILING))
 
 
 def _reraise_mapped(err: SlackApiError, *, as_user: bool = False) -> ToolError:
@@ -240,7 +247,7 @@ async def _fetch_channel_history(
     client: AsyncWebClient, *, channel_id: str, limit: int, cursor: str | None
 ) -> SlackChannelResult:
     resp = await client.conversations_history(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-        channel=channel_id, limit=max(1, min(limit, _HISTORY_LIMIT_CAP)), cursor=cursor
+        channel=channel_id, limit=_bounded_page(limit), cursor=cursor
     )
     raw = cast(list[dict[str, Any]], resp["messages"])
     raw.reverse()  # Slack returns newest-first; tools return oldest-first
@@ -325,7 +332,7 @@ async def _fetch_thread_replies(
     client: AsyncWebClient, *, channel_id: str, thread_ts: str, limit: int
 ) -> SlackThreadResult:
     resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-        channel=channel_id, ts=thread_ts, limit=max(1, min(limit, _HISTORY_LIMIT_CAP))
+        channel=channel_id, ts=thread_ts, limit=_bounded_page(limit)
     )
     raw = cast(list[dict[str, Any]], resp["messages"])  # already oldest-first
     has_more = bool(resp.get("has_more"))
@@ -339,9 +346,7 @@ async def _fetch_thread_replies(
         if parent_ts and str(parent_ts) != thread_ts:
             result_thread_ts = str(parent_ts)
             resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                channel=channel_id,
-                ts=result_thread_ts,
-                limit=max(1, min(limit, _HISTORY_LIMIT_CAP)),
+                channel=channel_id, ts=result_thread_ts, limit=_bounded_page(limit)
             )
             raw = cast(list[dict[str, Any]], resp["messages"])
             has_more = bool(resp.get("has_more"))
@@ -417,7 +422,7 @@ async def _fetch_single_message(
         # mapping (or an opaque raw SlackApiError).
         try:
             resp = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                channel=channel_id, ts=message_id, limit=_HISTORY_LIMIT_CAP
+                channel=channel_id, ts=message_id, limit=_MESSAGE_LOOKUP_PAGE
             )
         except SlackApiError as err:
             error_code = _slack_error_code(err)

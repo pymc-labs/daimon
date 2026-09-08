@@ -75,6 +75,7 @@ def _make_orchestrate_app(
     settings = MagicMock()
     settings.crypto.keys = ()
     settings.slack.max_concurrent_turns_per_tenant = 3
+    settings.slack.history_page_limit = 200
     settings.mcp.public_url = None
     # app_root_url=None short-circuits _maybe_post_connect_nudge (Task 11) — these
     # turn-context tests don't exercise the connect-nudge flow.
