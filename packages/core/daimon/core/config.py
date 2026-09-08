@@ -142,6 +142,9 @@ class McpSettings(BaseModel):
         return str(self.public_url).rstrip("/").removesuffix("/mcp").rstrip("/")
 
 
+_HUB_SIGNING_KEY_BYTES = 32
+
+
 class HubSettings(BaseModel):
     """OAuth-login MCP mounts for coding-agent clients.
 
@@ -173,9 +176,34 @@ class HubSettings(BaseModel):
         default=None,
         description=(
             "Base64url 32-byte key that signs hub login tokens. Required when "
-            "any hub mount is configured. Generate with Fernet.generate_key()."
+            "any hub mount is configured, and rejected at boot unless it "
+            "decodes to exactly 32 bytes. Generate with Fernet.generate_key()."
         ),
     )
+
+    @field_validator("jwt_signing_key")
+    @classmethod
+    def _check_signing_key(cls, value: SecretStr | None) -> SecretStr | None:
+        """Reject anything but a 32-byte base64url key.
+
+        FastMCP derives an HS256 secret and warns about short keys only for a
+        ``str`` secret; the proxy is handed ``bytes``, which it uses raw. A
+        passphrase would therefore be accepted silently as the signing secret.
+        """
+        if value is None:
+            return value
+        try:
+            decoded = base64.urlsafe_b64decode(value.get_secret_value())
+        except (binascii.Error, ValueError):
+            decoded = b""
+        if len(decoded) != _HUB_SIGNING_KEY_BYTES:
+            raise ValueError(
+                "DAIMON_HUB__JWT_SIGNING_KEY must be a base64url-encoded "
+                f"{_HUB_SIGNING_KEY_BYTES}-byte key; generate one with "
+                "python -c 'from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())'"
+            )
+        return value
 
     @property
     def slack_configured(self) -> bool:

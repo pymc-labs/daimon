@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 from daimon.core.config import (
     AnthropicSettings,
     ArtifactsSettings,
@@ -606,6 +608,25 @@ def test_hub_settings_platform_configured_requires_both_id_and_secret() -> None:
     assert hub.discord_configured is False, "client id alone must not count as configured"
     hub = HubSettings(discord_client_id="123", discord_client_secret=SecretStr("s"))
     assert hub.discord_configured is True, "id plus secret must count as configured"
+
+
+def test_hub_settings_accepts_a_fernet_shaped_signing_key() -> None:
+    key = Fernet.generate_key().decode()
+    hub = HubSettings(jwt_signing_key=SecretStr(key))
+    assert hub.jwt_signing_key is not None and hub.jwt_signing_key.get_secret_value() == key, (
+        f"a Fernet-generated key must be accepted unchanged, got {hub.jwt_signing_key!r}"
+    )
+
+
+def test_hub_settings_rejects_a_passphrase_signing_key() -> None:
+    with pytest.raises(ValidationError, match="DAIMON_HUB__JWT_SIGNING_KEY"):
+        HubSettings(jwt_signing_key=SecretStr("hunter2"))
+
+
+def test_hub_settings_rejects_a_signing_key_of_the_wrong_length() -> None:
+    short = base64.urlsafe_b64encode(b"\x00" * 16).decode()
+    with pytest.raises(ValidationError, match="DAIMON_HUB__JWT_SIGNING_KEY"):
+        HubSettings(jwt_signing_key=SecretStr(short))
 
 
 def test_hub_settings_read_from_nested_env(monkeypatch: pytest.MonkeyPatch) -> None:
