@@ -10,7 +10,11 @@ dependencies = [
     "httpx>=0.27",
     "pydantic>=2.7",
     "pydantic-settings>=2.4",
-    "mcp>=1.27",
+    # Pinned below 2.0: mcp_client.py unpacks streamable_http_client's
+    # context-manager result, and 2.x changed that from a 3-tuple
+    # (read, write, get_session_id) to a 2-tuple (read, write). Lift the
+    # pin once mcp_client.py is updated for the 2.x shape.
+    "mcp>=1.27,<2",
 ]
 
 [project.urls]
