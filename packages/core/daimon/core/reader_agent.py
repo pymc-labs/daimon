@@ -25,9 +25,6 @@ from typing import cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
-from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
-    BetaManagedAgentsURLMCPServerParams,
-)
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_READER_OF,
@@ -162,10 +159,11 @@ async def ensure_reader_variant(
         # create-params shape rejects, and a reader has no use for the
         # source's toolset overrides anyway.
         tools=None,
-        mcp_servers=cast(
-            "list[BetaManagedAgentsURLMCPServerParams] | None",
-            [server.model_dump(mode="json") for server in source_ma.mcp_servers] or None,
-        ),
+        # Likewise the source's MCP servers are not carried over: a reader has
+        # none by construction, and a spec that names servers without their
+        # paired toolset (which is exactly what the source looks like once its
+        # tools are dropped) fails the spec's own validator.
+        mcp_servers=None,
         skills=source_skills,
     )
     reader_spec = derive_reader_spec(source_spec)
