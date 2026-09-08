@@ -77,13 +77,19 @@ async def test_skips_archived_and_non_ready_tenants(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     pending = await make_tenant(db_session, platform="discord", workspace_id="g-pending")
+    archived = await make_tenant(db_session, platform="discord", workspace_id="g-archived")
     await db_session.commit()
     await set_provision_status(db_session_factory, tenant_id=pending.id, status="pending")
+    await set_provision_status(
+        db_session_factory, tenant_id=archived.id, status="ready", archive=True
+    )
 
     tenants = await resolve_hub_tenants(
         db_session_factory,
         platform="discord",
         platform_user_id="u1",
-        workspaces=[("g-pending", "P")],
+        workspaces=[("g-pending", "P"), ("g-archived", "A")],
     )
-    assert tenants == [], f"a non-ready tenant must not be offered, got {tenants!r}"
+    assert tenants == [], (
+        f"neither a non-ready nor an archived tenant may be offered, got {tenants!r}"
+    )
