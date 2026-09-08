@@ -4,7 +4,8 @@ The install-URL builder's own unit test lives in core's tree
 (``packages/core/tests/test_github_app_auth.py``); these tests cover the
 tool and the posting path only. Discord REST calls are faked at transport
 level via the sibling ``conftest.py``'s ``patch_discord_http`` (same trick
-``test_credential_requests.py`` uses), never via method-level mocks.
+``test_credential_requests.py`` uses), never via method-level mocks. The
+Slack posting path is covered in ``test_slack_app_install_button.py``.
 """
 
 from __future__ import annotations
@@ -278,25 +279,6 @@ async def test_result_model_has_no_success_shaped_field() -> None:
         name for name in field_names if any(word in name.lower() for word in forbidden_words)
     }
     assert not offending, f"result model must carry no success-shaped field, found {offending}"
-
-
-# ---------------------------------------------------------------------------
-# 3. Slack caller is rejected
-# ---------------------------------------------------------------------------
-
-
-async def test_post_app_install_link_rejects_slack_caller(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _runtime()
-    auth = _auth_identity(platform="slack", external_id=None, platform_user_id="U123")
-    captured = _outbound_request_count(monkeypatch)
-
-    with pytest.raises(ToolError, match="not supported on Slack"):
-        await _post_app_install_link_impl(
-            runtime, auth, channel_id="222", purpose="reading a private repo"
-        )
-    assert captured == [], "a rejected slack call must post nothing"
 
 
 # ---------------------------------------------------------------------------

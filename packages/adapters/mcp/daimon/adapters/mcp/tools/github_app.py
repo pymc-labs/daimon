@@ -2,10 +2,11 @@
 
 Makes an existing GitHub App installation reachable from chat. A link button
 carries a URL and no custom id, so nothing dispatches it in the bot process
-and no request state is created anywhere — Discord opens the URL directly.
-This tool introduces no credential-request row, no minted token, no expiry,
-and no dynamic item; see ``tools/discord/_app_install_button.py`` for the
-posting path this delegates to.
+and no request state is created anywhere — the chat client opens the URL
+directly. This tool introduces no credential-request row, no minted token,
+no expiry, and no dynamic item; see ``tools/discord/_app_install_button.py``
+and ``tools/slack/_app_install_button.py`` for the posting paths this
+delegates to.
 
 Ungated deliberately: posting a link has no blast radius inside daimon, and
 GitHub itself enforces who may install an App on a given account or
@@ -20,6 +21,9 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools.discord import (
     _post_app_install_button_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.slack._app_install_button import (
+    _post_slack_app_install_button_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.core.github_app_auth import build_app_install_url
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -29,8 +33,8 @@ from pydantic import BaseModel, ConfigDict
 class PostAppInstallLinkResult(BaseModel):
     """Result of posting the GitHub App install-link button.
 
-    A link button returns no signal when clicked — Discord opens the URL
-    itself, and nothing dispatches back to daimon. This result reports only
+    A link button returns no signal when clicked — the chat client opens the
+    URL itself, and nothing dispatches back to daimon. This result reports only
     that the invitation was posted: it carries no field named or meaning
     installed, success, completed, connected, or verified.
     """
@@ -49,8 +53,6 @@ async def _post_app_install_link_impl(
     channel_id: str,
     purpose: str,
 ) -> PostAppInstallLinkResult:
-    if auth.platform == "slack":
-        raise ToolError("post_github_app_install_link is not supported on Slack yet")
     if auth.platform_user_id is None:
         raise ToolError("posting the install link requires a platform-bound identity")
     slug = runtime.settings.github.app_slug
@@ -59,13 +61,12 @@ async def _post_app_install_link_impl(
             "this deployment has no GitHub App install link configured — "
             "an operator must set DAIMON_GITHUB__APP_SLUG"
         )
-    message_id = await _post_app_install_button_impl(
-        runtime,
-        auth,
-        channel_id=channel_id,
-        slug=slug,
-        purpose=purpose,
+    post = (
+        _post_slack_app_install_button_impl
+        if auth.platform == "slack"
+        else _post_app_install_button_impl
     )
+    message_id = await post(runtime, auth, channel_id=channel_id, slug=slug, purpose=purpose)
     return PostAppInstallLinkResult(
         channel_id=channel_id,
         message_id=message_id,
@@ -74,7 +75,7 @@ async def _post_app_install_link_impl(
 
 
 def register_github_app_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def post_github_app_install_link(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
@@ -86,7 +87,9 @@ def register_github_app_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         and has no token to paste, or when a sync failed because the repo is
         not readable. Posts a button in the thread; clicking it opens the
         install page on GitHub, where the user chooses which repositories to
-        grant access to.
+        grant access to. Slack: ``channel_id`` may be ``channel_id:thread_ts``
+        to post into the thread you were invoked from; ``message_id`` is the
+        posted message's ts.
 
         This tool CANNOT tell whether the install happened — a link button
         gives no signal back. After the user says they installed it, verify

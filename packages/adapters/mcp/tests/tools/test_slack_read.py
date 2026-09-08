@@ -1134,13 +1134,15 @@ def _recorded_limit(m: aioresponses, path: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_read_channel_clamps_limit_to_the_slack_page_cap(
+async def test_read_channel_passes_the_requested_limit_through(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A caller asking for 50 gets a request Slack will honour, not silently clamp.
+    """A caller asking for 50 has 50 requested of Slack.
 
-    Non-Marketplace apps receive at most 15 objects per conversations.history
-    call; the shared tool default of 50 is meaningful on Discord only.
+    Slack clamps the value per workspace — 15 for an app commercially
+    distributed outside the Marketplace, the full page for an internal-app
+    install. Clamping in our own code would hold the second class to the
+    first's ceiling.
     """
     runtime = await _make_runtime(committing_sessionmaker)
     auth = _auth()
@@ -1153,7 +1155,7 @@ async def test_read_channel_clamps_limit_to_the_slack_page_cap(
         m.get(_CONVERSATIONS_HISTORY, payload={"ok": True, "messages": []})  # pyright: ignore[reportUnknownMemberType]
         await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=50)
         limit = _recorded_limit(m, "/api/conversations.history")
-    assert limit == "15"
+    assert limit == "50"
 
 
 @pytest.mark.asyncio
@@ -1314,7 +1316,44 @@ async def test_read_channel_raises_limit_floor_to_one(
 
 
 @pytest.mark.asyncio
-async def test_read_thread_clamps_limit_to_the_slack_page_cap(
+async def test_read_channel_caps_limit_at_the_slack_maximum(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Above 999 Slack answers invalid_limit instead of clamping, so we clamp there."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(_CONVERSATIONS_HISTORY, payload={"ok": True, "messages": []})  # pyright: ignore[reportUnknownMemberType]
+        await _slack_read_channel_impl(runtime, auth, channel_id="C1", limit=5000)
+        limit = _recorded_limit(m, "/api/conversations.history")
+    assert limit == "999"
+
+
+@pytest.mark.asyncio
+async def test_read_thread_caps_limit_at_the_slack_maximum(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(_CONVERSATIONS_REPLIES, payload={"ok": True, "messages": []})  # pyright: ignore[reportUnknownMemberType]
+        await _slack_read_thread_impl(runtime, auth, thread_id="C1:1.0", limit=5000)
+        limit = _recorded_limit(m, "/api/conversations.replies")
+    assert limit == "999"
+
+
+@pytest.mark.asyncio
+async def test_read_thread_passes_the_requested_limit_through(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     runtime = await _make_runtime(committing_sessionmaker)
@@ -1331,5 +1370,127 @@ async def test_read_thread_clamps_limit_to_the_slack_page_cap(
         )
         result = await _slack_read_thread_impl(runtime, auth, thread_id="C1:1.0", limit=50)
         limit = _recorded_limit(m, "/api/conversations.replies")
-    assert limit == "15"
+    assert limit == "50"
     assert result.has_more is True, "truncation must reach the caller"
+
+
+def _recorded_query(m: aioresponses, path: str, key: str) -> list[str | None]:
+    """One query-param value per recorded call to a Slack read method, in call order."""
+    return [
+        url.query.get(key)
+        for (method, url), _ in m.requests.items()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        if method == "GET" and url.path == path
+    ]
+
+
+@pytest.mark.asyncio
+async def test_read_thread_forwards_the_cursor_to_conversations_replies(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(_CONVERSATIONS_REPLIES, payload={"ok": True, "messages": []})  # pyright: ignore[reportUnknownMemberType]
+        result = await _slack_read_thread_impl(
+            runtime, auth, thread_id="C1:1.0", limit=50, cursor="CURSOR_2"
+        )
+        cursors = _recorded_query(m, "/api/conversations.replies", "cursor")
+    assert cursors == ["CURSOR_2"], "the continuation must reach Slack, not replay page one"
+    assert result.next_cursor is None and result.hint is None
+
+
+@pytest.mark.asyncio
+async def test_read_thread_has_more_returns_next_cursor_and_a_hint_naming_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={
+                "ok": True,
+                "has_more": True,
+                "response_metadata": {"next_cursor": "CURSOR_NEXT"},
+                "messages": [{"ts": "1.0", "user": "U_A", "text": "root", "thread_ts": "1.0"}],
+            },
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO,
+            payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
+        )
+        result = await _slack_read_thread_impl(runtime, auth, thread_id="C1:1.0", limit=1)
+    assert result.has_more is True
+    assert result.next_cursor == "CURSOR_NEXT"
+    assert result.hint is not None and "cursor=CURSOR_NEXT" in result.hint, (
+        "the hint must hand the agent the exact argument to pass next"
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_thread_has_more_without_a_cursor_says_so_instead_of_claiming_done(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={"ok": True, "has_more": True, "messages": []},
+        )
+        result = await _slack_read_thread_impl(runtime, auth, thread_id="C1:1.0", limit=1)
+    assert result.has_more is True and result.next_cursor is None
+    assert result.hint is not None and "no continuation cursor" in result.hint
+
+
+@pytest.mark.asyncio
+async def test_read_thread_reply_ts_refetch_by_parent_keeps_the_cursor(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={
+                "ok": True,
+                "messages": [{"ts": "2.0", "user": "U_B", "text": "reply", "thread_ts": "1.0"}],
+            },
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_REPLIES,
+            payload={
+                "ok": True,
+                "messages": [{"ts": "1.0", "user": "U_A", "text": "root", "thread_ts": "1.0"}],
+            },
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO,
+            payload={"ok": True, "user": {"id": "U_A", "profile": {"display_name": "alice"}}},
+        )
+        result = await _slack_read_thread_impl(
+            runtime, auth, thread_id="C1:2.0", limit=50, cursor="CURSOR_3"
+        )
+        cursors = _recorded_query(m, "/api/conversations.replies", "cursor")
+    assert result.thread_ts == "1.0"
+    assert cursors == ["CURSOR_3", "CURSOR_3"], "both lookups page from the same continuation"

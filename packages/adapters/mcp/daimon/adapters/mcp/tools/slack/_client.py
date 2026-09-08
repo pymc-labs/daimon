@@ -41,9 +41,10 @@ def _build_retry_handlers() -> list[AsyncRetryHandler]:
     """Retry handlers for every AsyncWebClient built here.
 
     slack_sdk defaults to connection-error retries only, so a 429 reaches the
-    tool caller as a bare error. Slack caps non-Marketplace apps at one
-    ``conversations.history``/``conversations.replies`` call per minute, which
-    the model-facing read tools trip easily. Duplicated from the Slack
+    tool caller as a bare error. Slack caps apps commercially distributed
+    outside the Marketplace at one ``conversations.history``/
+    ``conversations.replies`` call per minute, which the model-facing read
+    tools trip easily. Duplicated from the Slack
     adapter's ``build_retry_handlers`` — adapters must not import each other.
     """
     return [*async_default_handlers(), AsyncRateLimitErrorRetryHandler()]

@@ -83,8 +83,9 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         For threads use read_thread. Each platform takes only its own
         pagination parameter — the other is rejected. Discord: at most 200
-        messages per call; use before to fetch older messages. Slack: use
-        cursor to fetch the next page; at most 15 messages are returned.
+        messages per call; use before to fetch older messages. Slack: at most
+        999 per call, and some workspaces cap a single call at 15 whatever
+        limit is asked for; use cursor to fetch the next page.
         """
         auth = await _auth(ctx)
         # MCP clients often send "" for an optional param they mean to omit —
@@ -109,21 +110,29 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         thread_id: str,
         limit: int = 50,
         before: str | None = None,
+        cursor: str | None = None,
     ) -> ReadThreadResult | SlackThreadResult:
         """Read messages from a thread, oldest-first.
 
         Discord: thread_id is the thread's channel id; use before for older messages.
-        Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456);
-        before is rejected — Slack threads read one page of at most 15 messages
-        from the thread root, and has_more=true means the newest replies were
-        not returned.
+        Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456).
+        Pages start at the thread root and run towards the newest reply, at
+        most 999 per page (some workspaces cap a page at 15 whatever limit is
+        asked for). has_more=true means newer replies exist; pass the returned
+        next_cursor as cursor to read them. before is Discord-only and cursor
+        is Slack-only.
         """
         auth = await _auth(ctx)
         before = before or None
+        cursor = cursor or None
         if auth.platform == "slack":
             if before is not None:
-                raise ToolError("before is Discord-only — slack read_thread has no pagination")
-            return await _slack_read_thread_impl(runtime, auth, thread_id=thread_id, limit=limit)
+                raise ToolError("before is Discord-only — slack read_thread pages with cursor")
+            return await _slack_read_thread_impl(
+                runtime, auth, thread_id=thread_id, limit=limit, cursor=cursor
+            )
+        if cursor is not None:
+            raise ToolError("cursor is Slack-only — discord read_thread pages with before")
         return await _read_thread_impl(
             runtime, auth, thread_id=thread_id, limit=limit, before=before
         )
@@ -248,15 +257,16 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         To post a file you made in your sandbox, call
         ``create_file_upload_url`` first and PUT the bytes to the URL it
         returns — never base64 a file into a tool argument. Combined
-        cap of 10 attachments per message. Both FILES paragraphs are
-        Discord-only for now — Slack file posting needs a scope this
-        install does not have.
+        cap of 10 attachments per message.
 
         Slack: ``channel_id`` may be ``channel_id:thread_ts`` (e.g.
         ``C0123456789:1717171717.123456``) to post into a thread. Content is
         sent as-is — nothing is escaped, so ``<@U…>`` mentions work — and is
         capped at 12,000 characters. daimon must already be in the channel
-        (a member can run ``/invite @daimon``).
+        (a member can run ``/invite @daimon``). ``file_handles`` works;
+        ``attachments`` by url does not (there is no Slack CDN to fetch from).
+        Files post as replies under the message, so ``content`` cannot be
+        empty when files are given — use it as the caption.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
