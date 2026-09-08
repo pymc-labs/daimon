@@ -1216,6 +1216,11 @@ class HubOAuthKv(Base):
     which reads and writes this table directly over asyncpg; daimon only ever
     deletes expired rows through ``stores.hub_oauth_kv``. Collections are
     prefixed per platform (``slack__``, ``discord__``) by the adapter.
+
+    Rows hold encrypted upstream access tokens but are keyed by the proxy's
+    own identifiers, not by account, so an account purge cannot address them.
+    Retention is bounded instead: every row carries a TTL no longer than the
+    upstream token's lifetime and the scheduled sweep deletes it once expired.
     """
 
     __tablename__ = "hub_oauth_kv"

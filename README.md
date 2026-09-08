@@ -184,6 +184,14 @@ scopes (`users:read`, `channels:history`, `groups:history`, `channels:read`,
 `search:read`) so a daimon reads Slack as the person asking and never sees a
 channel they cannot.
 
+A login reaches only workspaces where daimon is installed and ready, checked
+on every call. Membership itself is re-read when the login token is issued or
+refreshed: a Slack token stops working the moment its user leaves the
+workspace, while someone removed from a Discord server keeps that server's
+daimons until their Discord token expires. `DAIMON_HUB__ALLOWED_CLIENT_REDIRECT_URIS`
+limits which clients may complete a login; the default covers coding agents
+on loopback and claude.ai.
+
 ### 2. Create the Discord application
 
 1. Create an application in the

@@ -6,6 +6,15 @@ The OAuth proxy embeds whatever ``_extract_upstream_claims`` returns under the
 encode with ``encode_hub_claims``; the middleware decodes with
 ``decode_hub_claims``. Anything malformed decodes to ``None`` so a token from
 an older deployment fails closed rather than half-parsing.
+
+The tenant map is a snapshot taken when the token is issued or refreshed. The
+hub tools re-check each tenant's readiness against the database on every
+call, so an uninstall or archive takes effect immediately; workspace
+*membership* is only as fresh as the token. On Slack that is per request,
+because the token verifier's ``auth.test`` fails the moment the user leaves
+the workspace. On Discord the token is validated but guild membership is
+re-read only on refresh, so a removed member keeps a guild's daimons for at
+most the access token's upstream lifetime.
 """
 
 from __future__ import annotations
