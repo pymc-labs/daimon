@@ -1144,3 +1144,65 @@ class FileUpload(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class SupportEscalation(Base):
+    """One row per human-support request. The rows ARE the credit ledger.
+
+    There is no counter column and no `credits_remaining`: remaining is the
+    configured allowance minus the number of rows for that (tenant,
+    platform_user_id). A counter would be a second source of truth that can
+    drift from the rows it summarises, and it would need to be written in the
+    same transaction as the insert anyway -- which counting already is.
+
+    `platform_user_id` is the identity key for the same reason it is on
+    `message_feedback`: somebody can ask for help without ever having taken a
+    turn, so `account_id` may be NULL. Credits are per user WITHIN a tenant,
+    so the count predicate is always both columns together.
+
+    `delivered_at` is NULL until an operator DM actually lands. The row is
+    committed BEFORE any delivery is attempted, so a request whose every
+    operator DM bounces -- closed DMs are the ordinary failure -- survives as
+    an undelivered row instead of vanishing. That ordering is the whole point
+    of the column: it is the difference between a support request that can be
+    swept up later and one that was silently dropped on a paying trial.
+
+    Deliberately NO uniqueness constraint on (tenant, message, user): asking
+    for help twice about the same answer is legitimate and each request spends
+    its own credit.
+    """
+
+    __tablename__ = "support_escalations"
+    __table_args__ = (
+        Index(
+            "support_escalations_tenant_user_idx",
+            "tenant_id",
+            "platform_user_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    ma_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

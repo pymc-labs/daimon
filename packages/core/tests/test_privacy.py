@@ -736,6 +736,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "credential_requests": "credential_requests",
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
+        "support_escalations": "support_escalations",
     }
 
     uncovered = report_fields - set(mapping.keys())
@@ -780,6 +781,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "mcp_tokens": "account_id FK -> accounts.id",
         "wizard_session": "account_id FK -> accounts.id",
         "message_feedback": "account_id FK -> accounts.id",
+        "support_escalations": "account_id FK -> accounts.id",
     }
     # Intentional exclusions, each justified inline.
     allowlist: frozenset[str] = frozenset(

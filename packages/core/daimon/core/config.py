@@ -555,6 +555,42 @@ class BillingSettings(BaseModel):
     )
 
 
+class SupportSettings(BaseModel):
+    """Human-support escalation: where requests land, and how many each user gets.
+
+    `credits_per_user` is a COUNT of human interactions, deliberately not the
+    USD in `BillingSettings.signup_credit`. Sharing a ledger with billing would
+    let a support request eat the tenant's ability to run turns, and would give
+    a paid-up tenant unlimited support. Different unit, different table.
+
+    An unset `escalation_channel_id` disables the escalate affordance entirely
+    rather than recording requests nobody will ever see. Failing closed is the
+    honest behaviour: an escalate button that reaches no one is worse than no
+    button, because the person believes they have asked for help.
+    """
+
+    escalation_channel_id: str | None = Field(
+        default=None,
+        description=(
+            "Channel id where human-support requests are posted. Unset (the "
+            "default) disables the escalate affordance entirely — a request "
+            "that reaches nobody is worse than no button at all. A channel "
+            "rather than operator DMs: it survives one person's DMs being "
+            "closed, and it leaves a shared record anyone on the rota can pick "
+            "up. The bot must be able to post there."
+        ),
+    )
+    credits_per_user: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "How many human-support requests each user gets within a tenant. "
+            "A COUNT of interactions, NOT the USD in DAIMON_BILLING__SIGNUP_CREDIT — "
+            "the two are deliberately separate ledgers. 0 disables escalation."
+        ),
+    )
+
+
 class ArtifactsSettings(BaseModel):
     """Optional private object storage for hosted-client artifacts."""
 
@@ -610,6 +646,7 @@ class Settings(BaseSettings):
     report_host: ReportHostSettings = Field(default_factory=ReportHostSettings)
     sentry: SentrySettings = Field(default_factory=SentrySettings)
     billing: BillingSettings = Field(default_factory=BillingSettings)
+    support: SupportSettings = Field(default_factory=SupportSettings)
     artifacts: ArtifactsSettings | None = Field(
         default=None,
         description=(

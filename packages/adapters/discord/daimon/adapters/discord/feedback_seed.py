@@ -31,6 +31,7 @@ from collections.abc import Callable
 
 import structlog
 from daimon.core.message_feedback import THUMBS_DOWN, THUMBS_UP
+from daimon.core.support_escalation import ESCALATE
 
 import discord
 
@@ -38,7 +39,7 @@ log = structlog.get_logger()
 
 
 async def seed_feedback_reactions(channel: discord.abc.Messageable, *, message_id: str) -> None:
-    """Add the positive emoji then the negative one to `message_id`'s message.
+    """Add the two vote emoji, then the escalate emoji, to `message_id`'s message.
 
     The positive emoji is added first so the two always render in the same
     order. Best-effort: never raises. `discord.abc.Messageable` itself does
@@ -56,6 +57,10 @@ async def seed_feedback_reactions(channel: discord.abc.Messageable, *, message_i
         partial = get_partial_message(int(message_id))
         await partial.add_reaction(THUMBS_UP)
         await partial.add_reaction(THUMBS_DOWN)
+        # The escalate emoji is seeded LAST so the two vote emoji keep the
+        # order they have always rendered in. It is not a vote and never
+        # reaches message_feedback -- `vote_for_reaction` does not match it.
+        await partial.add_reaction(ESCALATE)
     except Exception as exc:  # noqa: BLE001 -- best-effort affordance running after the answer was delivered; a seed failure must never surface as a turn failure (see module docstring)
         log.warning(
             "feedback.seed_failed",

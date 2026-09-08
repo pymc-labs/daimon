@@ -38,6 +38,7 @@ from daimon.core.message_feedback import THUMBS_DOWN, THUMBS_UP
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger
+from daimon.core.support_escalation import ESCALATE
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.testing.factories import make_tenant
@@ -47,7 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 # --- unit tests: the helper alone -------------------------------------------
 
 
-async def test_seed_adds_positive_then_negative_emoji() -> None:
+async def test_seed_adds_the_two_vote_emoji_then_the_escalate_emoji() -> None:
     partial = MagicMock()
     partial.add_reaction = AsyncMock()
     channel = MagicMock()
@@ -55,10 +56,14 @@ async def test_seed_adds_positive_then_negative_emoji() -> None:
 
     await seed_feedback_reactions(channel, message_id="123")
 
-    assert partial.add_reaction.await_count == 2, "both emoji must be added"
-    first_call, second_call = partial.add_reaction.await_args_list
+    assert partial.add_reaction.await_count == 3, "both vote emoji and the escalate emoji"
+    first_call, second_call, third_call = partial.add_reaction.await_args_list
     assert first_call.args[0] == THUMBS_UP, "the positive emoji must be added first"
     assert second_call.args[0] == THUMBS_DOWN, "the negative emoji must be added second"
+    assert third_call.args[0] == ESCALATE, (
+        "the escalate emoji is seeded LAST so the two vote emoji keep the order "
+        "they have always rendered in"
+    )
 
 
 async def test_seed_when_add_reaction_raises_forbidden_returns_normally() -> None:
@@ -343,7 +348,7 @@ def _fake_run_turn(final_state: TurnState) -> object:
 @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
 @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
 @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-async def test_a_real_text_answer_seeds_both_emoji_on_the_final_message(
+async def test_a_real_text_answer_seeds_all_three_emoji_on_the_final_message(
     mock_resolve: AsyncMock,
     mock_create_session: AsyncMock,
     mock_run_turn: AsyncMock,
@@ -372,7 +377,7 @@ async def test_a_real_text_answer_seeds_both_emoji_on_the_final_message(
     await bot.on_message(message)
 
     mock_thread.get_partial_message.assert_called_once_with(777888999)
-    assert mock_thread.get_partial_message.return_value.add_reaction.await_count == 2, (
+    assert mock_thread.get_partial_message.return_value.add_reaction.await_count == 3, (
         "an answered turn must seed both vote emoji on its final message"
     )
 
