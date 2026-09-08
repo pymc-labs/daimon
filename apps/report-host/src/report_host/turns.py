@@ -23,6 +23,7 @@ call funnels through the single ``_settle_reservation`` helper below.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -42,6 +43,8 @@ from report_host.mcp_client import (
 from report_host.reports_store import ReportRow
 from report_host.threads_store import ThreadRow
 
+log = logging.getLogger(__name__)
+
 # One fixed, reader-facing message for a bundle the host cannot re-push —
 # either there is no archive on record, the file is no longer on the volume,
 # or it resolves outside `settings.data_dir`. A single constant (not an
@@ -59,6 +62,16 @@ _REPORT_MISSING_MESSAGE = "This report could not be found; ask the publisher to 
 _DEADLINE_MESSAGE = (
     "This question was not answered within the time limit and has been stopped. "
     "It is still billed for what it consumed."
+)
+# Shown for any failure `run_turn` did not otherwise recognize (see the
+# `except Exception` boundary below). A single constant (not an f-string),
+# same reasoning as BUNDLE_MISSING_MESSAGE above: fixed and generic, never
+# an exception string or a stack frame, so a reader is never shown internals
+# — nor the seam token, which is the one thing about this failure that must
+# not leave the process — and so tests can assert on it by identity.
+TURN_FAILED_MESSAGE = (
+    "daimon could not start on this question; nothing was charged. "
+    "Ask again; if it repeats, tell the report's publisher."
 )
 
 
@@ -195,11 +208,17 @@ async def run_turn(
     so a restart's resume sweep and a real reader question call this
     function identically.
 
-    Exception boundary: this runs as a background task, so it is a
-    legitimate catch site. Only ``SeamError`` is caught, and it is stored as
-    a message the reader can act on; anything else is a bug in the host and
-    propagates.
+    Exception boundary: this runs as a background task with no caller to
+    propagate to, so it is a legitimate catch site for anything, not only
+    ``SeamError``. A ``SeamError`` is stored as a message the reader can act
+    on; anything else is logged (thread id and slug, never the token) and
+    reported as one fixed, generic message. Either way the turn ends idle
+    rather than stuck, and its reservation is settled exactly once:
+    ``reservation_pending`` tracks whether a reservation is currently
+    outstanding for this call, every explicit settle below clears it before
+    returning, and the ``finally`` releases it if none of them ran.
     """
+    reservation_pending = False
     try:
         report = reports_store.load_report(conn, slug=thread.slug)
         if report is None:
@@ -229,6 +248,7 @@ async def run_turn(
                     pdf_revision=report.current_pdf,
                 )
                 return
+            reservation_pending = True
 
             try:
                 if thread.handle is None:
@@ -254,6 +274,7 @@ async def run_turn(
                     _settle_reservation(
                         conn, slug=report.slug, reserved=settings.reserve_usd, actual=Decimal(0)
                     )
+                    reservation_pending = False
                     return
 
                 archive_bytes = archive_path.read_bytes()
@@ -292,6 +313,7 @@ async def run_turn(
                     _settle_reservation(
                         conn, slug=report.slug, reserved=settings.reserve_usd, actual=Decimal(0)
                     )
+                    reservation_pending = False
                     return
             except SeamUnauthorizedError:
                 reports_store.set_seam_status(conn, slug=report.slug, status="unauthorized")
@@ -307,6 +329,7 @@ async def run_turn(
                 _settle_reservation(
                     conn, slug=report.slug, reserved=settings.reserve_usd, actual=Decimal(0)
                 )
+                reservation_pending = False
                 return
 
             handle = started.handle
@@ -326,6 +349,10 @@ async def run_turn(
             handle = thread.handle
             turn_event_id = thread.turn_event_id
             turn_started_at_text = reports_store.dt_to_text(thread.turn_started_at)
+            # A restart-resume re-attach: the reservation was taken by the
+            # call that crashed mid-turn and is still outstanding on the
+            # report right now. This call, not that one, is what settles it.
+            reservation_pending = True
 
         seen_event_ids: frozenset[str] = frozenset()
         cancelled_at_deadline = False
@@ -383,7 +410,12 @@ async def run_turn(
         _settle_reservation(
             conn, slug=report.slug, reserved=settings.reserve_usd, actual=cost.cost_usd
         )
+        reservation_pending = False
     except SeamError as err:
+        # No explicit settle here: a generic SeamError (an unrecognized tool
+        # error, a transport failure) has none of the specific branches
+        # above's cleanup to run, so the `finally` below is what releases
+        # this call's reservation.
         threads_store.add_message(
             conn,
             thread_id=thread.id,
@@ -396,6 +428,22 @@ async def run_turn(
             bundle_sha256=None,
             pdf_revision=None,
         )
+    except Exception:
+        log.exception("run_turn failed unexpectedly thread_id=%s slug=%s", thread.id, thread.slug)
+        threads_store.add_message(
+            conn,
+            thread_id=thread.id,
+            role="system",
+            text=TURN_FAILED_MESSAGE,
+            now=now(),
+            bundle_sha256=None,
+            pdf_revision=None,
+        )
     finally:
+        if reservation_pending:
+            _settle_reservation(
+                conn, slug=thread.slug, reserved=settings.reserve_usd, actual=Decimal(0)
+            )
+            reservation_pending = False
         if not shutting_down():
             threads_store.end_turn(conn, thread_id=thread.id, now=now())

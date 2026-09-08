@@ -19,7 +19,7 @@ import httpx
 import pytest
 from report_host import reports_store, threads_store, turns
 from report_host.config import Settings, load_settings
-from report_host.mcp_client import SeamClient
+from report_host.mcp_client import SeamClient, StartedTurn
 from report_host.turns import read_turn_progress, run_turn
 from starlette.types import Receive, Scope, Send
 
@@ -847,3 +847,169 @@ async def test_run_turn_reattach_sends_nothing_and_polls_straight_to_terminal(
     updated_report = reports_store.load_report(conn, slug="acme")
     assert updated_report is not None
     assert updated_report.spent_usd == Decimal("0.02")
+
+
+# --------------------------------------------------------------------------
+# The exception boundary: an unexpected exception, and the generic SeamError
+# branch, must both release the reservation exactly once — the staging
+# defect this fixes let three failed questions leak $1.80 of a $2.00 cap
+# with no seam call ever billed.
+# --------------------------------------------------------------------------
+
+
+async def test_run_turn_with_unexpected_exception_releases_reservation_and_shows_fixed_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_fake_seam: FakeSeamBuilder,
+    fake_seam_lifespan: FakeSeamLifespan,
+) -> None:
+    """The `except Exception` boundary: a bug in the seam client — not a
+    SeamError — must still end the turn, release the reservation, and show
+    the reader the one fixed message, never propagating out of `run_turn`.
+    This reproduces the actual staging defect (an unhandled `ValueError`
+    from the mcp client) with a plain `RuntimeError`, since the point being
+    pinned is the boundary itself, not which library raised."""
+    conn, _report, thread = _setup(tmp_path)
+    thread = _begin(conn, thread, deadline_at=NOW + timedelta(seconds=1200))
+
+    app = build_fake_seam(behaviors={}, captured_auth=[])
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    seam_client = _seam_client(app)
+
+    async def raise_runtime_error(
+        *, token: str, message: str, bundle: str | None = None
+    ) -> StartedTurn:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(seam_client, "start_turn", raise_runtime_error)
+
+    async with fake_seam_lifespan(app):
+        await run_turn(
+            conn=conn,
+            seam=seam_client,
+            settings=settings,
+            thread=thread,
+            message="hello",
+            now=lambda: NOW,
+        )
+
+    updated_report = reports_store.load_report(conn, slug="acme")
+    assert updated_report is not None
+    assert updated_report.spent_usd == Decimal("0"), (
+        "an unhandled exception must still release the reservation, not leak it"
+    )
+    messages = threads_store.list_messages(conn, thread_id=thread.id)
+    system_texts = [m.text for m in messages if m.role == "system"]
+    assert system_texts == [turns.TURN_FAILED_MESSAGE]
+    updated_thread = threads_store.load_thread(
+        conn, thread_id=thread.id, slug="acme", recipient_token="rcpt-1"
+    )
+    assert updated_thread is not None
+    assert updated_thread.status == "idle", "the thread must end idle, not stuck running"
+
+
+async def test_run_turn_with_generic_seam_error_releases_the_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_fake_seam: FakeSeamBuilder,
+    fake_seam_lifespan: FakeSeamLifespan,
+) -> None:
+    """The plain `except SeamError` branch (a transport failure or an
+    unrecognized tool error — anything that is neither `BundleExpiredError`
+    nor `SeamUnauthorizedError`) has no reservation cleanup of its own; the
+    `finally` release is what stops it leaking the reserve, same as it did
+    on staging when `SeamError`-shaped failures ran out three questions'
+    worth of reserve with no seam call ever billed."""
+    conn, _report, thread = _setup(tmp_path)
+    thread = _begin(conn, thread, deadline_at=NOW + timedelta(seconds=1200))
+
+    def start_turn(_args: dict[str, object]) -> dict[str, object]:
+        raise Exception("seam is temporarily unavailable")  # noqa: TRY002
+
+    app = build_fake_seam(behaviors={"start_turn": start_turn}, captured_auth=[])
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    async with fake_seam_lifespan(app):
+        await run_turn(
+            conn=conn,
+            seam=_seam_client(app),
+            settings=settings,
+            thread=thread,
+            message="hello",
+            now=lambda: NOW,
+        )
+
+    updated_report = reports_store.load_report(conn, slug="acme")
+    assert updated_report is not None
+    assert updated_report.spent_usd == Decimal("0"), (
+        "a generic SeamError must still release the reservation"
+    )
+    messages = threads_store.list_messages(conn, thread_id=thread.id)
+    system_texts = [m.text for m in messages if m.role == "system"]
+    assert len(system_texts) == 1
+    assert "could not answer" in system_texts[0].lower()
+
+
+async def test_run_turn_happy_path_settles_the_reservation_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_fake_seam: FakeSeamBuilder,
+    fake_seam_lifespan: FakeSeamLifespan,
+) -> None:
+    """Mutation check for the settle funnel: on a clean happy path, the real
+    `reports_store.settle_budget` must land exactly once. Making the
+    `finally` release unconditional (rather than gated on
+    `reservation_pending`) turns this red with a second, spurious call —
+    verified by hand while writing this fix, not asserted here since the
+    codebase does not carry a mutation-testing harness."""
+    conn, _report, thread = _setup(tmp_path)
+    thread = _begin(conn, thread, deadline_at=NOW + timedelta(seconds=1200))
+
+    get_my_session, list_events = _scripted([("idle", [_event("evt-1", "session.status_idle")])])
+
+    def start_turn(_args: dict[str, object]) -> dict[str, object]:
+        return {
+            "handle": "ses-1",
+            "turn_event_id": "evt-0",
+            "turn_started_at": "2026-09-08T12:00:00+00:00",
+        }
+
+    def get_turn_cost(_args: dict[str, object]) -> dict[str, object]:
+        return {"cost_usd": "0.10", "event_count": 1}
+
+    app = build_fake_seam(
+        behaviors={
+            "start_turn": start_turn,
+            "get_my_session": get_my_session,
+            "list_events": list_events,
+            "get_turn_cost": get_turn_cost,
+        },
+        captured_auth=[],
+    )
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    settle_calls: list[tuple[Decimal, Decimal | None]] = []
+    real_settle_budget = reports_store.settle_budget
+
+    def counting_settle_budget(
+        conn: sqlite3.Connection, *, slug: str, reserved: Decimal, actual: Decimal | None
+    ) -> None:
+        settle_calls.append((reserved, actual))
+        real_settle_budget(conn, slug=slug, reserved=reserved, actual=actual)
+
+    monkeypatch.setattr(reports_store, "settle_budget", counting_settle_budget)
+
+    async with fake_seam_lifespan(app):
+        await run_turn(
+            conn=conn,
+            seam=_seam_client(app),
+            settings=settings,
+            thread=thread,
+            message="hello",
+            now=lambda: NOW,
+        )
+
+    assert len(settle_calls) == 1, "the happy path must settle the reservation exactly once"
+    updated_report = reports_store.load_report(conn, slug="acme")
+    assert updated_report is not None
+    assert updated_report.spent_usd == Decimal("0.10")

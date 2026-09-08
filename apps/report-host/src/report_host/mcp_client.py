@@ -223,15 +223,17 @@ class SeamClient:
                 httpx.AsyncClient(
                     transport=self._transport, headers=headers, follow_redirects=True
                 ) as call_client,
-                streamable_http_client(self._mcp_url, http_client=call_client) as (
-                    read,
-                    write,
-                    _get_session_id,
-                ),
-                ClientSession(read, write) as session,
+                streamable_http_client(self._mcp_url, http_client=call_client) as streams,
             ):
-                await session.initialize()
-                result = await session.call_tool(tool, arguments)
+                # mcp 1.x yields a 3-tuple (read, write, get_session_id); 2.x
+                # narrowed this to a 2-tuple (read, write). Index rather than
+                # destructure so a resolver drift past the pyproject pin
+                # (mcp>=1.27,<2) fails loudly there, not as a bare
+                # `ValueError: not enough values to unpack` at runtime.
+                read, write = streams[0], streams[1]
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool, arguments)
         except* httpx.HTTPStatusError as eg:
             err = _flatten_first(eg)
             if err.response.status_code == 401:
