@@ -12,8 +12,6 @@ Admin, upload-token-consuming and publish routes are NOT here — they land in
 later plans. This module owns only what a report's reader can reach.
 """
 
-from __future__ import annotations
-
 import secrets
 import sqlite3
 from collections.abc import Awaitable, Callable
@@ -141,7 +139,7 @@ def build_reader_router(
     router = APIRouter()
     router.mount("/viewer", StaticFiles(directory=_VIEWER_DIR), name="viewer-assets")
 
-    def resolve_recipient(slug: str, request: Request) -> RecipientRow:
+    async def resolve_recipient(slug: str, request: Request) -> RecipientRow:
         token = request.query_params.get("k") or request.cookies.get(f"rh_{slug}")
         recipient = (
             reports_store.load_recipient(conn, slug=slug, token=token, now=now()) if token else None
@@ -151,7 +149,7 @@ def build_reader_router(
         return recipient
 
     @router.get("/r/{slug}")
-    def get_viewer(  # pyright: ignore[reportUnusedFunction]
+    async def get_viewer(  # pyright: ignore[reportUnusedFunction]
         slug: str, recipient: Annotated[RecipientRow, Depends(resolve_recipient)]
     ) -> HTMLResponse:
         html = (_VIEWER_DIR / "index.html").read_text()
@@ -167,7 +165,7 @@ def build_reader_router(
         return response
 
     @router.get("/api/{slug}/state")
-    def get_state(  # pyright: ignore[reportUnusedFunction]
+    async def get_state(  # pyright: ignore[reportUnusedFunction]
         slug: str, recipient: Annotated[RecipientRow, Depends(resolve_recipient)]
     ) -> StateResponse:
         report = reports_store.load_report(conn, slug=slug)
@@ -196,7 +194,7 @@ def build_reader_router(
         )
 
     @router.get("/api/{slug}/threads/{thread_id}")
-    def get_thread(  # pyright: ignore[reportUnusedFunction]
+    async def get_thread(  # pyright: ignore[reportUnusedFunction]
         slug: str,
         thread_id: int,
         recipient: Annotated[RecipientRow, Depends(resolve_recipient)],
@@ -222,7 +220,7 @@ def build_reader_router(
         )
 
     @router.get("/files/{slug}/{name}")
-    def get_file(  # pyright: ignore[reportUnusedFunction]
+    async def get_file(  # pyright: ignore[reportUnusedFunction]
         slug: str, name: str, recipient: Annotated[RecipientRow, Depends(resolve_recipient)]
     ) -> FileResponse:
         _validate_pdf_name(name)
@@ -237,8 +235,8 @@ def build_reader_router(
     async def ask(  # pyright: ignore[reportUnusedFunction]
         slug: str,
         body: AskRequest,
-        recipient: Annotated[RecipientRow, Depends(resolve_recipient)],
         background_tasks: BackgroundTasks,
+        recipient: Annotated[RecipientRow, Depends(resolve_recipient)],
     ) -> AskResponse:
         report = reports_store.load_report(conn, slug=slug)
         if report is None:

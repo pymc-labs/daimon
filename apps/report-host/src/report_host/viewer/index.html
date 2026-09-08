@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="only light">
+<title>Report</title>
+<link rel="stylesheet" href="/viewer/app.css">
+<script type="module">
+import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs";
+window.pdfjsLib = pdfjsLib;
+window.dispatchEvent(new Event("pdfjs-ready"));
+</script>
+</head>
+<body>
+<main class="viewer">
+  <div class="viewer-bar">
+    <div class="title" id="title">Loading…</div>
+    <div class="versions" id="versions"></div>
+    <button class="dock-open" id="dock-open" type="button" aria-label="Open chat">Ask daimon</button>
+  </div>
+  <div class="pages" id="pages"></div>
+</main>
+<aside class="dock">
+  <header class="dock-head">
+    <div>
+      <div class="dock-kicker">Ask about this report</div>
+      <div class="dock-reader" id="reader"></div>
+    </div>
+    <button class="dock-close" id="dock-close" type="button" aria-label="Close chat">&#x2715;</button>
+  </header>
+  <div class="banner" id="banner" hidden></div>
+  <section class="threads" id="threads"></section>
+  <section class="messages" id="messages"><div class="empty">Ask why any number is what it is. daimon answers from the analysis files behind this report.</div></section>
+  <div class="status" id="status"></div>
+  <div class="stop-row">
+    <button type="button" id="stop" class="stop-btn" hidden>Stop</button>
+    <span class="stop-hint">Stopping is still billed for the work daimon has already done.</span>
+  </div>
+  <form class="composer" id="composer">
+    <textarea id="input" rows="2" placeholder="Ask about any number or claim in this report"></textarea>
+    <button type="submit" id="send">Ask</button>
+  </form>
+  <footer class="meter" id="meter"></footer>
+</aside>
+<script src="/viewer/app.js"></script>
+</body>
+</html>
