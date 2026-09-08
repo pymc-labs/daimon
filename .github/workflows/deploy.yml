@@ -48,6 +48,7 @@ jobs:
       REPO: ${{ vars.GCP_AR_REPO }}
       ZONE: ${{ vars.GCP_ZONE }}
       NOTEBOOK_DOMAIN: ${{ vars.NOTEBOOK_DOMAIN }}
+      REPORT_DOMAIN: ${{ vars.REPORT_DOMAIN }}
     steps:
       # Guard both entry points: ci.yml/promote.yml pass a full github.sha,
       # but workflow_dispatch is free text — reject branch names, short SHAs,
@@ -86,6 +87,7 @@ jobs:
           BASE=${{ env.AR_HOST }}/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO }}
           echo "daimon=$BASE/daimon:$SHA" >> "$GITHUB_OUTPUT"
           echo "notebook=$BASE/notebook-host:$SHA" >> "$GITHUB_OUTPUT"
+          echo "report=$BASE/report-host:$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Build + push daimon image
         run: |
@@ -96,6 +98,11 @@ jobs:
         run: |
           docker build -t "${{ steps.tags.outputs.notebook }}" -f apps/notebook-host/Dockerfile .
           docker push "${{ steps.tags.outputs.notebook }}"
+
+      - name: Build + push report-host image
+        run: |
+          docker build -t "${{ steps.tags.outputs.report }}" -f apps/report-host/Dockerfile .
+          docker push "${{ steps.tags.outputs.report }}"
 
       - name: Run migrations (blocking gate)
         run: |
@@ -175,6 +182,18 @@ jobs:
               sudo docker image prune -af || true
             '
 
+      - name: Resolve seam URL for report-host
+        id: seam
+        run: |
+          # report-host's DAIMON_REPORT__MCP_URL points at the same mcp
+          # Cloud Run service the workers call, mounted at /mcp. The service
+          # URL is stable for the life of the service but has no predictable
+          # form, so it is discovered the same way the health gate step
+          # below discovers it, not hardcoded or stored as a variable.
+          URL=$(gcloud run services describe ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
+            --format='value(status.url)')
+          echo "url=$URL/mcp" >> "$GITHUB_OUTPUT"
+
       - name: Refresh notebook-host VM container (recreate in place)
         run: |
           gcloud compute ssh ${{ vars.GCP_AR_REPO }}-notebook --zone "$ZONE" \
@@ -189,6 +208,13 @@ jobs:
               # (the compose file and Caddyfile live in the operator private infra repo).
               export NOTEBOOK_DOMAIN="${{ env.NOTEBOOK_DOMAIN }}"
               export NOTEBOOK_PUBLIC_URL_BASE="https://${{ env.NOTEBOOK_DOMAIN }}"
+              # report-host is the second service on this same VM, behind the
+              # same Caddy on its own hostname (the compose file and Caddyfile
+              # live in the companion infra repo).
+              export REPORT_IMAGE="${{ steps.tags.outputs.report }}"
+              export REPORT_DOMAIN="${{ env.REPORT_DOMAIN }}"
+              export REPORT_PUBLIC_URL_BASE="https://${{ env.REPORT_DOMAIN }}"
+              export REPORT_MCP_URL="${{ steps.seam.outputs.url }}"
               # Same DOCKER_CONFIG redirect as the workers refresh: use root
               # docker config (has the Artifact Registry credential helper).
               export DOCKER_CONFIG=/root/.docker
@@ -210,6 +236,24 @@ jobs:
               cd /etc/daimon
               sudo -E docker compose -f compose.notebook.yml pull
               sudo -E docker compose -f compose.notebook.yml up -d --remove-orphans
+              # Gate: report-host must come up and stay up. `up -d` alone does
+              # not fail on a crash-looping container, and a green step that
+              # proves nothing is worse than a red one -- same reasoning as
+              # the slack worker gate above, modelled on it here.
+              for i in $(seq 1 20); do
+                sleep 6
+                running=$(sudo docker inspect --format "{{.State.Running}}" daimon-report-host-1)
+                restarts=$(sudo docker inspect --format "{{.RestartCount}}" daimon-report-host-1)
+                if [ "$running" = "true" ] && [ "$restarts" = "0" ] \
+                  && sudo docker exec daimon-report-host-1 python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8002/health\", timeout=3)" 2>/dev/null; then
+                  echo "report host healthy (attempt $i)"
+                  break
+                fi
+                if [ "$i" = "20" ]; then
+                  echo "report host not healthy after 120s (running=$running restarts=$restarts)" >&2
+                  exit 1
+                fi
+              done
               # Same prune as the workers refresh (see comment there).
               sudo docker image prune -af || true
             '
