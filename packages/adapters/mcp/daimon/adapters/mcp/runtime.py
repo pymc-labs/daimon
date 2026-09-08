@@ -27,5 +27,6 @@ class McpRuntime:
     deployment_default: DeploymentDefault
     gemini_client: genai.Client | None = None
     notebook_rate_limiter: RateLimiter | None = None
+    bundle_rate_limiter: RateLimiter | None = None
     fernet: MultiFernet | None = field(default=None)
     artifact_store: ArtifactStore | None = field(default=None)

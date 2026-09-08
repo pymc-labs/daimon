@@ -18,6 +18,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.artifacts import build_artifact_store
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.middleware.mcp_identity import (
@@ -241,6 +242,9 @@ def create_mcp_app(
     notebook_rate_limiter = RateLimiter(
         max_requests=effective_settings.notebook.publish_rate_per_hour,
     )
+    bundle_rate_limiter = RateLimiter(
+        max_requests=effective_settings.mcp.bundle_uploads_per_hour,
+    )
 
     fernet = (
         build_multifernet(tuple(k.get_secret_value() for k in effective_settings.crypto.keys))
@@ -262,6 +266,7 @@ def create_mcp_app(
         deployment_default=deployment_default,
         gemini_client=gemini_client,
         notebook_rate_limiter=notebook_rate_limiter,
+        bundle_rate_limiter=bundle_rate_limiter,
         fernet=fernet,
         artifact_store=artifact_store,
     )
@@ -305,6 +310,19 @@ def create_mcp_app(
     app.add_route(
         "/uploads/{token}",
         build_upload_route(effective_sessionmaker),
+        methods=["PUT"],
+    )
+    # No token path segment (unlike /uploads/{token}): the bearer IS the
+    # credential here, so there is nothing else to put in the path.
+    app.add_route(
+        "/bundles",
+        build_bundles_route(
+            anthropic=effective_anthropic,
+            session_factory=effective_sessionmaker,
+            auth=effective_auth,
+            mcp_settings=effective_settings.mcp,
+            rate_limiter=bundle_rate_limiter,
+        ),
         methods=["PUT"],
     )
     app.add_route("/healthz", _healthz, methods=["GET"])

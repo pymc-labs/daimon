@@ -33,6 +33,16 @@ Headless loop (primitives plus the bounded ``ask`` convenience tool):
 - ``deliver_turn_charts`` finds the newest completed reply and delivers charts
   from that turn. It performs a bounded artifact-store write when optional
   link delivery is configured; it is not admission-gated.
+- ``archive_my_session`` archives a finished session so it stops being a live
+  session forever (a reader thread that never archives would otherwise be
+  re-read by every usage-sweep tick). Read-only ownership check, not gated.
+- ``cancel_turn`` sends one unconditional ``user.interrupt`` and reports the
+  status observed right after — no read-then-send race. Read-only ownership
+  check, not gated (a caller over balance must still be able to stop a turn).
+- ``get_turn_cost`` folds one finished turn's ``span.model_request_end``
+  events into a pre-markup USD cost. A separate tool, not a field on
+  ``get_session`` — the host polls status every two seconds and reads cost
+  once per terminal. Read-only ownership check, not gated.
 """
 
 from __future__ import annotations
@@ -41,14 +51,19 @@ import asyncio
 import datetime as dt
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 from time import monotonic
 from typing import Any, Literal
 
+import anthropic
+import structlog
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
     BetaManagedAgentsSession,
 )
+from anthropic.types.beta.session_create_params import Resource
+from anthropic.types.beta.sessions import BetaManagedAgentsSendSessionEvents
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.hosted_artifacts import ChartUrl, deliver_hosted_charts
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -58,11 +73,14 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
+from daimon.core import bundle_handle
 from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
-from daimon.core.sessions import create_session
+from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.scoped_config_read import resolve
 from fastmcp import Context, FastMCP
@@ -73,9 +91,30 @@ from pydantic.json_schema import SkipJsonSchema
 
 from mcp.types import ImageContent, TextContent
 
+log = structlog.get_logger(__name__)
+
 # Each transcript page costs two upstream calls (ownership retrieve + events
 # list), so an uncapped walk on a long session can outlast any client timeout.
 _MAX_EVENT_PAGES = 20
+
+
+def _turn_boundary(sent: BetaManagedAgentsSendSessionEvents) -> str:
+    """Read the turn boundary event id off a send response.
+
+    The accepted event's id IS the boundary a caller drops through: read
+    events at or after the seam's own pre-send clock reading and discard
+    everything up to and including this id. The timestamp is NOT read off
+    the echo — a live probe against the API showed the send response always
+    echoes the event with ``processed_at=None``; the timestamp only appears
+    roughly half a second later, once the agent starts on the event — so the
+    boundary's clock is the caller's own, captured immediately before the
+    send (see the callers' ``now`` parameter). Raises when the send accepted
+    nothing — a send with no accepted event is not a started turn and must
+    not return a half-answer.
+    """
+    if not sent.data:
+        raise ToolError("send returned no accepted event")
+    return sent.data[0].id
 
 
 class AgentDescription(BaseModel):
@@ -246,17 +285,31 @@ async def _start_turn_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     message: str,
+    bundle: str | None = None,
+    *,
+    now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> dict[str, str]:
     """Create a new MA session for the caller's agent and send the first message.
 
-    Returns ``{"handle": session_id}`` — the caller passes ``handle`` to
-    subsequent ``continue_turn``, ``get_session``, and ``list_events`` calls.
+    Returns ``{"handle": session_id, "turn_event_id": ..., "turn_started_at": ...}``.
+    ``turn_event_id`` is the accepted ``user.message`` event's id, taken from
+    the ``events.send`` response. ``turn_started_at`` is ``now()`` captured
+    immediately BEFORE that call, not a timestamp read off the response — the
+    echo carries no usable timestamp of its own (see ``_turn_boundary``). A
+    caller reading the transcript should ask ``list_events`` for events with
+    ``created_at_gte=turn_started_at`` and discard everything up to and
+    including ``turn_event_id`` — this is the turn boundary.
 
     Environment resolution (fail-closed):
     - Resolve ``environment_name`` via the shared channel/tenant/deployment
       cascade (``resolve()``, MPP-01 — same as Discord).
     - Look it up on MA via ``find_environment_by_daimon_tag``.
     - Raise ``ToolError("environment not found")`` if either step fails.
+
+    When ``bundle`` is given, the session is created on the isolated path
+    (``create_isolated_session``) with the bundle mounted as its only
+    resource, instead of the normal vault/repo/env-mounted ``create_session``
+    path. See ``bundle_handle`` and SPEC §1.1 for the verification steps.
     """
     ma_agent = await _resolve_ma_agent(runtime, auth)
 
@@ -270,34 +323,71 @@ async def _start_turn_impl(
     if environment is None:
         raise ToolError("environment not found")
 
-    github_fallback_pat: str | None = (
-        runtime.settings.github.fallback_pat.get_secret_value()
-        if runtime.settings.github.fallback_pat is not None
-        else None
-    )
-    github_app_id: str | None = runtime.settings.github.app_id
-    github_app_private_key: str | None = (
-        runtime.settings.github.app_private_key.get_secret_value()
-        if runtime.settings.github.app_private_key is not None
-        else None
-    )
+    is_isolated = ma_agent.metadata.get(MA_METADATA_KEY_ISOLATED) == "true"
 
-    session = await create_session(
-        runtime.client,
-        agent=ma_agent,
-        environment=environment,
-        mcp_settings=runtime.settings.mcp,
-        account_id=auth.account_id,
-        tenant_id=auth.tenant_id,
-        agent_uuid=auth.agent_id,
-        session_factory=runtime.session_factory,
-        fernet=runtime.fernet,
-        github_fallback_pat=github_fallback_pat,
-        github_app_id=github_app_id,
-        github_app_private_key=github_app_private_key,
-    )
+    if bundle is not None:
+        if not is_isolated:
+            raise ToolError("bundle requires an isolated agent")
+        if runtime.settings.mcp.jwt_secret is None:
+            raise ToolError("bundle upload is not configured on this deployment")
+        claims = (
+            bundle_handle.verify(
+                runtime.settings.mcp.jwt_secret.get_secret_value(),
+                bundle,
+                tenant_id=auth.tenant_id,
+                agent_id=auth.agent_id,
+                now=dt.datetime.now(dt.UTC),
+            )
+            if auth.agent_id is not None
+            else None
+        )
+        if claims is None:
+            raise ToolError("bundle not found")
+        try:
+            await runtime.client.beta.files.retrieve_metadata(claims.file_id)
+        except anthropic.NotFoundError as err:
+            raise ToolError("bundle expired; re-upload") from err
+        resources: list[Resource] = [
+            {"type": "file", "file_id": claims.file_id, "mount_path": "/bundle.tar.gz"}
+        ]
+        session = await create_isolated_session(
+            runtime.client,
+            agent=ma_agent,
+            environment=environment,
+            account_id=auth.account_id,
+            tenant_id=auth.tenant_id,
+            resources=resources,
+        )
+    else:
+        github_fallback_pat: str | None = (
+            runtime.settings.github.fallback_pat.get_secret_value()
+            if runtime.settings.github.fallback_pat is not None
+            else None
+        )
+        github_app_id: str | None = runtime.settings.github.app_id
+        github_app_private_key: str | None = (
+            runtime.settings.github.app_private_key.get_secret_value()
+            if runtime.settings.github.app_private_key is not None
+            else None
+        )
 
-    await runtime.client.beta.sessions.events.send(
+        session = await create_session(
+            runtime.client,
+            agent=ma_agent,
+            environment=environment,
+            mcp_settings=runtime.settings.mcp,
+            account_id=auth.account_id,
+            tenant_id=auth.tenant_id,
+            agent_uuid=auth.agent_id,
+            session_factory=runtime.session_factory,
+            fernet=runtime.fernet,
+            github_fallback_pat=github_fallback_pat,
+            github_app_id=github_app_id,
+            github_app_private_key=github_app_private_key,
+        )
+
+    turn_started_at = now()
+    sent = await runtime.client.beta.sessions.events.send(
         session.id,
         events=[
             {
@@ -306,8 +396,13 @@ async def _start_turn_impl(
             }
         ],
     )
+    turn_event_id = _turn_boundary(sent)
 
-    return {"handle": session.id}
+    return {
+        "handle": session.id,
+        "turn_event_id": turn_event_id,
+        "turn_started_at": turn_started_at.isoformat(),
+    }
 
 
 async def _continue_turn_impl(
@@ -315,14 +410,22 @@ async def _continue_turn_impl(
     auth: AuthIdentity,
     handle: str,
     message: str,
+    *,
+    now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> dict[str, str]:
     """Send a follow-up message on an existing session.
 
-    ``_verify_agent_owns_session`` guards against cross-tenant AND
+    Returns ``{"handle": handle, "turn_event_id": ..., "turn_started_at": ...}``,
+    the same three-key shape as ``start_turn``. ``turn_event_id`` is taken
+    from THIS call's ``events.send`` response, not the session's earlier
+    events; ``turn_started_at`` is ``now()`` captured immediately BEFORE that
+    send (see ``_start_turn_impl`` for why the echo's own timestamp isn't
+    used). ``_verify_agent_owns_session`` guards against cross-tenant AND
     same-tenant cross-agent handles (Tampering threat mitigation, WR-03).
     """
     await _verify_agent_owns_session(runtime, auth, handle)
-    await runtime.client.beta.sessions.events.send(
+    turn_started_at = now()
+    sent = await runtime.client.beta.sessions.events.send(
         handle,
         events=[
             {
@@ -331,7 +434,12 @@ async def _continue_turn_impl(
             }
         ],
     )
-    return {"handle": handle}
+    turn_event_id = _turn_boundary(sent)
+    return {
+        "handle": handle,
+        "turn_event_id": turn_event_id,
+        "turn_started_at": turn_started_at.isoformat(),
+    }
 
 
 async def _list_sessions_impl(
@@ -365,6 +473,129 @@ async def _get_session_impl(
     return SessionInfo.from_ma(s)
 
 
+async def _archive_my_session_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+) -> dict[str, str]:
+    """Archive a finished session so it stops being a live session forever.
+
+    Without this, every reader thread accumulates as a live MA session and
+    the usage sweep re-reads all of them on every tick. Not a cancel — a
+    running turn is stopped with the cancel tool, not this one.
+    ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
+    cross-agent handles (WR-03).
+    """
+    await _verify_agent_owns_session(runtime, auth, handle)
+    await runtime.client.beta.sessions.archive(handle)
+    return {"handle": handle, "archived": "true"}
+
+
+async def _cancel_turn_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+) -> dict[str, str]:
+    """Stop a running turn with one unconditional interrupt, then report status.
+
+    Sends ``user.interrupt`` unconditionally — no read-then-send: a status
+    read before the send would race the session's own state (it can change
+    between the read and the send), and the interrupt is safe to send at any
+    status anyway, including an already-idle or already-terminated session
+    (harmless no-op). This call returns immediately; it does not wait for the
+    interrupt to take effect — poll ``get_my_session`` to see the session
+    reach ``idle`` or ``terminated`` (contrast ``daimon.core.ma.
+    send_interrupt_and_wait``, which sends the same event and then blocks on
+    the SSE stream for a terminal ``session.status_idle``; this tool is
+    fire-and-return, not fire-and-wait).
+
+    An interrupted turn is still billed for what it already consumed before
+    the interrupt landed — the model work already done is real work and is
+    not refunded. The report host surfaces that to the reader.
+
+    ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
+    cross-agent handles (WR-03) before any send.
+    """
+    await _verify_agent_owns_session(runtime, auth, handle)
+    await runtime.client.beta.sessions.events.send(handle, events=[{"type": "user.interrupt"}])
+    session = await runtime.client.beta.sessions.retrieve(handle)
+    return {"handle": handle, "status": session.status}
+
+
+async def _get_turn_cost_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+    turn_started_at: str,
+    turn_event_id: str,
+) -> dict[str, object]:
+    """Fold one finished turn's model-request cost — the RAW PROVIDER COST
+    BEFORE MARKUP.
+
+    This is NOT expected to equal the tenant ledger's debit for the same
+    turn: the ledger applies ``settings.billing.markup`` on top of this
+    figure (``daimon.core.tenant_balance.debit_amount``). An integrator who
+    assumes the two match will build a reconciliation that never balances.
+
+    Pass the ``turn_started_at``/``turn_event_id`` returned by ``start_turn``
+    or ``continue_turn``. Pages ``span.model_request_end`` events at or after
+    ``turn_started_at`` and folds each into
+    ``Decimal(str(cost_of(event.model_usage, pricing))).quantize(Decimal("0.000001"))``,
+    summed. The boundary event itself (``turn_event_id``) is never folded in,
+    even if it were ever echoed back by this filtered listing.
+
+    Returns ``{"cost_usd": <str(Decimal) or None>, "event_count": <int>}``.
+    ``cost_usd`` is serialised as a string, never a float — a float
+    round-trip is exactly the drift ``debit_amount``'s ``Decimal(str(...))``
+    conversion exists to avoid. ``cost_usd`` is ``None`` (NOT zero) when the
+    session's model has no pricing row: a zero would falsely claim the turn
+    was free. A turn with pricing but no model-request events yet returns a
+    real zero cost, distinguishable from the unpriced ``None`` case.
+
+    ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
+    cross-agent handles (WR-03); the session it returns is reused for the
+    pricing lookup rather than retrieved twice.
+    """
+    session = await _verify_agent_owns_session(runtime, auth, handle)
+    model_id = session.agent.model.id
+    pricing = MODEL_PRICING.get(model_id)
+    if pricing is None:
+        log.warning("agent_chat.get_turn_cost.unpriced_model", handle=handle, model_id=model_id)
+
+    total = Decimal("0")
+    event_count = 0
+    page: str | None = None
+    for _ in range(_MAX_EVENT_PAGES):
+        list_kwargs: dict[str, Any] = {
+            "created_at_gte": turn_started_at,
+            "types": ["span.model_request_end"],
+            "order": "asc",
+        }
+        if page is not None:
+            list_kwargs["page"] = page
+        cursor = await runtime.client.beta.sessions.events.list(handle, **list_kwargs)
+        for event in cursor.data:
+            if event.id == turn_event_id:
+                continue
+            if event.type != "span.model_request_end":
+                continue
+            event_count += 1
+            if pricing is None:
+                continue
+            cost = cost_of(event.model_usage, pricing)
+            if cost is None:
+                continue
+            total += Decimal(str(cost)).quantize(Decimal("0.000001"))
+        if cursor.next_page is None:
+            break
+        page = cursor.next_page
+
+    return {
+        "cost_usd": str(total) if pricing is not None else None,
+        "event_count": event_count,
+    }
+
+
 async def _list_events_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -372,12 +603,20 @@ async def _list_events_impl(
     page: str | None,
     limit: int | None,
     order: Literal["asc", "desc"] | None,
+    created_at_gte: str | None = None,
+    types: list[str] | None = None,
 ) -> Page[SessionEventOut]:
     """List a session's events (the transcript) for the caller to read.
 
     This is how a primitives-only caller reads the agent's reply: fold the
     ``agent.message`` events client-side. ``_verify_agent_owns_session``
     guards cross-tenant AND same-tenant cross-agent handles (WR-03).
+
+    ``created_at_gte`` and ``types`` let a poller read one turn instead of
+    the whole transcript: pass the ``turn_started_at`` from ``start_turn``/
+    ``continue_turn`` as ``created_at_gte`` and
+    ``types=["agent.message", "session.status_idle"]`` to see only this
+    turn's reply and completion signal.
     """
     await _verify_agent_owns_session(runtime, auth, handle)
     list_kwargs: dict[str, Any] = {}
@@ -387,6 +626,10 @@ async def _list_events_impl(
         list_kwargs["limit"] = limit
     if order is not None:
         list_kwargs["order"] = order
+    if created_at_gte is not None:
+        list_kwargs["created_at_gte"] = created_at_gte
+    if types is not None:
+        list_kwargs["types"] = types
     cursor = await runtime.client.beta.sessions.events.list(handle, **list_kwargs)
     return Page[SessionEventOut](
         items=[
@@ -582,9 +825,10 @@ def register_agent_chat_tools(
 
     ``start_turn``, ``continue_turn``, and ``ask`` run the shared
     ``_check_admission`` gate (the same balance/cap checks the media tools run)
-    before creating a session or sending an event. The four read-only tools and
-    ``deliver_turn_charts`` stay on bare ``_auth``; the latter performs a
-    bounded artifact-store write when optional link delivery is configured.
+    before creating a session or sending an event. Every other tool —
+    including ``cancel_turn`` and ``get_turn_cost`` — stays on bare ``_auth``;
+    ``deliver_turn_charts`` is the one exception that performs a bounded
+    artifact-store write when optional link delivery is configured.
     """
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
@@ -608,12 +852,30 @@ def register_agent_chat_tools(
         return await _list_sessions_impl(runtime, await _auth(ctx))
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
-    async def start_turn(ctx: Context, message: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+    async def start_turn(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, message: str, bundle: str | None = None
+    ) -> dict[str, str]:
         """Start a new conversation turn with the agent and return a handle.
 
         Creates a persistent MA session with vault/repo/env parity and sends
-        the first user message. Returns ``{"handle": "<session_id>"}`` which
-        you pass to ``get_session``, ``list_events``, and ``continue_turn``.
+        the first user message. Returns ``{"handle": "<session_id>",
+        "turn_event_id": "<event_id>", "turn_started_at": "<iso8601>"}``.
+        ``handle`` is passed to ``get_session``, ``list_events``, and
+        ``continue_turn``. ``turn_event_id`` and ``turn_started_at`` identify
+        this turn's first event: poll ``list_events`` with
+        ``created_at_gte=turn_started_at`` and discard everything up to and
+        including ``turn_event_id`` to read only this turn's transcript.
+
+        ``bundle`` is an opaque handle returned by the bundle upload route.
+        Passing it mounts that archive read-only in the session's uploads
+        directory instead of the normal vault/repo/env mounts, and requires
+        an isolated agent — a non-isolated agent is refused outright with
+        the message 'bundle requires an isolated agent'. A handle that fails
+        verification for any reason (tampered, expired, wrong tenant, wrong
+        agent) is refused with the message 'bundle not found', one wording
+        for every cause. A handle whose underlying file is gone is refused
+        with the message 'bundle expired; re-upload' — that one specifically
+        means push the archive again.
         """
         auth = await _check_admission(
             ctx,
@@ -621,7 +883,7 @@ def register_agent_chat_tools(
             billing_config=billing_config,
             tool_name="start_turn",
         )
-        return await _start_turn_impl(runtime, auth, message)
+        return await _start_turn_impl(runtime, auth, message, bundle)
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def ask(ctx: Context, message: str) -> AskResult:  # pyright: ignore[reportUnusedFunction]
@@ -646,7 +908,12 @@ def register_agent_chat_tools(
         """Send a follow-up message on an existing session.
 
         Use this to continue a multi-turn conversation. Returns
-        ``{"handle": "<session_id>"}`` unchanged for chaining.
+        ``{"handle": "<session_id>", "turn_event_id": "<event_id>",
+        "turn_started_at": "<iso8601>"}`` — the same three-key shape as
+        ``start_turn``, with the boundary taken from THIS message's send, not
+        the session's earlier turns. Poll ``list_events`` with
+        ``created_at_gte=turn_started_at`` and discard events up to and
+        including ``turn_event_id`` to read only this turn's transcript.
         """
         auth = await _check_admission(
             ctx,
@@ -667,19 +934,82 @@ def register_agent_chat_tools(
         return await _get_session_impl(runtime, await _auth(ctx), handle)
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
+    async def archive_my_session(ctx: Context, handle: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+        """Archive a session when its conversation is finished.
+
+        An archived session is no longer live and stops being re-read by
+        usage collection. This is NOT a cancel — to stop a running turn, use
+        the cancel tool instead. Returns ``{"handle": "<session_id>",
+        "archived": "true"}``.
+        """
+        return await _archive_my_session_impl(runtime, await _auth(ctx), handle)
+
+    @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
+    async def cancel_turn(ctx: Context, handle: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+        """Stop a running turn immediately.
+
+        Sends an interrupt regardless of the session's current status —
+        sending one to an already-idle session is harmless. Returns
+        ``{"handle": "<session_id>", "status": "<observed_status>"}``
+        immediately; it does not wait for the interrupt to take effect, so
+        poll ``get_my_session`` to see the session reach ``idle`` or
+        ``terminated``. An interrupted turn is still billed for what it
+        already consumed before the interrupt landed: the model work already
+        done is real work and is not refunded.
+        """
+        return await _cancel_turn_impl(runtime, await _auth(ctx), handle)
+
+    @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
+    async def get_turn_cost(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        handle: str,
+        turn_started_at: str,
+        turn_event_id: str,
+    ) -> dict[str, object]:
+        """Return one finished turn's raw provider cost, before markup.
+
+        Pass the ``turn_started_at``/``turn_event_id`` returned by
+        ``start_turn`` or ``continue_turn``. Call this once per terminal —
+        the host polls status every two seconds and should read cost once,
+        not on every poll. Returns ``{"cost_usd": "<decimal string>" | None,
+        "event_count": <int>}``. ``cost_usd`` is ``None`` when the session's
+        model has no pricing row (never zero — zero would falsely claim the
+        turn was free). This figure is NOT expected to equal the tenant
+        ledger's debit for the same turn: the ledger applies
+        ``settings.billing.markup`` on top of it.
+        """
+        return await _get_turn_cost_impl(
+            runtime, await _auth(ctx), handle, turn_started_at, turn_event_id
+        )
+
+    @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def list_events(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         handle: str,
         page: str | None = None,
         limit: int | None = None,
         order: Literal["asc", "desc"] | None = None,
+        created_at_gte: str | None = None,
+        types: list[str] | None = None,
     ) -> Page[SessionEventOut]:
         """List a session's events — the transcript.
 
         The agent's reply is in the ``agent.message`` events. Call this once
         ``get_session`` reports the session is idle to read what the agent said.
+
+        A poller reading one turn should pass
+        ``types=["agent.message", "session.status_idle"]``,
+        ``created_at_gte=<the turn_started_at from start_turn/continue_turn>``,
+        and ``order="asc"``, then discard events up to and including the
+        ``turn_event_id`` it was given, locally. A turn is finished only when
+        a ``session.status_idle`` event appears AFTER the boundary, or
+        ``get_my_session`` reports the session ``terminated`` — a bare
+        ``idle`` status read right after a send may be the PREVIOUS turn's
+        state and must not be trusted. ``rescheduling`` counts as running.
         """
-        return await _list_events_impl(runtime, await _auth(ctx), handle, page, limit, order)
+        return await _list_events_impl(
+            runtime, await _auth(ctx), handle, page, limit, order, created_at_gte, types
+        )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def deliver_turn_charts(  # pyright: ignore[reportUnusedFunction]

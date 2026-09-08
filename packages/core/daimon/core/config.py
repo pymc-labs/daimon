@@ -99,6 +99,33 @@ class McpSettings(BaseModel):
             "at startup."
         ),
     )
+    bundle_max_bytes: int = Field(
+        default=25 * 1024 * 1024,
+        description=(
+            "Per-upload byte cap enforced by the bundle upload route. The mcp "
+            "service runs on Cloud Run over HTTP/1, whose maximum request size "
+            "is 32 MiB, so the default sits below it with headroom."
+        ),
+    )
+    bundle_uploads_per_hour: int = Field(
+        default=20,
+        description=(
+            "Per-token cap on bundle upload route calls per rolling hour. "
+            "Prevents a compromised or buggy caller from exhausting the "
+            "Files API upload path. Set to 0 to disable (not recommended in "
+            "production)."
+        ),
+    )
+    bundle_ttl_days: int = Field(
+        default=90,
+        description=(
+            "How long an uploaded bundle object is retained on the Files API "
+            "before deletion. Deletion is performed by the scheduler's "
+            "pending-file sweeper, not by this process directly — a "
+            "deployment running no scheduler will never reclaim these "
+            "objects."
+        ),
+    )
 
     @property
     def app_root_url(self) -> str | None:

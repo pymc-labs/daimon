@@ -2,6 +2,7 @@
 
 Subcommands:
   * mint-token         — signs a JWT for local debug / integration tests.
+  * mint-agent-token   — mints a long-lived, revocable agent-scoped token.
   * url                — prints DAIMON_MCP__PUBLIC_URL.
   * janitor            — find and optionally archive orphan daimon-mcp:* vaults.
   * sweep-credentials  — delete+recreate stale is_admin creds (defense-in-depth).
@@ -17,10 +18,12 @@ import datetime as dt
 import typer
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
-from daimon.adapters.cli.tenant import discover_tenant
+from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
 from daimon.core.config import Settings, load_settings
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import ConfigError
-from daimon.core.mcp_auth import mint_jwt
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_auth import mint_agent_mcp_token, mint_jwt
 from daimon.core.mcp_credential_sweep import sweep_stale_admin_credentials
 from daimon.core.mcp_vault_janitor import archive_orphan_mcp_vaults
 from daimon.core.stores.identity import get_or_create_cli_principal
@@ -84,6 +87,93 @@ async def mint_token(*, rt: CliRuntime, os_user: str | None) -> None:
         secret=rt.settings.mcp.jwt_secret.get_secret_value().encode(),
         now=dt.datetime.now(dt.UTC),
     )
+    typer.echo(token)
+
+
+@mcp_app.command(
+    "mint-agent-token",
+    help=(
+        "Mint a long-lived, revocable agent-scoped MCP token. This is an "
+        "operator and testing door, NOT the production path — reports mint "
+        "their own tokens when published, and a token minted here is "
+        "revoked with the same revocation the publishing side uses."
+    ),
+)
+def mcp_mint_agent_token_command(
+    tenant: str = typer.Option(..., "--tenant", help="Tenant uuid the agent belongs to."),
+    agent: str = typer.Option(..., "--agent", help="The agent's daimon name."),
+    label: str | None = typer.Option(
+        None, "--label", help="Human-readable label stored with the token row."
+    ),
+    ttl_days: int = typer.Option(
+        90, "--ttl-days", help="Days until the token expires. Defaults to 90."
+    ),
+) -> None:
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _with_runtime() -> None:
+        async with build_runtime(settings) as rt:
+            await mint_agent_token(
+                rt=rt, tenant=tenant, agent=agent, label=label, ttl_days=ttl_days
+            )
+
+    run_cli(_with_runtime(), console=console)
+
+
+async def mint_agent_token(
+    *,
+    rt: CliRuntime,
+    tenant: str,
+    agent: str,
+    label: str | None,
+    ttl_days: int,
+) -> None:
+    """Async body for `daimon mcp mint-agent-token`.
+
+    This is an operator and testing door, NOT the production path: reports
+    mint their own agent-scoped token when they are published
+    (`ensure_reader_variant` + `mint_agent_mcp_token`), and a token minted
+    here is revoked with the same `revoke_mcp_token` the publishing side
+    uses. This command exists so an operator debugging a report, or a test
+    needing a real agent token, has somewhere to get one without going
+    through a publish.
+    """
+    if rt.settings.mcp.jwt_secret is None:
+        raise ConfigError(
+            "DAIMON_MCP__JWT_SECRET is unset. Generate one with "
+            "`python -c 'import secrets; print(secrets.token_hex(32))'`."
+        )
+
+    async with rt.sessionmaker() as session, session.begin():
+        override = await resolve_tenant_override(session, TenantSelector(tenant_id=tenant))
+        tenant_id = await discover_tenant(session, override=override)
+        principal = await get_or_create_cli_principal(
+            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+        )
+        account_id = principal.account_id
+    # Session closed. MA call below.
+
+    ma_agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=agent)
+    if ma_agent is None:
+        raise ConfigError(f"no agent named {agent!r} in tenant {tenant_id}.")
+
+    # mint_agent_mcp_token requires the DERIVED per-agent uuid, not MA's raw
+    # `agent_...` id — the verifier re-derives via derive_agent_uuid too, so
+    # passing the raw MA id here would mint a token no verifier accepts.
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(ma_agent.id))
+
+    async with rt.sessionmaker() as session, session.begin():
+        token = await mint_agent_mcp_token(
+            session,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            label=label,
+            secret=rt.settings.mcp.jwt_secret.get_secret_value().encode(),
+            now=dt.datetime.now(dt.UTC),
+            ttl_days=ttl_days,
+        )
     typer.echo(token)
 
 

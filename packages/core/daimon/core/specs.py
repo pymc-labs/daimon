@@ -82,7 +82,7 @@ class AgentSpec(BaseModel):
     verbatim — any SDK rename or discriminator change is inherited without
     re-declaration.
 
-    Two fields diverge from the SDK:
+    Three fields diverge from the SDK:
 
     - `metadata` is omitted entirely. The upload call synthesizes
       `{daimon_account, daimon_name}` at the SDK boundary; operators cannot
@@ -93,6 +93,17 @@ class AgentSpec(BaseModel):
       IDs don't exist until skills have uploaded. `Field(exclude=True)` keeps
       it out of `model_dump()`; the resolved list is passed as a separate
       kwarg at the call site.
+    - `isolated: bool` is an authoring-side property of how daimon builds and
+      mounts the agent, not a Managed Agents create parameter — it never
+      appears in an `agents.create`/`agents.update` payload. `dump_agent_spec`
+      splats its output straight into the SDK call, so an unexcluded field
+      would be sent upstream as an unknown parameter and rejected.
+      `Field(exclude=True)` keeps it out of `model_dump()`, exactly like
+      `skills` and `skill_repos` above. Because it is excluded, `isolated`
+      does not participate in `compute_spec_fingerprint` (which hashes
+      `dump_agent_spec(spec, mode="json")`) — that is correct rather than a
+      gap, since the flag's only observable effects (no `mcp_servers`, no
+      `mcp_toolset` tool) both participate in the hash directly.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -106,6 +117,7 @@ class AgentSpec(BaseModel):
     multiagent: BetaManagedAgentsMultiagentParams | None = None
     skills: list[SkillRef] = Field(default_factory=list[SkillRef], exclude=True)
     skill_repos: list[SkillRepo] = Field(default_factory=list[SkillRepo], exclude=True)
+    isolated: bool = Field(default=False, exclude=True)
 
     @model_validator(mode="after")
     def _require_mcp_toolset_when_mcp_servers_set(self) -> AgentSpec:

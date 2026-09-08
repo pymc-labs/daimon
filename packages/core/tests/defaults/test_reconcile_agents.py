@@ -1214,3 +1214,102 @@ async def test_reconcile_agent_retries_once_on_version_conflict() -> None:
         "retried merge must be recomputed against the SECOND retrieve — a concurrent writer's "
         f"MCP server must not be dropped; got mcp_servers={sent_mcp!r}"
     )
+
+
+async def test_reconcile_agent_isolated_spec_gets_no_mcp_wiring_or_guidance() -> None:
+    """T-21-02-D: an isolated spec must never gain the default daimon-mcp
+    server or its matching mcp_toolset tool, even with public_url set —
+    reconcile_agent must gate both merge calls on spec.isolated rather than
+    relying on mcp_merge.py's own public_url-is-None early return."""
+    spec = AgentSpec(
+        name="reader",
+        model="claude-sonnet-4-6",
+        system="You are a reader agent.",
+        tools=[{"type": "agent_toolset_20260401", "configs": [{"name": "bash"}]}],
+        isolated=True,
+    )
+    router = _router_with_agents([])
+    created_payload: dict[str, Any] = {}
+
+    def on_create(req: httpx.Request, _m: object) -> httpx.Response:
+        created_payload.update(json.loads(req.content))
+        return httpx.Response(
+            200,
+            json=_tagged_agent(id_="ag_reader", name=spec.name, tenant_id=TENANT_ID),
+        )
+
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic_http(router.dispatch)
+
+    outcome = await reconcile_agent(
+        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=_DEFAULT_MCP_URL
+    )
+    assert outcome.action is Action.CREATED
+
+    mcp_servers = created_payload.get("mcp_servers")
+    assert not mcp_servers, (
+        "isolated spec's POST body must carry no mcp_servers entry, even with public_url set"
+    )
+    tool_types = [t.get("type") for t in created_payload.get("tools", [])]
+    assert "mcp_toolset" not in tool_types, (
+        "isolated spec's POST body must carry no mcp_toolset tool"
+    )
+    guidance_sentinel = CREDENTIAL_GUIDANCE_BLOCK.splitlines()[0]
+    assert guidance_sentinel not in (created_payload.get("system") or ""), (
+        "isolated spec's system must not gain the credential-guidance block — "
+        "there is no MCP vault or mounted env file for it to describe"
+    )
+
+
+async def test_reconcile_agent_isolated_spec_stamps_daimon_isolated_metadata() -> None:
+    """T-21-02-E: daimon_isolated must be stamped in MA metadata (the tool
+    layer reads it back at session-create time, not the local spec object)."""
+    spec = AgentSpec(name="reader", model="claude-sonnet-4-6", isolated=True)
+    router = _router_with_agents([])
+    created_payload: dict[str, Any] = {}
+
+    def on_create(req: httpx.Request, _m: object) -> httpx.Response:
+        created_payload.update(json.loads(req.content))
+        return httpx.Response(
+            200,
+            json=_tagged_agent(id_="ag_reader2", name=spec.name, tenant_id=TENANT_ID),
+        )
+
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic_http(router.dispatch)
+
+    await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
+
+    assert created_payload["metadata"]["daimon_isolated"] == "true", (
+        "reconcile must pass spec.isolated through to build_metadata"
+    )
+
+
+async def test_reconcile_agent_non_isolated_spec_still_gets_full_mcp_wiring() -> None:
+    """Regression pin: gating on spec.isolated must not become over-broad —
+    a non-isolated spec with the same public_url still gets both the
+    daimon-mcp server and the mcp_toolset tool."""
+    spec = _agent_spec()
+    router = _router_with_agents([])
+    created_payload: dict[str, Any] = {}
+
+    def on_create(req: httpx.Request, _m: object) -> httpx.Response:
+        created_payload.update(json.loads(req.content))
+        return httpx.Response(
+            200,
+            json=_tagged_agent(id_="ag_full", name=spec.name, tenant_id=TENANT_ID),
+        )
+
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic_http(router.dispatch)
+
+    await reconcile_agent(
+        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=_DEFAULT_MCP_URL
+    )
+
+    mcp_servers = created_payload.get("mcp_servers")
+    assert mcp_servers and mcp_servers[0]["name"] == "daimon-mcp", (
+        "non-isolated spec must still gain the default daimon-mcp server"
+    )
+    tool_types = [t.get("type") for t in created_payload.get("tools", [])]
+    assert "mcp_toolset" in tool_types, "non-isolated spec must still gain the mcp_toolset tool"
