@@ -2,12 +2,19 @@
 
 (a) a bare `idle` status can be observed immediately after a send — status
     alone is never a valid completion signal;
-(b) `sessions.events.list(created_at_gte=...)` is inclusive of the exact
-    timestamp it is anchored on, which is what lets the boundary event itself
-    be dropped client-side instead of silently missed;
+(b) the send response's echoed event carries no `processed_at` at all, and
+    a `created_at_gte` filter anchored on the caller's OWN pre-send clock
+    reading (not the echo) includes the boundary event and excludes every
+    event from an earlier turn on the same session;
 (c)-(e) `user.interrupt` converges to a terminal state from `running`, from
     `rescheduling` (skipped with a reason if that state cannot be reached
     deterministically), and is a no-op when sent to an already-idle session.
+
+(b) supersedes an earlier version of this suite that expected the echo to
+carry a usable `processed_at`. A live run showed the echo's `processed_at`
+is always None; the timestamp only appears roughly half a second later,
+once the agent starts on the event. The boundary's clock has to be the
+caller's own, captured immediately before the send.
 
 Runtime discipline: haiku only, one session per test. Env-gated by
 DAIMON_TEST_ANTHROPIC_API_KEY; the default `uv run pytest` deselects the
@@ -17,6 +24,7 @@ contract marker so this never gates CI.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import uuid
 from collections.abc import Callable
 
@@ -147,11 +155,16 @@ async def test_status_immediately_after_send_is_not_a_completion_signal(
     )
 
 
-async def test_created_at_gte_boundary_is_inclusive_of_the_boundary_event(
+async def test_send_echo_carries_no_processed_at(
     anthropic_client: AsyncAnthropic,
     live_agent: BetaManagedAgentsAgent,
     live_environment: BetaEnvironment,
 ) -> None:
+    """The fact D-07 r4 rests on: the send response's echoed event has no
+    processed_at at all, immediately after the send returns. A timestamp
+    only appears roughly half a second later, once the agent starts on the
+    event — too late to serve as the boundary's clock, which is why the
+    seam captures its own reading before the send instead."""
     session = await anthropic_client.beta.sessions.create(
         agent=live_agent.id, environment_id=live_environment.id
     )
@@ -160,28 +173,92 @@ async def test_created_at_gte_boundary_is_inclusive_of_the_boundary_event(
         "content": [{"type": "text", "text": "Reply with exactly: DONE"}],
     }
     sent = await anthropic_client.beta.sessions.events.send(session.id, events=[message])
-    assert sent.data, (
-        "send must echo back the sent event so its processed_at can anchor the boundary"
-    )
+    assert sent.data, "send must echo back the sent event"
     boundary_event = sent.data[0]
-    assert boundary_event.processed_at is not None, (
-        "the boundary event must carry a processed_at timestamp to anchor created_at_gte on"
+    assert boundary_event.processed_at is None, (
+        f"the send echo is expected to carry no processed_at immediately after the "
+        f"send returns; observed {boundary_event.processed_at!r}. If this ever starts "
+        "returning a timestamp, the boundary's clock source should be reconsidered."
     )
+
+
+async def test_created_at_gte_with_a_pre_send_clock_bound_isolates_the_second_turn(
+    anthropic_client: AsyncAnthropic,
+    live_agent: BetaManagedAgentsAgent,
+    live_environment: BetaEnvironment,
+) -> None:
+    """A created_at_gte filter anchored on the CALLER's own pre-send clock
+    reading (never the echo, which carries none) includes the second turn's
+    boundary event and excludes every event from the first turn on the same
+    session. Also proves that filtering by type still surfaces the boundary
+    event first."""
+    session = await anthropic_client.beta.sessions.create(
+        agent=live_agent.id, environment_id=live_environment.id
+    )
+    first_message: BetaManagedAgentsUserMessageEventParams = {
+        "type": "user.message",
+        "content": [{"type": "text", "text": "Reply with exactly: FIRST"}],
+    }
+    await anthropic_client.beta.sessions.events.send(session.id, events=[first_message])
+    first_idle = await _poll_until(
+        anthropic_client, session.id, lambda s: s == "idle", _IDLE_WAIT_S
+    )
+    assert first_idle is not None, (
+        f"the first turn never reached idle within {_IDLE_WAIT_S}s — the second turn's "
+        "boundary cannot be exercised without a finished first turn to isolate from"
+    )
+    first_turn_ids = {
+        event.id
+        async for event in anthropic_client.beta.sessions.events.list(
+            session_id=session.id, order="asc"
+        )
+    }
+
+    turn_started_at = dt.datetime.now(dt.UTC)
+    second_message: BetaManagedAgentsUserMessageEventParams = {
+        "type": "user.message",
+        "content": [{"type": "text", "text": "Reply with exactly: SECOND"}],
+    }
+    sent = await anthropic_client.beta.sessions.events.send(session.id, events=[second_message])
+    assert sent.data, "send must echo back the sent event"
+    boundary_event_id = sent.data[0].id
+
+    second_idle = await _poll_until(
+        anthropic_client, session.id, lambda s: s == "idle", _IDLE_WAIT_S
+    )
+    assert second_idle is not None, f"the second turn never reached idle within {_IDLE_WAIT_S}s"
 
     results = [
         event
         async for event in anthropic_client.beta.sessions.events.list(
-            session_id=session.id, created_at_gte=boundary_event.processed_at, order="asc"
+            session_id=session.id, created_at_gte=turn_started_at, order="asc"
         )
     ]
-    assert results, (
-        "an inclusive created_at_gte filter anchored on the boundary event's own timestamp "
-        "must return at least the boundary event itself"
+    result_ids = [event.id for event in results]
+    assert boundary_event_id in result_ids, (
+        f"a created_at_gte filter anchored on the caller's own pre-send clock reading "
+        f"must include the boundary event {boundary_event_id!r}; got {result_ids!r}"
     )
-    assert results[0].id == boundary_event.id, (
-        f"the boundary event ({boundary_event.id}) must be the first result under an "
-        f"inclusive created_at_gte filter in asc order; got {results[0].id!r} first instead "
-        "— either the filter is exclusive of the boundary or an earlier event leaked through"
+    leaked_first_turn_ids = first_turn_ids.intersection(result_ids)
+    assert not leaked_first_turn_ids, (
+        f"a pre-send clock bound must exclude every event from the prior turn; "
+        f"first-turn events leaked through: {leaked_first_turn_ids!r}"
+    )
+
+    typed_results = [
+        event
+        async for event in anthropic_client.beta.sessions.events.list(
+            session_id=session.id,
+            created_at_gte=turn_started_at,
+            types=["user.message", "agent.message", "session.status_idle"],
+            order="asc",
+        )
+    ]
+    assert typed_results, "the typed, bounded listing must return at least the boundary event"
+    assert typed_results[0].id == boundary_event_id, (
+        f"with created_at_gte and a type filter together, the boundary event "
+        f"({boundary_event_id}) must be the first result in asc order; got "
+        f"{typed_results[0].id!r} first instead"
     )
 
 
