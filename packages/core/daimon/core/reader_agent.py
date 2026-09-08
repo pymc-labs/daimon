@@ -25,7 +25,6 @@ from typing import cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
-from anthropic.types.beta.agent_create_params import Tool
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
@@ -156,10 +155,13 @@ async def ensure_reader_variant(
         model=source_ma.model.id,
         description=source_ma.description,
         system=source_ma.system,
-        tools=cast(
-            "list[Tool] | None",
-            [tool.model_dump(mode="json") for tool in source_ma.tools] or None,
-        ),
+        # A reader carries only the base agent toolset, which `dump_agent_spec`
+        # injects (with always-allow) on every create/update. The source's
+        # toolset is deliberately not round-tripped: the live agent response
+        # carries per-tool fields (a `type` on each config entry) that the
+        # create-params shape rejects, and a reader has no use for the
+        # source's toolset overrides anyway.
+        tools=None,
         mcp_servers=cast(
             "list[BetaManagedAgentsURLMCPServerParams] | None",
             [server.model_dump(mode="json") for server in source_ma.mcp_servers] or None,
