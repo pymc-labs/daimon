@@ -173,3 +173,172 @@ async def test_get_mcp_token_returns_none_for_unknown_jti(
     unknown_jti = uuid.uuid4()
     row = await store.get_mcp_token(db_session, jti=unknown_jti)
     assert row is None, "get_mcp_token must return None for an unknown jti"
+
+
+async def test_list_live_tokens_by_label_returns_matching_live_token_in_tenant(
+    db_session: AsyncSession,
+) -> None:
+    """A live token with a matching label in the right tenant is returned."""
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    jti = uuid.uuid4()
+    now = datetime.now(tz=UTC)
+
+    await store.create_mcp_token_row(
+        db_session,
+        jti=jti,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        agent_id=str(uuid.uuid4()),
+        label="walkthrough-slug",
+        created_at=now,
+    )
+
+    rows = await store.list_live_tokens_by_label(
+        db_session, tenant_id=tenant_id, label="walkthrough-slug"
+    )
+
+    assert [row.jti for row in rows] == [jti], (
+        "the live token with a matching label in the right tenant must be returned"
+    )
+
+
+async def test_list_live_tokens_by_label_excludes_token_from_other_tenant(
+    db_session: AsyncSession,
+) -> None:
+    """A token with the same label in a DIFFERENT tenant is not returned.
+
+    This is the load-bearing case: two tenants can publish a report under
+    the same slug, and one tenant's lookup must never see the other's token.
+    """
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    other_tenant_id, other_account_id = await _seed_tenant_and_account(db_session)
+
+    await store.create_mcp_token_row(
+        db_session,
+        jti=uuid.uuid4(),
+        account_id=other_account_id,
+        tenant_id=other_tenant_id,
+        agent_id=str(uuid.uuid4()),
+        label="shared-slug",
+        created_at=datetime.now(tz=UTC),
+    )
+
+    rows = await store.list_live_tokens_by_label(
+        db_session, tenant_id=tenant_id, label="shared-slug"
+    )
+
+    assert rows == [], (
+        "a token minted for a different tenant must never be returned, even with a matching label"
+    )
+
+
+async def test_list_live_tokens_by_label_excludes_revoked_token(
+    db_session: AsyncSession,
+) -> None:
+    """A revoked token with a matching label is not returned."""
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    jti = uuid.uuid4()
+    now = datetime.now(tz=UTC)
+
+    await store.create_mcp_token_row(
+        db_session,
+        jti=jti,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        agent_id=str(uuid.uuid4()),
+        label="revoked-slug",
+        created_at=now,
+    )
+    await store.revoke_mcp_token(db_session, jti=jti, now=now)
+
+    rows = await store.list_live_tokens_by_label(
+        db_session, tenant_id=tenant_id, label="revoked-slug"
+    )
+
+    assert rows == [], "a revoked token must not be returned by the live-token lookup"
+
+
+async def test_list_live_tokens_by_label_excludes_different_label(
+    db_session: AsyncSession,
+) -> None:
+    """A token with a different label is not returned."""
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+
+    await store.create_mcp_token_row(
+        db_session,
+        jti=uuid.uuid4(),
+        account_id=account_id,
+        tenant_id=tenant_id,
+        agent_id=str(uuid.uuid4()),
+        label="some-other-slug",
+        created_at=datetime.now(tz=UTC),
+    )
+
+    rows = await store.list_live_tokens_by_label(
+        db_session, tenant_id=tenant_id, label="requested-slug"
+    )
+
+    assert rows == [], "a token with a non-matching label must not be returned"
+
+
+async def test_list_live_tokens_by_label_excludes_null_label(
+    db_session: AsyncSession,
+) -> None:
+    """A token whose label is None is not returned by any label query."""
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+
+    await store.create_mcp_token_row(
+        db_session,
+        jti=uuid.uuid4(),
+        account_id=account_id,
+        tenant_id=tenant_id,
+        agent_id=str(uuid.uuid4()),
+        label=None,
+        created_at=datetime.now(tz=UTC),
+    )
+
+    rows = await store.list_live_tokens_by_label(db_session, tenant_id=tenant_id, label="")
+
+    assert rows == [], "a token with a None label must never surface from a label query"
+
+
+async def test_list_live_tokens_by_label_returns_all_matches_sharing_one_label(
+    db_session: AsyncSession,
+) -> None:
+    """Two live tokens sharing one label in one tenant are both returned."""
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    now = datetime.now(tz=UTC)
+    jti_a = uuid.uuid4()
+    jti_b = uuid.uuid4()
+
+    for jti in (jti_a, jti_b):
+        await store.create_mcp_token_row(
+            db_session,
+            jti=jti,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=str(uuid.uuid4()),
+            label="shared-among-two",
+            created_at=now,
+        )
+
+    rows = await store.list_live_tokens_by_label(
+        db_session, tenant_id=tenant_id, label="shared-among-two"
+    )
+
+    assert {row.jti for row in rows} == {jti_a, jti_b}, (
+        "both live tokens sharing the label must be returned, not just one"
+    )
+
+
+async def test_list_live_tokens_by_label_returns_empty_list_on_no_match(
+    db_session: AsyncSession,
+) -> None:
+    """An unmatched query returns an empty list and does not raise."""
+    tenant_id, _account_id = await _seed_tenant_and_account(db_session)
+
+    rows = await store.list_live_tokens_by_label(
+        db_session, tenant_id=tenant_id, label="nonexistent-slug"
+    )
+
+    assert rows == [], "an unmatched label query must return an empty list, not raise"
