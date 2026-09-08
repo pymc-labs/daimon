@@ -36,9 +36,9 @@ def upgrade() -> None:
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("collection", "key"),
     )
-    op.create_index("idx_hub_oauth_kv_expires_at", "hub_oauth_kv", ["expires_at"])
+    op.create_index("ix_hub_oauth_kv_expires_at", "hub_oauth_kv", ["expires_at"])
 
 
 def downgrade() -> None:
-    op.drop_index("idx_hub_oauth_kv_expires_at", table_name="hub_oauth_kv")
+    op.drop_index("ix_hub_oauth_kv_expires_at", table_name="hub_oauth_kv")
     op.drop_table("hub_oauth_kv")
