@@ -54,6 +54,13 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # Cross-tenant BY DESIGN: links a CLI principal to a platform principal for
     # operator impersonation. Both endpoints are globally unique principal UUIDs.
     "principal_links": "cross-principal link table (both PKs globally unique UUIDs)",
+    # FastMCP OAuthProxy state (client registrations, authorization codes,
+    # upstream and issued tokens), keyed by (collection, key) and
+    # Fernet-encrypted. A row belongs to one platform login, not a tenant; the
+    # caller's tenant scope lives inside the issued token's claims, so
+    # per-tenant isolation is enforced at request time by the hub middleware
+    # rather than by a column.
+    "hub_oauth_kv": "OAuthProxy login state keyed by (collection, key); tenant lives in the token claims, not the row",
 }
 
 

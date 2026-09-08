@@ -142,6 +142,99 @@ class McpSettings(BaseModel):
         return str(self.public_url).rstrip("/").removesuffix("/mcp").rstrip("/")
 
 
+_HUB_SIGNING_KEY_BYTES = 32
+
+
+class HubSettings(BaseModel):
+    """OAuth-login MCP mounts for coding-agent clients.
+
+    A platform's mount appears only when both its client id and secret are
+    set; a deployment that sets neither runs exactly as before. The signing
+    key is shared by both mounts and must be a base64url 32-byte key, the same
+    shape as a Fernet key, so the proxy uses it directly rather than deriving
+    one from the client secret (rotating a client secret would otherwise
+    invalidate every issued login).
+    """
+
+    slack_client_id: str | None = Field(
+        default=None,
+        description=(
+            "Slack OAuth app client ID for the /slack/mcp login mount. Register "
+            "<DAIMON_MCP__PUBLIC_URL origin>/slack/auth/callback as a redirect "
+            "URL on the Slack app."
+        ),
+    )
+    slack_client_secret: SecretStr | None = Field(
+        default=None,
+        description="Slack OAuth app client secret for the /slack/mcp login mount.",
+    )
+    discord_client_id: str | None = Field(
+        default=None,
+        description=(
+            "Discord OAuth app client ID for the /discord/mcp login mount. "
+            "Register <DAIMON_MCP__PUBLIC_URL origin>/discord/auth/callback as a "
+            "redirect URI on the Discord app."
+        ),
+    )
+    discord_client_secret: SecretStr | None = Field(
+        default=None,
+        description="Discord OAuth app client secret for the /discord/mcp login mount.",
+    )
+    allowed_client_redirect_uris: list[str] = Field(
+        default=[
+            "http://localhost:*",
+            "http://127.0.0.1:*",
+            "https://claude.ai/*",
+            "https://claude.com/*",
+        ],
+        description=(
+            "Redirect URI patterns an MCP client may register with the hub login "
+            "mounts (wildcards allowed). Defaults cover coding agents on loopback "
+            "and claude.ai; widen only for a client you operate."
+        ),
+    )
+    jwt_signing_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Base64url 32-byte key that signs hub login tokens. Required when "
+            "any hub mount is configured, and rejected at boot unless it "
+            "decodes to exactly 32 bytes. Generate with Fernet.generate_key()."
+        ),
+    )
+
+    @field_validator("jwt_signing_key")
+    @classmethod
+    def _check_signing_key(cls, value: SecretStr | None) -> SecretStr | None:
+        """Reject anything but a 32-byte base64url key.
+
+        FastMCP derives an HS256 secret and warns about short keys only for a
+        ``str`` secret; the proxy is handed ``bytes``, which it uses raw. A
+        passphrase would therefore be accepted silently as the signing secret.
+        """
+        if value is None:
+            return value
+        try:
+            decoded = base64.urlsafe_b64decode(value.get_secret_value())
+        except (binascii.Error, ValueError):
+            decoded = b""
+        if len(decoded) != _HUB_SIGNING_KEY_BYTES:
+            raise ValueError(
+                "DAIMON_HUB__JWT_SIGNING_KEY must be a base64url-encoded "
+                f"{_HUB_SIGNING_KEY_BYTES}-byte key; generate one with "
+                "python -c 'from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())'"
+            )
+        return value
+
+    @property
+    def slack_configured(self) -> bool:
+        return self.slack_client_id is not None and self.slack_client_secret is not None
+
+    @property
+    def discord_configured(self) -> bool:
+        return self.discord_client_id is not None and self.discord_client_secret is not None
+
+
 class DiscordSettings(BaseModel):
     """Discord adapter config.
 
@@ -636,6 +729,7 @@ class Settings(BaseSettings):
     cli: CLISettings = Field(default_factory=CLISettings)
     log: LogSettings = Field(default_factory=LogSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
+    hub: HubSettings = Field(default_factory=HubSettings)
     discord: DiscordSettings | None = None
     slack: SlackSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)

@@ -164,6 +164,7 @@ def session_response(
     status: SessionStatus = "idle",
     agent_id: str | None = None,
     environment_id: str = "env_test",
+    metadata: dict[str, str] | None = None,
 ) -> httpx.Response:
     """Response for GET /v1/sessions/{id} (the SDK's `beta.sessions.retrieve`).
 
@@ -193,7 +194,7 @@ def session_response(
         environment_id=environment_id,
         created_at=now,
         updated_at=now,
-        metadata={},
+        metadata=metadata or {},
         outcome_evaluations=[],
         resources=[],
         stats=EMPTY_SESSION_STATS,

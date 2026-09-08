@@ -20,6 +20,7 @@ from daimon.adapters.mcp.artifacts import build_artifact_store
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
+from daimon.adapters.mcp.hub.app import mount_hub_apps
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.middleware.mcp_identity import (
     ClaimResolver,
@@ -392,6 +393,15 @@ def create_mcp_app(
             )
     else:
         log.info("slack oauth disabled", reason="no slack settings or crypto keys")
+
+    mount_hub_apps(
+        app,
+        settings=effective_settings,
+        runtime=runtime,
+        sessionmaker=effective_sessionmaker,
+        billing_config=effective_billing_config,
+        fernet=fernet,
+    )
 
     # GitHub App clone-auth: App-clone boots with only app_id +
     # app_private_key — no webhook required. The /webhooks/github mount is

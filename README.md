@@ -161,6 +161,37 @@ stored objects, so configure a bucket lifecycle rule for the retention period
 your deployment requires. See `.env.example` for the optional region, URL
 lifetime, and image-embedding controls.
 
+Coding-agent clients such as Claude Code connect through the plugin in
+[`plugin/`](plugin/) instead of a per-agent token: it logs in via Slack or
+Discord OAuth and reaches every daimon install the logged-in person belongs
+to.
+
+#### Hub login mounts
+
+Each platform's mount needs its own OAuth app, plus `DAIMON_HUB__*`,
+`DAIMON_CRYPTO__KEYS` (the login state is encrypted at rest) and
+`DAIMON_MCP__PUBLIC_URL` (the mounts derive their public base URL from it) on
+the server. Register these redirect URIs on the OAuth apps, where the origin
+is `DAIMON_MCP__PUBLIC_URL` without the trailing `/mcp`:
+
+- Slack: `{origin}/slack/auth/callback`
+- Discord: `{origin}/discord/auth/callback`
+
+The Discord app requests the `identify` and `guilds` scopes, enough to learn
+who logged in and which servers they are in. The Slack app requests user
+scopes (`users:read`, `channels:history`, `groups:history`, `channels:read`,
+`groups:read`, `im:history`, `mpim:history`, `im:read`, `mpim:read`,
+`search:read`) so a daimon reads Slack as the person asking and never sees a
+channel they cannot.
+
+A login reaches only workspaces where daimon is installed and ready, checked
+on every call. Membership itself is re-read when the login token is issued or
+refreshed: a Slack token stops working the moment its user leaves the
+workspace, while someone removed from a Discord server keeps that server's
+daimons until their Discord token expires. `DAIMON_HUB__ALLOWED_CLIENT_REDIRECT_URIS`
+limits which clients may complete a login; the default covers coding agents
+on loopback and claude.ai.
+
 ### 2. Create the Discord application
 
 1. Create an application in the

@@ -17,6 +17,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Double,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -1205,4 +1206,30 @@ class SupportEscalation(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class HubOAuthKv(Base):
+    """Backing table for the hub login proxies' key-value store.
+
+    Column shape is dictated by ``key_value.aio.stores.postgresql.PostgreSQLStore``,
+    which reads and writes this table directly over asyncpg; daimon only ever
+    deletes expired rows through ``stores.hub_oauth_kv``. Collections are
+    prefixed per platform (``slack__``, ``discord__``) by the adapter.
+
+    Rows hold encrypted upstream access tokens but are keyed by the proxy's
+    own identifiers, not by account, so an account purge cannot address them.
+    Retention is bounded instead: every row carries a TTL no longer than the
+    upstream token's lifetime and the scheduled sweep deletes it once expired.
+    """
+
+    __tablename__ = "hub_oauth_kv"
+
+    collection: Mapped[str] = mapped_column(Text, primary_key=True)
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    ttl: Mapped[float | None] = mapped_column(Double, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
     )

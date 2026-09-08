@@ -1,4 +1,219 @@
 # serializer version: 1
+# name: test_rendered_hub_tool_schema_matches_snapshot
+  dict({
+    'instructions': 'Every daimon reachable here lives in a Discord workspace. Call list_daimons first; every other tool takes a daimon_id from that list.',
+    'tools': dict({
+      'ask': dict({
+        'description': '''
+          Ask a daimon one question and wait up to about two minutes for its answer.
+          
+          Runs as you, in that daimon's workspace: it reads only what you can see
+          and spends that workspace's credit. Pass ``handle`` from a previous
+          result to continue the same conversation. On timeout the error carries
+          the handle; resume with it rather than asking again.
+        ''',
+        'parameters': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'daimon_id': dict({
+              'type': 'string',
+            }),
+            'handle': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'default': None,
+            }),
+            'message': dict({
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'daimon_id',
+            'message',
+          ]),
+          'type': 'object',
+        }),
+      }),
+      'continue_turn': dict({
+        'description': 'Send a follow-up on an existing session without waiting.',
+        'parameters': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'daimon_id': dict({
+              'type': 'string',
+            }),
+            'handle': dict({
+              'type': 'string',
+            }),
+            'message': dict({
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'daimon_id',
+            'handle',
+            'message',
+          ]),
+          'type': 'object',
+        }),
+      }),
+      'describe_daimon': dict({
+        'description': 'Describe one daimon: role, skills, repo, environment, platform and workspace.',
+        'parameters': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'daimon_id': dict({
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'daimon_id',
+          ]),
+          'type': 'object',
+        }),
+      }),
+      'get_session': dict({
+        'description': 'Status of one session. Poll until ``idle`` before reading ``list_events``.',
+        'parameters': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'daimon_id': dict({
+              'type': 'string',
+            }),
+            'handle': dict({
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'daimon_id',
+            'handle',
+          ]),
+          'type': 'object',
+        }),
+      }),
+      'list_daimons': dict({
+        'description': '''
+          List every daimon you can reach on this platform, across all your workspaces.
+          
+          Call this first. ``id`` is what every other tool takes as ``daimon_id``;
+          ``workspace`` tells you which Slack workspace or Discord server the daimon
+          lives in. Two daimons may share a ``name`` in different workspaces.
+        ''',
+        'parameters': dict({
+          'additionalProperties': False,
+          'properties': dict({
+          }),
+          'type': 'object',
+        }),
+      }),
+      'list_events': dict({
+        'description': "A session's transcript. The daimon's reply is in ``agent.message`` events.",
+        'parameters': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'daimon_id': dict({
+              'type': 'string',
+            }),
+            'handle': dict({
+              'type': 'string',
+            }),
+            'limit': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'integer',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'default': None,
+            }),
+            'order': dict({
+              'anyOf': list([
+                dict({
+                  'enum': list([
+                    'asc',
+                    'desc',
+                  ]),
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'default': None,
+            }),
+            'page': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'default': None,
+            }),
+          }),
+          'required': list([
+            'daimon_id',
+            'handle',
+          ]),
+          'type': 'object',
+        }),
+      }),
+      'list_my_sessions': dict({
+        'description': '''
+          Sessions you started with this daimon, for resuming with ``handle``.
+          
+          Other people's conversations with the same daimon are not listed and
+          their handles are not accepted.
+        ''',
+        'parameters': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'daimon_id': dict({
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'daimon_id',
+          ]),
+          'type': 'object',
+        }),
+      }),
+      'start_turn': dict({
+        'description': '''
+          Start a turn without waiting.
+          
+          Returns ``{"handle": ...}`` for polling with ``get_session``.
+        ''',
+        'parameters': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'daimon_id': dict({
+              'type': 'string',
+            }),
+            'message': dict({
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'daimon_id',
+            'message',
+          ]),
+          'type': 'object',
+        }),
+      }),
+    }),
+  })
+# ---
 # name: test_rendered_tool_schema_matches_snapshot
   dict({
     'archive_agent': dict({
@@ -64,11 +279,23 @@
         persistent turn, waits up to about 120 seconds for idle, and
         returns the final text plus a resumable handle. Chart images are
         embedded by default; short-lived download links are added when private
-        artifact storage is configured.
+        artifact storage is configured. Pass ``handle`` from a previous result to
+        continue that conversation instead of starting a new one.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'handle': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'message': dict({
             'type': 'string',
           }),

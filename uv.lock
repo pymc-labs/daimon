@@ -904,6 +904,7 @@ dependencies = [
     { name = "httpx" },
     { name = "imageio-ffmpeg" },
     { name = "pillow" },
+    { name = "py-key-value-aio", extra = ["postgresql"] },
     { name = "pydantic" },
     { name = "sentry-sdk" },
     { name = "slack-sdk" },
@@ -929,6 +930,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "imageio-ffmpeg", specifier = ">=0.6" },
     { name = "pillow", specifier = ">=11,<13" },
+    { name = "py-key-value-aio", extras = ["postgresql"], specifier = ">=0.4.4" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "sentry-sdk", specifier = ">=2.61" },
     { name = "slack-sdk", specifier = ">=3.42,<4" },
@@ -3028,6 +3030,9 @@ keyring = [
 ]
 memory = [
     { name = "cachetools" },
+]
+postgresql = [
+    { name = "asyncpg" },
 ]
 
 [[package]]

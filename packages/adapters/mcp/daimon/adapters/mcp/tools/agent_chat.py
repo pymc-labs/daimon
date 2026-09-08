@@ -127,6 +127,9 @@ class AgentDescription(BaseModel):
     skill_names: list[str]
     repo_url: str | None
     environment_name: str | None
+    platform: str | None = None
+    workspace_id: str | None = None
+    workspace: str | None = None
 
 
 class AskResult(BaseModel):
@@ -278,6 +281,8 @@ async def _describe_agent_impl(
         skill_names=skill_names,
         repo_url=repo_url,
         environment_name=env_name,
+        platform=auth.platform,
+        workspace_id=auth.external_id,
     )
 
 
@@ -736,16 +741,29 @@ async def _ask_impl(
     auth: AuthIdentity,
     message: str,
     *,
+    handle: str | None = None,
     timeout_seconds: float = 120.0,
     poll_interval_seconds: float = 1.0,
     clock: Callable[[], float] = monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> AskResult:
-    """Start a turn, wait boundedly for idle, and return its final reply."""
-    turn_started_at = now()
-    started = await _start_turn_impl(runtime, auth, message)
+    """Start a turn (or continue one given ``handle``), wait boundedly for idle, and
+    return its final reply.
+
+    The reply is read from THIS turn's side of the boundary the send
+    returned. That matters most on the resume path: a resumable session is
+    already idle, and the agent only picks up the new message a moment after
+    the send is acknowledged, so an unfiltered "newest agent.message" read on
+    the first poll would hand back the previous turn's answer.
+    """
+    if handle is None:
+        started = await _start_turn_impl(runtime, auth, message, now=now)
+    else:
+        started = await _continue_turn_impl(runtime, auth, handle, message, now=now)
     handle = started["handle"]
+    turn_event_id = started["turn_event_id"]
+    turn_started_at = dt.datetime.fromisoformat(started["turn_started_at"])
     deadline = clock() + timeout_seconds
 
     while True:
@@ -763,8 +781,19 @@ async def _ask_impl(
             page: str | None = None
             final_text: str | None = None
             for _ in range(_MAX_EVENT_PAGES):
-                events = await _list_events_impl(runtime, auth, handle, page, 100, "desc")
+                events = await _list_events_impl(
+                    runtime,
+                    auth,
+                    handle,
+                    page,
+                    100,
+                    "desc",
+                    created_at_gte=turn_started_at.isoformat(),
+                    types=["agent.message"],
+                )
                 for event in events.items:
+                    if event.id == turn_event_id:
+                        continue
                     final_text = _agent_message_text(event)
                     if final_text is not None:
                         break
@@ -886,12 +915,15 @@ def register_agent_chat_tools(
         return await _start_turn_impl(runtime, auth, message, bundle)
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
-    async def ask(ctx: Context, message: str) -> AskResult:  # pyright: ignore[reportUnusedFunction]
+    async def ask(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, message: str, handle: str | None = None
+    ) -> AskResult:
         """Ask one question and wait for the final answer and any chart images. Starts a
         persistent turn, waits up to about 120 seconds for idle, and
         returns the final text plus a resumable handle. Chart images are
         embedded by default; short-lived download links are added when private
-        artifact storage is configured.
+        artifact storage is configured. Pass ``handle`` from a previous result to
+        continue that conversation instead of starting a new one.
         """
         auth = await _check_admission(
             ctx,
@@ -900,7 +932,7 @@ def register_agent_chat_tools(
             tool_name="ask",
         )
         return _ask_tool_result(  # type: ignore[return-value]
-            await _ask_impl(runtime, auth, message)
+            await _ask_impl(runtime, auth, message, handle=handle)
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
