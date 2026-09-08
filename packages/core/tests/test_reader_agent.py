@@ -424,3 +424,54 @@ async def test_ensure_reader_variant_raises_for_unknown_source() -> None:
         await ensure_reader_variant(
             client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="ghost"
         )
+
+
+async def test_ensure_reader_variant_ignores_the_source_toolset_shape() -> None:
+    """A live agent's toolset carries per-config fields the create shape rejects.
+
+    Managed Agents returns each toolset config entry with a ``type`` next to
+    its ``name`` (and ``enabled`` / ``permission_policy`` filled in). Feeding
+    that back into an agent spec fails validation, which is exactly what
+    happened on the first live publish. The reader must be created from the
+    base toolset alone, whatever the source carries.
+    """
+    source = _source_agent_dict(id_="ag_src", spec_hash="src-hash-1")
+    source["tools"] = [
+        {
+            "type": "agent_toolset_20260401",
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {
+                    "type": name,
+                    "name": name,
+                    "enabled": True,
+                    "permission_policy": {"type": "always_allow"},
+                }
+                for name in ("bash", "read", "edit", "grep", "glob", "write")
+            ],
+        }
+    ]
+    router = _router([source])
+    created: dict[str, Any] = {}
+    _add_create_route(router, created)
+    client = build_fake_anthropic(router.dispatch)
+
+    result = await ensure_reader_variant(
+        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
+    )
+
+    assert result.id == "ag_reader"
+    tools = created["tools"]
+    assert [tool["type"] for tool in tools] == ["agent_toolset_20260401"], (
+        "the reader must carry exactly the base agent toolset"
+    )
+    config_names = [config["name"] for config in tools[0]["configs"]]
+    assert config_names == ["bash", "read", "edit", "grep", "glob", "write"], (
+        "the base toolset's six tools, in the spec's own order"
+    )
+    assert all("type" not in config for config in tools[0]["configs"]), (
+        "no per-config type may leak from the live response into the create call"
+    )
+    assert tools[0]["default_config"]["permission_policy"] == {"type": "always_allow"}, (
+        "readers run headless, so the dump step must inject always-allow"
+    )
