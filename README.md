@@ -164,8 +164,25 @@ lifetime, and image-embedding controls.
 Coding-agent clients such as Claude Code connect through the plugin in
 [`plugin/`](plugin/) instead of a per-agent token: it logs in via Slack or
 Discord OAuth and reaches every daimon install the logged-in person belongs
-to. This needs `DAIMON_HUB__*` configured on the server in addition to the
-settings above.
+to.
+
+#### Hub login mounts
+
+Each platform's mount needs its own OAuth app, plus `DAIMON_HUB__*`,
+`DAIMON_CRYPTO__KEYS` (the login state is encrypted at rest) and
+`DAIMON_MCP__PUBLIC_URL` (the mounts derive their public base URL from it) on
+the server. Register these redirect URIs on the OAuth apps, where the origin
+is `DAIMON_MCP__PUBLIC_URL` without the trailing `/mcp`:
+
+- Slack: `{origin}/slack/auth/callback`
+- Discord: `{origin}/discord/auth/callback`
+
+The Discord app requests the `identify` and `guilds` scopes, enough to learn
+who logged in and which servers they are in. The Slack app requests user
+scopes (`users:read`, `channels:history`, `groups:history`, `channels:read`,
+`groups:read`, `im:history`, `mpim:history`, `im:read`, `mpim:read`,
+`search:read`) so a daimon reads Slack as the person asking and never sees a
+channel they cannot.
 
 ### 2. Create the Discord application
 

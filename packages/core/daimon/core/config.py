@@ -158,7 +158,11 @@ class HubSettings(BaseModel):
 
     slack_client_id: str | None = Field(
         default=None,
-        description="Slack OAuth app client ID for the /slack/mcp login mount.",
+        description=(
+            "Slack OAuth app client ID for the /slack/mcp login mount. Register "
+            "<DAIMON_MCP__PUBLIC_URL origin>/slack/auth/callback as a redirect "
+            "URL on the Slack app."
+        ),
     )
     slack_client_secret: SecretStr | None = Field(
         default=None,
@@ -166,7 +170,11 @@ class HubSettings(BaseModel):
     )
     discord_client_id: str | None = Field(
         default=None,
-        description="Discord OAuth app client ID for the /discord/mcp login mount.",
+        description=(
+            "Discord OAuth app client ID for the /discord/mcp login mount. "
+            "Register <DAIMON_MCP__PUBLIC_URL origin>/discord/auth/callback as a "
+            "redirect URI on the Discord app."
+        ),
     )
     discord_client_secret: SecretStr | None = Field(
         default=None,
