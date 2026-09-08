@@ -98,26 +98,23 @@ log = structlog.get_logger(__name__)
 _MAX_EVENT_PAGES = 20
 
 
-def _turn_boundary(sent: BetaManagedAgentsSendSessionEvents, *, handle: str) -> tuple[str, str]:
-    """Read the turn boundary (event id, ISO timestamp) off a send response.
+def _turn_boundary(sent: BetaManagedAgentsSendSessionEvents) -> str:
+    """Read the turn boundary event id off a send response.
 
-    The accepted event IS the boundary (SPEC D-07): a caller reads events at
-    or after ``turn_started_at`` and discards everything up to and including
-    ``turn_event_id``, instead of guessing the boundary from its own clock.
-    Raises when the send accepted nothing — a send with no accepted event is
-    not a started turn and must not return a half-answer.
+    The accepted event's id IS the boundary a caller drops through: read
+    events at or after the seam's own pre-send clock reading and discard
+    everything up to and including this id. The timestamp is NOT read off
+    the echo — a live probe against the API showed the send response always
+    echoes the event with ``processed_at=None``; the timestamp only appears
+    roughly half a second later, once the agent starts on the event — so the
+    boundary's clock is the caller's own, captured immediately before the
+    send (see the callers' ``now`` parameter). Raises when the send accepted
+    nothing — a send with no accepted event is not a started turn and must
+    not return a half-answer.
     """
     if not sent.data:
         raise ToolError("send returned no accepted event")
-    event = sent.data[0]
-    if event.processed_at is None:
-        log.warning(
-            "agent_chat.turn_boundary.processed_at_missing", handle=handle, event_id=event.id
-        )
-        timestamp = dt.datetime.now(dt.UTC)
-    else:
-        timestamp = event.processed_at
-    return event.id, timestamp.isoformat()
+    return sent.data[0].id
 
 
 class AgentDescription(BaseModel):
@@ -289,15 +286,19 @@ async def _start_turn_impl(
     auth: AuthIdentity,
     message: str,
     bundle: str | None = None,
+    *,
+    now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> dict[str, str]:
     """Create a new MA session for the caller's agent and send the first message.
 
     Returns ``{"handle": session_id, "turn_event_id": ..., "turn_started_at": ...}``.
-    ``turn_event_id`` and ``turn_started_at`` identify this turn's first event
-    (the accepted ``user.message``), taken from the ``events.send`` response.
-    A caller reading the transcript should ask ``list_events`` for events at
-    or after ``turn_started_at`` and discard everything up to and including
-    ``turn_event_id`` — this is the turn boundary, not the caller's own clock.
+    ``turn_event_id`` is the accepted ``user.message`` event's id, taken from
+    the ``events.send`` response. ``turn_started_at`` is ``now()`` captured
+    immediately BEFORE that call, not a timestamp read off the response — the
+    echo carries no usable timestamp of its own (see ``_turn_boundary``). A
+    caller reading the transcript should ask ``list_events`` for events with
+    ``created_at_gte=turn_started_at`` and discard everything up to and
+    including ``turn_event_id`` — this is the turn boundary.
 
     Environment resolution (fail-closed):
     - Resolve ``environment_name`` via the shared channel/tenant/deployment
@@ -385,6 +386,7 @@ async def _start_turn_impl(
             github_app_private_key=github_app_private_key,
         )
 
+    turn_started_at = now()
     sent = await runtime.client.beta.sessions.events.send(
         session.id,
         events=[
@@ -394,12 +396,12 @@ async def _start_turn_impl(
             }
         ],
     )
-    turn_event_id, turn_started_at = _turn_boundary(sent, handle=session.id)
+    turn_event_id = _turn_boundary(sent)
 
     return {
         "handle": session.id,
         "turn_event_id": turn_event_id,
-        "turn_started_at": turn_started_at,
+        "turn_started_at": turn_started_at.isoformat(),
     }
 
 
@@ -408,16 +410,21 @@ async def _continue_turn_impl(
     auth: AuthIdentity,
     handle: str,
     message: str,
+    *,
+    now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> dict[str, str]:
     """Send a follow-up message on an existing session.
 
     Returns ``{"handle": handle, "turn_event_id": ..., "turn_started_at": ...}``,
-    the same three-key shape as ``start_turn`` — the boundary is taken from
-    THIS call's ``events.send`` response, not the session's earlier events.
-    ``_verify_agent_owns_session`` guards against cross-tenant AND
+    the same three-key shape as ``start_turn``. ``turn_event_id`` is taken
+    from THIS call's ``events.send`` response, not the session's earlier
+    events; ``turn_started_at`` is ``now()`` captured immediately BEFORE that
+    send (see ``_start_turn_impl`` for why the echo's own timestamp isn't
+    used). ``_verify_agent_owns_session`` guards against cross-tenant AND
     same-tenant cross-agent handles (Tampering threat mitigation, WR-03).
     """
     await _verify_agent_owns_session(runtime, auth, handle)
+    turn_started_at = now()
     sent = await runtime.client.beta.sessions.events.send(
         handle,
         events=[
@@ -427,11 +434,11 @@ async def _continue_turn_impl(
             }
         ],
     )
-    turn_event_id, turn_started_at = _turn_boundary(sent, handle=handle)
+    turn_event_id = _turn_boundary(sent)
     return {
         "handle": handle,
         "turn_event_id": turn_event_id,
-        "turn_started_at": turn_started_at,
+        "turn_started_at": turn_started_at.isoformat(),
     }
 
 

@@ -1840,13 +1840,16 @@ def _mint_bundle(
     tenant_id: uuid.UUID = _TENANT_ID,
     agent_id: uuid.UUID = _AGENT_UUID,
 ) -> str:
+    # `now` is real wall-clock time, not a fixed calendar date: a fixed past
+    # date plus a fixed ttl eventually crosses its own expiry as the test
+    # suite ages (observed 2026-09-08, one week after this helper landed).
     return bundle_handle.mint(
         secret,
         file_id=file_id,
         tenant_id=tenant_id,
         agent_id=agent_id,
         sha256="a" * 64,
-        now=dt.datetime(2026, 9, 1, tzinfo=dt.UTC),
+        now=dt.datetime.now(dt.UTC),
         ttl_days=7,
     )
 
@@ -1908,7 +1911,19 @@ async def test_start_turn_with_bundle_mounts_the_single_resource_on_an_isolated_
 async def test_start_turn_with_bundle_preserves_the_boundary_return_shape(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The bundle branch must not regress the plan 21-05 boundary return shape."""
+    """The bundle branch must not regress the plan 21-05 boundary return shape.
+
+    ``turn_started_at`` is the injected pre-send clock, not the echo's own
+    (absent, on the real API) timestamp — the echo's ``processed_at`` here is
+    set only to prove it is ignored, not read.
+    """
+    call_order: list[str] = []
+    fixed_at = dt.datetime(2026, 9, 1, 10, 0, tzinfo=dt.UTC)
+
+    def now() -> dt.datetime:
+        call_order.append("now")
+        return fixed_at
+
     router = _isolated_agent_and_env_router()
     router.add(
         "POST", r"/v1/sessions", lambda _r, _m: httpx.Response(200, json=_make_fake_session())
@@ -1918,33 +1933,39 @@ async def test_start_turn_with_bundle_preserves_the_boundary_return_shape(
         r"/v1/files/([^/]+)",
         lambda _r, m: httpx.Response(200, json=_file_metadata_payload(m.group(1))),
     )
-    router.add(
-        "POST",
-        r"/v1/sessions/([^/]+)/events",
-        lambda _r, _m: send_events_response(
+
+    def on_send(_r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        call_order.append("send")
+        return send_events_response(
             data=[
                 BetaManagedAgentsUserMessageEvent(
                     id="sevt_bundle_boundary_2",
                     content=[BetaManagedAgentsTextBlock(type="text", text="hi")],
                     type="user.message",
-                    processed_at=dt.datetime(2026, 9, 1, 10, 0, tzinfo=dt.UTC),
+                    processed_at=None,
                 ).model_dump(mode="json")
             ]
-        ),
-    )
+        )
+
+    router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
     client = build_fake_anthropic(router.dispatch)
     runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
     runtime.settings.mcp.jwt_secret = SecretStr(_BUNDLE_SECRET)
     auth = _auth()
     handle = _mint_bundle()
 
-    result = await _start_turn_impl(runtime, auth, "hi", handle)
+    result = await _start_turn_impl(runtime, auth, "hi", handle, now=now)
 
     assert set(result) == {"handle", "turn_event_id", "turn_started_at"}, (
         f"bundle branch must return the same three-key boundary shape; got {result!r}"
     )
     assert result["turn_event_id"] == "sevt_bundle_boundary_2"
-    assert result["turn_started_at"] == dt.datetime(2026, 9, 1, 10, 0, tzinfo=dt.UTC).isoformat()
+    assert result["turn_started_at"] == fixed_at.isoformat(), (
+        "turn_started_at must be the injected clock, not the echo's processed_at"
+    )
+    assert call_order == ["now", "send"], (
+        f"the clock must be read BEFORE events.send, not after; got {call_order!r}"
+    )
 
 
 def _zero_upstream_router() -> tuple[MARouter, list[str], list[str]]:
@@ -2129,28 +2150,36 @@ async def test_start_turn_with_bundle_when_jwt_secret_unset_is_refused(
 async def test_start_turn_returns_the_accepted_events_boundary(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """turn_event_id/turn_started_at come from events.send's data[0], not a guess.
+    """turn_event_id comes from events.send's data[0]; turn_started_at from the
+    caller's own clock, captured before the send, not from the echo.
 
     Also proves branch B (no ``bundle``) is untouched by the 21-07 bundle
     branch: ``create_session`` still receives the full vault/repo/env
     argument set, not the isolated path's stripped-down call.
     """
-    accepted_at = dt.datetime(2026, 9, 1, 10, 0, tzinfo=dt.UTC)
+    call_order: list[str] = []
+    fixed_at = dt.datetime(2026, 9, 1, 10, 0, tzinfo=dt.UTC)
+
+    def now() -> dt.datetime:
+        call_order.append("now")
+        return fixed_at
+
     router = _agent_and_env_router()
-    router.add(
-        "POST",
-        r"/v1/sessions/([^/]+)/events",
-        lambda _r, _m: send_events_response(
+
+    def on_send(_r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        call_order.append("send")
+        return send_events_response(
             data=[
                 BetaManagedAgentsUserMessageEvent(
                     id="sevt_boundary_001",
                     content=[BetaManagedAgentsTextBlock(type="text", text="hi")],
                     type="user.message",
-                    processed_at=accepted_at,
+                    processed_at=None,
                 ).model_dump(mode="json")
             ]
-        ),
-    )
+        )
+
+    router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
     client = build_fake_anthropic(router.dispatch)
     runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
     auth = _auth()
@@ -2160,13 +2189,16 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "daimon.adapters.mcp.tools.agent_chat.create_session",
         new=AsyncMock(return_value=fake_session),
     ) as mock_create_session:
-        result = await _start_turn_impl(runtime, auth, "hi")
+        result = await _start_turn_impl(runtime, auth, "hi", now=now)
 
     assert result["turn_event_id"] == "sevt_boundary_001", (
         f"turn_event_id should be the send response's accepted event id; got {result!r}"
     )
-    assert result["turn_started_at"] == accepted_at.isoformat(), (
-        f"turn_started_at should be the accepted event's processed_at, isoformat()'d; got {result!r}"
+    assert result["turn_started_at"] == fixed_at.isoformat(), (
+        f"turn_started_at should be the injected pre-send clock, isoformat()'d; got {result!r}"
+    )
+    assert call_order == ["now", "send"], (
+        f"the clock must be read BEFORE events.send, not after; got {call_order!r}"
     )
     assert mock_create_session.await_args is not None, "create_session should be awaited once"
     call_kwargs = mock_create_session.await_args.kwargs
@@ -2186,39 +2218,52 @@ async def test_start_turn_returns_the_accepted_events_boundary(
 
 
 async def test_continue_turn_returns_boundary_from_its_own_send() -> None:
-    """continue_turn's boundary is THIS send's accepted event, not session history."""
-    own_send_at = dt.datetime(2026, 9, 1, 11, 0, tzinfo=dt.UTC)
+    """continue_turn's turn_event_id is THIS send's accepted event, not session
+    history; turn_started_at is the caller's own clock, captured before THIS
+    send, not the echo's timestamp (the live API never populates one on the
+    echo)."""
+    call_order: list[str] = []
+    own_clock_at = dt.datetime(2026, 9, 1, 11, 0, tzinfo=dt.UTC)
+
+    def now() -> dt.datetime:
+        call_order.append("now")
+        return own_clock_at
+
     router = MARouter()
     router.add(
         "GET",
         r"/v1/sessions/([^/]+)",
         lambda _r, _m: httpx.Response(200, json=_make_fake_session(status="idle")),
     )
-    router.add(
-        "POST",
-        r"/v1/sessions/([^/]+)/events",
-        lambda _r, _m: send_events_response(
+
+    def on_send(_r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        call_order.append("send")
+        return send_events_response(
             data=[
                 BetaManagedAgentsUserMessageEvent(
                     id="sevt_continue_boundary",
                     content=[BetaManagedAgentsTextBlock(type="text", text="again")],
                     type="user.message",
-                    processed_at=own_send_at,
+                    processed_at=None,
                 ).model_dump(mode="json")
             ]
-        ),
-    )
+        )
+
+    router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
     client = build_fake_anthropic(router.dispatch)
     runtime = _runtime(client)
     auth = _auth()
 
-    result = await _continue_turn_impl(runtime, auth, "ses_test001", "again")
+    result = await _continue_turn_impl(runtime, auth, "ses_test001", "again", now=now)
 
     assert result == {
         "handle": "ses_test001",
         "turn_event_id": "sevt_continue_boundary",
-        "turn_started_at": own_send_at.isoformat(),
+        "turn_started_at": own_clock_at.isoformat(),
     }
+    assert call_order == ["now", "send"], (
+        f"the clock must be read BEFORE events.send, not after; got {call_order!r}"
+    )
 
 
 async def test_start_turn_raises_when_send_accepts_nothing(
@@ -2246,10 +2291,19 @@ async def test_start_turn_raises_when_send_accepts_nothing(
         await _start_turn_impl(runtime, auth, "hi")
 
 
-async def test_start_turn_falls_back_to_now_when_processed_at_is_missing(
+async def test_start_turn_ignores_the_echos_processed_at_even_when_present(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A missing processed_at still returns a parseable ISO timestamp, not a raise."""
+    """turn_started_at never reads the echo's processed_at, present or absent.
+
+    The live API always echoes ``processed_at=None`` on the send response (a
+    timestamp appears only ~0.5s later, once the agent starts on the event),
+    so the boundary's clock can only ever be the caller's own, captured
+    before the send. This test pins a non-None processed_at on the fake echo
+    specifically to prove it is never read.
+    """
+    injected_at = dt.datetime(2026, 9, 1, 12, 0, tzinfo=dt.UTC)
+    echoed_processed_at = dt.datetime(1999, 1, 1, tzinfo=dt.UTC)
     router = _agent_and_env_router()
     router.add(
         "POST",
@@ -2260,7 +2314,7 @@ async def test_start_turn_falls_back_to_now_when_processed_at_is_missing(
                     id="sevt_no_timestamp",
                     content=[BetaManagedAgentsTextBlock(type="text", text="hi")],
                     type="user.message",
-                    processed_at=None,
+                    processed_at=echoed_processed_at,
                 ).model_dump(mode="json")
             ]
         ),
@@ -2274,11 +2328,12 @@ async def test_start_turn_falls_back_to_now_when_processed_at_is_missing(
         "daimon.adapters.mcp.tools.agent_chat.create_session",
         new=AsyncMock(return_value=fake_session),
     ):
-        result = await _start_turn_impl(runtime, auth, "hi")
+        result = await _start_turn_impl(runtime, auth, "hi", now=lambda: injected_at)
 
     assert result["turn_event_id"] == "sevt_no_timestamp"
-    # Must be a parseable ISO timestamp (the log.warning'd clock fallback), not a raise.
-    dt.datetime.fromisoformat(result["turn_started_at"])
+    assert result["turn_started_at"] == injected_at.isoformat(), (
+        "turn_started_at must be the injected clock, never the echo's processed_at"
+    )
 
 
 async def test_list_events_forwards_created_at_gte_and_types() -> None:
