@@ -10,12 +10,16 @@ from collections.abc import AsyncIterator
 
 import httpx
 import pytest
+from daimon.adapters.mcp.hub.app import build_hub_app
 from daimon.adapters.mcp.hub.claims import decode_hub_claims, encode_hub_claims
 from daimon.adapters.mcp.hub.identity import HubIdentity, HubIdentityMiddleware, _hub_auth
 from daimon.core.hub_identity import HubTenant
 from fastmcp import Context, FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp, Message
+
+from .test_app import _runtime
 
 pytestmark = pytest.mark.asyncio
 
@@ -43,7 +47,7 @@ def test_decode_returns_none_on_malformed_tenant() -> None:
 
 def _app_with_tokens(tokens: dict[str, dict[str, object]]) -> FastMCP:
     mcp = FastMCP(name="hub-test", auth=StaticTokenVerifier(tokens=tokens))
-    mcp.add_middleware(HubIdentityMiddleware())
+    mcp.add_middleware(HubIdentityMiddleware("slack"))
 
     @mcp.tool
     async def whoami(ctx: Context) -> str:  # pyright: ignore[reportUnusedFunction]
@@ -95,8 +99,8 @@ def _parse_jsonrpc(resp: httpx.Response) -> dict[str, object]:
     return resp.json()  # type: ignore[return-value]
 
 
-async def _call_whoami_via_http(app: ASGIApp, token: str) -> dict[str, object]:
-    """Initialize an MCP HTTP session and call tools/call for whoami; return the JSON-RPC result."""
+async def _call_tool_via_http(app: ASGIApp, token: str, tool: str = "whoami") -> dict[str, object]:
+    """Initialize an MCP HTTP session and call ``tool``; return the JSON-RPC result."""
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
@@ -128,7 +132,7 @@ async def _call_whoami_via_http(app: ASGIApp, token: str) -> dict[str, object]:
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
-                "params": {"name": "whoami", "arguments": {}},
+                "params": {"name": tool, "arguments": {}},
             },
             headers=headers,
         )
@@ -139,7 +143,7 @@ async def _call_whoami_via_http(app: ASGIApp, token: str) -> dict[str, object]:
 async def test_middleware_exposes_identity_to_tools() -> None:
     claims = encode_hub_claims(platform="slack", platform_user_id="U1", tenants=[_TENANT])
     mcp = _app_with_tokens({"tok": {"sub": "U1", "client_id": "c", "upstream_claims": claims}})
-    result = await _call_whoami_via_http(mcp.http_app(), "tok")
+    result = await _call_tool_via_http(mcp.http_app(), "tok")
     payload = result.get("result", result)
     assert isinstance(payload, dict), f"unexpected tools/call shape: {result!r}"
     assert not payload.get("isError"), (
@@ -152,8 +156,32 @@ async def test_middleware_exposes_identity_to_tools() -> None:
 
 async def test_middleware_rejects_token_without_hub_claims() -> None:
     mcp = _app_with_tokens({"tok": {"sub": "U1", "client_id": "c"}})
-    result = await _call_whoami_via_http(mcp.http_app(), "tok")
+    result = await _call_tool_via_http(mcp.http_app(), "tok")
     # The middleware raises AuthorizationError before the tool is dispatched, so
     # the request fails at the JSON-RPC level rather than surfacing as a tool
     # result with isError=True.
     assert "error" in result, f"token without hub claims must be rejected; got {result!r}"
+
+
+async def test_middleware_rejects_a_token_issued_for_another_platform(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    claims = encode_hub_claims(platform="slack", platform_user_id="U1", tenants=[_TENANT])
+    auth = StaticTokenVerifier(
+        tokens={"tok": {"sub": "U1", "client_id": "c", "upstream_claims": claims}}
+    )
+    mcp = build_hub_app(
+        platform="discord", runtime=_runtime(sessionmaker), auth=auth, billing_config=None
+    )
+
+    result = await _call_tool_via_http(
+        mcp.http_app(path="/mcp", stateless_http=True, json_response=True),
+        "tok",
+        tool="list_daimons",
+    )
+
+    payload = result.get("result", result)
+    assert isinstance(payload, dict), f"unexpected tools/call shape: {result!r}"
+    assert payload.get("isError"), (
+        f"a Slack login must not be accepted by the Discord mount: {result!r}"
+    )

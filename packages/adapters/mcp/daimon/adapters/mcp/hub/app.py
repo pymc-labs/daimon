@@ -56,7 +56,7 @@ def build_hub_app(
             "Call list_daimons first; every other tool takes a daimon_id from that list."
         ),
     )
-    mcp.add_middleware(HubIdentityMiddleware())
+    mcp.add_middleware(HubIdentityMiddleware(platform))
     mcp.add_middleware(MaErrorMiddleware())
     register_hub_tools(mcp, runtime, billing_config=billing_config)
     return mcp

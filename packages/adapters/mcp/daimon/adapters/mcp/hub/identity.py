@@ -35,6 +35,17 @@ class HubIdentity:
 
 
 class HubIdentityMiddleware(Middleware):
+    """Decode the login claims into request state for the mount's platform.
+
+    Both mounts sign with the same key, so a Slack login token verifies
+    against the Discord proxy's signature check too; only the issuer and
+    audience separate them. Comparing the claims' platform to the mount's is
+    the second, independent layer behind that check.
+    """
+
+    def __init__(self, platform: Platform) -> None:
+        self.platform = platform
+
     async def on_request(self, context: MiddlewareContext, call_next: CallNext) -> object:
         from daimon.adapters.mcp.hub.claims import decode_hub_claims
 
@@ -44,6 +55,8 @@ class HubIdentityMiddleware(Middleware):
         identity = decode_hub_claims(token.claims)
         if identity is None:
             raise AuthorizationError("token carries no hub identity")
+        if identity.platform != self.platform:
+            raise AuthorizationError("token was issued for another platform")
         fastmcp_ctx = context.fastmcp_context
         if fastmcp_ctx is None:
             raise AuthorizationError("missing fastmcp context on request")
