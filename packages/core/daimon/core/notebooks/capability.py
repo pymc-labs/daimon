@@ -7,6 +7,10 @@ signed payload, so a tampered URL path cannot redirect bytes to another slug.
 
 Pure: the caller injects ``now`` (clock) and ``jti`` (nonce) — no I/O, no clock,
 no RNG here, so the token is deterministic given its inputs.
+
+The ``"report"`` operation is verified by ``report_host.capability`` instead —
+a separate standalone app with its own duplicated verify side, kept in lockstep
+by tests on both sides.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Literal
 
-Op = Literal["blog", "notebook", "data"]
+Op = Literal["blog", "notebook", "data", "report"]
 
 
 def _b64(raw: bytes) -> str:
