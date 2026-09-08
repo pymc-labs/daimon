@@ -87,6 +87,17 @@ CREATE TABLE IF NOT EXISTS revisions (
     note TEXT,
     PRIMARY KEY (slug, name)
 );
+
+-- One per-turn upload token, minted by the ask route so a turn's first
+-- message can carry a one-time URL the agent PUTs a revised PDF to. No FK to
+-- threads(id): that table lives in threads_store's schema, applied after
+-- this one, so a forward reference here would break connect()'s ordering.
+CREATE TABLE IF NOT EXISTS upload_tokens (
+    token TEXT PRIMARY KEY,
+    slug TEXT NOT NULL REFERENCES reports(slug) ON DELETE CASCADE,
+    thread_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -462,3 +473,19 @@ def list_revisions(conn: sqlite3.Connection, *, slug: str) -> list[RevisionRow]:
 def set_current_pdf(conn: sqlite3.Connection, *, slug: str, name: str) -> None:
     with conn:
         conn.execute("UPDATE reports SET current_pdf = ? WHERE slug = ?", (name, slug))
+
+
+def create_upload_token(
+    conn: sqlite3.Connection, *, token: str, slug: str, thread_id: int, now: datetime
+) -> None:
+    """Record a per-turn upload token minted for a reader's question.
+
+    The route that consumes this token — validating single use and swapping
+    in the uploaded PDF as a new revision — lands in a later plan; this only
+    persists the row so that route has something to read and burn.
+    """
+    with conn:
+        conn.execute(
+            "INSERT INTO upload_tokens (token, slug, thread_id, created_at) VALUES (?, ?, ?, ?)",
+            (token, slug, thread_id, dt_to_text(now)),
+        )
