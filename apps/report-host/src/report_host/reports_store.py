@@ -451,6 +451,18 @@ def list_recipients(conn: sqlite3.Connection, *, slug: str) -> list[RecipientRow
     return [_row_to_recipient(row) for row in rows]
 
 
+def prune_expired_recipients(conn: sqlite3.Connection, *, now: datetime) -> int:
+    """Delete every recipient row past its expiry, revoked or not.
+
+    Belt and braces against the reader route's own ``load_recipient`` expiry
+    check (T-21-18-E): a second, independent control, and it keeps the table
+    from growing forever. Returns how many rows were removed.
+    """
+    with conn:
+        cur = conn.execute("DELETE FROM recipients WHERE expires_at <= ?", (dt_to_text(now),))
+    return cur.rowcount
+
+
 def add_revision(
     conn: sqlite3.Connection,
     *,
