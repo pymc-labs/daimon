@@ -1264,6 +1264,28 @@
         'type': 'object',
       }),
     }),
+    'delete_report': dict({
+      'description': '''
+        Un-publish a report you published.
+        
+        Revokes the report's credential and removes it from the host —
+        every link you handed out stops working. This cannot be undone;
+        re-publishing the same slug mints a new credential and new links,
+        so anyone who needs access again must be sent their new link.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'slug': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'slug',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'delete_routine': dict({
       'description': 'Delete a routine (hard delete, tenant-scoped).',
       'parameters': dict({
@@ -2222,6 +2244,96 @@
           'prompt',
           'steps',
           'channel_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'publish_report': dict({
+      'description': '''
+        Publish a report: a page where the named people can read it and
+        ask it questions.
+        
+        Pass a short slug (goes in the URL), a title, one entry per
+        recipient (``name`` and ``label`` — a short identifier for their
+        link, e.g. an email or handle), a dollar cap on how much reader Q&A
+        may spend against your tenant's balance, and optionally which agent
+        should answer questions (defaults to this tenant's configured
+        agent).
+        
+        Returns ``{upload_url, links}``: ``upload_url`` is a one-time
+        capability URL: ``links`` maps each recipient's name to their own
+        personal link.
+        
+        What to do next: build ONE gzip archive (``tar -czf bundle.tar.gz
+        report.pdf analysis/``) with the report PDF at its root and the
+        analysis files beside it, using relative paths only — no absolute
+        paths, no leading slash — then PUT it to ``upload_url``:
+        ``curl -sS -X PUT --data-binary @bundle.tar.gz "<upload_url>"``.
+        Keep the archive under the size cap; if it's too large, raw model
+        output files (posterior draws, large .nc/.csv dumps) are the first
+        thing to drop — never the PDF or the code that produced it. Relay
+        each recipient their own link; the links are not interchangeable.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'Recipient': dict({
+            'description': 'One named recipient of a published report; the host mints one link each.',
+            'properties': dict({
+              'label': dict({
+                'type': 'string',
+              }),
+              'name': dict({
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+              'label',
+            ]),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'agent': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'cap_usd': dict({
+            'anyOf': list([
+              dict({
+                'type': 'number',
+              }),
+              dict({
+                'type': 'string',
+              }),
+            ]),
+          }),
+          'recipients': dict({
+            'items': dict({
+              '$ref': '#/$defs/Recipient',
+            }),
+            'type': 'array',
+          }),
+          'slug': dict({
+            'type': 'string',
+          }),
+          'title': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'slug',
+          'title',
+          'recipients',
+          'cap_usd',
         ]),
         'type': 'object',
       }),
