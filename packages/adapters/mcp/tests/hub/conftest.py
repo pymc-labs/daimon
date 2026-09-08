@@ -1,8 +1,7 @@
 """Make parent test helpers (conftest, factories) importable from hub/ tests.
 
-Without __init__.py in the test directories (removed to avoid pluggy plugin
-registration collision with packages/core/tests), the hub/ subdirectory
-needs the parent tests/ directory on sys.path for absolute imports.
+The parent ``tests/`` directory has no ``__init__.py``, so ``factories`` is
+only importable once that directory is on sys.path.
 
 Because packages/core/tests also has a ``factories`` module on sys.path
 (added by core's conftest), we must insert the MCP tests directory first

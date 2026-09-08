@@ -21,9 +21,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_platform_principal, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
-from factories import (
-    make_ma_agent,  # tests/tools/conftest.py sys.path shim; copy that shim into tests/hub/conftest.py
-)
+from factories import make_ma_agent
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

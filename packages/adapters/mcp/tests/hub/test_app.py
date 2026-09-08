@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 import pytest
+from cryptography.fernet import Fernet, MultiFernet
 from daimon.adapters.mcp.hub.app import build_hub_app, mount_hub_apps
 from daimon.adapters.mcp.hub.claims import encode_hub_claims
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -20,6 +21,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.defaults.loader import DeploymentDefault
+from daimon.core.errors import BootstrapError
 from daimon.core.hub_identity import HubTenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -41,14 +43,25 @@ _HUB_TOOLS = {
 }
 
 
-def _settings(hub: HubSettings | None = None) -> Settings:
+def _settings(
+    hub: HubSettings | None = None, *, public_url: str | None = "https://t.example.com/mcp"
+) -> Settings:
     return Settings(
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
         anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
         mcp=McpSettings(
-            public_url=HttpUrl("https://t.example.com/mcp"), jwt_secret=SecretStr("x" * 32)
+            public_url=HttpUrl(public_url) if public_url is not None else None,
+            jwt_secret=SecretStr("x" * 32),
         ),
         hub=hub or HubSettings(),
+    )
+
+
+def _discord_hub(*, signing_key: str | None = None) -> HubSettings:
+    return HubSettings(
+        discord_client_id="id",
+        discord_client_secret=SecretStr("s"),
+        jwt_signing_key=SecretStr(signing_key) if signing_key is not None else None,
     )
 
 
@@ -142,14 +155,27 @@ async def test_unconfigured_hub_mounts_nothing(
     assert "/slack" not in paths and "/discord" not in paths, f"got {paths!r}"
 
 
-async def test_mount_hub_apps_requires_signing_key_and_crypto(
+async def test_mount_hub_apps_requires_a_signing_key(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    from daimon.core.errors import BootstrapError
-
-    hub = HubSettings(discord_client_id="id", discord_client_secret=SecretStr("s"))
     app = Starlette()
-    with pytest.raises(BootstrapError, match="JWT_SIGNING_KEY"):
+    with pytest.raises(BootstrapError, match="DAIMON_HUB__JWT_SIGNING_KEY"):
+        mount_hub_apps(
+            app,
+            settings=_settings(_discord_hub()),
+            runtime=_runtime(sessionmaker),
+            sessionmaker=sessionmaker,
+            billing_config=None,
+            fernet=None,
+        )
+
+
+async def test_mount_hub_apps_requires_crypto_keys(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    hub = _discord_hub(signing_key=Fernet.generate_key().decode())
+    app = Starlette()
+    with pytest.raises(BootstrapError, match="DAIMON_CRYPTO__KEYS"):
         mount_hub_apps(
             app,
             settings=_settings(hub),
@@ -160,17 +186,28 @@ async def test_mount_hub_apps_requires_signing_key_and_crypto(
         )
 
 
+async def test_mount_hub_apps_requires_a_public_url(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    key = Fernet.generate_key()
+    hub = _discord_hub(signing_key=key.decode())
+    app = Starlette()
+    with pytest.raises(BootstrapError, match="DAIMON_MCP__PUBLIC_URL"):
+        mount_hub_apps(
+            app,
+            settings=_settings(hub, public_url=None),
+            runtime=_runtime(sessionmaker),
+            sessionmaker=sessionmaker,
+            billing_config=None,
+            fernet=MultiFernet([Fernet(key)]),
+        )
+
+
 async def test_mount_hub_apps_adds_mount_and_root_well_known_routes(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    from cryptography.fernet import Fernet, MultiFernet
-
     key = Fernet.generate_key()
-    hub = HubSettings(
-        discord_client_id="id",
-        discord_client_secret=SecretStr("s"),
-        jwt_signing_key=SecretStr(key.decode()),
-    )
+    hub = _discord_hub(signing_key=key.decode())
     app = Starlette()
     mounted = mount_hub_apps(
         app,
