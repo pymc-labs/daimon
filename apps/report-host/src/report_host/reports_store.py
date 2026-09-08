@@ -139,6 +139,14 @@ class RevisionRow:
     note: str | None
 
 
+@dataclass(frozen=True)
+class UploadTokenRow:
+    token: str
+    slug: str
+    thread_id: int
+    created_at: datetime
+
+
 def to_micros(amount: Decimal) -> int:
     """Quantize a Decimal USD amount to an exact integer micro-dollar count."""
     return int((amount * _MICROS_PER_USD).to_integral_value(rounding=ROUND_HALF_UP))
@@ -481,11 +489,36 @@ def create_upload_token(
     """Record a per-turn upload token minted for a reader's question.
 
     The route that consumes this token — validating single use and swapping
-    in the uploaded PDF as a new revision — lands in a later plan; this only
-    persists the row so that route has something to read and burn.
+    in the uploaded PDF as a new revision — is `uploads.turn_upload`, which
+    calls `consume_upload_token` below.
     """
     with conn:
         conn.execute(
             "INSERT INTO upload_tokens (token, slug, thread_id, created_at) VALUES (?, ?, ?, ?)",
             (token, slug, thread_id, dt_to_text(now)),
         )
+
+
+def consume_upload_token(conn: sqlite3.Connection, *, token: str) -> UploadTokenRow | None:
+    """Atomically look up and burn a per-turn upload token.
+
+    One `DELETE ... RETURNING`, no preceding read: the row's presence IS its
+    unused state, so deleting it and returning what was deleted is the
+    single-use check and the burn in one statement — two concurrent uses of
+    the same token cannot both see it as present (T-21-17-B).
+    """
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM upload_tokens WHERE token = ? "
+            "RETURNING token, slug, thread_id, created_at",
+            (token,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return UploadTokenRow(
+        token=row["token"],
+        slug=row["slug"],
+        thread_id=row["thread_id"],
+        created_at=text_to_dt(row["created_at"]),
+    )

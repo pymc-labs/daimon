@@ -197,6 +197,19 @@ def load_thread(
     return _row_to_thread(row) if row is not None else None
 
 
+def load_thread_by_id(conn: sqlite3.Connection, *, thread_id: int) -> ThreadRow | None:
+    """Look up a thread by id alone, with no recipient or slug scope.
+
+    Reader-facing code always goes through `load_thread`'s three-way scope
+    (T-21-12-A). This unscoped lookup exists only for the upload route,
+    which authorises by a per-turn token that already names its own thread
+    id and has no recipient token to scope by — it still needs to read that
+    thread's current status to refuse a token whose turn has already ended.
+    """
+    row = conn.execute("SELECT * FROM threads WHERE id = ?", (thread_id,)).fetchone()
+    return _row_to_thread(row) if row is not None else None
+
+
 def list_threads(conn: sqlite3.Connection, *, slug: str, recipient_token: str) -> list[ThreadRow]:
     rows = conn.execute(
         "SELECT * FROM threads WHERE slug = ? AND recipient_token = ? ORDER BY created_at",
