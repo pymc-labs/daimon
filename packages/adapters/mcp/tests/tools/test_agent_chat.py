@@ -622,6 +622,13 @@ async def test_start_turn_then_poll_get_session_and_read_transcript(
     )
 
 
+def _started(
+    handle: str, *, at: dt.datetime = dt.datetime(2026, 6, 23, 0, 0, tzinfo=dt.UTC)
+) -> dict[str, str]:
+    """The three-key shape start_turn/continue_turn return: handle plus turn boundary."""
+    return {"handle": handle, "turn_event_id": "sevt_boundary", "turn_started_at": at.isoformat()}
+
+
 async def test_ask_delivers_embedded_charts_without_artifact_settings() -> None:
     runtime = MagicMock()
     runtime.settings.artifacts = None
@@ -644,7 +651,7 @@ async def test_ask_delivers_embedded_charts_without_artifact_settings() -> None:
     with (
         patch(
             "daimon.adapters.mcp.tools.agent_chat._start_turn_impl",
-            new=AsyncMock(return_value={"handle": "ses_ask001"}),
+            new=AsyncMock(return_value=_started("ses_ask001", at=turn_started_at)),
         ),
         patch(
             "daimon.adapters.mcp.tools.agent_chat._get_session_impl",
@@ -704,7 +711,7 @@ async def test_ask_timeout_preserves_the_resumable_handle() -> None:
     with (
         patch(
             "daimon.adapters.mcp.tools.agent_chat._start_turn_impl",
-            new=AsyncMock(return_value={"handle": "ses_slow001"}),
+            new=AsyncMock(return_value=_started("ses_slow001")),
         ),
         patch(
             "daimon.adapters.mcp.tools.agent_chat._get_session_impl",
@@ -738,7 +745,7 @@ async def test_ask_surfaces_terminal_non_idle_status_without_waiting() -> None:
     with (
         patch(
             "daimon.adapters.mcp.tools.agent_chat._start_turn_impl",
-            new=AsyncMock(return_value={"handle": "ses_terminated001"}),
+            new=AsyncMock(return_value=_started("ses_terminated001")),
         ),
         patch(
             "daimon.adapters.mcp.tools.agent_chat._get_session_impl",
@@ -839,7 +846,7 @@ async def test_ask_keeps_polling_through_an_unmodeled_transient_status() -> None
     with (
         patch(
             "daimon.adapters.mcp.tools.agent_chat._start_turn_impl",
-            new=AsyncMock(return_value={"handle": "ses_queued001"}),
+            new=AsyncMock(return_value=_started("ses_queued001")),
         ),
         patch(
             "daimon.adapters.mcp.tools.agent_chat._get_session_impl",
@@ -2929,3 +2936,49 @@ async def test_ask_with_handle_continues_instead_of_starting(
         f"got {result!r} sent={sent!r}"
     )
     assert result.message == "done", f"got {result.message!r}"
+
+
+async def test_ask_with_handle_reads_only_this_turns_reply(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A resumed session is already idle and still holds the previous answer; ask must
+    read from this turn's boundary, not the newest agent.message in the transcript."""
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, m: httpx.Response(
+            200, json=_make_fake_session(session_id=m.group(1), status="idle")
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: send_events_response(
+            data=[
+                BetaManagedAgentsUserMessageEvent(
+                    id="sevt_continue_boundary",
+                    content=[BetaManagedAgentsTextBlock(type="text", text="and then?")],
+                    type="user.message",
+                    processed_at=dt.datetime(2026, 6, 23, 0, 0, tzinfo=dt.UTC),
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+
+    def _events(r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        bounded = "created_at[gte]" in r.url.params
+        text = "this turn" if bounded else "previous turn"
+        return httpx.Response(
+            200, json={"data": [_make_agent_message_event(text)], "next_page": None}
+        )
+
+    router.add("GET", r"/v1/sessions/([^/]+)/events", _events)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+
+    result = await _ask_impl(runtime, _auth(), "and then?", handle="sess_existing")
+
+    assert result.message == "this turn", (
+        f"ask returned the transcript's newest message instead of this turn's: {result!r}"
+    )

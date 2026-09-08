@@ -749,13 +749,21 @@ async def _ask_impl(
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
 ) -> AskResult:
     """Start a turn (or continue one given ``handle``), wait boundedly for idle, and
-    return its final reply."""
-    turn_started_at = now()
+    return its final reply.
+
+    The reply is read from THIS turn's side of the boundary the send
+    returned. That matters most on the resume path: a resumable session is
+    already idle, and the agent only picks up the new message a moment after
+    the send is acknowledged, so an unfiltered "newest agent.message" read on
+    the first poll would hand back the previous turn's answer.
+    """
     if handle is None:
-        started = await _start_turn_impl(runtime, auth, message)
-        handle = started["handle"]
+        started = await _start_turn_impl(runtime, auth, message, now=now)
     else:
-        await _continue_turn_impl(runtime, auth, handle, message)
+        started = await _continue_turn_impl(runtime, auth, handle, message, now=now)
+    handle = started["handle"]
+    turn_event_id = started["turn_event_id"]
+    turn_started_at = dt.datetime.fromisoformat(started["turn_started_at"])
     deadline = clock() + timeout_seconds
 
     while True:
@@ -773,8 +781,19 @@ async def _ask_impl(
             page: str | None = None
             final_text: str | None = None
             for _ in range(_MAX_EVENT_PAGES):
-                events = await _list_events_impl(runtime, auth, handle, page, 100, "desc")
+                events = await _list_events_impl(
+                    runtime,
+                    auth,
+                    handle,
+                    page,
+                    100,
+                    "desc",
+                    created_at_gte=turn_started_at.isoformat(),
+                    types=["agent.message"],
+                )
                 for event in events.items:
+                    if event.id == turn_event_id:
+                        continue
                     final_text = _agent_message_text(event)
                     if final_text is not None:
                         break
