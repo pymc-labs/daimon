@@ -47,7 +47,9 @@ function applyState(s) {
   state = s;
   $("title").textContent = s.title;
   if (s.recipient_name) $("reader").textContent = `Reading as ${s.recipient_name}`;
-  const b = s.budget, frac = b.cap_usd ? Math.min(1, b.spent_usd / b.cap_usd) : 1;
+  // Money arrives as decimal strings (the API never emits floats for it); coerce once.
+  const b = { spent_usd: Number(s.budget.spent_usd), cap_usd: Number(s.budget.cap_usd), reserve_usd: Number(s.budget.reserve_usd) };
+  const frac = b.cap_usd ? Math.min(1, b.spent_usd / b.cap_usd) : 1;
   $("meter").innerHTML = `Question budget · $${b.spent_usd.toFixed(2)} of $${b.cap_usd.toFixed(2)} · up to $${b.reserve_usd.toFixed(2)} per answer` +
     `<div class="bar"><div class="fill ${frac >= 1 ? "over" : frac >= 0.75 ? "warn" : ""}" style="width:${(frac * 100).toFixed(0)}%"></div></div>`;
   const banner = $("banner");
