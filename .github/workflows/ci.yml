@@ -242,6 +242,18 @@ jobs:
       - name: pytest (notebook-host)
         run: uv run pytest apps/notebook-host -n auto
 
+  pytest-report-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - name: pytest (report-host)
+        run: uv run pytest apps/report-host -n auto
+
   docker-build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -252,7 +264,7 @@ jobs:
 
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, pytest-core, pytest-mcp, pytest-discord, pytest-slack, pytest-parity, pytest-notebook-host, docker-build]
+    needs: [lint, pytest-core, pytest-mcp, pytest-discord, pytest-slack, pytest-parity, pytest-notebook-host, pytest-report-host, docker-build]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators

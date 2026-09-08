@@ -23,7 +23,7 @@ billing = ["daimon-adapter-mcp[billing]"]
 Repository = "https://github.com/pymc-labs/daimon"
 
 [tool.uv.workspace]
-members = ["packages/core", "packages/adapters/*", "packages/testing", "apps/notebook-host"]
+members = ["packages/core", "packages/adapters/*", "packages/testing", "apps/notebook-host", "apps/report-host"]
 
 [tool.uv.sources]
 daimon-core = { workspace = true }
@@ -51,14 +51,14 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 "**/tests/**" = ["E501"]
 
 [tool.pyright]
-include = ["packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "apps/notebook-host/src/notebook_host"]
+include = ["packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host"]
 stubPath = "typings"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingImports = "error"
 
 [tool.importlinter]
-root_packages = ["daimon", "notebook_host"]
+root_packages = ["daimon", "notebook_host", "report_host"]
 
 [[tool.importlinter.contracts]]
 name = "Core must not import adapters"
@@ -130,11 +130,17 @@ type = "forbidden"
 source_modules = ["notebook_host"]
 forbidden_modules = ["daimon"]
 
+[[tool.importlinter.contracts]]
+name = "report-host must not import daimon"
+type = "forbidden"
+source_modules = ["report_host"]
+forbidden_modules = ["daimon"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-testpaths = ["packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/testing/tests", "tests/integration", "tests/parity", "apps/notebook-host/tests"]
+testpaths = ["packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/testing/tests", "tests/integration", "tests/parity", "apps/notebook-host/tests", "apps/report-host/tests"]
 addopts = "--import-mode=importlib -m 'not contract and not slow'"
 markers = [
     "contract: live MA API tests -- opt-in only, never gate CI",
