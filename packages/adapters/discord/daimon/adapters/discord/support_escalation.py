@@ -22,13 +22,17 @@ Template-disjointness: the `sup:` prefix must never overlap `mfb:` (feedback),
 an incoming custom_id against EVERY registered template with no early break,
 so an overlap fires two handlers on one click.
 
+Requests land in a CHANNEL, not in operator direct messages. A channel
+survives one person's DMs being closed, leaves a shared record anyone on the
+rota can pick up, and does not silently make whoever is first in a config list
+the only person who ever hears anything.
+
 Delivery ordering is the load-bearing part of this module. The row is
-committed BEFORE any operator DM is attempted, and `delivered_at` is stamped
-only once a DM actually lands. A closed-DM operator is the ordinary failure
-mode -- `_send_feedback_prompt` already documents that Discord gives no way
-around it -- and a support request from a paying trial client that vanishes
-because nobody's DMs were open is the one outcome here worth engineering
-against. An undelivered row can be swept later; a dropped one cannot.
+committed BEFORE the post is attempted, and `delivered_at` is stamped only
+once it actually lands. A support request from a paying trial client that
+vanishes because the channel was misconfigured or the bot lost access is the
+one outcome here worth engineering against. An undelivered row can be swept
+later; a dropped one cannot.
 """
 
 from __future__ import annotations
@@ -102,6 +106,11 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
             return
 
         settings = self._runtime.settings
+        channel_id = settings.support.escalation_channel_id
+        if channel_id is None:
+            # Disabled between the reaction and the submit. Nothing is spent.
+            await interaction.followup.send(_MALFORMED, ephemeral=True)
+            return
         # The button arrives by direct message, so `interaction.guild_id` is
         # None and the originating guild comes from the custom_id instead.
         guild_id = self._guild_id
@@ -142,11 +151,11 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
         # The row is committed. Everything below is best-effort delivery, and
         # a total failure downgrades the confirmation wording rather than the
         # outcome -- the request is already durable.
-        delivered = await self._notify_operators(
+        delivered = await self._post_to_channel(
             interaction=interaction,
             note=note,
             guild_id=guild_id,
-            operator_ids=settings.support.operator_user_ids,
+            channel_id=channel_id,
         )
         if delivered:
             async with self._runtime.sessionmaker() as session, session.begin():
@@ -174,38 +183,49 @@ class SupportModal(discord.ui.Modal, title="Ask a human"):
                 session, tenant_id=tenant_id, platform_user_id=user_id
             )
 
-    async def _notify_operators(
+    async def _post_to_channel(
         self,
         *,
         interaction: discord.Interaction,
         note: str,
         guild_id: str,
-        operator_ids: list[str],
+        channel_id: str,
     ) -> bool:
-        """DM every configured operator. True if at least ONE landed.
+        """Post the request into the escalation channel. True if it landed.
 
-        Every operator is tried even after one succeeds: they are a rota, not
-        a fallback chain, and stopping at the first success would silently
-        make the first id in the list the only one who ever hears anything.
+        Resolves through the cache first and falls back to one fetch, because
+        the escalation channel lives in the operators' own guild and may not be
+        in a freshly-started bot's cache. Returns False on anything that means
+        the message did not arrive -- a channel that cannot be resolved, one
+        the bot cannot post in, or an id that is not a channel it can message
+        -- so the caller leaves `delivered_at` NULL and tells the requester the
+        honest thing.
         """
         link = f"https://discord.com/channels/{guild_id}/{self._channel_id}/{self._message_id}"
-        body = f"**Human support requested** by {interaction.user.mention}\n{link}\n\n{note}"
+        body = (
+            f"**Human support requested** by {interaction.user.mention} "
+            f"({interaction.user})\n{link}\n\n{note}"
+        )
         bot = cast(commands.Bot, interaction.client)
-        delivered = False
-        for raw_id in operator_ids:
-            try:
-                operator = bot.get_user(int(raw_id)) or await bot.fetch_user(int(raw_id))
-                await operator.send(body)
-                delivered = True
-            except (discord.HTTPException, ValueError) as exc:
-                # Closed DMs (Forbidden) and a malformed configured id are both
-                # operator-side misconfiguration, not the requester's problem.
-                _log.warning(
-                    "support.operator_undeliverable",
-                    operator_id=raw_id,
-                    err_type=type(exc).__name__,
-                )
-        return delivered
+        try:
+            channel = bot.get_channel(int(channel_id))
+            if channel is None:
+                channel = await bot.fetch_channel(int(channel_id))
+            if not isinstance(channel, discord.abc.Messageable):
+                _log.warning("support.channel_not_messageable", channel_id=channel_id)
+                return False
+            await channel.send(body)
+            return True
+        except (discord.HTTPException, ValueError) as exc:
+            # A misconfigured id, a channel the bot was removed from, or lost
+            # send permission. All operator-side, none of them the requester's
+            # problem -- and none of them may lose the row.
+            _log.warning(
+                "support.channel_undeliverable",
+                channel_id=channel_id,
+                err_type=type(exc).__name__,
+            )
+            return False
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         """Adapter boundary: discord.py routes on_submit failures here, not to a dispatcher."""

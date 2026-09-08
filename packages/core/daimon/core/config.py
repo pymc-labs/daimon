@@ -556,25 +556,28 @@ class BillingSettings(BaseModel):
 
 
 class SupportSettings(BaseModel):
-    """Human-support escalation: who gets pinged, and how many asks each user gets.
+    """Human-support escalation: where requests land, and how many each user gets.
 
     `credits_per_user` is a COUNT of human interactions, deliberately not the
     USD in `BillingSettings.signup_credit`. Sharing a ledger with billing would
     let a support request eat the tenant's ability to run turns, and would give
     a paid-up tenant unlimited support. Different unit, different table.
 
-    An empty `operator_user_ids` disables the escalate affordance entirely
+    An unset `escalation_channel_id` disables the escalate affordance entirely
     rather than recording requests nobody will ever see. Failing closed is the
     honest behaviour: an escalate button that reaches no one is worse than no
     button, because the person believes they have asked for help.
     """
 
-    operator_user_ids: list[str] = Field(
-        default_factory=list,
+    escalation_channel_id: str | None = Field(
+        default=None,
         description=(
-            "Platform user ids DM'd when someone escalates to human support. "
-            "Empty (the default) disables the escalate affordance entirely — "
-            "a request that reaches nobody is worse than no button at all."
+            "Channel id where human-support requests are posted. Unset (the "
+            "default) disables the escalate affordance entirely — a request "
+            "that reaches nobody is worse than no button at all. A channel "
+            "rather than operator DMs: it survives one person's DMs being "
+            "closed, and it leaves a shared record anyone on the rota can pick "
+            "up. The bot must be able to post there."
         ),
     )
     credits_per_user: int = Field(

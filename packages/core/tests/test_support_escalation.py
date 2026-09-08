@@ -79,3 +79,33 @@ def test_parse_rejects_malformed() -> None:
     assert parse_custom_id("sup:1:2") is None
     assert parse_custom_id("sup:abc:2:3") is None
     assert parse_custom_id("") is None
+
+
+def test_escalation_is_disabled_when_no_channel_is_configured() -> None:
+    """An escalate path that reaches nobody is worse than none at all.
+
+    The person believes they have asked for help. Failing closed here is why
+    both the reaction gate and the submit path check the channel, rather than
+    recording requests into a table nobody watches.
+    """
+    from daimon.core.config import SupportSettings
+
+    assert SupportSettings().escalation_channel_id is None, (
+        "escalation must be OFF by default -- a deployment that never "
+        "configures a channel must not offer the affordance"
+    )
+    assert SupportSettings().credits_per_user == 3
+
+
+def test_support_credits_are_not_the_billing_ledger() -> None:
+    """Support credits are a COUNT; signup_credit is USD in tenant_ledger.
+
+    Sharing one ledger would let a support request consume the tenant's
+    ability to run turns, and would hand a paid-up tenant unlimited support.
+    Asserted rather than only documented so a later 'tidy-up' that merges them
+    fails here.
+    """
+    from daimon.core.config import BillingSettings, SupportSettings
+
+    assert isinstance(SupportSettings().credits_per_user, int)
+    assert not isinstance(BillingSettings().signup_credit, int)

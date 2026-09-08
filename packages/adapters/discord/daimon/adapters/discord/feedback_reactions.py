@@ -250,13 +250,14 @@ class FeedbackReactionCog(commands.Cog):
         modal is submitted -- someone can react, wait, and submit after
         spending their last credit elsewhere, and only the write decides.
 
-        An empty operator list disables the affordance rather than recording
-        requests nobody will read: an escalate path that reaches no one is
-        worse than none, because the person believes they have asked for help.
+        An unset escalation channel disables the affordance rather than
+        recording requests nobody will read: an escalate path that reaches no
+        one is worse than none, because the person believes they have asked
+        for help.
         """
         settings = self._bot.runtime.settings
         allowance = settings.support.credits_per_user
-        if not settings.support.operator_user_ids or allowance <= 0:
+        if settings.support.escalation_channel_id is None or allowance <= 0:
             log.info("support.disabled", message_id=str(payload.message_id))
             return
 
