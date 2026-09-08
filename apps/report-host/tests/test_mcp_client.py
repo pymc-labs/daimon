@@ -12,12 +12,17 @@ fixture from `conftest.py`, not defined here, so plan 21-14's shell tests for
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from decimal import Decimal
 
 import httpx
 import pytest
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+from mcp.client.streamable_http import streamable_http_client as real_streamable_http_client
+from mcp.shared.message import SessionMessage
+from report_host import mcp_client as mcp_client_module
 from report_host.mcp_client import (
     BundleExpiredError,
     BundlePushed,
@@ -238,6 +243,55 @@ async def test_unauthorized_bearer_raises_seam_unauthorized_error(
     async with fake_seam_lifespan(app):
         with pytest.raises(SeamUnauthorizedError):
             await _seam_client(app).start_turn(token="revoked-token", message="hello")
+
+
+async def test_call_tool_tolerates_a_two_tuple_from_streamable_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+    build_fake_seam: FakeSeamBuilder,
+    fake_seam_lifespan: FakeSeamLifespan,
+) -> None:
+    """Pins the fix for the 1.x-vs-2.x unpack: `_call_tool` must index into
+    ``streamable_http_client``'s result rather than destructure it, so a
+    2-tuple (mcp 2.x's narrower yield) works exactly like the 3-tuple mcp 1.x
+    yields today.
+
+    No installed mcp release actually produces a 2-tuple (this project pins
+    ``mcp<2``), so the real transport is wrapped and its third element is
+    dropped — a validated fake that speaks the real wire protocol underneath,
+    not a stand-in for the whole client, only for the shape this test needs.
+    """
+
+    @contextlib.asynccontextmanager
+    async def two_tuple_streamable_http_client(
+        url: str,
+        *,
+        http_client: httpx.AsyncClient | None = None,
+        terminate_on_close: bool = True,
+    ) -> AsyncIterator[
+        tuple[
+            MemoryObjectReceiveStream[SessionMessage | Exception],
+            MemoryObjectSendStream[SessionMessage],
+        ]
+    ]:
+        async with real_streamable_http_client(
+            url, http_client=http_client, terminate_on_close=terminate_on_close
+        ) as (read, write, _get_session_id):
+            yield read, write
+
+    monkeypatch.setattr(
+        mcp_client_module, "streamable_http_client", two_tuple_streamable_http_client
+    )
+
+    def start_turn(_args: dict[str, object]) -> dict[str, object]:
+        return {"handle": "ses_1", "turn_event_id": "evt_1", "turn_started_at": "t0"}
+
+    captured: list[str] = []
+    app = build_fake_seam(behaviors={"start_turn": start_turn}, captured_auth=captured)
+    async with fake_seam_lifespan(app):
+        result = await _seam_client(app).start_turn(token="tok", message="hello")
+    assert result == StartedTurn(handle="ses_1", turn_event_id="evt_1", turn_started_at="t0"), (
+        "a 2-tuple from streamable_http_client must not raise an unpack error"
+    )
 
 
 async def test_archive_session_returns_none_and_issues_exactly_one_call(
