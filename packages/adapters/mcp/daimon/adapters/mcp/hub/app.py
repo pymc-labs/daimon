@@ -22,7 +22,7 @@ from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.hub.discord_provider import DaimonDiscordProvider
 from daimon.adapters.mcp.hub.identity import HubIdentityMiddleware
 from daimon.adapters.mcp.hub.slack_provider import SlackHubProvider
-from daimon.adapters.mcp.hub.storage import asyncpg_dsn, build_hub_kv
+from daimon.adapters.mcp.hub.storage import asyncpg_dsn, build_hub_kv_base, hub_kv_for
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.hub import register_hub_tools
@@ -32,6 +32,7 @@ from daimon.core.errors import BootstrapError
 from daimon.core.stores.domain import Platform
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import AuthProvider
+from key_value.aio.protocols import AsyncKeyValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.routing import Mount
@@ -66,11 +67,10 @@ def _providers(
     *,
     settings: Settings,
     sessionmaker: async_sessionmaker[AsyncSession],
-    fernet: MultiFernet,
+    hub_kv: AsyncKeyValue,
     signing_key: bytes,
     app_root_url: str,
 ) -> list[tuple[Platform, AuthProvider]]:
-    dsn = asyncpg_dsn(str(settings.database.url))
     out: list[tuple[Platform, AuthProvider]] = []
     hub = settings.hub
     if hub.slack_configured:
@@ -83,7 +83,7 @@ def _providers(
                     client_secret=hub.slack_client_secret.get_secret_value(),
                     base_url=f"{app_root_url}/slack",
                     session_factory=sessionmaker,
-                    client_storage=build_hub_kv(database_url=dsn, fernet=fernet, platform="slack"),
+                    client_storage=hub_kv_for(hub_kv, platform="slack"),
                     jwt_signing_key=signing_key,
                 ),
             )
@@ -98,9 +98,7 @@ def _providers(
                     client_secret=hub.discord_client_secret.get_secret_value(),
                     base_url=f"{app_root_url}/discord",
                     session_factory=sessionmaker,
-                    client_storage=build_hub_kv(
-                        database_url=dsn, fernet=fernet, platform="discord"
-                    ),
+                    client_storage=hub_kv_for(hub_kv, platform="discord"),
                     jwt_signing_key=signing_key,
                 ),
             )
@@ -132,12 +130,15 @@ def mount_hub_apps(
         raise BootstrapError("DAIMON_MCP__PUBLIC_URL is required when a hub mount is configured")
 
     signing_key = hub.jwt_signing_key.get_secret_value().encode()
+    kv_store, hub_kv = build_hub_kv_base(
+        database_url=asyncpg_dsn(str(settings.database.url)), fernet=fernet
+    )
     sub_apps: list[Starlette] = []
     mounted: list[str] = []
     for platform, provider in _providers(
         settings=settings,
         sessionmaker=sessionmaker,
-        fernet=fernet,
+        hub_kv=hub_kv,
         signing_key=signing_key,
         app_root_url=app_root_url,
     ):
@@ -160,6 +161,7 @@ def mount_hub_apps(
     async def chained(a: Starlette) -> AsyncIterator[Any]:
         async with AsyncExitStack() as stack:
             state = await stack.enter_async_context(parent_lifespan(a))
+            await stack.enter_async_context(kv_store)
             for sub in sub_apps:
                 await stack.enter_async_context(sub.router.lifespan_context(sub))
             yield state
