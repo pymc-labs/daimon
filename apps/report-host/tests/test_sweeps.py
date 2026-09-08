@@ -10,11 +10,12 @@ end.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from report_host import reports_store, sweeps, threads_store
@@ -49,9 +50,9 @@ class _RaisingSchedule:
     def __init__(self) -> None:
         self.calls = 0
 
-    def __call__(self, coro: Awaitable[None]) -> None:
+    def __call__(self, coro: Coroutine[Any, Any, None]) -> None:
         self.calls += 1
-        coro.close()  # type: ignore[attr-defined]  # never actually scheduled
+        coro.close()  # never actually scheduled
         if self.calls == 1:
             raise RuntimeError("scheduling blew up")
 
@@ -149,7 +150,7 @@ async def test_resume_schedules_exactly_one_reattach_per_running_thread_with_a_h
     _seed_report(conn)
     thread = _seed_running_thread(conn, with_handle=True, deadline_at=NOW + timedelta(seconds=1200))
     recorder = _RunTurnRecorder()
-    scheduled: list[Awaitable[None]] = []
+    scheduled: list[Coroutine[Any, Any, None]] = []
 
     resumed = await sweeps.resume_running_threads(
         conn=conn,
@@ -181,7 +182,7 @@ async def test_resume_stores_ask_again_and_does_not_schedule_for_a_handleless_th
         conn, with_handle=False, deadline_at=NOW + timedelta(seconds=1200)
     )
     recorder = _RunTurnRecorder()
-    scheduled: list[Awaitable[None]] = []
+    scheduled: list[Coroutine[Any, Any, None]] = []
 
     resumed = await sweeps.resume_running_threads(
         conn=conn,

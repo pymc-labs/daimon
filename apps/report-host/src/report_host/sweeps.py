@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from report_host import reports_store, threads_store, turns
 from report_host.config import Settings
@@ -44,8 +45,8 @@ async def resume_running_threads(
     seam: SeamClient,
     settings: Settings,
     now: Callable[[], datetime],
-    schedule: Callable[[Awaitable[None]], object],
-    run_turn: Callable[..., Awaitable[None]] = turns.run_turn,
+    schedule: Callable[[Coroutine[Any, Any, None]], object],
+    run_turn: Callable[..., Coroutine[Any, Any, None]] = turns.run_turn,
 ) -> int:
     """Re-attach to every thread the host left ``running`` across a restart.
 
