@@ -11,6 +11,16 @@ Once a daimon is resolved the tool builds an ordinary ``AuthIdentity`` for the
 caller's account in that tenant and hands off to the agent-chat implementation
 functions. That is what makes a hub turn run with the person's channel
 visibility and bill the right tenant, exactly as a per-agent token does.
+
+Session handles are scoped one step tighter than on the per-agent surface.
+There, the token *is* the agent, so "the agent's sessions" and "the caller's
+sessions" coincide. Here every member of a workspace shares one daimon, so a
+handle is only usable by the account that created the session: the
+``daimon_account`` metadata ``create_session`` stamps on every session is
+compared to the caller's account before any read or continuation, and
+``list_my_sessions`` filters on it. Channel threads driven by the chat
+adapters carry the thread starter's account, so they are invisible to
+everyone else through the hub.
 """
 
 from __future__ import annotations
@@ -18,7 +28,7 @@ from __future__ import annotations
 import uuid
 from typing import Literal
 
-from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.hub.identity import (
     HubIdentity,
@@ -35,22 +45,25 @@ from daimon.adapters.mcp.tools.agent_chat import (
     _describe_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _get_session_impl,  # pyright: ignore[reportPrivateUsage]
     _list_events_impl,  # pyright: ignore[reportPrivateUsage]
-    _list_sessions_impl,  # pyright: ignore[reportPrivateUsage]
     _start_turn_impl,  # pyright: ignore[reportPrivateUsage]
+    _verify_agent_owns_session,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
+from daimon.core.stores.tenants import get_tenant
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel
 
 _NOT_FOUND = "daimon not found"
+_SESSION_NOT_FOUND = "session not found"
 
 
 class DaimonSummary(BaseModel):
@@ -103,15 +116,30 @@ async def _resolve_daimon(
 async def _auth_for(
     runtime: McpRuntime, hub: HubIdentity, tenant: HubTenant, agent: BetaManagedAgentsAgent
 ) -> AuthIdentity:
-    """Identity for the caller's account in ``tenant``. Never admin: the hub has no admin tools."""
+    """Identity for the caller's account in ``tenant``.
+
+    ``role`` and ``is_admin`` are both pinned to the non-admin value rather
+    than copied from the account row: the hub registers no admin tools, and
+    every admin gate in the codebase expects the pair to agree.
+
+    The tenant's readiness is re-checked here rather than trusted from the
+    login-time claims, so a workspace that uninstalls daimon or is archived
+    stops being reachable on the next call instead of when the token expires.
+    """
     async with runtime.session_factory() as session:
         row = await get_account_with_tenant(session, account_id=tenant.account_id)
-    if row is None:
+        live = await get_tenant(session, tenant.tenant_id)
+    if (
+        row is None
+        or live is None
+        or live.archived_at is not None
+        or live.provision_status != "ready"
+    ):
         raise ToolError(_NOT_FOUND)
     return AuthIdentity(
         account_id=tenant.account_id,
         tenant_id=tenant.tenant_id,
-        role=Role.USER if row.role is not Role.ADMIN else Role.ADMIN,
+        role=Role.USER,
         platform=hub.platform,
         external_id=tenant.workspace_id,
         agent_id=derive_agent_uuid(tenant_id=tenant.tenant_id, ma_agent_id=str(agent.id)),
@@ -122,17 +150,44 @@ async def _auth_for(
 
 async def _identity(
     runtime: McpRuntime, ctx: Context, daimon_id: str
-) -> tuple[HubTenant, AuthIdentity]:
+) -> tuple[HubTenant, BetaManagedAgentsAgent, AuthIdentity]:
     hub = await _hub_auth(ctx)
     tenant, agent = await _resolve_daimon(runtime, hub, daimon_id)
-    return tenant, await _auth_for(runtime, hub, tenant, agent)
+    return tenant, agent, await _auth_for(runtime, hub, tenant, agent)
+
+
+def _owned_by(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:
+    return session.metadata.get(MA_METADATA_KEY_ACCOUNT) == str(auth.account_id)
+
+
+async def _verify_account_owns_session(
+    runtime: McpRuntime, auth: AuthIdentity, handle: str
+) -> None:
+    """Reject a handle unless the caller's account created the session.
+
+    Same message as an unknown handle, so a session's existence is not leaked
+    to other members of the workspace.
+    """
+    session = await _verify_agent_owns_session(runtime, auth, handle)
+    if not _owned_by(session, auth):
+        raise ToolError(_SESSION_NOT_FOUND)
+
+
+async def _list_my_sessions_impl(
+    runtime: McpRuntime, auth: AuthIdentity, agent: BetaManagedAgentsAgent
+) -> list[SessionInfo]:
+    out: list[SessionInfo] = []
+    async for session in runtime.client.beta.sessions.list(agent_id=str(agent.id)):
+        if _owned_by(session, auth):
+            out.append(SessionInfo.from_ma(session))
+    return out
 
 
 def register_hub_tools(
     mcp: FastMCP, runtime: McpRuntime, *, billing_config: BillingConfig | None
 ) -> None:
     async def _admitted(ctx: Context, daimon_id: str, tool_name: str) -> AuthIdentity:
-        _, auth = await _identity(runtime, ctx, daimon_id)
+        _, _, auth = await _identity(runtime, ctx, daimon_id)
         return await _admit(
             auth,
             sessionmaker=runtime.session_factory,
@@ -157,7 +212,7 @@ def register_hub_tools(
         ctx: Context, daimon_id: str
     ) -> AgentDescription:
         """Describe one daimon: role, skills, repo, environment, platform and workspace."""
-        tenant, auth = await _identity(runtime, ctx, daimon_id)
+        tenant, _, auth = await _identity(runtime, ctx, daimon_id)
         base = await _describe_agent_impl(runtime, auth)
         return base.model_copy(update={"workspace": tenant.workspace_name})
 
@@ -173,6 +228,8 @@ def register_hub_tools(
         the handle; resume with it rather than asking again.
         """
         auth = await _admitted(ctx, daimon_id, "ask")
+        if handle is not None:
+            await _verify_account_owns_session(runtime, auth, handle)
         return _ask_tool_result(await _ask_impl(runtime, auth, message, handle=handle))
 
     @mcp.tool
@@ -192,6 +249,7 @@ def register_hub_tools(
     ) -> dict[str, str]:
         """Send a follow-up on an existing session without waiting."""
         auth = await _admitted(ctx, daimon_id, "continue_turn")
+        await _verify_account_owns_session(runtime, auth, handle)
         return await _continue_turn_impl(runtime, auth, handle, message)
 
     @mcp.tool
@@ -199,7 +257,8 @@ def register_hub_tools(
         ctx: Context, daimon_id: str, handle: str
     ) -> SessionInfo:
         """Status of one session. Poll until ``idle`` before reading ``list_events``."""
-        _, auth = await _identity(runtime, ctx, daimon_id)
+        _, _, auth = await _identity(runtime, ctx, daimon_id)
+        await _verify_account_owns_session(runtime, auth, handle)
         return await _get_session_impl(runtime, auth, handle)
 
     @mcp.tool
@@ -212,13 +271,18 @@ def register_hub_tools(
         order: Literal["asc", "desc"] | None = None,
     ) -> Page[SessionEventOut]:
         """A session's transcript. The daimon's reply is in ``agent.message`` events."""
-        _, auth = await _identity(runtime, ctx, daimon_id)
+        _, _, auth = await _identity(runtime, ctx, daimon_id)
+        await _verify_account_owns_session(runtime, auth, handle)
         return await _list_events_impl(runtime, auth, handle, page, limit, order)
 
     @mcp.tool
     async def list_my_sessions(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, daimon_id: str
     ) -> list[SessionInfo]:
-        """Sessions you have with this daimon, for resuming with ``handle``."""
-        _, auth = await _identity(runtime, ctx, daimon_id)
-        return await _list_sessions_impl(runtime, auth)
+        """Sessions you started with this daimon, for resuming with ``handle``.
+
+        Other people's conversations with the same daimon are not listed and
+        their handles are not accepted.
+        """
+        _, agent, auth = await _identity(runtime, ctx, daimon_id)
+        return await _list_my_sessions_impl(runtime, auth, agent)

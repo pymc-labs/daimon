@@ -4,6 +4,7 @@ foreign daimon ids the same way ask does -- driven over the wire, not called dir
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -11,9 +12,10 @@ import pytest
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.mcp.hub.app import build_hub_app
 from daimon.adapters.mcp.hub.claims import encode_hub_claims
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.testing.factories import make_platform_principal, make_tenant
+from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
 from daimon.testing.ma import build_fake_anthropic, list_response, session_response
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -24,6 +26,8 @@ pytestmark = pytest.mark.asyncio
 
 _TOKEN = "tok"
 _HANDLE = "ses_wrap_001"
+_THEIR_HANDLE = "ses_theirs"
+_OTHER_ACCOUNT = str(uuid.uuid4())
 
 
 def _foreign_daimon_id() -> str:
@@ -32,7 +36,7 @@ def _foreign_daimon_id() -> str:
     return str(derive_agent_uuid(tenant_id=uuid.uuid4(), ma_agent_id=AGENT_ID))
 
 
-def _session_payload(session_id: str) -> dict[str, Any]:
+def _session_payload(session_id: str, *, account_id: str) -> dict[str, Any]:
     return BetaManagedAgentsSession.model_validate(
         {
             "id": session_id,
@@ -52,7 +56,7 @@ def _session_payload(session_id: str) -> dict[str, Any]:
             "updated_at": "2026-06-23T00:00:00Z",
             "outcome_evaluations": [],
             "environment_id": "env_parity_test",
-            "metadata": {},
+            "metadata": {MA_METADATA_KEY_ACCOUNT: account_id},
             "resources": [],
             "stats": {},
             "status": "idle",
@@ -64,12 +68,17 @@ def _session_payload(session_id: str) -> dict[str, Any]:
 
 
 async def _hub_app(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    funded: bool = True,
 ) -> tuple[Any, str, HubTenant]:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     principal = await make_platform_principal(
         db_session, platform="discord", external_id="u1", tenant=tenant
     )
+    if funded:
+        await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     await db_session.commit()
 
     hub_tenant = HubTenant(
@@ -83,11 +92,21 @@ async def _hub_app(
         tokens={_TOKEN: {"sub": "u1", "client_id": "c", "upstream_claims": claims}}
     )
 
+    mine = str(principal.account_id)
+
+    def _owner(session_id: str) -> str:
+        return _OTHER_ACCOUNT if session_id == _THEIR_HANDLE else mine
+
     router = build_turn_router(str(tenant.id))
     router.add(
         "GET",
         r"/v1/sessions/([^/]+)$",
-        lambda _r, m: session_response(session_id=m.group(1), status="idle", agent_id=AGENT_ID),
+        lambda _r, m: session_response(
+            session_id=m.group(1),
+            status="idle",
+            agent_id=AGENT_ID,
+            metadata={MA_METADATA_KEY_ACCOUNT: _owner(m.group(1))},
+        ),
     )
     router.add(
         "GET",
@@ -109,7 +128,13 @@ async def _hub_app(
     router.add(
         "GET",
         r"/v1/sessions$",
-        lambda _r, _m: list_response([_session_payload("ses_a"), _session_payload("ses_b")]),
+        lambda _r, _m: list_response(
+            [
+                _session_payload("ses_a", account_id=mine),
+                _session_payload(_THEIR_HANDLE, account_id=_OTHER_ACCOUNT),
+                _session_payload("ses_b", account_id=mine),
+            ]
+        ),
     )
     runtime = _runtime(build_fake_anthropic(router.dispatch), db_session_factory)
     mcp = build_hub_app(platform="discord", runtime=runtime, auth=auth, billing_config=None)
@@ -262,7 +287,9 @@ async def test_list_my_sessions_returns_the_callers_sessions(
     )
     structured = payload.get("structuredContent") or {}
     sessions = structured.get("result", structured) if isinstance(structured, dict) else structured
-    assert {s["id"] for s in sessions} == {"ses_a", "ses_b"}, f"got {sessions!r}"
+    assert {s["id"] for s in sessions} == {"ses_a", "ses_b"}, (
+        f"another member's session must not be listed as the caller's: {sessions!r}"
+    )
 
 
 async def test_list_my_sessions_rejects_a_daimon_id_outside_the_callers_tenants(
@@ -284,3 +311,56 @@ async def test_list_my_sessions_rejects_a_daimon_id_outside_the_callers_tenants(
         f"list_my_sessions must reject a daimon_id outside the caller's tenants, got {payload!r}"
     )
     assert "daimon not found" in str(payload.get("content")), f"got {payload!r}"
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("get_session", {"handle": _THEIR_HANDLE}),
+        ("list_events", {"handle": _THEIR_HANDLE}),
+        ("continue_turn", {"handle": _THEIR_HANDLE, "message": "hi"}),
+        ("ask", {"handle": _THEIR_HANDLE, "message": "hi"}),
+    ],
+)
+async def test_handle_started_by_another_account_is_indistinguishable_from_unknown(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tool: str,
+    arguments: dict[str, str],
+) -> None:
+    """Every workspace member shares the daimon, so agent ownership alone would let one
+    member read or continue another's conversation. The account check closes that, with
+    the same message as a nonexistent handle."""
+    mcp, daimon_id, _hub_tenant = await _hub_app(db_session, db_session_factory)
+    app = mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
+
+    result = await _call_tool(
+        app, "/mcp", _TOKEN, name=tool, arguments={"daimon_id": daimon_id, **arguments}
+    )
+
+    payload = result.get("result", result)
+    assert isinstance(payload, dict) and payload.get("isError"), (
+        f"{tool} must reject a handle another account started, got {payload!r}"
+    )
+    assert "session not found" in str(payload.get("content")), f"got {payload!r}"
+
+
+@pytest.mark.parametrize("tool", ["ask", "start_turn", "continue_turn"])
+async def test_billed_tools_are_refused_before_the_turn_when_the_workspace_has_no_credit(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tool: str
+) -> None:
+    """The hub path runs the same balance gate as the per-agent tools; a depleted
+    workspace is turned away before any session is created or continued."""
+    mcp, daimon_id, _hub_tenant = await _hub_app(db_session, db_session_factory, funded=False)
+    app = mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
+    arguments: dict[str, str] = {"daimon_id": daimon_id, "message": "hi"}
+    if tool == "continue_turn":
+        arguments["handle"] = _HANDLE
+
+    result = await _call_tool(app, "/mcp", _TOKEN, name=tool, arguments=arguments)
+
+    payload = result.get("result", result)
+    assert isinstance(payload, dict) and payload.get("isError"), (
+        f"{tool} must be refused for a workspace with no credit, got {payload!r}"
+    )
+    assert "credit is depleted" in str(payload.get("content")), f"got {payload!r}"
