@@ -101,6 +101,36 @@ async def _poll_until(
         await asyncio.sleep(_POLL_INTERVAL_S)
 
 
+async def _wait_for_idle_event_since(
+    anthropic_client: AsyncAnthropic,
+    session_id: str,
+    since: dt.datetime,
+    deadline_s: float,
+) -> str | None:
+    """Poll `events.list` for a `session.status_idle` event at or after `since`.
+
+    A session's status can still read `idle` for a brief window right after a
+    send — the flip to `running` lags by roughly half a second — so polling
+    `sessions.retrieve` immediately after a send can observe a turn that has
+    not actually started yet. An idle EVENT that lands after the boundary,
+    not a status snapshot, is the only completion signal this suite trusts.
+    Returns the first matching event's id, or None if none appears within
+    the deadline.
+    """
+    deadline = asyncio.get_running_loop().time() + deadline_s
+    while True:
+        async for event in anthropic_client.beta.sessions.events.list(
+            session_id=session_id,
+            created_at_gte=since,
+            types=["session.status_idle"],
+            order="asc",
+        ):
+            return event.id
+        if asyncio.get_running_loop().time() >= deadline:
+            return None
+        await asyncio.sleep(_POLL_INTERVAL_S)
+
+
 async def _interrupt_and_wait_for_terminal(
     anthropic_client: AsyncAnthropic, session_id: str, deadline_s: float
 ) -> str:
@@ -195,24 +225,32 @@ async def test_created_at_gte_with_a_pre_send_clock_bound_isolates_the_second_tu
     session = await anthropic_client.beta.sessions.create(
         agent=live_agent.id, environment_id=live_environment.id
     )
+    first_turn_started_at = dt.datetime.now(dt.UTC)
     first_message: BetaManagedAgentsUserMessageEventParams = {
         "type": "user.message",
         "content": [{"type": "text", "text": "Reply with exactly: FIRST"}],
     }
     await anthropic_client.beta.sessions.events.send(session.id, events=[first_message])
-    first_idle = await _poll_until(
-        anthropic_client, session.id, lambda s: s == "idle", _IDLE_WAIT_S
+    first_idle_event_id = await _wait_for_idle_event_since(
+        anthropic_client, session.id, first_turn_started_at, _IDLE_WAIT_S
     )
-    assert first_idle is not None, (
-        f"the first turn never reached idle within {_IDLE_WAIT_S}s — the second turn's "
-        "boundary cannot be exercised without a finished first turn to isolate from"
+    assert first_idle_event_id is not None, (
+        f"the first turn's session.status_idle event never appeared within {_IDLE_WAIT_S}s "
+        "— the second turn's boundary cannot be exercised without a finished first turn to "
+        "isolate from"
     )
-    first_turn_ids = {
-        event.id
+    first_turn_events = [
+        event
         async for event in anthropic_client.beta.sessions.events.list(
             session_id=session.id, order="asc"
         )
-    }
+    ]
+    first_turn_ids = {event.id for event in first_turn_events}
+    assert first_turn_ids, "the first turn must have produced events before it can be isolated from"
+    assert any(event.type == "agent.message" for event in first_turn_events), (
+        "the first turn must have produced an agent.message event before its ids are "
+        f"snapshotted for isolation; observed types: {[e.type for e in first_turn_events]!r}"
+    )
 
     turn_started_at = dt.datetime.now(dt.UTC)
     second_message: BetaManagedAgentsUserMessageEventParams = {
@@ -223,10 +261,12 @@ async def test_created_at_gte_with_a_pre_send_clock_bound_isolates_the_second_tu
     assert sent.data, "send must echo back the sent event"
     boundary_event_id = sent.data[0].id
 
-    second_idle = await _poll_until(
-        anthropic_client, session.id, lambda s: s == "idle", _IDLE_WAIT_S
+    second_idle_event_id = await _wait_for_idle_event_since(
+        anthropic_client, session.id, turn_started_at, _IDLE_WAIT_S
     )
-    assert second_idle is not None, f"the second turn never reached idle within {_IDLE_WAIT_S}s"
+    assert second_idle_event_id is not None, (
+        f"the second turn's session.status_idle event never appeared within {_IDLE_WAIT_S}s"
+    )
 
     results = [
         event
