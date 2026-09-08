@@ -90,6 +90,7 @@ def _make_preview() -> PurgePreview:
         credential_requests=zero,
         wizard_sessions=zero,
         message_feedback=zero,
+        support_escalations=zero,
     )
 
 

@@ -290,8 +290,10 @@ class DaimonBot(commands.Bot):
         # class-level registration rather than a live view. Local import for
         # the same cycle reason as above.
         from daimon.adapters.discord.feedback_button import FeedbackButton
+        from daimon.adapters.discord.support_escalation import SupportEscalateButton
 
         self.add_dynamic_items(FeedbackButton)
+        self.add_dynamic_items(SupportEscalateButton)
 
     async def _post_to_guild(self, guild: discord.Guild, embed: discord.Embed) -> None:
         """Post an embed via the fallback chain: text channel → DM owner → skip."""

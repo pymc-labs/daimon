@@ -556,3 +556,21 @@ class FileUploadRow(BaseModel):
     content_type: str
     content: bytes | None
     created_at: datetime
+
+
+class SupportEscalationRow(BaseModel):
+    """Pydantic row for SupportEscalation — one human-support request."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID | None
+    platform: str
+    platform_user_id: str
+    channel_id: str
+    message_id: str
+    ma_session_id: str | None
+    note: str
+    delivered_at: datetime | None
+    created_at: datetime

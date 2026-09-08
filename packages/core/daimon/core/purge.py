@@ -100,6 +100,7 @@ from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
 from daimon.core.stores import wizard_session as wizard_session_store
@@ -133,6 +134,7 @@ class PurgeReport(BaseModel):
     credential_requests: int = 0
     wizard_sessions: int = 0
     message_feedback: int = 0
+    support_escalations: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -152,6 +154,7 @@ class PurgeReport(BaseModel):
             credential_requests=self.credential_requests + other.credential_requests,
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
             message_feedback=self.message_feedback + other.message_feedback,
+            support_escalations=self.support_escalations + other.support_escalations,
         )
 
 
@@ -226,6 +229,19 @@ async def _purge_principal_in_session(
                 platform_user_id=principal.external_id,
             )
         )
+        # support_escalations carries the SAME (tenant, platform-user) key and
+        # the same account_id = NULL hazard: somebody can ask for help without
+        # ever having taken a turn, so an account-keyed pass alone would leave
+        # the request AND its free-text note behind. The note is unsolicited
+        # personal text, so this is the same erasure obligation the vote text
+        # carries, not a bookkeeping nicety.
+        support_escalations_count = (
+            await support_escalation_store.delete_support_escalations_for_platform_user(
+                session,
+                tenant_id=principal.tenant_id,
+                platform_user_id=principal.external_id,
+            )
+        )
     else:
         routines_count = 0
         kind = "cli"
@@ -269,6 +285,10 @@ async def _purge_principal_in_session(
         # running one would risk deleting an unrelated platform user's rows
         # that happen to share the string.
         message_feedback_count = 0
+        # Escalation is a reaction-then-modal path in a guild, so a CLI
+        # principal owns no support_escalations rows — same reasoning, and the
+        # same refusal to match on os_user, as message_feedback above.
+        support_escalations_count = 0
 
     # user_skills and github_credentials are keyed by principal_id alone — both
     # principal kinds own rows in these tables.
@@ -314,6 +334,7 @@ async def _purge_principal_in_session(
         credential_requests=credential_requests_count,
         wizard_sessions=wizard_sessions_count,
         message_feedback=message_feedback_count,
+        support_escalations=support_escalations_count,
     )
 
 
@@ -426,6 +447,15 @@ async def purge_account(
         message_feedback_count = await message_feedback_store.delete_message_feedback_for_account(
             session, account_id=account_id, platform_user_keys=platform_user_keys
         )
+        # Same account_id = NULL hazard, same obligation: the note is
+        # unsolicited personal text, so an account erasure that missed these
+        # rows would leave it behind.
+        support_escalations_count = (
+            await support_escalation_store.delete_support_escalations_for_account(
+                session, account_id=account_id, platform_user_keys=platform_user_keys
+            )
+        )
+
         # slack_turn_contexts (D-07): keyed by (tenant_id, account_id), not
         # principal_id. Loop every tenant the account's principals belong to —
         # mirrors the upstream session-deletion loop below.
@@ -444,6 +474,7 @@ async def purge_account(
             PurgeReport(
                 mcp_tokens=mcp_tokens_count,
                 message_feedback=message_feedback_count,
+                support_escalations=support_escalations_count,
                 user_configs=user_cfg_count,
                 accounts=account_count,
                 slack_turn_contexts=slack_turn_contexts_count,

@@ -555,6 +555,39 @@ class BillingSettings(BaseModel):
     )
 
 
+class SupportSettings(BaseModel):
+    """Human-support escalation: who gets pinged, and how many asks each user gets.
+
+    `credits_per_user` is a COUNT of human interactions, deliberately not the
+    USD in `BillingSettings.signup_credit`. Sharing a ledger with billing would
+    let a support request eat the tenant's ability to run turns, and would give
+    a paid-up tenant unlimited support. Different unit, different table.
+
+    An empty `operator_user_ids` disables the escalate affordance entirely
+    rather than recording requests nobody will ever see. Failing closed is the
+    honest behaviour: an escalate button that reaches no one is worse than no
+    button, because the person believes they have asked for help.
+    """
+
+    operator_user_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Platform user ids DM'd when someone escalates to human support. "
+            "Empty (the default) disables the escalate affordance entirely — "
+            "a request that reaches nobody is worse than no button at all."
+        ),
+    )
+    credits_per_user: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "How many human-support requests each user gets within a tenant. "
+            "A COUNT of interactions, NOT the USD in DAIMON_BILLING__SIGNUP_CREDIT — "
+            "the two are deliberately separate ledgers. 0 disables escalation."
+        ),
+    )
+
+
 class ArtifactsSettings(BaseModel):
     """Optional private object storage for hosted-client artifacts."""
 
@@ -610,6 +643,7 @@ class Settings(BaseSettings):
     report_host: ReportHostSettings = Field(default_factory=ReportHostSettings)
     sentry: SentrySettings = Field(default_factory=SentrySettings)
     billing: BillingSettings = Field(default_factory=BillingSettings)
+    support: SupportSettings = Field(default_factory=SupportSettings)
     artifacts: ArtifactsSettings | None = Field(
         default=None,
         description=(

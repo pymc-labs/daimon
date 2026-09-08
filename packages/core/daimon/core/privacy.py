@@ -36,6 +36,7 @@ from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
 from daimon.core.stores import wizard_session as wizard_session_store
@@ -80,6 +81,7 @@ class PurgePreview(BaseModel):
     credential_requests: PurgePreviewRow
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
+    support_escalations: PurgePreviewRow
 
 
 def _format_platform_principal(p: PlatformPrincipalRow) -> str:
@@ -335,6 +337,19 @@ async def collect_purge_preview(
         )
         message_feedback = PurgePreviewRow(count=message_feedback_count, example=None)
 
+        # 15. support_escalations — same account-scoped shape, and the SAME
+        # platform-user keys, as message_feedback above. The argument shapes
+        # here are identical to purge_account's delete by contract; any
+        # divergence makes this preview lie about what erasure will remove.
+        support_escalations_count = (
+            await support_escalation_store.count_support_escalations_for_account(
+                session,
+                account_id=account_id,
+                platform_user_keys=message_feedback_platform_user_keys,
+            )
+        )
+        support_escalations = PurgePreviewRow(count=support_escalations_count, example=None)
+
     return PurgePreview(
         linked_principals=linked_principals,
         principal_links=principal_links,
@@ -351,4 +366,5 @@ async def collect_purge_preview(
         credential_requests=credential_requests,
         wizard_sessions=wizard_sessions,
         message_feedback=message_feedback,
+        support_escalations=support_escalations,
     )

@@ -39,6 +39,7 @@ from typing import cast
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.feedback_button import FeedbackButton
+from daimon.adapters.discord.support_escalation import SupportEscalateButton
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.message_feedback import (
     Vote,
@@ -48,8 +49,10 @@ from daimon.core.message_feedback import (
 )
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.message_feedback import record_vote
+from daimon.core.stores.support_escalation import count_escalations_for_user
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
+from daimon.core.support_escalation import has_credit, is_escalation_reaction, remaining_credits
 
 import discord
 from discord.ext import commands
@@ -93,6 +96,27 @@ class FeedbackReactionCog(commands.Cog):
         if self._bot.user is None:
             return  # not connected yet
         bot_user_id = self._bot.user.id
+
+        if is_escalation_reaction(
+            emoji_name=payload.emoji.name,
+            emoji_is_custom=payload.emoji.id is not None,
+            reactor_id=payload.user_id,
+            bot_user_id=bot_user_id,
+            guild_id=payload.guild_id,
+        ):
+            # Escalation shares this listener because it shares the seeded
+            # reactions, and nothing else. It never touches message_feedback.
+            verdict = is_bot_authored(
+                message_author_id=payload.message_author_id, bot_user_id=bot_user_id
+            )
+            if verdict is False:
+                return
+            if verdict is None and not await self._is_bot_message_via_fetch(
+                payload, bot_user_id=bot_user_id
+            ):
+                return
+            await self._offer_support(payload)
+            return
 
         candidate_vote = vote_for_reaction(
             emoji_name=payload.emoji.name,
@@ -216,6 +240,70 @@ class FeedbackReactionCog(commands.Cog):
         if len(self._author_is_bot) >= _AUTHOR_CACHE_MAX_ENTRIES:
             del self._author_is_bot[next(iter(self._author_is_bot))]
         self._author_is_bot[message_id] = is_bot_message
+
+    async def _offer_support(self, payload: discord.RawReactionActionEvent) -> None:
+        """Bridge an escalate reaction into the private note form.
+
+        Reacting spends NOTHING. This only reads the person's remaining
+        credits to decide which of two direct messages to send, and the
+        authoritative gate runs again inside the write transaction when the
+        modal is submitted -- someone can react, wait, and submit after
+        spending their last credit elsewhere, and only the write decides.
+
+        An empty operator list disables the affordance rather than recording
+        requests nobody will read: an escalate path that reaches no one is
+        worse than none, because the person believes they have asked for help.
+        """
+        settings = self._bot.runtime.settings
+        allowance = settings.support.credits_per_user
+        if not settings.support.operator_user_ids or allowance <= 0:
+            log.info("support.disabled", message_id=str(payload.message_id))
+            return
+
+        # guild_id is guaranteed non-None: is_escalation_reaction already
+        # returned False for any reaction lacking a guild.
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
+        async with self._bot.runtime.sessionmaker() as session:
+            used = await count_escalations_for_user(
+                session, tenant_id=tenant_id, platform_user_id=str(payload.user_id)
+            )
+
+        try:
+            user = self._bot.get_user(payload.user_id)
+            if user is None:
+                user = await self._bot.fetch_user(payload.user_id)
+            if not has_credit(allowance=allowance, used=used):
+                await user.send(
+                    "You've used all your human-support requests. "
+                    "Contact us if you'd like more added to your account."
+                )
+                return
+            left = remaining_credits(allowance=allowance, used=used)
+            view: discord.ui.View = discord.ui.View(timeout=None)
+            view.add_item(
+                SupportEscalateButton(
+                    guild_id=str(payload.guild_id),
+                    channel_id=str(payload.channel_id),
+                    message_id=str(payload.message_id),
+                )
+            )
+            await user.send(
+                content=(
+                    f"You asked for a human on that answer. "
+                    f"You have {left} support request(s) left -- "
+                    "tell us what you need and we'll pick it up."
+                ),
+                view=view,
+            )
+        except discord.HTTPException as exc:
+            # Closed DMs are the common case and there is no other channel to
+            # reach this person on. Nothing has been spent, so this costs them
+            # only the prompt.
+            log.info(
+                "support.prompt_undeliverable",
+                message_id=str(payload.message_id),
+                error=str(exc),
+            )
 
     async def _send_feedback_prompt(
         self, payload: discord.RawReactionActionEvent, *, feedback_id: uuid.UUID
