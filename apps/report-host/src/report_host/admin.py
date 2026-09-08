@@ -45,7 +45,7 @@ def _validate_slug(slug: str) -> str:
     below.
     """
     if not slug or len(slug) > _SLUG_MAX_LEN or not _SLUG_PATTERN.fullmatch(slug):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"invalid slug: {slug!r}")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"invalid slug: {slug!r}")
     return slug
 
 
