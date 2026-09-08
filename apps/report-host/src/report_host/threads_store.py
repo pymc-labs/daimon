@@ -38,7 +38,7 @@ from typing import Literal
 from report_host.reports_store import dt_to_text, from_micros, text_to_dt, to_micros
 
 ThreadStatus = Literal["idle", "running"]
-Role = Literal["user", "assistant"]
+Role = Literal["user", "assistant", "system"]
 
 # Alias for the connection's row type (row_factory is set once, in
 # reports_store.connect()), so the mapping helpers below share one spelling.
