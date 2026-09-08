@@ -85,6 +85,7 @@ def _providers(
                     session_factory=sessionmaker,
                     client_storage=hub_kv_for(hub_kv, platform="slack"),
                     jwt_signing_key=signing_key,
+                    allowed_client_redirect_uris=hub.allowed_client_redirect_uris,
                 ),
             )
         )
@@ -100,6 +101,7 @@ def _providers(
                     session_factory=sessionmaker,
                     client_storage=hub_kv_for(hub_kv, platform="discord"),
                     jwt_signing_key=signing_key,
+                    allowed_client_redirect_uris=hub.allowed_client_redirect_uris,
                 ),
             )
         )

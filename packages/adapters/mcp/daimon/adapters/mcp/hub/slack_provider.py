@@ -115,6 +115,7 @@ class SlackHubProvider(OAuthProxy):
         session_factory: async_sessionmaker[AsyncSession],
         client_storage: AsyncKeyValue,
         jwt_signing_key: bytes,
+        allowed_client_redirect_uris: list[str],
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._http = http_client or httpx.AsyncClient(timeout=10.0)
@@ -128,6 +129,7 @@ class SlackHubProvider(OAuthProxy):
             forward_pkce=False,
             client_storage=client_storage,
             jwt_signing_key=jwt_signing_key,
+            allowed_client_redirect_uris=allowed_client_redirect_uris,
             fallback_access_token_expiry_seconds=_FALLBACK_EXPIRY_S,
         )
         self._session_factory = session_factory

@@ -51,6 +51,7 @@ class DaimonDiscordProvider(DiscordProvider):
         session_factory: async_sessionmaker[AsyncSession],
         client_storage: AsyncKeyValue,
         jwt_signing_key: bytes,
+        allowed_client_redirect_uris: list[str],
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         super().__init__(
@@ -60,6 +61,7 @@ class DaimonDiscordProvider(DiscordProvider):
             required_scopes=_SCOPES,
             client_storage=client_storage,
             jwt_signing_key=jwt_signing_key,
+            allowed_client_redirect_uris=allowed_client_redirect_uris,
             http_client=http_client,
         )
         self._session_factory = session_factory

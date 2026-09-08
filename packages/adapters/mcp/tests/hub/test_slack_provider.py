@@ -46,6 +46,7 @@ def _provider(
         session_factory=session_factory,
         client_storage=MemoryStore(),
         jwt_signing_key=b"0" * 32,
+        allowed_client_redirect_uris=["http://localhost:*"],
         http_client=http,
     )
 

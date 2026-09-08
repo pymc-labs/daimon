@@ -180,6 +180,19 @@ class HubSettings(BaseModel):
         default=None,
         description="Discord OAuth app client secret for the /discord/mcp login mount.",
     )
+    allowed_client_redirect_uris: list[str] = Field(
+        default=[
+            "http://localhost:*",
+            "http://127.0.0.1:*",
+            "https://claude.ai/*",
+            "https://claude.com/*",
+        ],
+        description=(
+            "Redirect URI patterns an MCP client may register with the hub login "
+            "mounts (wildcards allowed). Defaults cover coding agents on loopback "
+            "and claude.ai; widen only for a client you operate."
+        ),
+    )
     jwt_signing_key: SecretStr | None = Field(
         default=None,
         description=(

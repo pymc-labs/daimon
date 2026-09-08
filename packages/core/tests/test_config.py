@@ -629,6 +629,26 @@ def test_hub_settings_rejects_a_signing_key_of_the_wrong_length() -> None:
         HubSettings(jwt_signing_key=SecretStr(short))
 
 
+def test_hub_settings_default_redirect_allowlist_is_loopback_and_claude() -> None:
+    hub = HubSettings()
+    assert hub.allowed_client_redirect_uris == [
+        "http://localhost:*",
+        "http://127.0.0.1:*",
+        "https://claude.ai/*",
+        "https://claude.com/*",
+    ], f"got {hub.allowed_client_redirect_uris!r}"
+
+
+def test_hub_settings_redirect_allowlist_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_HUB__ALLOWED_CLIENT_REDIRECT_URIS", '["https://ide.example/*"]')
+    settings = load_settings(_env_file=None)
+    assert settings.hub.allowed_client_redirect_uris == ["https://ide.example/*"], (
+        f"got {settings.hub.allowed_client_redirect_uris!r}"
+    )
+
+
 def test_hub_settings_read_from_nested_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
