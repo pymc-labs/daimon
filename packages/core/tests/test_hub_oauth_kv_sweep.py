@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import structlog
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -41,3 +42,22 @@ async def test_sweep_deletes_expired_rows_and_keeps_live_and_permanent_rows(
         .all()
     )
     assert list(remaining) == ["live", "permanent"], f"unexpected survivors: {remaining!r}"
+
+
+async def test_sweep_warns_when_it_fills_its_batch(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    await _insert(db_session, key="expired-1", expires_at=now - timedelta(seconds=1))
+    await _insert(db_session, key="expired-2", expires_at=now - timedelta(seconds=1))
+    await db_session.commit()
+
+    with structlog.testing.capture_logs() as logs:
+        deleted = await sweep_expired_hub_oauth_kv(db_session_factory, now=now, limit=1)
+
+    assert deleted == 1, f"the batch limit must cap the delete, got {deleted}"
+    backlog = [e for e in logs if e["event"] == "hub_oauth_kv_sweep.backlog"]
+    assert backlog and backlog[0]["log_level"] == "warning", (
+        f"a full batch must be reported at warning level, got {logs!r}"
+    )

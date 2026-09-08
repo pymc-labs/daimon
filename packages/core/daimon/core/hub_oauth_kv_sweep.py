@@ -26,8 +26,15 @@ async def sweep_expired_hub_oauth_kv(
     now: datetime,
     limit: int = 500,
 ) -> int:
-    """Delete up to ``limit`` expired rows. Returns the number deleted."""
+    """Delete up to ``limit`` expired rows. Returns the number deleted.
+
+    A full batch means the sweep may not be keeping up, and one interval of
+    deletions is no longer evidence the table is bounded, so it is reported at
+    warning level as well.
+    """
     async with session_factory() as session, session.begin():
         count = await delete_expired_hub_oauth_kv(session, cutoff=now, limit=limit)
     _log.info("hub_oauth_kv_sweep.expired", count=count)
+    if count == limit:
+        _log.warning("hub_oauth_kv_sweep.backlog", count=count, limit=limit)
     return count
