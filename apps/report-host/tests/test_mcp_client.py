@@ -4,20 +4,20 @@ The fake seam is a small `mcp.server.lowlevel.Server` mounted on the real
 streamable-HTTP ASGI transport (`StreamableHTTPSessionManager`), driven over
 `httpx.ASGITransport` — never a monkeypatch of `SeamClient`'s own methods, so
 every test exercises the real MCP wire protocol our client actually speaks.
+
+The harness itself (`build_fake_seam` / `fake_seam_lifespan`) is a shared
+fixture from `conftest.py`, not defined here, so plan 21-14's shell tests for
+`turns.py` can drive the same fake seam without a second implementation.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from decimal import Decimal
 
 import httpx
 import pytest
-from mcp import types as mcp_types
-from mcp.server.lowlevel import Server
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from report_host.mcp_client import (
     BundleExpiredError,
     BundlePushed,
@@ -26,109 +26,17 @@ from report_host.mcp_client import (
     SeamUnauthorizedError,
     StartedTurn,
 )
-from starlette.applications import Starlette
-from starlette.routing import Route
-from starlette.types import Message, Receive, Scope, Send
+from starlette.types import Receive, Scope, Send
 
 pytestmark = pytest.mark.asyncio
 
-FakeToolBehavior = Callable[[dict[str, object]], dict[str, object]]
+# Local aliases for the fixture types `conftest.py` provides (`build_fake_seam`,
+# `fake_seam_lifespan`) — a plain `from conftest import ...` doesn't work under
+# this project's `--import-mode=importlib` pytest config, so these mirror
+# conftest's own aliases for type-hint purposes only, not a second harness.
 FakeASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
-
-
-class _StreamableHTTPEndpoint:
-    """ASGI endpoint that hands every request to the session manager."""
-
-    def __init__(self, manager: StreamableHTTPSessionManager) -> None:
-        self._manager = manager
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        await self._manager.handle_request(scope, receive, send)
-
-
-def _build_fake_seam(
-    *,
-    behaviors: dict[str, FakeToolBehavior],
-    captured_auth: list[str],
-    captured_arguments: dict[str, dict[str, object]] | None = None,
-    unauthorized_tokens: frozenset[str] = frozenset(),
-) -> FakeASGIApp:
-    """Build a minimal MCP server exposing exactly the tools under test.
-
-    Raising inside a behavior maps to an ``isError`` CallToolResult carrying
-    exactly ``str(exception)`` as its text — the low-level server's own
-    ``except Exception as e: return self._make_error_result(str(e))``, with
-    no wrapping — so tests can pin exact tool-error wording.
-    """
-    server = Server("fake-seam")
-
-    @server.call_tool()
-    async def handle_call_tool(  # pyright: ignore[reportUnusedFunction]
-        name: str, arguments: dict[str, object]
-    ) -> dict[str, object]:
-        if captured_arguments is not None:
-            captured_arguments[name] = arguments
-        behavior = behaviors[name]
-        return behavior(arguments)
-
-    @server.list_tools()
-    async def handle_list_tools() -> list[mcp_types.Tool]:  # pyright: ignore[reportUnusedFunction]
-        # No outputSchema: the mcp client's own call_tool() fetches this list
-        # to validate structuredContent against a declared schema, and skips
-        # validation entirely when a tool has none — exactly what these tests
-        # want, since they assert on the client's own decoding, not a schema.
-        return [
-            mcp_types.Tool(name=name, inputSchema={"type": "object", "properties": {}})
-            for name in behaviors
-        ]
-
-    manager = StreamableHTTPSessionManager(app=server, stateless=True)
-    starlette_app = Starlette(
-        routes=[Route("/mcp", endpoint=_StreamableHTTPEndpoint(manager))],
-        lifespan=lambda _app: manager.run(),
-    )
-
-    async def wrapped(scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http":
-            headers = dict(scope["headers"])
-            auth_header = headers.get(b"authorization", b"").decode()
-            captured_auth.append(auth_header)
-            token = auth_header.removeprefix("Bearer ")
-            if token in unauthorized_tokens:
-                await send({"type": "http.response.start", "status": 401, "headers": []})
-                await send({"type": "http.response.body", "body": b""})
-                return
-        await starlette_app(scope, receive, send)
-
-    return wrapped
-
-
-@contextlib.asynccontextmanager
-async def _lifespan(app: FakeASGIApp) -> AsyncIterator[None]:
-    send_queue: asyncio.Queue[Message] = asyncio.Queue()
-    receive_queue: asyncio.Queue[Message] = asyncio.Queue()
-
-    async def receive() -> Message:
-        return await receive_queue.get()
-
-    async def send(message: Message) -> None:
-        await send_queue.put(message)
-
-    async def run_lifespan() -> None:
-        await app({"type": "lifespan", "asgi": {"version": "3.0"}}, receive, send)
-
-    task = asyncio.create_task(run_lifespan())
-
-    await receive_queue.put({"type": "lifespan.startup"})
-    msg = await send_queue.get()
-    assert msg["type"] == "lifespan.startup.complete", msg
-    try:
-        yield
-    finally:
-        await receive_queue.put({"type": "lifespan.shutdown"})
-        msg = await send_queue.get()
-        assert msg["type"] == "lifespan.shutdown.complete", msg
-        await task
+FakeSeamBuilder = Callable[..., FakeASGIApp]
+FakeSeamLifespan = Callable[[FakeASGIApp], AbstractAsyncContextManager[None]]
 
 
 def _seam_client(app: FakeASGIApp) -> SeamClient:
@@ -140,7 +48,9 @@ def _seam_client(app: FakeASGIApp) -> SeamClient:
     )
 
 
-async def test_start_turn_returns_all_three_boundary_fields() -> None:
+async def test_start_turn_returns_all_three_boundary_fields(
+    build_fake_seam: FakeSeamBuilder, fake_seam_lifespan: FakeSeamLifespan
+) -> None:
     def start_turn(_args: dict[str, object]) -> dict[str, object]:
         return {
             "handle": "ses_1",
@@ -149,58 +59,64 @@ async def test_start_turn_returns_all_three_boundary_fields() -> None:
         }
 
     captured: list[str] = []
-    app = _build_fake_seam(behaviors={"start_turn": start_turn}, captured_auth=captured)
-    async with _lifespan(app):
+    app = build_fake_seam(behaviors={"start_turn": start_turn}, captured_auth=captured)
+    async with fake_seam_lifespan(app):
         result = await _seam_client(app).start_turn(token="tok", message="hello")
     assert result == StartedTurn(
         handle="ses_1", turn_event_id="evt_1", turn_started_at="2026-01-01T00:00:00Z"
     ), "start_turn must return all three boundary fields the seam sent"
 
 
-async def test_start_turn_with_bundle_passes_it_through() -> None:
+async def test_start_turn_with_bundle_passes_it_through(
+    build_fake_seam: FakeSeamBuilder, fake_seam_lifespan: FakeSeamLifespan
+) -> None:
     seen: dict[str, dict[str, object]] = {}
 
     def start_turn(args: dict[str, object]) -> dict[str, object]:
         return {"handle": "ses_1", "turn_event_id": "evt_1", "turn_started_at": "t0"}
 
     captured: list[str] = []
-    app = _build_fake_seam(
+    app = build_fake_seam(
         behaviors={"start_turn": start_turn}, captured_auth=captured, captured_arguments=seen
     )
-    async with _lifespan(app):
+    async with fake_seam_lifespan(app):
         await _seam_client(app).start_turn(token="tok", message="hello", bundle="bundle-handle-1")
     assert seen["start_turn"].get("bundle") == "bundle-handle-1", (
         "a provided bundle handle must be forwarded to the seam"
     )
 
 
-async def test_start_turn_without_bundle_omits_the_parameter() -> None:
+async def test_start_turn_without_bundle_omits_the_parameter(
+    build_fake_seam: FakeSeamBuilder, fake_seam_lifespan: FakeSeamLifespan
+) -> None:
     seen: dict[str, dict[str, object]] = {}
 
     def start_turn(_args: dict[str, object]) -> dict[str, object]:
         return {"handle": "ses_1", "turn_event_id": "evt_1", "turn_started_at": "t0"}
 
     captured: list[str] = []
-    app = _build_fake_seam(
+    app = build_fake_seam(
         behaviors={"start_turn": start_turn}, captured_auth=captured, captured_arguments=seen
     )
-    async with _lifespan(app):
+    async with fake_seam_lifespan(app):
         await _seam_client(app).start_turn(token="tok", message="hello")
     assert "bundle" not in seen["start_turn"], (
         "omitting bundle must omit the wire argument entirely, not send bundle=null"
     )
 
 
-async def test_authorization_header_carries_the_per_call_token() -> None:
+async def test_authorization_header_carries_the_per_call_token(
+    build_fake_seam: FakeSeamBuilder, fake_seam_lifespan: FakeSeamLifespan
+) -> None:
     """The load-bearing test: two calls on ONE client, two different tokens."""
 
     def start_turn(_args: dict[str, object]) -> dict[str, object]:
         return {"handle": "ses_1", "turn_event_id": "evt_1", "turn_started_at": "t0"}
 
     captured: list[str] = []
-    app = _build_fake_seam(behaviors={"start_turn": start_turn}, captured_auth=captured)
+    app = build_fake_seam(behaviors={"start_turn": start_turn}, captured_auth=captured)
     client = _seam_client(app)
-    async with _lifespan(app):
+    async with fake_seam_lifespan(app):
         await client.start_turn(token="token-a", message="hello")
         headers_after_first = list(captured)
         captured.clear()
@@ -217,7 +133,9 @@ async def test_authorization_header_carries_the_per_call_token() -> None:
     )
 
 
-async def test_list_events_forwards_created_at_gte_and_types_and_returns_items() -> None:
+async def test_list_events_forwards_created_at_gte_and_types_and_returns_items(
+    build_fake_seam: FakeSeamBuilder, fake_seam_lifespan: FakeSeamLifespan
+) -> None:
     seen: dict[str, dict[str, object]] = {}
 
     def list_events(_args: dict[str, object]) -> dict[str, object]:
@@ -227,10 +145,10 @@ async def test_list_events_forwards_created_at_gte_and_types_and_returns_items()
         }
 
     captured: list[str] = []
-    app = _build_fake_seam(
+    app = build_fake_seam(
         behaviors={"list_events": list_events}, captured_auth=captured, captured_arguments=seen
     )
-    async with _lifespan(app):
+    async with fake_seam_lifespan(app):
         result = await _seam_client(app).list_events(
             token="tok",
             handle="ses_1",
@@ -243,13 +161,15 @@ async def test_list_events_forwards_created_at_gte_and_types_and_returns_items()
     assert result.next_page is None
 
 
-async def test_get_turn_cost_parses_string_cost_usd_into_exact_decimal() -> None:
+async def test_get_turn_cost_parses_string_cost_usd_into_exact_decimal(
+    build_fake_seam: FakeSeamBuilder, fake_seam_lifespan: FakeSeamLifespan
+) -> None:
     def get_turn_cost(_args: dict[str, object]) -> dict[str, object]:
         return {"cost_usd": "0.123456", "event_count": 7}
 
     captured: list[str] = []
-    app = _build_fake_seam(behaviors={"get_turn_cost": get_turn_cost}, captured_auth=captured)
-    async with _lifespan(app):
+    app = build_fake_seam(behaviors={"get_turn_cost": get_turn_cost}, captured_auth=captured)
+    async with fake_seam_lifespan(app):
         result = await _seam_client(app).get_turn_cost(
             token="tok", handle="ses_1", turn_started_at="t0", turn_event_id="evt_1"
         )
@@ -259,37 +179,43 @@ async def test_get_turn_cost_parses_string_cost_usd_into_exact_decimal() -> None
     assert result.event_count == 7
 
 
-async def test_get_turn_cost_with_null_cost_usd_returns_none() -> None:
+async def test_get_turn_cost_with_null_cost_usd_returns_none(
+    build_fake_seam: FakeSeamBuilder, fake_seam_lifespan: FakeSeamLifespan
+) -> None:
     def get_turn_cost(_args: dict[str, object]) -> dict[str, object]:
         return {"cost_usd": None, "event_count": 3}
 
     captured: list[str] = []
-    app = _build_fake_seam(behaviors={"get_turn_cost": get_turn_cost}, captured_auth=captured)
-    async with _lifespan(app):
+    app = build_fake_seam(behaviors={"get_turn_cost": get_turn_cost}, captured_auth=captured)
+    async with fake_seam_lifespan(app):
         result = await _seam_client(app).get_turn_cost(
             token="tok", handle="ses_1", turn_started_at="t0", turn_event_id="evt_1"
         )
     assert result.cost_usd is None, "a null cost_usd must stay None, never coerce to zero"
 
 
-async def test_tool_error_with_bundle_expired_wording_raises_bundle_expired_error() -> None:
+async def test_tool_error_with_bundle_expired_wording_raises_bundle_expired_error(
+    build_fake_seam: FakeSeamBuilder, fake_seam_lifespan: FakeSeamLifespan
+) -> None:
     def start_turn(_args: dict[str, object]) -> dict[str, object]:
         raise Exception("bundle expired; re-upload")  # noqa: TRY002
 
     captured: list[str] = []
-    app = _build_fake_seam(behaviors={"start_turn": start_turn}, captured_auth=captured)
-    async with _lifespan(app):
+    app = build_fake_seam(behaviors={"start_turn": start_turn}, captured_auth=captured)
+    async with fake_seam_lifespan(app):
         with pytest.raises(BundleExpiredError):
             await _seam_client(app).start_turn(token="tok", message="hello", bundle="stale")
 
 
-async def test_tool_error_with_other_wording_raises_seam_error_not_bundle_expired() -> None:
+async def test_tool_error_with_other_wording_raises_seam_error_not_bundle_expired(
+    build_fake_seam: FakeSeamBuilder, fake_seam_lifespan: FakeSeamLifespan
+) -> None:
     def start_turn(_args: dict[str, object]) -> dict[str, object]:
         raise Exception("bundle not found")  # noqa: TRY002
 
     captured: list[str] = []
-    app = _build_fake_seam(behaviors={"start_turn": start_turn}, captured_auth=captured)
-    async with _lifespan(app):
+    app = build_fake_seam(behaviors={"start_turn": start_turn}, captured_auth=captured)
+    async with fake_seam_lifespan(app):
         with pytest.raises(SeamError) as excinfo:
             await _seam_client(app).start_turn(token="tok", message="hello", bundle="bad")
     assert not isinstance(excinfo.value, BundleExpiredError), (
@@ -297,22 +223,26 @@ async def test_tool_error_with_other_wording_raises_seam_error_not_bundle_expire
     )
 
 
-async def test_unauthorized_bearer_raises_seam_unauthorized_error() -> None:
+async def test_unauthorized_bearer_raises_seam_unauthorized_error(
+    build_fake_seam: FakeSeamBuilder, fake_seam_lifespan: FakeSeamLifespan
+) -> None:
     def start_turn(_args: dict[str, object]) -> dict[str, object]:
         return {"handle": "ses_1", "turn_event_id": "evt_1", "turn_started_at": "t0"}
 
     captured: list[str] = []
-    app = _build_fake_seam(
+    app = build_fake_seam(
         behaviors={"start_turn": start_turn},
         captured_auth=captured,
         unauthorized_tokens=frozenset({"revoked-token"}),
     )
-    async with _lifespan(app):
+    async with fake_seam_lifespan(app):
         with pytest.raises(SeamUnauthorizedError):
             await _seam_client(app).start_turn(token="revoked-token", message="hello")
 
 
-async def test_archive_session_returns_none_and_issues_exactly_one_call() -> None:
+async def test_archive_session_returns_none_and_issues_exactly_one_call(
+    build_fake_seam: FakeSeamBuilder, fake_seam_lifespan: FakeSeamLifespan
+) -> None:
     calls: list[dict[str, object]] = []
 
     def archive_my_session(args: dict[str, object]) -> dict[str, object]:
@@ -320,10 +250,10 @@ async def test_archive_session_returns_none_and_issues_exactly_one_call() -> Non
         return {"handle": args["handle"], "archived": "true"}
 
     captured: list[str] = []
-    app = _build_fake_seam(
+    app = build_fake_seam(
         behaviors={"archive_my_session": archive_my_session}, captured_auth=captured
     )
-    async with _lifespan(app):
+    async with fake_seam_lifespan(app):
         result = await _seam_client(app).archive_session(token="tok", handle="ses_1")
     assert result is None
     assert len(calls) == 1, "archive_session must issue exactly one tool call"
