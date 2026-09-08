@@ -484,6 +484,28 @@ class NotebookSettings(BaseModel):
     )
 
 
+class ReportHostSettings(BaseModel):
+    """Optional report-host client config.
+
+    Both fields optional so deployments without a report host keep working.
+    The publishing MCP tool raises ToolError when host_url is unset.
+    """
+
+    host_url: HttpUrl | None = Field(
+        default=None,
+        description="Base URL of the report-host service (e.g. http://report-host:8002).",
+    )
+    admin_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Bearer secret used to authenticate admin calls to the report-host "
+            "service. Must be the same value the report host itself is "
+            "configured with (its DAIMON_REPORT__ADMIN_SECRETS) — rotating one "
+            "without the other breaks publishing."
+        ),
+    )
+
+
 class SentrySettings(BaseModel):
     """Sentry observability config.
 
@@ -585,6 +607,7 @@ class Settings(BaseSettings):
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
     notebook: NotebookSettings = Field(default_factory=NotebookSettings)
+    report_host: ReportHostSettings = Field(default_factory=ReportHostSettings)
     sentry: SentrySettings = Field(default_factory=SentrySettings)
     billing: BillingSettings = Field(default_factory=BillingSettings)
     artifacts: ArtifactsSettings | None = Field(
