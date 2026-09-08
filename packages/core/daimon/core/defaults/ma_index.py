@@ -11,6 +11,7 @@ others are left alone and a warning is logged.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from typing import Literal
 
 import sentry_sdk
@@ -145,6 +146,27 @@ async def list_agents_by_tenant(
     async for ag in client.beta.agents.list(include_archived=False):
         if ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(ag)
+    return results
+
+
+async def list_agents_by_tenants(
+    client: AsyncAnthropic, *, tenant_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, list[BetaManagedAgentsAgent]]:
+    """Return non-archived MA agents for several tenants from one org listing.
+
+    The org listing is paginated in full whichever way it is filtered, so a
+    caller holding many tenants (a hub login spanning several workspaces)
+    pays once here rather than once per tenant. Every requested tenant is a
+    key in the result, empty when it has no agents.
+    """
+    wanted = {str(t): t for t in tenant_ids}
+    results: dict[uuid.UUID, list[BetaManagedAgentsAgent]] = {t: [] for t in tenant_ids}
+    if not wanted:
+        return results
+    async for ag in client.beta.agents.list(include_archived=False):
+        tenant = wanted.get(ag.metadata.get(MA_METADATA_KEY_TENANT, ""))
+        if tenant is not None:
+            results[tenant].append(ag)
     return results
 
 

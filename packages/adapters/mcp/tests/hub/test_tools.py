@@ -41,7 +41,11 @@ def _runtime(client: AsyncAnthropic, session_factory: Any) -> McpRuntime:
     )
 
 
-def _agents_router(agents_by_tenant: dict[uuid.UUID, list[tuple[str, str]]]) -> MARouter:
+def _agents_router(
+    agents_by_tenant: dict[uuid.UUID, list[tuple[str, str]]],
+    listings: list[str] | None = None,
+) -> MARouter:
+    """``listings`` collects one entry per GET /v1/agents page request when given."""
     router = MARouter()
     payload = [
         make_ma_agent(
@@ -53,7 +57,13 @@ def _agents_router(agents_by_tenant: dict[uuid.UUID, list[tuple[str, str]]]) -> 
         for tid, agents in agents_by_tenant.items()
         for ma_id, name in agents
     ]
-    router.add("GET", r"/v1/agents", lambda _r, _m: list_response(payload))
+
+    def _list(_r: Any, _m: Any) -> Any:
+        if listings is not None:
+            listings.append("agents.list")
+        return list_response(payload)
+
+    router.add("GET", r"/v1/agents", _list)
     return router
 
 
@@ -98,6 +108,30 @@ async def test_list_daimons_spans_every_tenant_and_disambiguates_same_names(
         str(derive_agent_uuid(tenant_id=t2.tenant_id, ma_agent_id="ag_2")),
     }, f"ids must be the derived per-agent UUIDs, got {[d.id for d in daimons]!r}"
     assert daimons[0].platform == "discord" and daimons[0].role_summary.startswith("Answers ops")
+
+
+async def test_list_daimons_pages_the_org_once_however_many_tenants_the_caller_has(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The org agent listing is the expensive call; a login spanning several workspaces
+    must not pay for it once per workspace."""
+    hub = await _two_tenant_hub(db_session)
+    listings: list[str] = []
+    router = _agents_router(
+        {
+            hub.tenants[0].tenant_id: [("ag_1", "helper")],
+            hub.tenants[1].tenant_id: [("ag_2", "ops")],
+        },
+        listings,
+    )
+    runtime = _runtime(build_fake_anthropic(router.dispatch), db_session_factory)
+
+    daimons = await _list_daimons_impl(runtime, hub)
+
+    assert len(daimons) == 2, f"got {daimons!r}"
+    assert listings == ["agents.list"], (
+        f"expected one org listing for two tenants, got {len(listings)}"
+    )
 
 
 async def test_resolve_daimon_rejects_ids_outside_the_callers_tenants(

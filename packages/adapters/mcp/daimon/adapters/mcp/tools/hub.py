@@ -50,7 +50,7 @@ from daimon.adapters.mcp.tools.agent_chat import (
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core.billing import BillingConfig
-from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
@@ -90,11 +90,19 @@ def _summary(tenant: HubTenant, hub: HubIdentity, agent: BetaManagedAgentsAgent)
     )
 
 
+async def _agents_by_tenant(
+    runtime: McpRuntime, hub: HubIdentity
+) -> list[tuple[HubTenant, list[BetaManagedAgentsAgent]]]:
+    by_id = await list_agents_by_tenants(
+        runtime.client, tenant_ids=[t.tenant_id for t in hub.tenants]
+    )
+    return [(tenant, by_id[tenant.tenant_id]) for tenant in hub.tenants]
+
+
 async def _list_daimons_impl(runtime: McpRuntime, hub: HubIdentity) -> list[DaimonSummary]:
     out: list[DaimonSummary] = []
-    for tenant in hub.tenants:
-        for agent in await list_agents_by_tenant(runtime.client, tenant_id=tenant.tenant_id):
-            out.append(_summary(tenant, hub, agent))
+    for tenant, agents in await _agents_by_tenant(runtime, hub):
+        out.extend(_summary(tenant, hub, agent) for agent in agents)
     out.sort(key=lambda d: (d.workspace.lower(), d.name.lower()))
     return out
 
@@ -106,8 +114,8 @@ async def _resolve_daimon(
         wanted = uuid.UUID(daimon_id)
     except ValueError as e:
         raise ToolError(_NOT_FOUND) from e
-    for tenant in hub.tenants:
-        for agent in await list_agents_by_tenant(runtime.client, tenant_id=tenant.tenant_id):
+    for tenant, agents in await _agents_by_tenant(runtime, hub):
+        for agent in agents:
             if derive_agent_uuid(tenant_id=tenant.tenant_id, ma_agent_id=str(agent.id)) == wanted:
                 return tenant, agent
     raise ToolError(_NOT_FOUND)
