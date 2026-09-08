@@ -61,10 +61,14 @@ async def _publish_report_impl(
     slug: str,
     title: str,
     recipients: list[Recipient],
-    cap_usd: Decimal,
+    cap_usd: float | str,
     agent: str | None,
     client_factory: type[httpx.AsyncClient] = httpx.AsyncClient,
 ) -> dict[str, object]:
+    # FastMCP has no Decimal-shaped tool argument, so cap_usd arrives as a
+    # float or a string; a string round trip is what keeps a float's binary
+    # imprecision from ever reaching the core function as a signed cap.
+    cap = Decimal(str(cap_usd))
     if runtime.settings.mcp.jwt_secret is None:
         raise ToolError("report host not configured: DAIMON_MCP__JWT_SECRET is unset")
     jwt_secret = runtime.settings.mcp.jwt_secret.get_secret_value().encode()
@@ -83,7 +87,7 @@ async def _publish_report_impl(
                 slug=slug,
                 title=title,
                 recipients=recipients,
-                cap_usd=cap_usd,
+                cap_usd=cap,
                 agent=agent,
                 now=datetime.now(UTC),
             )
@@ -164,7 +168,7 @@ def register_publish_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             slug=slug,
             title=title,
             recipients=recipients,
-            cap_usd=Decimal(str(cap_usd)),
+            cap_usd=cap_usd,
             agent=agent,
         )
 
