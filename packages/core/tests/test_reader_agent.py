@@ -426,14 +426,16 @@ async def test_ensure_reader_variant_raises_for_unknown_source() -> None:
         )
 
 
-async def test_ensure_reader_variant_ignores_the_source_toolset_shape() -> None:
+async def test_ensure_reader_variant_ignores_the_source_toolset_and_servers() -> None:
     """A live agent's toolset carries per-config fields the create shape rejects.
 
     Managed Agents returns each toolset config entry with a ``type`` next to
     its ``name`` (and ``enabled`` / ``permission_policy`` filled in). Feeding
     that back into an agent spec fails validation, which is exactly what
-    happened on the first live publish. The reader must be created from the
-    base toolset alone, whatever the source carries.
+    happened on the first live publish. The same live agent also names the
+    daimon-mcp server, and once its tools are gone a spec that names a server
+    without its toolset fails the spec's own rule. The reader must be created
+    from the base toolset alone, with no servers, whatever the source carries.
     """
     source = _source_agent_dict(id_="ag_src", spec_hash="src-hash-1")
     source["tools"] = [
@@ -450,6 +452,9 @@ async def test_ensure_reader_variant_ignores_the_source_toolset_shape() -> None:
                 for name in ("bash", "read", "edit", "grep", "glob", "write")
             ],
         }
+    ]
+    source["mcp_servers"] = [
+        {"type": "url", "name": "daimon-mcp", "url": "https://mcp.example.test/mcp"}
     ]
     router = _router([source])
     created: dict[str, Any] = {}
@@ -474,4 +479,7 @@ async def test_ensure_reader_variant_ignores_the_source_toolset_shape() -> None:
     )
     assert tools[0]["default_config"]["permission_policy"] == {"type": "always_allow"}, (
         "readers run headless, so the dump step must inject always-allow"
+    )
+    assert "mcp_servers" not in created or not created["mcp_servers"], (
+        "a reader must be created with no MCP servers, whatever the source names"
     )
