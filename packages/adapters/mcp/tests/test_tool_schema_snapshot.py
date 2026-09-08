@@ -17,6 +17,8 @@ from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
+from daimon.adapters.mcp.hub.app import build_hub_app
+from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
     AnthropicSettings,
@@ -29,6 +31,7 @@ from daimon.core.config import (
     Settings,
     SlackSettings,
 )
+from daimon.core.defaults.loader import DeploymentDefault
 from daimon.testing.ma import build_stub_anthropic
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -121,6 +124,48 @@ async def test_rendered_tool_schema_matches_snapshot(
     assert not missing, f"expected tool group(s) missing from the rendered registry: {missing}"
 
     assert rendered == snapshot, "rendered tool schema drifted from the committed snapshot"
+
+
+async def test_rendered_hub_tool_schema_matches_snapshot(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    snapshot: SnapshotAssertion,
+) -> None:
+    """The hub mounts render a different surface from ``/mcp`` — a smaller tool
+    set, tool descriptions written for a coding-agent client, and server
+    instructions that tell it to call list_daimons first. The instructions are
+    part of the snapshot because they are prompt text the model reads, and
+    nothing else pins them."""
+    mcp = build_hub_app(
+        platform="discord",
+        runtime=McpRuntime(
+            session_factory=sessionmaker,
+            client=build_stub_anthropic(),
+            settings=_fully_configured_settings(),
+            deployment_default=DeploymentDefault(environment_name=None),
+        ),
+        auth=StaticTokenVerifier(tokens={}),
+        billing_config=None,
+    )
+    tools = await mcp.local_provider.list_tools()
+
+    rendered: dict[str, object] = {
+        "instructions": mcp.instructions,
+        "tools": dict(
+            sorted(
+                (
+                    tool.name,
+                    {
+                        "description": _strip_trailing_whitespace(tool.description),
+                        "parameters": tool.parameters,
+                    },
+                )
+                for tool in tools
+            )
+        ),
+    }
+
+    assert rendered["tools"], "the hub tool registry must not be empty"
+    assert rendered == snapshot, "rendered hub tool schema drifted from the committed snapshot"
 
 
 def _non_null_branch(container: dict[str, Any]) -> dict[str, Any]:
