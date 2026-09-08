@@ -1215,7 +1215,7 @@ class HubOAuthKv(Base):
     Column shape is dictated by ``key_value.aio.stores.postgresql.PostgreSQLStore``,
     which reads and writes this table directly over asyncpg; daimon only ever
     deletes expired rows through ``stores.hub_oauth_kv``. Collections are
-    prefixed per platform (``slack.``, ``discord.``) by the adapter.
+    prefixed per platform (``slack__``, ``discord__``) by the adapter.
     """
 
     __tablename__ = "hub_oauth_kv"

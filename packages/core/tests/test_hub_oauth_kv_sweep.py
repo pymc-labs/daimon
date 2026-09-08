@@ -16,7 +16,7 @@ async def _insert(session: AsyncSession, *, key: str, expires_at: datetime | Non
     await session.execute(
         text(
             "INSERT INTO hub_oauth_kv (collection, key, value, ttl, created_at, expires_at) "
-            "VALUES ('discord.mcp-oauth-transactions', :key, '{}'::jsonb, NULL, now(), :exp)"
+            "VALUES ('discord__mcp-oauth-transactions', :key, '{}'::jsonb, NULL, now(), :exp)"
         ),
         {"key": key, "exp": expires_at},
     )
