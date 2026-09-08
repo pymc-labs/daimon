@@ -18,7 +18,8 @@ from .test_app import _lifespan, _runtime, _tools_list
 
 pytestmark = pytest.mark.asyncio
 
-SENTINEL = "hub-sentinel-upstream-token-DO-NOT-LOG"
+TOKEN_SENTINEL = "hub-sentinel-upstream-token-DO-NOT-LOG"
+CLAIMS_SENTINEL = "hub-sentinel-workspace"
 
 
 async def _call_list_daimons(app: Starlette, path: str, token: str) -> list[dict[str, Any]]:
@@ -70,15 +71,18 @@ async def _call_list_daimons(app: Starlette, path: str, token: str) -> list[dict
         return items if isinstance(items, list) else []
 
 
-async def test_hub_call_never_logs_the_bearer_token(
-    sessionmaker: Any, caplog: pytest.LogCaptureFixture
+async def test_hub_call_logs_neither_the_bearer_token_nor_the_login_claims(
+    sessionmaker: Any, caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]
 ) -> None:
     tenant = HubTenant(
-        tenant_id=uuid.uuid4(), account_id=uuid.uuid4(), workspace_id="g1", workspace_name="PyMC"
+        tenant_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        workspace_id="g1",
+        workspace_name=CLAIMS_SENTINEL,
     )
     claims = encode_hub_claims(platform="discord", platform_user_id="u1", tenants=[tenant])
     auth = StaticTokenVerifier(
-        tokens={SENTINEL: {"sub": "u1", "client_id": "c", "upstream_claims": claims}}
+        tokens={TOKEN_SENTINEL: {"sub": "u1", "client_id": "c", "upstream_claims": claims}}
     )
     mcp = build_hub_app(
         platform="discord", runtime=_runtime(sessionmaker), auth=auth, billing_config=None
@@ -86,11 +90,23 @@ async def test_hub_call_never_logs_the_bearer_token(
     caplog.set_level(logging.DEBUG)
 
     app = mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
-    names = await _tools_list(app, "/mcp", SENTINEL)
-    daimons = await _call_list_daimons(app, "/mcp", SENTINEL)
+    names = await _tools_list(app, "/mcp", TOKEN_SENTINEL)
+    daimons = await _call_list_daimons(app, "/mcp", TOKEN_SENTINEL)
+    # daimon's structlog uses PrintLoggerFactory, so its own lines land on the
+    # process's stdout and never reach the stdlib logging caplog reads.
+    captured = capfd.readouterr()
+    printed = captured.out + captured.err
 
     assert "list_daimons" in names, f"expected list_daimons among hub tools, got {names!r}"
     assert daimons == [], f"empty tenant should list no daimons, got {daimons!r}"
-    assert SENTINEL not in caplog.text, "bearer token must never be logged"
+    for haystack, where in ((caplog.text, "stdlib logs"), (printed, "stdout")):
+        assert TOKEN_SENTINEL not in haystack, (
+            f"bearer token must never be logged; found in {where}"
+        )
+        assert CLAIMS_SENTINEL not in haystack, (
+            f"login claims must never be logged; found in {where}"
+        )
     for record in caplog.records:
-        assert SENTINEL not in record.getMessage() and SENTINEL not in repr(record.args), record
+        assert TOKEN_SENTINEL not in record.getMessage() and TOKEN_SENTINEL not in repr(
+            record.args
+        ), record
