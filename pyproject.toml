@@ -92,6 +92,7 @@ source_modules = [
     "daimon.core.output_delivery",
     "daimon.core.privacy",
     "daimon.core.purge",
+    "daimon.core.reports",
     "daimon.core.scope",
     "daimon.core.skill_sync",
     "daimon.core.skill_zip",
