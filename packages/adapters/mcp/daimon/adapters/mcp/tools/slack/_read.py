@@ -36,6 +36,7 @@ from daimon.adapters.mcp.tools.slack._leak_policy import (
 from daimon.adapters.mcp.tools.slack._models import (
     SlackChannelResult,
     SlackChannelRow,
+    SlackConversationType,
     SlackMessageRow,
     SlackThreadResult,
 )
@@ -71,6 +72,28 @@ def _slack_error_code(err: SlackApiError) -> str:
 def _is_im(channel: dict[str, Any]) -> bool:
     """True when the source is a 1:1 direct message."""
     return bool(channel.get("is_im"))
+
+
+def _conversation_type(channel: dict[str, Any]) -> SlackConversationType:
+    if channel.get("is_im"):
+        return "im"
+    if channel.get("is_mpim"):
+        return "mpim"
+    if channel.get("is_private"):
+        return "private_channel"
+    return "public_channel"
+
+
+def _to_channel_row(ch: dict[str, Any]) -> SlackChannelRow:
+    topic = cast(dict[str, Any], ch.get("topic") or {})
+    return SlackChannelRow(
+        id=str(ch["id"]),
+        name=str(ch.get("name", "")),
+        type=_conversation_type(ch),
+        is_private=bool(ch.get("is_private")),
+        topic=str(topic["value"]) if topic.get("value") else None,
+        num_members=int(ch["num_members"]) if ch.get("num_members") else None,
+    )
 
 
 async def _gate_user_source(
@@ -188,16 +211,7 @@ async def _slack_list_channels_impl(  # pyright: ignore[reportUnusedFunction]  #
             # their contents: only surfaced when the destination is a DM.
             if _is_im(ch) and not is_dm_destination(destination):
                 continue
-            topic = cast(dict[str, Any], ch.get("topic") or {})
-            rows.append(
-                SlackChannelRow(
-                    id=str(ch["id"]),
-                    name=str(ch.get("name", "")),
-                    is_private=bool(ch.get("is_private")),
-                    topic=str(topic["value"]) if topic.get("value") else None,
-                    num_members=int(ch["num_members"]) if ch.get("num_members") else None,
-                )
-            )
+            rows.append(_to_channel_row(ch))
         return rows
 
     # Bot path: unchanged shipped behavior (bot's channels ∩ caller visibility).
@@ -223,16 +237,7 @@ async def _slack_list_channels_impl(  # pyright: ignore[reportUnusedFunction]  #
             is_member=str(ch["id"]) in user_channel_ids,
         ):
             continue
-        topic = cast(dict[str, Any], ch.get("topic") or {})
-        rows.append(
-            SlackChannelRow(
-                id=str(ch["id"]),
-                name=str(ch.get("name", "")),
-                is_private=bool(ch.get("is_private")),
-                topic=str(topic["value"]) if topic.get("value") else None,
-                num_members=int(ch["num_members"]) if ch.get("num_members") else None,
-            )
-        )
+        rows.append(_to_channel_row(ch))
     return rows
 
 

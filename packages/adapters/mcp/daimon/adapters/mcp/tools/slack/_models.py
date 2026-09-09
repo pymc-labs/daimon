@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict
+
+SlackConversationType = Literal["public_channel", "private_channel", "im", "mpim"]
 
 
 class SlackChannelRow(BaseModel):
     id: str
     name: str
+    type: SlackConversationType
+    # Group DMs and 1:1 DMs are is_private on the wire too; ``type`` is what
+    # separates them from a private channel.
     is_private: bool
     topic: str | None = None
     num_members: int | None = None

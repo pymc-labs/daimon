@@ -291,6 +291,10 @@ async def test_list_channels_omits_private_channels_user_is_not_in(
     assert {r.id for r in rows} == {"C_PUB", "C_PRIV_IN"}, (
         "private channels the caller is not in must be silently omitted"
     )
+    assert {r.id: r.type for r in rows} == {
+        "C_PUB": "public_channel",
+        "C_PRIV_IN": "private_channel",
+    }, "bot-path rows carry the conversation type as well"
 
 
 @pytest.mark.asyncio
@@ -1120,6 +1124,43 @@ async def test_list_channels_user_path_dm_destination_shows_public_private_and_i
     assert {r.id for r in rows} == {"C_PUB", "C_PRIV", "D_IM", "G_MPIM"}, (
         "DM destination should permit listing all private-ish entries too"
     )
+
+
+@pytest.mark.asyncio
+async def test_list_channels_rows_carry_conversation_type(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A group DM is is_private on the wire; only ``type`` tells it apart from a private channel."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    await _seed_user_token(runtime, committing_sessionmaker)
+    await _seed_turn_context(committing_sessionmaker, auth, channel_id="D_DEST")
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_CONVERSATIONS,
+            payload={
+                "ok": True,
+                "channels": [
+                    {"id": "C_PUB", "name": "general", "is_private": False},
+                    {"id": "C_PRIV", "name": "sekret", "is_private": True},
+                    {"id": "D_IM", "name": "", "is_im": True, "is_private": True},
+                    {
+                        "id": "G_MPIM",
+                        "name": "mpdm-alice--bob--carol-1",
+                        "is_mpim": True,
+                        "is_private": True,
+                    },
+                ],
+                "response_metadata": {"next_cursor": ""},
+            },
+        )
+        rows = await _slack_list_channels_impl(runtime, auth)
+    assert {r.id: r.type for r in rows} == {
+        "C_PUB": "public_channel",
+        "C_PRIV": "private_channel",
+        "D_IM": "im",
+        "G_MPIM": "mpim",
+    }, "type must follow Slack's conversation kinds, not the is_private flag"
 
 
 def _recorded_limit(m: aioresponses, path: str) -> str:
