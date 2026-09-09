@@ -61,7 +61,11 @@ async def sweep_headless_usage(
         tenant_raw = session.metadata.get(MA_METADATA_KEY_TENANT)
         if tenant_raw is None:
             continue
-        tenant_id = uuid.UUID(tenant_raw)
+        try:
+            tenant_id = uuid.UUID(tenant_raw)
+        except ValueError:
+            # Invalid tenant identity cannot be billed; continue scanning other sessions.
+            continue
         if tenant_id not in known_tenants:
             # Session belongs to a tenant this deployment doesn't own. A shared MA
             # workspace holds sessions from other deployments/evals whose tenant_ids
@@ -95,13 +99,17 @@ async def _resolve_platform_user_id(
 ) -> str | None:
     """Resolve the owning human's platform_user_id from the session's daimon_account.
 
-    Returns None when the session has no account tag or the account has no
+    Returns None when the session has no valid account tag or the account has no
     discord principal — the tenant_ledger debit still fires on tenant_id alone,
     so billing stays correct; only per-member reporting attribution is absent.
     """
     account_raw = metadata.get(MA_METADATA_KEY_ACCOUNT)
     if account_raw is None:
         return None
+    try:
+        account_id = uuid.UUID(account_raw)
+    except ValueError:
+        return None
     async with sessionmaker() as s:
-        identity = await get_account_with_tenant(s, account_id=uuid.UUID(account_raw))
+        identity = await get_account_with_tenant(s, account_id=account_id)
     return identity.platform_user_id if identity is not None else None
