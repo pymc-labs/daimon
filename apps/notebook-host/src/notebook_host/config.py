@@ -98,6 +98,11 @@ class Settings(BaseSettings):
     # ``max_attachment_bytes`` cap (operator policy lives on the daimon side).
     # 100 MiB at default — well above the 10 MiB daimon cap, well below disk-fill.
     max_attachment_bytes_ceiling: int = 100 * 1024 * 1024
+    # Minimum free bytes on the data_dir volume for a write route to accept
+    # work. Below it, publishes and uploads refuse with 507 instead of dying
+    # with an OSError mid-write (a full volume once surfaced as opaque 500s
+    # on every upload). 256 MiB default; 0 disables the guard.
+    min_free_disk_bytes: int = 256 * 1024 * 1024
     # Per-subprocess RLIMIT_AS (address space) in bytes. Default 4 GiB —
     # generous enough for ML-ish notebooks, tight enough that a runaway
     # alloc kills only the offender, not the Fly Machine. Linux only;

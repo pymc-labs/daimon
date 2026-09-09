@@ -220,3 +220,43 @@ def test_upload_rejects_body_over_host_ceiling_under_token_max(
     assert not get_slug_paths(tmp_path, "ceil").notebook.exists(), (
         "no file written when over the host ceiling"
     )
+
+
+def test_upload_returns_507_when_free_disk_below_minimum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host without disk headroom must refuse uploads clearly, before burning.
+
+    A full data volume used to surface as a 500 from deep inside the
+    consumed-store write. The guard runs before the jti burn, so the same
+    token stays usable once space is freed.
+    """
+    monkeypatch.setenv("DAIMON_NOTEBOOK__MIN_FREE_DISK_BYTES", str(2**60))
+    client, _ = _make_app(tmp_path, monkeypatch)
+    tok = _mint("blog", "no-room")
+    r = client.put(f"/upload/{tok}", content=b"# nb\n")
+    assert r.status_code == 507, f"no disk headroom → 507, got {r.status_code}: {r.text}"
+    assert not get_slug_paths(tmp_path, "no-room").notebook.exists(), (
+        "no file written without disk headroom"
+    )
+
+    monkeypatch.setenv("DAIMON_NOTEBOOK__MIN_FREE_DISK_BYTES", "0")
+    retry_client, _ = _make_app(tmp_path, monkeypatch)
+    retry = retry_client.put(f"/upload/{tok}", content=b"# nb\n")
+    assert retry.status_code == 200, (
+        "a token refused for missing headroom must not be burned — the same token "
+        f"must succeed once space is freed, got {retry.status_code}: {retry.text}"
+    )
+
+
+def test_admin_put_notebook_returns_507_when_free_disk_below_minimum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DAIMON_NOTEBOOK__MIN_FREE_DISK_BYTES", str(2**60))
+    client, _ = _make_app(tmp_path, monkeypatch)
+    r = client.put(
+        "/admin/notebooks/no-room",
+        json={"source": "# nb\n"},
+        headers={"Authorization": f"Bearer {_SECRET}"},
+    )
+    assert r.status_code == 507, f"no disk headroom → 507, got {r.status_code}: {r.text}"

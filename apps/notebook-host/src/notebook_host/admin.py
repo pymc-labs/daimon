@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import os
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -129,6 +130,29 @@ def _bearer_dep(settings: Settings) -> Callable[[str | None], None]:
     return require
 
 
+def _disk_headroom_dep(settings: Settings) -> Callable[[], None]:
+    """Refuse writes when the data volume lacks headroom, before any byte lands.
+
+    A full volume otherwise surfaces as an OSError 500 from deep inside the
+    first write (historically the jti burn), and on the capability route that
+    burn would waste the single-use token. Runs as a route dependency so it
+    precedes the handler body entirely. ``min_free_disk_bytes = 0`` disables.
+    """
+
+    def require() -> None:
+        if settings.min_free_disk_bytes <= 0:
+            return
+        free = shutil.disk_usage(settings.data_dir).free
+        if free < settings.min_free_disk_bytes:
+            raise HTTPException(
+                status.HTTP_507_INSUFFICIENT_STORAGE,
+                f"notebook host is out of disk space (free={free}, "
+                f"required={settings.min_free_disk_bytes})",
+            )
+
+    return require
+
+
 def _atomic_write_bytes(path: Path, content: bytes, *, owner_uid: int | None = None) -> None:
     """Write via tmp + ``os.replace`` so a concurrent reader never sees a torn file.
 
@@ -225,6 +249,7 @@ async def _spawn_tracked(
 def create_admin_router(state: AdminState) -> APIRouter:
     router = APIRouter()
     require_admin = _bearer_dep(state.settings)
+    require_disk_headroom = _disk_headroom_dep(state.settings)
 
     @router.get("/health")
     def health() -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
@@ -243,7 +268,10 @@ def create_admin_router(state: AdminState) -> APIRouter:
             "subprocess_ttl_seconds": state.settings.subprocess_ttl_seconds,
         }
 
-    @router.put("/admin/notebooks/{slug}", dependencies=[Depends(require_admin)])
+    @router.put(
+        "/admin/notebooks/{slug}",
+        dependencies=[Depends(require_admin), Depends(require_disk_headroom)],
+    )
     async def put_notebook(slug: str, body: WriteRequest) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
         slug = safe_slug(slug)
         source_bytes = body.source.encode("utf-8")
@@ -275,7 +303,7 @@ def create_admin_router(state: AdminState) -> APIRouter:
 
     @router.put(
         "/admin/notebooks/{slug}/data/{name}",
-        dependencies=[Depends(require_admin)],
+        dependencies=[Depends(require_admin), Depends(require_disk_headroom)],
     )
     async def put_notebook_data(  # pyright: ignore[reportUnusedFunction]
         slug: str, name: str, request: Request
@@ -362,7 +390,10 @@ def create_admin_router(state: AdminState) -> APIRouter:
             ]
         }
 
-    @router.put("/admin/blogs/{slug}", dependencies=[Depends(require_admin)])
+    @router.put(
+        "/admin/blogs/{slug}",
+        dependencies=[Depends(require_admin), Depends(require_disk_headroom)],
+    )
     async def put_blog(slug: str, body: WriteRequest) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
         slug = safe_slug(slug)
         source_bytes = body.source.encode("utf-8")
@@ -448,7 +479,7 @@ def create_admin_router(state: AdminState) -> APIRouter:
             state.snapshot_pids()
         return {"reaped": reaped, "subprocess_ttl_seconds": state.settings.subprocess_ttl_seconds}
 
-    @router.put("/upload/{token}")
+    @router.put("/upload/{token}", dependencies=[Depends(require_disk_headroom)])
     async def upload(token: str, request: Request) -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
         # Public route — authed by the capability token, NOT the admin bearer.
         secrets_list = [s.get_secret_value() for s in state.settings.admin_secrets]

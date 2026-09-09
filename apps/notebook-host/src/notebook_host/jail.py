@@ -183,6 +183,19 @@ def remove_slug_tree(data_dir: Path, slug: str, *, uids_file: Path | None = None
         release_slug_uid(uids_file, slug)
 
 
+def clear_slug_uv_cache(data_dir: Path, slug: str) -> None:
+    """Remove a slug's ``home/.cache/uv`` without touching the rest of the tree.
+
+    Every failed sandboxed spawn leaves a fresh ephemeral uv environment in
+    the slug's cache, so a blog stuck in a spawn/kill/retry loop grows it
+    without bound until the data volume fills. Clearing on failure bounds the
+    leak at the cost of a cold install on the next attempt; a successful
+    spawn keeps its warm cache. A no-op (does not raise) if the cache doesn't
+    exist. ``slug`` must already have passed ``lifecycle.safe_slug``.
+    """
+    shutil.rmtree(get_slug_paths(data_dir, slug).home / ".cache" / "uv", ignore_errors=True)
+
+
 # ─── uid pool ────────────────────────────────────────────────────────────────
 #
 # A persisted slug -> uid registry, not a deterministic hash of the slug.
