@@ -76,8 +76,8 @@ def test_hourly_cap_is_inclusive() -> None:
 
 
 def test_post_classifier_maps_verdicts() -> None:
-    assert decide_post_classifier(ClassifierVerdict("respond", "asked", 0.9)) == Respond()
-    assert decide_post_classifier(ClassifierVerdict("silence", "chatter", 0.9)) == Skip(
+    assert decide_post_classifier(ClassifierVerdict("respond", "asked")) == Respond()
+    assert decide_post_classifier(ClassifierVerdict("silence", "chatter")) == Skip(
         SkipReason.CLASSIFIER_SILENCED
     )
 
@@ -85,18 +85,16 @@ def test_post_classifier_maps_verdicts() -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        '{"decision": "respond", "reason": "asked", "confidence": 0.8}',
-        '```json\n{"decision": "respond", "reason": "asked", "confidence": 0.8}\n```',
+        '{"decision": "respond", "reason": "asked"}',
+        '```json\n{"decision": "respond", "reason": "asked"}\n```',
     ],
 )
 def test_parse_accepts_plain_and_fenced_json(text: str) -> None:
-    assert parse_classifier_response(text) == ClassifierVerdict("respond", "asked", 0.8)
+    assert parse_classifier_response(text) == ClassifierVerdict("respond", "asked")
 
 
-def test_parse_defaults_missing_reason_and_confidence() -> None:
-    assert parse_classifier_response('{"decision": "silence"}') == ClassifierVerdict(
-        "silence", "", 0.0
-    )
+def test_parse_defaults_missing_reason() -> None:
+    assert parse_classifier_response('{"decision": "silence"}') == ClassifierVerdict("silence", "")
 
 
 @pytest.mark.parametrize("text", ["not json", "[1]", '{"decision": "maybe"}', '{"x": 1}'])

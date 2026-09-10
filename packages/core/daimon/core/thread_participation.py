@@ -117,11 +117,10 @@ class ClassifierMessage:
 class ClassifierVerdict:
     decision: str  # "respond" | "silence"
     reason: str
-    confidence: float
 
 
 SILENCE_ON_ERROR: Final[ClassifierVerdict] = ClassifierVerdict(
-    decision="silence", reason="classifier_error", confidence=0.0
+    decision="silence", reason="classifier_error"
 )
 
 
@@ -146,7 +145,7 @@ Decide SILENCE when:
 - {bot_display_name} has nothing to add beyond what a human already said
 
 Output EXACTLY this JSON and nothing else:
-{{"decision": "respond" | "silence", "reason": "<short>", "confidence": 0.0-1.0}}
+{{"decision": "respond" | "silence", "reason": "<short>"}}
 """
 
 
@@ -179,12 +178,7 @@ def parse_classifier_response(text: str) -> ClassifierVerdict:
     decision = payload.get("decision")
     if not isinstance(decision, str) or decision not in ("respond", "silence"):
         raise ValueError(f"unexpected decision: {decision!r}")
-    confidence = payload.get("confidence", 0.0)
-    return ClassifierVerdict(
-        decision=decision,
-        reason=str(payload.get("reason", "")),
-        confidence=float(confidence) if isinstance(confidence, (int, float)) else 0.0,
-    )
+    return ClassifierVerdict(decision=decision, reason=str(payload.get("reason", "")))
 
 
 def _strip_code_fence(text: str) -> str:

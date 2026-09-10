@@ -134,7 +134,6 @@ class AutoResponder:
             event,
             reason=post.reason.value if isinstance(post, Skip) else None,
             classifier_reason=verdict.reason,
-            confidence=verdict.confidence,
             thread_id=str(thread.id),
             tier=resolved.tier,
         )

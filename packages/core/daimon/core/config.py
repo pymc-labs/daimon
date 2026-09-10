@@ -257,7 +257,7 @@ class ThreadParticipationSettings(BaseModel):
     )
     quiet_seconds: float = Field(
         default=8.0,
-        ge=0,
+        gt=0,
         description=(
             "How long a followed thread must be quiet after an unprompted message before "
             "the agent decides whether to reply. A burst of messages is judged once, at "

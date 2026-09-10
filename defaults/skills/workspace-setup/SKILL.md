@@ -124,10 +124,10 @@ it, and off again when they ask you to stop.
 Two tools, scoped by which id is given:
 
 ```
-set_thread_participation(mode, thread_id, channel_id)  # thread_id given -> this thread
-set_thread_participation(mode, channel_id)             # thread_id omitted -> this channel
-set_thread_participation(mode)                         # neither -> the whole workspace
-get_thread_participation(thread_id, channel_id)        # who decided, and what
+set_thread_participation(mode, thread_id=..., channel_id=...)  # this thread (both ids)
+set_thread_participation(mode, channel_id=...)                 # this channel
+set_thread_participation(mode)                                 # the whole workspace
+get_thread_participation(thread_id=..., channel_id=...)        # who decided, and what
 ```
 
 Modes are `on`, `off`, `disabled` (channel and workspace only: off, and no

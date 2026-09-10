@@ -23,7 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with an hourly per-thread cap as a backstop; auto turns carry an
   `unprompted="true"` hint so the agent keeps them short, and one that fails
   admission (credit depleted, cap, missing config) stays silent instead of
-  posting the notice a mention would earn. Off by default, so
+  posting the notice a mention would earn (a failure after the turn has
+  started still renders, since the thinking embed is already up). A burst
+  is judged for the newest message's author only, so nobody's words run on
+  someone else's session. Off by default, so
   existing deployments behave exactly as before. Migration
   `0014_thread_participation` adds two empty tables.
 

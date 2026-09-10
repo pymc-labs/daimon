@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 import anthropic as _anthropic
 import sentry_sdk
@@ -201,7 +201,16 @@ class _AutoBatch:
     """
 
     messages: list[discord.Message]
+    first_at: float
     timer: asyncio.Task[None] | None = None
+
+
+# A batch keeps only this many newest messages (the classifier window is the
+# same size), and stops restarting its timer once it has waited this many quiet
+# periods, so a thread that never goes quiet is still judged on a bounded delay
+# with a bounded prompt.
+_AUTO_BATCH_MAX_MESSAGES: Final[int] = 10
+_AUTO_BATCH_MAX_QUIET_PERIODS: Final[int] = 6
 
 
 class DaimonBot(commands.Bot):
@@ -735,13 +744,13 @@ class DaimonBot(commands.Bot):
 
         Nothing is decided here: the message joins the thread's batch and the
         quiet timer restarts. A thread the cascade resolves to anything but
-        `on` costs exactly one indexed read and returns -- no classifier, no
-        timer, no turn.
+        `on` costs exactly one indexed read and returns -- no liveness read,
+        no classifier, no timer, no turn.
         """
         if self.draining or self.user is None:
             return
-        assert message.guild is not None
-        assert isinstance(message.channel, discord.Thread)
+        if message.guild is None or not isinstance(message.channel, discord.Thread):
+            return
         thread = message.channel
         thread_id = thread.id
         if thread_id in self._processing:
@@ -750,7 +759,8 @@ class DaimonBot(commands.Bot):
         guild_id = str(message.guild.id)
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
         discord_settings = self.runtime.settings.discord
-        assert discord_settings is not None, "gated on discord settings in on_message"
+        if discord_settings is None:
+            return
         responder = AutoResponder(
             settings=discord_settings.thread_participation,
             sessionmaker=self.runtime.sessionmaker,
@@ -759,28 +769,34 @@ class DaimonBot(commands.Bot):
             bot_display_name=discord_settings.bot_display_name,
         )
         try:
+            # Cascade first: it says `off` for almost every message, so the
+            # tenant liveness read is only paid by threads actually followed.
+            resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
+            if resolved.mode is not ParticipationMode.ON:
+                log.debug(
+                    "thread_participation.not_following",
+                    thread_id=str(thread_id),
+                    mode=resolved.mode.value,
+                    tier=resolved.tier,
+                )
+                return
             tr = await get_tenant_liveness(self.runtime.sessionmaker, tenant_id)
             if tr is None or tr.archived_at is not None or tr.provision_status != "ready":
                 return
-            resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
         except Exception as exc:  # noqa: BLE001 -- unasked-for turn: log, stay silent
             log.exception("thread_participation.decision_failed", thread_id=str(thread_id))
             sentry_sdk.capture_exception(exc)
             return
-        if resolved.mode is not ParticipationMode.ON:
-            log.debug(
-                "thread_participation.not_following",
-                thread_id=str(thread_id),
-                mode=resolved.mode.value,
-                tier=resolved.tier,
-            )
-            return
 
-        batch = self._auto_pending.setdefault(thread_id, _AutoBatch(messages=[]))
-        batch.messages.append(message)
-        if batch.timer is not None:
-            batch.timer.cancel()
+        now = asyncio.get_running_loop().time()
         quiet_seconds = discord_settings.thread_participation.quiet_seconds
+        batch = self._auto_pending.setdefault(thread_id, _AutoBatch(messages=[], first_at=now))
+        batch.messages.append(message)
+        del batch.messages[:-_AUTO_BATCH_MAX_MESSAGES]
+        if batch.timer is not None:
+            if now - batch.first_at >= quiet_seconds * _AUTO_BATCH_MAX_QUIET_PERIODS:
+                return  # waited long enough: let the running timer fire as scheduled
+            batch.timer.cancel()
         batch.timer = self._spawn(
             self._auto_quiet_timer(
                 quiet_seconds, thread, guild_id=guild_id, tenant_id=tenant_id, responder=responder
@@ -797,10 +813,7 @@ class DaimonBot(commands.Bot):
         responder: AutoResponder,
     ) -> None:
         """Wait out the quiet period, then judge the batch. Cancelled = a newer message won."""
-        try:
-            await asyncio.sleep(quiet_seconds)
-        except asyncio.CancelledError:
-            return  # normal path: another message restarted the timer
+        await asyncio.sleep(quiet_seconds)
         await self._auto_fire(thread, guild_id=guild_id, tenant_id=tenant_id, responder=responder)
 
     async def _auto_fire(
@@ -819,13 +832,20 @@ class DaimonBot(commands.Bot):
         if self.draining or thread_id in self._processing:
             return
         discord_settings = self.runtime.settings.discord
-        assert discord_settings is not None, "gated on discord settings in on_message"
+        if discord_settings is None:
+            return
+        # One turn = one caller (see _drain_pending_mentions): the newest
+        # message's author is the caller, and only their messages are judged.
+        # Coalescing other authors' text onto this caller's session would
+        # reopen the confused-deputy hole the mention path closed.
+        trigger = batch.messages[-1]
+        candidates = [m for m in batch.messages if m.author.id == trigger.author.id]
         try:
             # Re-resolved rather than carried from the batch: the quiet window
             # is long enough for someone to turn the thread off mid-burst.
             resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
             if not await responder.should_respond(
-                thread, batch.messages, tenant_id=tenant_id, resolved=resolved
+                thread, candidates, tenant_id=tenant_id, resolved=resolved
             ):
                 return
         except asyncio.CancelledError:
@@ -834,8 +854,8 @@ class DaimonBot(commands.Bot):
             log.exception("thread_participation.decision_failed", thread_id=str(thread_id))
             sentry_sdk.capture_exception(exc)
             return
-        if thread_id in self._processing:
-            return  # a mention landed while the classifier was deciding
+        if self.draining or thread_id in self._processing:
+            return  # a drain or a mention landed while the classifier was deciding
 
         cap = discord_settings.max_concurrent_turns_per_tenant
         count = self._inflight.get(tenant_id, 0)
@@ -852,20 +872,18 @@ class DaimonBot(commands.Bot):
         self._inflight[tenant_id] = count + 1
         self._processing.add(thread_id)
         try:
-            # The last message is the trigger; the delta context carries the
+            # The ledger row is written when the turn is admitted, not when it
+            # answers: spend starts here, and a turn the agent ends in silence
+            # (or one that fails) must still count against the hourly cap.
+            try:
+                await responder.record(
+                    tenant_id=tenant_id, thread_id=thread_id, message_id=str(trigger.id)
+                )
+            except Exception:  # noqa: BLE001 -- best-effort ledger: a miss loosens the cap by one
+                log.exception("thread_participation.record_failed", thread_id=str(thread_id))
+            # The newest message is the trigger; the delta context carries the
             # rest of the batch, since they all landed after the watermark.
-            posted_message_id = await self._handle_mention(
-                batch.messages[-1], guild_id, tenant_id, unprompted=True
-            )
-            if posted_message_id is not None:
-                try:
-                    await responder.record(
-                        tenant_id=tenant_id, thread_id=thread_id, message_id=posted_message_id
-                    )
-                except SQLAlchemyError:
-                    # The reply is already posted; a missed ledger row only
-                    # loosens the rate limit by one, so log rather than fail.
-                    log.exception("thread_participation.record_failed", thread_id=str(thread_id))
+            await self._handle_mention(trigger, guild_id, tenant_id, unprompted=True)
             await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
         finally:
             self._processing.discard(thread_id)
@@ -1121,12 +1139,8 @@ class DaimonBot(commands.Bot):
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
         unprompted: bool = False,
-    ) -> str | None:
+    ) -> None:
         """Orchestrate thread creation/lookup, session lifecycle, and turn execution.
-
-        Returns the Discord id of the answer message when the turn produced
-        one, else ``None`` (skipped, cancelled, errored). Organic thread
-        participation records that id as its rate-limit ledger entry.
 
         When ``content_override`` is provided (drain path for queued mentions in a
         non-thread channel), it replaces ``message.content`` as the user message
@@ -1150,7 +1164,7 @@ class DaimonBot(commands.Bot):
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid)
         try:
-            return await self._orchestrate(
+            await self._orchestrate(
                 message,
                 guild_id,
                 tenant_id,
@@ -1169,7 +1183,6 @@ class DaimonBot(commands.Bot):
             await self._render_turn_error(message, tenant_id, guild_id, rid, exc)
         finally:
             structlog.contextvars.unbind_contextvars("rid")
-        return None
 
     async def _render_turn_error(
         self,
@@ -1202,11 +1215,8 @@ class DaimonBot(commands.Bot):
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
         unprompted: bool = False,
-    ) -> str | None:
+    ) -> None:
         """Core orchestration logic extracted for clean error boundary.
-
-        Returns the answer message's id when the turn answered, else ``None``
-        (see ``_handle_mention``).
 
         ``created_thread_ids``, when provided, receives the id of a
         bot-created thread as soon as it exists — even if this call later
@@ -1252,7 +1262,7 @@ class DaimonBot(commands.Bot):
                 missing=list(err.missing),
             )
             if unprompted:
-                return None  # nobody asked; a notice per quiet burst would spam the thread
+                return  # nobody asked; a notice per quiet burst would spam the thread
             target = thread or message.channel
             hints: list[str] = []
             if "agent" in err.missing:
@@ -1277,7 +1287,7 @@ class DaimonBot(commands.Bot):
                 tenant_id=str(err.tenant_id),
             )
             if unprompted:
-                return None
+                return
             target = thread or message.channel
             await target.send(
                 "The configured agent or environment no longer exists. "
@@ -1297,7 +1307,7 @@ class DaimonBot(commands.Bot):
                     guild_id=guild_id,
                     tenant_id=str(tenant_id),
                 )
-                return None
+                return
             target = thread or message.channel
             if err.reason == "balance_depleted":
                 log.info("turn.skipped.over_balance", guild_id=guild_id, tenant_id=str(tenant_id))
@@ -1682,6 +1692,3 @@ class DaimonBot(commands.Bot):
             # session mapping, not whether the turn actually answered.
             if final_lifecycle.was_answered and final_lifecycle.final_message_id is not None:
                 await seed_feedback_reactions(thread, message_id=final_lifecycle.final_message_id)
-        if state.error is not None or not final_lifecycle.was_answered:
-            return None
-        return final_lifecycle.final_message_id

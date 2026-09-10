@@ -15,6 +15,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools import thread_participation as tool_module
 from daimon.adapters.mcp.tools.thread_participation import (
     _get_thread_participation_impl,  # pyright: ignore[reportPrivateUsage]
     _set_thread_participation_impl,  # pyright: ignore[reportPrivateUsage]
@@ -33,7 +34,7 @@ from daimon.core.stores.thread_participation import (
     ParticipationModes,
     get_participation_modes,
 )
-from daimon.core.thread_participation import ParticipationMode
+from daimon.core.thread_participation import ParticipationMode, ParticipationScope
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -44,6 +45,25 @@ pytestmark = pytest.mark.asyncio
 _D28_MESSAGE = "Changing my setup needs Manage Server — ask a server admin to use /agent-setup"
 _CHANNEL = "chan-1"
 _THREAD = "thread-1"
+
+
+@pytest.fixture(autouse=True)
+def verified_scopes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[ParticipationScope, str | None]]:
+    """Stand in for the Discord lookup: every id is visible, and `_THREAD`'s parent is `_CHANNEL`.
+
+    The real `_verify_scope` is exercised against a fake Discord HTTP layer in
+    `tools/test_thread_participation_verify.py`; here the cascade logic is under test.
+    """
+    calls: list[tuple[ParticipationScope, str | None]] = []
+
+    async def fake(
+        runtime: McpRuntime, auth: AuthIdentity, scope: ParticipationScope, scope_id: str | None
+    ) -> str | None:
+        calls.append((scope, scope_id))
+        return _CHANNEL if scope is ParticipationScope.THREAD else None
+
+    monkeypatch.setattr(tool_module, "_verify_scope", fake)
+    return calls
 
 
 def _settings(mode: Literal["on", "off", "disabled"], *, discord: bool = True) -> Settings:
@@ -410,3 +430,85 @@ async def test_get_reports_the_all_unset_default(
     assert (status.workspace_mode, status.channel_mode, status.thread_mode) == (None, None, None), (
         "unset tiers must be reported as unset, not as off"
     )
+
+
+# ---------------------------------------------------------------------------
+# caller-supplied ids
+# ---------------------------------------------------------------------------
+
+
+async def test_a_disabled_channel_refuses_a_thread_even_when_channel_id_is_omitted(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """The parent comes from Discord, not from the caller, so leaving channel_id out is not a bypass."""
+    tenant_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    await _set_thread_participation_impl(
+        runtime, _auth(tenant_id=tenant_id, admin=True), "disabled", None, _CHANNEL
+    )
+
+    with pytest.raises(ToolError) as exc_info:
+        await _set_thread_participation_impl(
+            runtime, _auth(tenant_id=tenant_id, admin=False), "on", _THREAD, None
+        )
+
+    assert "channel level" in str(exc_info.value)
+    assert (await _modes(db_session, tenant_id)).thread is None, "no thread row may be written"
+
+
+async def test_every_thread_and_channel_id_is_verified_before_a_write(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    verified_scopes: list[tuple[ParticipationScope, str | None]],
+) -> None:
+    tenant_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    admin = _auth(tenant_id=tenant_id, admin=True)
+
+    await _set_thread_participation_impl(runtime, admin, "on", _THREAD, None)
+    await _set_thread_participation_impl(runtime, admin, "on", None, _CHANNEL)
+    await _set_thread_participation_impl(runtime, admin, "on", None, None)
+    await _get_thread_participation_impl(runtime, admin, _THREAD, None)
+
+    assert verified_scopes == [
+        (ParticipationScope.THREAD, _THREAD),
+        (ParticipationScope.CHANNEL, _CHANNEL),
+        (ParticipationScope.WORKSPACE, None),
+        (ParticipationScope.THREAD, _THREAD),
+    ]
+
+
+@pytest.mark.parametrize(("thread_id", "channel_id"), [("", None), (None, ""), ("  ", _CHANNEL)])
+async def test_empty_ids_are_refused_without_a_write(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    thread_id: str | None,
+    channel_id: str | None,
+) -> None:
+    tenant_id = await _seed(committing_sessionmaker)
+
+    with pytest.raises(ToolError, match="must not be empty"):
+        await _set_thread_participation_impl(
+            _runtime(committing_sessionmaker),
+            _auth(tenant_id=tenant_id, admin=True),
+            "on",
+            thread_id,
+            channel_id,
+        )
+
+    modes = await _modes(db_session, tenant_id)
+    assert (modes.workspace, modes.channel, modes.thread) == (None, None, None)
+
+
+async def test_get_refuses_a_non_discord_caller_too(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _seed(committing_sessionmaker)
+
+    with pytest.raises(ToolError, match="Discord"):
+        await _get_thread_participation_impl(
+            _runtime(committing_sessionmaker, "on"),
+            _auth(tenant_id=tenant_id, admin=False, platform="slack"),
+            None,
+            None,
+        )

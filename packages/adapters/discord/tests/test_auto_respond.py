@@ -79,7 +79,7 @@ class _FakeClassifier:
 
     async def __call__(self, anthropic: Any, **kwargs: Any) -> ClassifierVerdict:
         self.calls.append(kwargs)
-        return ClassifierVerdict(self.decision, "fake", 0.9)
+        return ClassifierVerdict(self.decision, "fake")
 
 
 @pytest.fixture

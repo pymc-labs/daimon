@@ -21,11 +21,25 @@ import uuid
 from dataclasses import dataclass
 from typing import Final, Literal
 
+import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.discord._client import (
+    _require_bot_token,  # pyright: ignore[reportPrivateUsage]
+    _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
+    _require_guild_channel,  # pyright: ignore[reportPrivateUsage]
+    _require_guild_id,  # pyright: ignore[reportPrivateUsage]
+    _resolve_channel,  # pyright: ignore[reportPrivateUsage]
+    _resolve_member,  # pyright: ignore[reportPrivateUsage]
+    rest_client,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.discord._visibility import (
+    _check_thread_view,  # pyright: ignore[reportPrivateUsage]
+    _check_view_permission,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.stores.thread_participation import (
     ParticipationModes,
@@ -114,11 +128,48 @@ def _target_scope(
     thread_id: str | None, channel_id: str | None
 ) -> tuple[ParticipationScope, str | None]:
     """Narrowest id given wins. A thread's channel_id is its parent, not a second target."""
+    if thread_id is not None and not thread_id.strip():
+        raise ToolError("thread_id must not be empty")
+    if channel_id is not None and not channel_id.strip():
+        raise ToolError("channel_id must not be empty")
     if thread_id is not None:
         return ParticipationScope.THREAD, thread_id
     if channel_id is not None:
         return ParticipationScope.CHANNEL, channel_id
     return ParticipationScope.WORKSPACE, None
+
+
+async def _verify_scope(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    scope: ParticipationScope,
+    scope_id: str | None,
+) -> str | None:
+    """The ids are caller-supplied: confirm they name something in this guild the caller can see.
+
+    Rows are tenant-scoped, so a foreign id could never leak across tenants;
+    this closes the within-tenant gap where a member names a private thread
+    they are not in and makes the bot speak (and spend) there. Returns the
+    thread's real parent channel id for thread scope, so the cascade below is
+    resolved against the parent that runtime will actually use, whatever the
+    caller passed as channel_id.
+    """
+    if scope is ParticipationScope.WORKSPACE or scope_id is None:
+        return None
+    guild_id = _require_guild_id(auth)
+    user_id = _require_discord_identity(auth)
+    async with rest_client(_require_bot_token(runtime)) as c:
+        _, member = await _resolve_member(c, guild_id, user_id)
+        target = _require_guild_channel(await _resolve_channel(c, scope_id), guild_id)
+        if scope is ParticipationScope.THREAD:
+            if not isinstance(target, discord.Thread):
+                raise ToolError("thread_id does not name a thread — pass a channel as channel_id")
+            await _check_thread_view(c, target, member, user_id)
+            return str(target.parent_id)
+        if isinstance(target, discord.Thread):
+            raise ToolError("channel_id names a thread — pass it as thread_id instead")
+        _check_view_permission(target, member)
+        return None
 
 
 def _resolve_above(
@@ -157,6 +208,9 @@ async def _set_thread_participation_impl(
         _require_admin(auth)
     if scope is ParticipationScope.THREAD and mode == "disabled":
         raise ToolError(_DISABLED_NEEDS_A_WIDER_SCOPE)
+    parent_id = await _verify_scope(runtime, auth, scope, scope_id)
+    if parent_id is not None:
+        channel_id = parent_id
 
     requested = None if mode == "inherit" else ParticipationMode(mode)
     tenant_id: uuid.UUID = auth.tenant_id
@@ -244,18 +298,21 @@ async def _get_thread_participation_impl(
     thread_id: str | None,
     channel_id: str | None,
 ) -> ThreadParticipationStatus:
+    if auth.platform != _PLATFORM:
+        raise ToolError(_WRONG_PLATFORM)
     deployment = _deployment_mode(runtime)
-    modes = ParticipationModes(workspace=None, channel=None, thread=None)
-    if auth.platform is not None:
-        # Rows are keyed by platform; a token that carries none can own none.
-        async with runtime.session_factory() as session:
-            modes = await get_participation_modes(
-                session,
-                tenant_id=auth.tenant_id,
-                platform=auth.platform,
-                channel_id=channel_id,
-                thread_id=thread_id,
-            )
+    scope, scope_id = _target_scope(thread_id, channel_id)
+    parent_id = await _verify_scope(runtime, auth, scope, scope_id)
+    if parent_id is not None:
+        channel_id = parent_id
+    async with runtime.session_factory() as session:
+        modes = await get_participation_modes(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=auth.platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+        )
 
     effective = resolve_participation(
         deployment=deployment,
@@ -293,10 +350,9 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
         silence far more often than speech: nothing here obliges you to reply.
 
         Which ids to pass (Discord only; the tool refuses elsewhere):
-        - a thread: ``thread_id`` from ``<thread role="current_thread">``, plus
-          ``channel_id`` from ``<channel role="parent_channel">`` so the parent
-          channel's setting is taken into account. Always pass both when you
-          have both.
+        - a thread: ``thread_id`` from ``<thread role="current_thread">``. The
+          thread must exist in this server and be visible to the caller; its
+          parent channel is looked up, so ``channel_id`` is optional here.
         - a whole channel: ``channel_id`` only. **Admin action** (Manage Server).
         - the whole workspace: neither id. **Admin action** (Manage Server).
 
@@ -326,10 +382,11 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
         did or did not reply unprompted, or before changing a setting — the tier
         that currently wins is the tier worth changing.
 
-        Pass ``thread_id`` from ``<thread role="current_thread">`` and
-        ``channel_id`` from ``<channel role="parent_channel">``; pass both for a
-        thread, ``channel_id`` alone for a channel, neither for the workspace.
-        Not gated: any member can ask.
+        Pass ``thread_id`` from ``<thread role="current_thread">`` for a
+        thread (its parent channel is looked up), ``channel_id`` from
+        ``<channel role="parent_channel">`` alone for a channel, neither for
+        the workspace. Not gated: any member can ask, about threads and
+        channels they can see.
 
         Reports every tier (deployment, workspace, channel, thread) plus the
         winner, so "why" is answerable without guessing. Following is off by

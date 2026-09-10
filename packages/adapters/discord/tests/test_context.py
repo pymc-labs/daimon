@@ -479,7 +479,7 @@ class TestBuildContextXml:
         assert "<user_query" in marked and ' unprompted="true">' in marked, (
             "the attribute closes the opening tag, after the timestamp"
         )
-        assert "unprompted" not in default, "a mention-driven turn is unchanged"
+        assert ' unprompted="true"' not in default, "a mention-driven turn is unchanged"
 
 
 class TestBuildDeltaXml:
@@ -630,7 +630,7 @@ class TestBuildDeltaXml:
         default, _ = await build_delta_xml(_make_thread([m1, trigger]), trigger, after_message_id=1)
 
         assert ' unprompted="true">' in marked
-        assert "unprompted" not in default
+        assert ' unprompted="true"' not in default
 
     @pytest.mark.asyncio
     async def test_delta_none_after_falls_back_to_full(self) -> None:

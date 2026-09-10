@@ -1871,10 +1871,11 @@
         did or did not reply unprompted, or before changing a setting — the tier
         that currently wins is the tier worth changing.
         
-        Pass ``thread_id`` from ``<thread role="current_thread">`` and
-        ``channel_id`` from ``<channel role="parent_channel">``; pass both for a
-        thread, ``channel_id`` alone for a channel, neither for the workspace.
-        Not gated: any member can ask.
+        Pass ``thread_id`` from ``<thread role="current_thread">`` for a
+        thread (its parent channel is looked up), ``channel_id`` from
+        ``<channel role="parent_channel">`` alone for a channel, neither for
+        the workspace. Not gated: any member can ask, about threads and
+        channels they can see.
         
         Reports every tier (deployment, workspace, channel, thread) plus the
         winner, so "why" is answerable without guessing. Following is off by
@@ -3253,10 +3254,9 @@
         silence far more often than speech: nothing here obliges you to reply.
         
         Which ids to pass (Discord only; the tool refuses elsewhere):
-        - a thread: ``thread_id`` from ``<thread role="current_thread">``, plus
-          ``channel_id`` from ``<channel role="parent_channel">`` so the parent
-          channel's setting is taken into account. Always pass both when you
-          have both.
+        - a thread: ``thread_id`` from ``<thread role="current_thread">``. The
+          thread must exist in this server and be visible to the caller; its
+          parent channel is looked up, so ``channel_id`` is optional here.
         - a whole channel: ``channel_id`` only. **Admin action** (Manage Server).
         - the whole workspace: neither id. **Admin action** (Manage Server).
         
