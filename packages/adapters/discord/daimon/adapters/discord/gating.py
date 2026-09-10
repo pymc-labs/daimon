@@ -52,3 +52,23 @@ def _is_allowed_bot_author(
     if self_user_id is not None and author_id == self_user_id:
         return False
     return author_id in qa_bot_user_ids
+
+
+def is_auto_respond_candidate(
+    *,
+    available: bool,
+    author_is_bot: bool,
+    bot_mentioned: bool,
+    in_thread: bool,
+    guild_id: str | None,
+) -> bool:
+    """Pre-DB gate for organic thread participation: may this unmentioned message be screened?
+
+    Only human-authored, unmentioned messages inside a guild thread qualify,
+    and only while the deployment leaves the feature available (its mode is
+    not `disabled`). Bots never qualify, allow-listed QA bots included: the
+    mention path is the only automation entry point.
+    """
+    if not available or author_is_bot or bot_mentioned:
+        return False
+    return in_thread and guild_id is not None

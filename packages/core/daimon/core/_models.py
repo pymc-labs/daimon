@@ -1233,3 +1233,72 @@ class HubOAuthKv(Base):
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+
+
+class ThreadParticipationScope(Base):
+    """An explicit organic-participation setting at one scope.
+
+    One row per (tenant, platform, scope, scope_id); the workspace row uses an
+    empty scope_id because tenant_id already names it. No row means "inherit",
+    so the table only ever holds deliberate choices, and a deployment where
+    nobody asked stays empty. `daimon.core.thread_participation.resolve_participation`
+    turns these rows into an effective mode.
+    """
+
+    __tablename__ = "thread_participation_scopes"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "platform", "scope", "scope_id", name="pk_thread_participation_scopes"
+        ),
+        CheckConstraint(
+            "scope IN ('workspace', 'channel', 'thread')",
+            name="ck_thread_participation_scopes_scope",
+        ),
+        CheckConstraint(
+            "mode IN ('on', 'off', 'disabled')", name="ck_thread_participation_scopes_mode"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    platform: Mapped[str] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(Text)
+    scope_id: Mapped[str] = mapped_column(Text)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ThreadAutoResponse(Base):
+    """One row per reply the agent posted in a thread unprompted.
+
+    The rows ARE the rate-limit ledger, the same way `support_escalations`
+    rows are the credit ledger: the hourly cap counts rows in the window.
+    There is no counter column to drift.
+    """
+
+    __tablename__ = "thread_auto_responses"
+    __table_args__ = (
+        Index(
+            "thread_auto_responses_thread_idx",
+            "tenant_id",
+            "platform",
+            "thread_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

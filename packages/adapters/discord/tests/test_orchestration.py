@@ -1786,3 +1786,56 @@ class TestSessionReuse:
         assert live_row.ma_session_id == new_session_id, (
             "new live row must store the recreated session id"
         )
+
+
+class TestUnpromptedAdmission:
+    """An unprompted (organic thread participation) turn that fails admission
+    posts nothing: the notice a mention earns would otherwise be reposted on
+    every quiet burst in the thread."""
+
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_missing_config_is_silent_when_unprompted(
+        self,
+        mock_resolve: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config(agent_name=None, environment_name=None)
+        bot = _make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_thread_message(content="what about the residuals?")
+
+        result = await bot._orchestrate(message, "123456", tenant.id, unprompted=True)  # pyright: ignore[reportPrivateUsage]
+
+        assert result is None
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_depleted_balance_is_silent_when_unprompted_but_not_for_a_mention(
+        self,
+        mock_resolve: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # No ledger entry: the balance gate denies.
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        bot = _make_bot(_make_runtime(tenant.id, db_session_factory))
+
+        unprompted = _make_thread_message(content="and the priors?")
+        result = await bot._orchestrate(unprompted, "123456", tenant.id, unprompted=True)  # pyright: ignore[reportPrivateUsage]
+        assert result is None
+        unprompted.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+        mention = _make_thread_message()
+        await bot._orchestrate(mention, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
+        mention.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        sent: str = mention.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        assert "credit" in sent.lower(), "a mention still gets the depleted-credit notice"

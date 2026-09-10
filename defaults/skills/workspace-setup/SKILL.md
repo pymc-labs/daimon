@@ -115,6 +115,30 @@ Server); a non-admin caller is refused with no write. The equivalent surface
 without chat is the setup panel's **Set as default…** door, which writes the
 same channel/workspace scopes and shows the same cascade.
 
+## Following threads
+
+Replying in a thread nobody addressed you in is off by default, and staying
+off is the preferred answer — turn a thread on when someone asks you to follow
+it, and off again when they ask you to stop.
+
+Two tools, scoped by which id is given:
+
+```
+set_thread_participation(mode, thread_id, channel_id)  # thread_id given -> this thread
+set_thread_participation(mode, channel_id)             # thread_id omitted -> this channel
+set_thread_participation(mode)                         # neither -> the whole workspace
+get_thread_participation(thread_id, channel_id)        # who decided, and what
+```
+
+Modes are `on`, `off`, `disabled` (channel and workspace only: off, and no
+narrower scope may override it), and `inherit` (drop this scope's own setting).
+
+Resolution cascades deployment default (the operator's environment), then
+workspace, then channel, then thread: the narrowest scope with a setting wins,
+except that a `disabled` tier beats every tier below it. Any member may set a
+thread; channel and workspace scopes require a workspace admin (Manage
+Server), and a non-admin caller is refused with no write. Discord only for now.
+
 ## Scheduled routines
 
 The agent creates routines itself, with

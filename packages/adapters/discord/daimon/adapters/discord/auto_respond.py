@@ -1,0 +1,172 @@
+"""Organic thread participation, Discord shell: decide whether an unmentioned burst gets a turn.
+
+The decision itself is pure (`daimon.core.thread_participation`); this module
+gathers its inputs -- the resolved participation mode for the thread and the
+hourly ledger count -- then runs the classifier when the cheap gates pass.
+
+Split in two on purpose. `resolve` is the hot path: every unmentioned message
+in every thread pays for it, so it is one indexed read that `bot.py` uses to
+drop `off` threads before it starts a timer or spends anything else.
+`should_respond` runs once per quiet burst, for followed threads only.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime, timedelta
+
+import structlog
+from anthropic import AsyncAnthropic
+from daimon.core.config import ThreadParticipationSettings
+from daimon.core.stores.thread_participation import (
+    count_auto_responses_since,
+    get_participation_modes,
+    record_auto_response,
+)
+from daimon.core.thread_classifier import classify
+from daimon.core.thread_participation import (
+    AutoRespondSnapshot,
+    ClassifierMessage,
+    ParticipationMode,
+    ResolvedParticipation,
+    Skip,
+    decide_post_classifier,
+    decide_pre_classifier,
+    resolve_participation,
+)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+import discord
+
+log = structlog.get_logger()
+
+PLATFORM = "discord"
+RATE_LIMIT_WINDOW = timedelta(hours=1)
+
+
+class AutoResponder:
+    def __init__(
+        self,
+        *,
+        settings: ThreadParticipationSettings,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        anthropic: AsyncAnthropic,
+        bot_user_id: int,
+        bot_display_name: str,
+    ) -> None:
+        self._settings = settings
+        self._sessionmaker = sessionmaker
+        self._anthropic = anthropic
+        self._bot_user_id = bot_user_id
+        self._bot_display_name = bot_display_name
+
+    async def resolve(
+        self, *, tenant_id: uuid.UUID, thread: discord.Thread
+    ) -> ResolvedParticipation:
+        """Walk the scope cascade for this thread. One read covers all three tiers."""
+        async with self._sessionmaker() as session:
+            modes = await get_participation_modes(
+                session,
+                tenant_id=tenant_id,
+                platform=PLATFORM,
+                channel_id=str(thread.parent_id),
+                thread_id=str(thread.id),
+            )
+        return resolve_participation(
+            deployment=ParticipationMode(self._settings.mode),
+            workspace=modes.workspace,
+            channel=modes.channel,
+            thread=modes.thread,
+        )
+
+    async def should_respond(
+        self,
+        thread: discord.Thread,
+        candidates: list[discord.Message],
+        *,
+        tenant_id: uuid.UUID,
+        resolved: ResolvedParticipation,
+    ) -> bool:
+        """Run the gates and, if they pass, the classifier. Logs every skip with its reason."""
+        async with self._sessionmaker() as session:
+            in_window = await count_auto_responses_since(
+                session,
+                tenant_id=tenant_id,
+                platform=PLATFORM,
+                thread_id=str(thread.id),
+                since=datetime.now(UTC) - RATE_LIMIT_WINDOW,
+            )
+        pre = decide_pre_classifier(
+            AutoRespondSnapshot(
+                mode=resolved.mode,
+                auto_responses_in_window=in_window,
+                max_per_window=self._settings.max_per_hour,
+            )
+        )
+        if isinstance(pre, Skip):
+            log.info(
+                "thread_participation.skipped",
+                reason=pre.reason.value,
+                thread_id=str(thread.id),
+                tier=resolved.tier,
+            )
+            return False
+        recent = await self._recent_window(thread, exclude_ids={m.id for m in candidates})
+        verdict = await classify(
+            self._anthropic,
+            model=self._settings.classifier_model,
+            bot_display_name=self._bot_display_name,
+            recent=recent,
+            candidates=[
+                ClassifierMessage(
+                    author_name=m.author.display_name, content=m.content, is_bot=False
+                )
+                for m in candidates
+            ],
+        )
+        post = decide_post_classifier(verdict)
+        event = (
+            "thread_participation.skipped"
+            if isinstance(post, Skip)
+            else "thread_participation.triggered"
+        )
+        log.info(
+            event,
+            reason=post.reason.value if isinstance(post, Skip) else None,
+            classifier_reason=verdict.reason,
+            confidence=verdict.confidence,
+            thread_id=str(thread.id),
+            tier=resolved.tier,
+        )
+        return not isinstance(post, Skip)
+
+    async def record(self, *, tenant_id: uuid.UUID, thread_id: int, message_id: str) -> None:
+        async with self._sessionmaker() as session, session.begin():
+            await record_auto_response(
+                session,
+                tenant_id=tenant_id,
+                platform=PLATFORM,
+                thread_id=str(thread_id),
+                message_id=message_id,
+            )
+
+    async def _recent_window(
+        self, thread: discord.Thread, *, exclude_ids: set[int]
+    ) -> list[ClassifierMessage]:
+        """The messages before the burst, oldest first. The burst itself is the candidates."""
+        window: list[discord.Message] = []
+        async for m in thread.history(
+            limit=self._settings.recent_messages_window + len(exclude_ids)
+        ):
+            if m.id not in exclude_ids:
+                window.append(m)
+        window = window[: self._settings.recent_messages_window]
+        window.reverse()
+        return [
+            ClassifierMessage(
+                author_name=m.author.display_name,
+                content=m.content,
+                is_bot=m.author.id == self._bot_user_id,
+            )
+            for m in window
+        ]
