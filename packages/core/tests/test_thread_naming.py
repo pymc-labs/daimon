@@ -19,9 +19,27 @@ from daimon.core.thread_naming import (
     THREAD_NAME_MAX_CHARS,
     THREAD_NAMING_MODEL,
     parse_thread_name,
+    strip_mentions,
     suggest_thread_name,
 )
 from daimon.testing.ma import build_fake_anthropic
+
+# ---------------------------------------------------------------------------
+# strip_mentions (pure)
+# ---------------------------------------------------------------------------
+
+
+def test_strip_mentions_removes_user_role_and_channel_tokens() -> None:
+    assert strip_mentions("<@999> ask <@!42> and <@&7> in <#123>  please") == "ask and in please", (
+        "every mention token must go and the gaps must collapse to single spaces"
+    )
+
+
+def test_strip_mentions_leaves_only_empty_for_attachment_only_mention() -> None:
+    assert strip_mentions("<@999>") == "", (
+        "a bare bot mention has no text to title; the caller must skip the metered call"
+    )
+
 
 # ---------------------------------------------------------------------------
 # parse_thread_name (pure)

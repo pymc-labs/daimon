@@ -6,7 +6,7 @@ executable record of that split is
 ``tests/parity/test_thread_naming_discord_only.py``.
 
 Functional core, imperative shell (`guideline:architecture`):
-``parse_thread_name`` is pure; ``suggest_thread_name`` is the single I/O
+``strip_mentions`` and ``parse_thread_name`` are pure; ``suggest_thread_name`` is the single I/O
 call, a plain ``messages.create`` like ``thread_classifier``. Metering is the caller's
 job (``usage_recording.record_thread_naming_usage``) because the caller
 owns the tenant and runs after the balance and cap gates.
@@ -14,6 +14,7 @@ owns the tenant and runs after the balance and cap gates.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from anthropic import AsyncAnthropic
@@ -24,6 +25,7 @@ THREAD_NAMING_MODEL = "claude-haiku-4-5"
 THREAD_NAME_MAX_CHARS = 80
 _MAX_OUTPUT_TOKENS = 60
 _NONE_SENTINEL = "NONE"
+_MENTION_RE = re.compile(r"<(?:@[!&]?|#)\d+>")
 
 _SYSTEM_PROMPT = f"""\
 Generate a concise Discord thread title from the user's message.
@@ -59,6 +61,16 @@ class ThreadNameSuggestion:
 
     name: str | None
     usage: ThreadNamingUsage
+
+
+def strip_mentions(text: str) -> str:
+    """Drop ``<@user>``, ``<@&role>`` and ``<#channel>`` tokens and collapse whitespace.
+
+    An @-mention of the bot is always present in ``message.content``, so
+    without this an image-only mention would still look like text and pay
+    for a call that can only answer NONE.
+    """
+    return " ".join(_MENTION_RE.sub(" ", text).split())
 
 
 def parse_thread_name(raw: str) -> str | None:
