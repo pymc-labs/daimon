@@ -48,6 +48,9 @@ change which agent answers the conversation.
    for code is not automatically an MCP connection token. Ask “API access for
    code or an MCP connection?” only when the request leaves that choice unclear.
    A token form does not complete an arbitrary browser OAuth login.
+   Successful submission attaches the server to the agent, but does not refresh
+   this conversation's toolset. Check actual tool availability before promising
+   to use the connection here; a new conversation can load the updated agent.
 5. **Confirm the result.** Explain what changed and what still needs doing.
    Read partial-success warnings: a saved token with a failed attachment is
    not a connected server, and an imported skill is not necessarily attached.
