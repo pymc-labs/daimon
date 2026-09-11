@@ -133,7 +133,7 @@ async def get_github_login(
     """Display-only login resolver — the non-secret peer of `get_pat`.
 
     Returns `github_login` for the resolved credential without decrypting (or
-    even reading) the token, so the /agent-setup panel can show GitHub linkage
+    even reading) the token, so a Working repo view can show GitHub linkage
     for the selected agent. Same cascade shape as `get_pat`:
 
     agent_id given -> overlay-only -> None (no principal-default bleed).

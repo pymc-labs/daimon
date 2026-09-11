@@ -116,23 +116,21 @@ _WRONG_WORKSPACE = (
 # re-derives the panel's decision from primitives, as Discord's
 # `credential_repo_bind` does.
 _SHARED_AGENT_MESSAGE = (
-    ":lock: This agent is shared — it is either the workspace's built-in agent or the "
-    "current default for this workspace or a channel — so changing its repo or its "
-    "environment variables needs workspace-admin permission. Fork it to get an "
-    "editable copy you own; the fork starts with no environment variables of its own."
+    ":lock: Changing this shared agent's working repo needs a workspace admin. "
+    "Ask an admin to request the working-repo change for this agent in this conversation."
 )
 
 _AGENT_GONE_MESSAGE = "That agent no longer exists — ask again and a fresh request will be posted."
 
 _MODAL_TITLE: Final[dict[CredentialRequestKind, str]] = {
-    "env": "Add secret",
-    "mcp": "Add MCP credential",
+    "env": "Add key",
+    "mcp": "Add MCP token",
     "skill_repo": "Import skills",
     "repo": "Bind repo",
 }
 
 _VALUE_LABEL: Final[dict[CredentialRequestKind, str]] = {
-    "env": "Secret value",
+    "env": "API key",
     "mcp": "Auth token",
     "skill_repo": "GitHub token",
 }
@@ -562,8 +560,8 @@ async def run_env_credential_submission(
         channel_id=channel_id,
         user_id=user_id,
         text=(
-            f"Added `{consumed.target}`. Takes effect on the next session — "
-            "anyone who talks to this agent can use it."
+            f"Saved `{consumed.target}` for shared use by this agent. "
+            "Existing sessions may still use the previous setup."
         ),
     )
 
@@ -595,8 +593,8 @@ async def run_mcp_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=(
-                "daimon-mcp is not configured (public_url / jwt_secret missing) — "
-                "credential not written."
+                "This deployment is not finished being set up. Ask the operator to finish "
+                "setup, then try again. Nothing was saved."
             ),
         )
         return
@@ -670,8 +668,8 @@ async def run_mcp_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=(
-                "Credential request consumed, but storing the auth token failed "
-                f"(`{type(err).__name__}`). Ask for a new request to retry."
+                "The request was used up, but storing the MCP token failed. "
+                "Ask for a new private form to retry."
             ),
         )
         return
@@ -715,8 +713,8 @@ async def run_mcp_credential_submission(
             user_id=user_id,
             text=(
                 f"Auth token stored, but attaching `{mcp_server_url}` to the agent "
-                f"failed (`{type(err).__name__}`). The server is not connected yet — "
-                "ask the agent to attach it, or request a new credential to retry."
+                "failed. The server is not connected yet — "
+                "ask the agent to attach it, or request a new private token form to retry."
             ),
         )
         return
@@ -726,7 +724,7 @@ async def run_mcp_credential_submission(
         channel_id=channel_id,
         user_id=user_id,
         text=(
-            f"MCP credential added for `{mcp_server_url}` and attached as "
+            f"MCP token added for `{mcp_server_url}` and attached as "
             f"`{consumed.target}`. Anyone who talks to this agent can use it."
         ),
     )
@@ -844,7 +842,7 @@ async def _attach_skills_to_requested_agent(
             agent_id=str(agent_id),
             err_type=type(err).__name__,
         )
-        return f"Imported, but attaching to `{agent.name}` failed ({type(err).__name__})."
+        return f"Imported, but attaching to `{agent.name}` failed. Ask again to retry attaching it."
     return f"Attached {len(skill_ids)} to `{agent.name}`."
 
 
@@ -895,6 +893,7 @@ async def run_skill_repo_credential_submission(
         pat_masked=mask_tail(value),
     )
 
+    is_token_stored = False
     try:
         # Verify BEFORE storing: a token that cannot read this repo is not a
         # credential for it, and storing it would shadow a working one on the
@@ -921,6 +920,7 @@ async def run_skill_repo_credential_submission(
             pasted_pat=value,
             now=now,
         )
+        is_token_stored = True
         async with runtime.sessionmaker.begin() as session:
             await set_binding(
                 session,
@@ -941,14 +941,17 @@ async def run_skill_repo_credential_submission(
             token=value,
         )
     except DaimonError as err:
-        # Written for the user by the raiser — surface verbatim.
+        # Keep upstream details in operator logs, never in the receipt.
+        log.warning("credential_request.skill_repo_sync_failed", err_type=type(err).__name__)
         await _post_ephemeral(
             client,
             channel_id=channel_id,
             user_id=user_id,
             text=(
-                f"Token stored, but the import failed: {err} The request was used up — "
-                "ask again to retry the import."
+                "Token stored, but skill setup did not finish. Ask again to retry."
+                if is_token_stored
+                else "Skill setup failed before token storage could be confirmed. "
+                "Ask again with a new private form to retry."
             ),
         )
         return
@@ -963,8 +966,10 @@ async def run_skill_repo_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=(
-                f"Token stored, but the import failed (`{type(err).__name__}`). "
-                "Ask again to retry the import."
+                "Token stored, but skill setup did not finish. Ask again to retry."
+                if is_token_stored
+                else "Skill setup failed before token storage could be confirmed. "
+                "Ask again with a new private form to retry."
             ),
         )
         return
@@ -1063,11 +1068,14 @@ async def run_repo_bind_credential_submission(
                 proof=proof,
             )
     except DaimonError as err:
+        log.warning("credential_request.repo_write_failed", err_type=type(err).__name__)
         await _post_ephemeral(
             client,
             channel_id=channel_id,
             user_id=user_id,
-            text=f"{err} The request was used up — ask again to retry.",
+            text=(
+                "Repository access could not be saved. Ask again to retry with a new private form."
+            ),
         )
         return
     except Exception as err:
@@ -1081,8 +1089,8 @@ async def run_repo_bind_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=(
-                "Credential request consumed, but binding the repo failed "
-                f"(`{type(err).__name__}`). Ask for a new request to retry."
+                "The request was used up, but binding the working repo failed. "
+                "Ask for a new private form to retry."
             ),
         )
         return
@@ -1091,5 +1099,8 @@ async def run_repo_bind_credential_submission(
         client,
         channel_id=channel_id,
         user_id=user_id,
-        text=f"Bound `{consumed.target}` on `{branch}`. Takes effect on the next session.",
+        text=(
+            f"Bound `{consumed.target}` on `{branch}`. "
+            "Existing sessions may still use the previous setup."
+        ),
     )

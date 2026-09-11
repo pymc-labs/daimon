@@ -284,7 +284,9 @@ class DiscordTurnLifecycle:
                 continue
             self._persisted_sealed_indices.add(index)
             for chunk in split_for_discord_safe(text):
-                await self._send_message(content=chunk)
+                await self._send_message(
+                    content=chunk, allowed_mentions=discord.AllowedMentions.none()
+                )
             log.info("turn.sealed_response_posted", block_index=index, chars=len(text))
 
     async def on_terminal_success(self, state: TurnState) -> None:
@@ -318,10 +320,16 @@ class DiscordTurnLifecycle:
         self._was_answered = True
         chunks = split_for_discord_safe(response_text)
         # Clean replace: first chunk replaces the embed
-        await self._edit(self._message_ref, content=chunks[0], embed=None, view=None)
+        await self._edit(
+            self._message_ref,
+            content=chunks[0],
+            embed=None,
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         # Overflow: subsequent chunks posted as new messages
         for chunk in chunks[1:]:
-            await self._send_message(content=chunk)
+            await self._send_message(content=chunk, allowed_mentions=discord.AllowedMentions.none())
 
         log.info("turn.terminal_success")
 

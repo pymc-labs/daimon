@@ -57,26 +57,24 @@ def test_custom_id_pattern_rejects_wrong_prefix() -> None:
 
 
 def test_build_button_label_env() -> None:
-    assert build_button_label("env", "OPENAI_API_KEY") == "Add env credential: OPENAI_API_KEY"
+    assert build_button_label("env", "OPENAI_API_KEY") == "Add key: OPENAI_API_KEY"
 
 
 def test_build_button_label_mcp() -> None:
-    assert build_button_label("mcp", "linear") == "Add MCP credential: linear"
+    assert build_button_label("mcp", "linear") == "Add MCP token: linear"
 
 
 def test_build_button_label_truncates_long_target_within_discord_label_limit() -> None:
     label = build_button_label("mcp", "x" * 200)
 
     assert len(label) <= MAX_BUTTON_LABEL_CHARS, "label must fit Discord's 80-char button limit"
-    assert label.startswith("Add MCP credential: "), (
-        "truncation must not lose the human-readable prefix"
-    )
+    assert label.startswith("Add MCP token: "), "truncation must not lose the human-readable prefix"
 
 
 def test_build_button_label_repo() -> None:
     assert (
         build_button_label("repo", "clsandoval/daimon-qa-scratch")
-        == "Bind repo: clsandoval/daimon-qa-scratch"
+        == "Set working repo: clsandoval/daimon-qa-scratch"
     )
 
 
@@ -84,7 +82,9 @@ def test_build_button_label_truncates_long_repo_target_within_discord_label_limi
     label = build_button_label("repo", "https://github.com/" + "x" * 200)
 
     assert len(label) <= MAX_BUTTON_LABEL_CHARS, "label must fit Discord's 80-char button limit"
-    assert label.startswith("Bind repo: "), "truncation must not lose the human-readable prefix"
+    assert label.startswith("Set working repo: "), (
+        "truncation must not lose the human-readable prefix"
+    )
     assert label.endswith("…"), "truncation must append the single-character ellipsis"
 
 
@@ -136,7 +136,7 @@ def test_build_button_label_honours_slack_label_limit() -> None:
 
     label = build_button_label("mcp", "x" * 200, max_chars=MAX_SLACK_BUTTON_LABEL_CHARS)
     assert len(label) == MAX_SLACK_BUTTON_LABEL_CHARS == 75
-    assert label.startswith("Add MCP credential: ")
+    assert label.startswith("Add MCP token: ")
     assert label.endswith("…")
 
 

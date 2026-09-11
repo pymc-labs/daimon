@@ -27,6 +27,8 @@ graphify-out/
 # Local symlinks into the private companion repo.
 /infra
 /CLAUDE.md
+/AGENTS.md
+/.agents
 
 # Per-deployment Fly configs derived from *.example.toml templates.
 apps/notebook-host/fly.notebook.toml

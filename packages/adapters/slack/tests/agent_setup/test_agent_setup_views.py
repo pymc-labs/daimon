@@ -458,8 +458,8 @@ def test_secrets_section_empty_names_renders_empty_state() -> None:
         secret_names=[],
     )
     serialized = json.dumps(blocks)
-    # The empty state copy is: "_-# + add your first secret_"
-    assert "add your first secret" in serialized, (
+    # The empty state copy is: "_Add your first key_"
+    assert "Add your first key" in serialized, (
         "empty secret_names must render the empty-state guidance copy"
     )
 

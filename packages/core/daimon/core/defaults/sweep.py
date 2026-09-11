@@ -35,8 +35,8 @@ _log = structlog.get_logger(__name__)
 def _is_defaults_managed(metadata: dict[str, str]) -> bool:
     """True when the resource was stamped by a defaults `reconcile_*` write.
 
-    User forks (created via `daimon agents fork`, Discord `/agent-setup`, etc.)
-    leave this marker unset so the sweep ignores them. Without this filter the
+    User forks (created via `daimon agents fork`, the chat `fork_agent` tool,
+    etc.) leave this marker unset so the sweep ignores them. Without this filter the
     sweep would archive every user-created resource on the next `defaults
     apply` (which runs on every scheduler boot).
     """

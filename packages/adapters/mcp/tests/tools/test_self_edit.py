@@ -798,7 +798,7 @@ async def test_set_repo_binding_no_github_credential_hint(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """NoBindingError → ToolError with /agent-setup hint."""
+    """NoBindingError → ToolError naming the private repo-binding request."""
 
     async def _fake_mint(**_kwargs: object) -> str:
         raise NoBindingError("no github credential")
@@ -807,7 +807,7 @@ async def test_set_repo_binding_no_github_credential_hint(
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity()
 
-    with pytest.raises(ToolError, match="/agent-setup"):
+    with pytest.raises(ToolError, match="request_repo_binding"):
         await _set_repo_binding_impl(
             runtime, auth, repo_url="https://github.com/o/r", default_branch="main"
         )

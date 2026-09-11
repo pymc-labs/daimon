@@ -9,8 +9,9 @@ Cross-agent isolation is enforced by composite-PK at the store layer
 All seven tools are tagged ``agent-chat`` and are therefore visible only
 to a session whose token carries an agent identity — the same identity
 their ``_require_agent_id`` precondition needs to succeed. An ordinary
-chat session never discovers this group; the setup panel is the path for
-a chat user to bind a repo or manage env vars.
+chat session never discovers this group; chat users bind working repos with
+``request_repo_binding`` and manage keys with ``request_agent_key``,
+``list_agent_keys`` and ``remove_agent_key``.
 
 ``register_self_edit_tools(mcp, runtime)`` wires the ``@mcp.tool`` closures.
 """
@@ -263,8 +264,10 @@ async def _set_repo_binding_impl(
             agent_id,
         )
         raise ToolError(
-            "no GitHub credential for this account — run /agent-setup → "
-            "Repo+Auth and connect a github account"
+            f"No GitHub token is available to bind {repo_url}. Tell the user to ask "
+            "Daimon in Discord or Slack chat to connect this agent to that repository; "
+            "that chat can use request_repo_binding to collect access privately. "
+            "This agent-scoped session cannot call that tool. Do not retry here."
         ) from e
     except ProviderConfigError as e:
         logger.warning(
@@ -511,8 +514,9 @@ def register_self_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     middleware's narrowing reveals them only when the token carries an
     ``agent_id`` claim — the same precondition ``_require_agent_id`` enforces
     at the impl layer. A session with no agent identity (e.g. an ordinary
-    chat turn) never sees this group; the setup panel is the path for a
-    chat user to bind a repo or manage env vars.
+    chat turn) never sees this group; chat users bind working repos with
+    ``request_repo_binding`` and manage keys with ``request_agent_key``,
+    ``list_agent_keys`` and ``remove_agent_key``.
     """
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]

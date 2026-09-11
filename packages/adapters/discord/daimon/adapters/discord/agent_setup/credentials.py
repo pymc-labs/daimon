@@ -59,7 +59,7 @@ def format_paste_result(*, key_count: int) -> str:
     Takes a COUNT — never a key name, never a value. The key names surface is
     the chips line, which the post-paste reload refreshes.
     """
-    noun = "env var" if key_count == 1 else "env vars"
+    noun = "key" if key_count == 1 else "keys"
     return f"Saved ✓ — {key_count} {noun} set"
 
 
@@ -77,7 +77,7 @@ def build_credentials_container(
     `result_line` is the optional post-paste acknowledgement; it carries a
     count only (see `format_paste_result`), so it cannot carry a value either.
 
-    Env variables are per-agent daimon state (agent_files, keyed by
+    Keys are per-agent daimon state (agent_files, keyed by
     tenant/agent/key) and are never part of the agent spec, so provenance
     (system-agent or not) does not gate *rendering* them: every member, on
     every agent including the seeded default, can open this sub-view and read
@@ -87,7 +87,7 @@ def build_credentials_container(
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
     container.add_item(
         header(
-            f"🔑 Env vars — {agent_name}",
+            f"🔑 Keys — {agent_name}",
             subtext="values are write-only; only key names are shown",
         )
     )
@@ -98,7 +98,7 @@ def build_credentials_container(
         container.add_item(discord.ui.TextDisplay(chips))
     else:
         # Design-language collapse: dim hint instead of "(none)" copy.
-        container.add_item(discord.ui.TextDisplay("-# ＋ add your first env var"))
+        container.add_item(discord.ui.TextDisplay("-# ＋ add your first key"))
 
     if result_line is not None:
         container.add_item(discord.ui.TextDisplay(result_line))
@@ -106,7 +106,7 @@ def build_credentials_container(
     return container
 
 
-class PasteSecretModal(discord.ui.Modal, title="Add env vars"):
+class PasteSecretModal(discord.ui.Modal, title="Add keys"):
     """Paste KEY=VALUE lines → per-key ``put_agent_file``.
 
     No URL fetch, no attachment, no HTTP: pasted bytes go modal text → store
@@ -174,7 +174,7 @@ class PasteSecretModal(discord.ui.Modal, title="Add env vars"):
             key = key.strip()
             if not _POSIX_KEY_RE.match(key):
                 await interaction.followup.send(
-                    "Secret name must match `[A-Za-z_][A-Za-z0-9_]*` "
+                    "Key name must match `[A-Za-z_][A-Za-z0-9_]*` "
                     "(letters, digits, underscores; must not start with a digit). "
                     "Fix and re-paste.",
                     ephemeral=True,
@@ -182,7 +182,7 @@ class PasteSecretModal(discord.ui.Modal, title="Add env vars"):
                 return
             if len(value.encode()) > _MAX_SECRET_VALUE_BYTES:
                 await interaction.followup.send(
-                    f"Secret value for `{key}` is too large. Max {_MAX_SECRET_VALUE_BYTES} bytes.",
+                    f"Key value for `{key}` is too large. Max {_MAX_SECRET_VALUE_BYTES} bytes.",
                     ephemeral=True,
                 )
                 return
@@ -219,7 +219,7 @@ class PasteSecretModal(discord.ui.Modal, title="Add env vars"):
         if n == 1:
             toast = f"Added `{pairs[0][0]}`. Takes effect on the next session."
         else:
-            toast = f"Added {n} env vars. Takes effect on the next session."
+            toast = f"Added {n} keys. Takes effect on the next session."
         await interaction.followup.send(toast, ephemeral=True)
         # Carries the count of keys actually WRITTEN — never a key name, never
         # a value. It is all the collapsed render needs.
@@ -227,10 +227,10 @@ class PasteSecretModal(discord.ui.Modal, title="Add env vars"):
 
 
 class CredentialsSubView(ExpiringView, discord.ui.LayoutView):
-    """F5 Components V2 env-vars sub-view opened from EditView's Env vars button.
+    """F5 Components V2 keys sub-view opened from EditView's Keys button.
 
-    Container: ## 🔑 Env vars — {agent} + write-only subtext, KEY chips on one
-    line, ✕ Remove a var… select, + Add env vars · ← Back button row.
+    Container: ## 🔑 Keys — {agent} + write-only subtext, KEY chips on one
+    line, ✕ Remove a key… select, + Add keys · ← Back button row.
 
     Carries key NAMES only (``secret_names``) — never values. Mutations
     re-render this view in place via ``edit_original_response``, and a
@@ -270,7 +270,7 @@ class CredentialsSubView(ExpiringView, discord.ui.LayoutView):
             result_line=result_line,
         )
 
-        # ✕ Remove a var… select (cap 20, glyph in placeholder not emoji=).
+        # ✕ Remove a key… select (cap 20, glyph in placeholder not emoji=).
         remove_select = _build_remove_select(self._secret_names)
         remove_select.callback = self._make_remove_cb(remove_select)  # type: ignore[method-assign]
 
@@ -278,15 +278,15 @@ class CredentialsSubView(ExpiringView, discord.ui.LayoutView):
         select_row.add_item(remove_select)
         container.add_item(select_row)
 
-        # Button row: + Add env vars · ← Back. A result line means the paste
+        # Button row: + Add keys · ← Back. A result line means the paste
         # just landed, so the add control is SWAPPED OUT for it — not greyed
         # out. Remove and ← Back stay live: the panel is still a management
-        # surface, and re-adding is one '← Back' → 'Env vars' hop away.
+        # surface, and re-adding is one '← Back' → 'Keys' hop away.
         btn_row: discord.ui.ActionRow[CredentialsSubView] = discord.ui.ActionRow()
 
         if result_line is None:
             add_btn: discord.ui.Button[CredentialsSubView] = discord.ui.Button(
-                label="+ Add env vars",
+                label="+ Add keys",
                 style=discord.ButtonStyle.success,
                 disabled=len(self._secret_names) >= _SECRET_CAP,
             )
@@ -414,7 +414,7 @@ class CredentialsSubView(ExpiringView, discord.ui.LayoutView):
 
 
 def _build_remove_select(secret_names: list[str]) -> discord.ui.Select[CredentialsSubView]:
-    """✕ Remove a var… select listing every key (no cap).
+    """✕ Remove a key… select listing every key (no cap).
 
     Each option's ``label``/``value`` carries ONLY the secret KEY NAME — never a
     value, never a per-key custom_id. Disabled (empty placeholder) only when
@@ -424,14 +424,14 @@ def _build_remove_select(secret_names: list[str]) -> discord.ui.Select[Credentia
     """
     if len(secret_names) == 0:
         return discord.ui.Select(
-            placeholder="(no env vars — use + Add env vars)",
+            placeholder="(no keys — use + Add keys)",
             min_values=1,
             max_values=1,
-            options=[discord.SelectOption(label="(no env vars)", value="__none__")],
+            options=[discord.SelectOption(label="(no keys)", value="__none__")],
             disabled=True,
         )
     return discord.ui.Select(
-        placeholder="✕ Remove a var…",
+        placeholder="✕ Remove a key…",
         min_values=1,
         max_values=1,
         options=[discord.SelectOption(label=f"✕ {key}"[:100], value=key) for key in secret_names],

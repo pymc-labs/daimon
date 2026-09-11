@@ -43,6 +43,7 @@ def _build_runtime(
     settings.crypto.keys = (SecretStr(fernet_key),)
     if mintable:
         settings.slack.signing_secret = SecretStr("shh-secret")
+        settings.slack.bot_display_name = "research-bot"
         settings.mcp.app_root_url = "https://mcp.example.com"
     else:
         settings.slack = None

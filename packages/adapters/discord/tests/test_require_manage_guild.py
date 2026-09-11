@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 from daimon.adapters.discord.checks import require_manage_guild
 
-_D28_MESSAGE = "Changing my setup needs Manage Server — ask a server admin to use /agent-setup"
+_ROUTINES_HANDOVER = "Please open `/routines` to review this server’s scheduled routines."
 
 
 def _make_interaction(
@@ -90,7 +90,7 @@ async def test_require_manage_guild_rejects_member_without_perms() -> None:
         else call_args.kwargs.get("ephemeral") is True
     ), "non-admin member rejected ephemerally"
     sent_msg = call_args.args[0] if call_args.args else call_args.kwargs.get("content", "")
-    assert _D28_MESSAGE in sent_msg, "rejection message must be sent on rejection"
+    assert _ROUTINES_HANDOVER in sent_msg, "rejection message must be sent on rejection"
     assert not interaction._inner_called, (
         "non-admin member rejected ephemerally — inner fn not called"
     )

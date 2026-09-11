@@ -13,8 +13,8 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agent_removal import (
     _detach_mcp_server_impl,
-    _list_env_credential_keys_impl,
-    _remove_env_credential_impl,
+    _list_agent_keys_impl,
+    _remove_agent_key_impl,
     _remove_skill_impl,
 )
 from daimon.adapters.mcp.tools.agents import AgentInfo
@@ -256,7 +256,7 @@ async def test_detach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await _detach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -491,7 +491,7 @@ async def test_remove_skill_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await _remove_skill_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -523,7 +523,7 @@ async def test_remove_skill_impl_allows_non_admin_when_agent_unreachable(
 
 
 # ---------------------------------------------------------------------------
-# list_env_credential_keys / remove_env_credential
+# list_agent_keys / remove_agent_key
 # ---------------------------------------------------------------------------
 
 
@@ -565,7 +565,7 @@ def _multi_agent_router(
     return build_fake_anthropic(router.dispatch)
 
 
-async def test_list_env_credential_keys_impl_returns_sorted_key_names_only(
+async def test_list_agent_keys_impl_returns_sorted_key_names_only(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = uuid.uuid4()
@@ -589,13 +589,13 @@ async def test_list_env_credential_keys_impl_returns_sorted_key_names_only(
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
-    result = await _list_env_credential_keys_impl(
+    result = await _list_agent_keys_impl(
         _runtime(client, session_factory=db_session_factory), auth, agent_name="demo"
     )
     assert result == ["AKEY", "MKEY", "ZKEY"], "must return only the three key names, sorted"
 
 
-async def test_list_env_credential_keys_impl_returns_empty_list_when_none_set(
+async def test_list_agent_keys_impl_returns_empty_list_when_none_set(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = uuid.uuid4()
@@ -606,13 +606,13 @@ async def test_list_env_credential_keys_impl_returns_empty_list_when_none_set(
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
-    result = await _list_env_credential_keys_impl(
+    result = await _list_agent_keys_impl(
         _runtime(client, session_factory=db_session_factory), auth, agent_name="demo"
     )
     assert result == [], "no variables set must return an empty list, not an error"
 
 
-async def test_list_env_credential_keys_impl_raises_when_agent_not_found(
+async def test_list_agent_keys_impl_raises_when_agent_not_found(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = uuid.uuid4()
@@ -624,12 +624,12 @@ async def test_list_env_credential_keys_impl_raises_when_agent_not_found(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
     with pytest.raises(ToolError, match="not found"):
-        await _list_env_credential_keys_impl(
+        await _list_agent_keys_impl(
             _runtime(client, session_factory=db_session_factory), auth, agent_name="ghost"
         )
 
 
-async def test_list_env_credential_keys_impl_never_returns_a_stored_value(
+async def test_list_agent_keys_impl_never_returns_a_stored_value(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = uuid.uuid4()
@@ -652,7 +652,7 @@ async def test_list_env_credential_keys_impl_never_returns_a_stored_value(
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
-    result = await _list_env_credential_keys_impl(
+    result = await _list_agent_keys_impl(
         _runtime(client, session_factory=db_session_factory), auth, agent_name="demo"
     )
     assert result == ["API_KEY"]
@@ -661,7 +661,7 @@ async def test_list_env_credential_keys_impl_never_returns_a_stored_value(
     )
 
 
-async def test_list_env_credential_keys_impl_callable_by_non_admin_on_default_agent(
+async def test_list_agent_keys_impl_callable_by_non_admin_on_default_agent(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     account_id = uuid.uuid4()
@@ -671,13 +671,13 @@ async def test_list_env_credential_keys_impl_callable_by_non_admin_on_default_ag
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    result = await _list_env_credential_keys_impl(
+    result = await _list_agent_keys_impl(
         _runtime(client, session_factory=db_session_factory), auth, agent_name="scoped-agent"
     )
     assert result == [], "the listing is not reachability-gated, even on a default agent"
 
 
-async def test_remove_env_credential_impl_removes_existing_key(
+async def test_remove_agent_key_impl_removes_existing_key(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = uuid.uuid4()
@@ -696,16 +696,16 @@ async def test_remove_env_credential_impl_removes_existing_key(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
     runtime = _runtime(client, session_factory=db_session_factory)
-    result = await _remove_env_credential_impl(runtime, auth, agent_name="demo", key="API_KEY")
+    result = await _remove_agent_key_impl(runtime, auth, agent_name="demo", key="API_KEY")
     assert result.removed is True
     assert result.agent_name == "demo"
     assert result.key == "API_KEY"
 
-    remaining = await _list_env_credential_keys_impl(runtime, auth, agent_name="demo")
+    remaining = await _list_agent_keys_impl(runtime, auth, agent_name="demo")
     assert remaining == [], "a follow-up listing must no longer contain the removed key"
 
 
-async def test_remove_env_credential_impl_is_idempotent_when_key_absent(
+async def test_remove_agent_key_impl_is_idempotent_when_key_absent(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = uuid.uuid4()
@@ -716,7 +716,7 @@ async def test_remove_env_credential_impl_is_idempotent_when_key_absent(
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
-    result = await _remove_env_credential_impl(
+    result = await _remove_agent_key_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="demo",
@@ -725,7 +725,7 @@ async def test_remove_env_credential_impl_is_idempotent_when_key_absent(
     assert result.removed is False, "removing an absent key must succeed idempotently"
 
 
-async def test_remove_env_credential_impl_raises_when_agent_not_found(
+async def test_remove_agent_key_impl_raises_when_agent_not_found(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = uuid.uuid4()
@@ -737,7 +737,7 @@ async def test_remove_env_credential_impl_raises_when_agent_not_found(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
     with pytest.raises(ToolError, match="not found"):
-        await _remove_env_credential_impl(
+        await _remove_agent_key_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
             agent_name="ghost",
@@ -745,7 +745,7 @@ async def test_remove_env_credential_impl_raises_when_agent_not_found(
         )
 
 
-async def test_remove_env_credential_impl_callable_by_non_admin_on_default_agent(
+async def test_remove_agent_key_impl_callable_by_non_admin_on_default_agent(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     account_id = uuid.uuid4()
@@ -755,7 +755,7 @@ async def test_remove_env_credential_impl_callable_by_non_admin_on_default_agent
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    result = await _remove_env_credential_impl(
+    result = await _remove_agent_key_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="scoped-agent",
@@ -764,7 +764,7 @@ async def test_remove_env_credential_impl_callable_by_non_admin_on_default_agent
     assert result.removed is False, "removal is not reachability-gated, even on a default agent"
 
 
-async def test_remove_env_credential_impl_succeeds_against_seeded_agent_with_no_daimon_account(
+async def test_remove_agent_key_impl_succeeds_against_seeded_agent_with_no_daimon_account(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = uuid.uuid4()
@@ -782,7 +782,7 @@ async def test_remove_env_credential_impl_succeeds_against_seeded_agent_with_no_
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
-    result = await _remove_env_credential_impl(
+    result = await _remove_agent_key_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="daimon",
@@ -791,7 +791,7 @@ async def test_remove_env_credential_impl_succeeds_against_seeded_agent_with_no_
     assert result.removed is True, "the system-agent guard must not apply to env-variable removal"
 
 
-async def test_remove_env_credential_impl_isolates_between_agents_in_same_tenant(
+async def test_remove_agent_key_impl_isolates_between_agents_in_same_tenant(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = uuid.uuid4()
@@ -818,8 +818,8 @@ async def test_remove_env_credential_impl_isolates_between_agents_in_same_tenant
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
     runtime = _runtime(client, session_factory=db_session_factory)
-    result = await _remove_env_credential_impl(runtime, auth, agent_name="agent-a", key="SHARED")
+    result = await _remove_agent_key_impl(runtime, auth, agent_name="agent-a", key="SHARED")
     assert result.removed is True
 
-    remaining = await _list_env_credential_keys_impl(runtime, auth, agent_name="agent-b")
+    remaining = await _list_agent_keys_impl(runtime, auth, agent_name="agent-b")
     assert remaining == ["SHARED"], "removing from agent-a must not affect agent-b's SHARED key"

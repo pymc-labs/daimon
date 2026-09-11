@@ -10,14 +10,9 @@ Protocol sequence (MCP Streamable HTTP):
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import datetime as dt
-import json
 import uuid
-from collections.abc import AsyncIterator
 
-import httpx
 import pytest
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
@@ -32,100 +27,14 @@ from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_account, make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from starlette.types import ASGIApp, Message
+from starlette.types import ASGIApp
 
-from .factories import make_jwt
+from .factories import make_jwt, mcp_session
 
 pytestmark = pytest.mark.asyncio
 
 SECRET = "a" * 32
 _NOW = dt.datetime(2026, 4, 24, tzinfo=dt.UTC)
-
-INIT_BODY: dict[str, object] = {
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "initialize",
-    "params": {
-        "protocolVersion": "2024-11-05",
-        "capabilities": {},
-        "clientInfo": {"name": "test", "version": "0"},
-    },
-}
-INIT_HEADERS = {
-    "Accept": "application/json, text/event-stream",
-    "Content-Type": "application/json",
-}
-
-
-@contextlib.asynccontextmanager
-async def _lifespan(app: ASGIApp) -> AsyncIterator[None]:
-    send_queue: asyncio.Queue[Message] = asyncio.Queue()
-    receive_queue: asyncio.Queue[Message] = asyncio.Queue()
-
-    async def receive() -> Message:
-        return await receive_queue.get()
-
-    async def send(message: Message) -> None:
-        await send_queue.put(message)
-
-    async def run_lifespan() -> None:
-        await app({"type": "lifespan", "asgi": {"version": "3.0"}}, receive, send)
-
-    task = asyncio.create_task(run_lifespan())
-
-    await receive_queue.put({"type": "lifespan.startup"})
-    msg = await send_queue.get()
-    assert msg["type"] == "lifespan.startup.complete", msg
-    try:
-        yield
-    finally:
-        await receive_queue.put({"type": "lifespan.shutdown"})
-        msg = await send_queue.get()
-        assert msg["type"] == "lifespan.shutdown.complete", msg
-        await task
-
-
-async def _mcp_session(
-    app: ASGIApp,
-    *,
-    token: str,
-    method: str,
-    params: dict[str, object] | None = None,
-) -> dict[str, object]:
-    """Initialize MCP session then execute a JSON-RPC method.
-
-    Returns the JSON-RPC result dict from the method response.
-    Raises AssertionError on unexpected HTTP status.
-    """
-    headers = dict(INIT_HEADERS)
-    headers["Authorization"] = f"Bearer {token}"
-    transport = httpx.ASGITransport(app=app)  # pyright: ignore[reportArgumentType]
-    async with _lifespan(app), httpx.AsyncClient(transport=transport, base_url="http://t") as c:
-        # Step 1: initialize handshake
-        init_resp = await c.post("/mcp", json=INIT_BODY, headers=headers)
-        assert init_resp.status_code == 200, f"initialize failed: {init_resp.text}"
-        session_id = init_resp.headers.get("mcp-session-id")
-        if session_id:
-            headers["Mcp-Session-Id"] = session_id
-
-        # Step 2: actual method call
-        body = {"jsonrpc": "2.0", "id": 2, "method": method, "params": params or {}}
-        resp = await c.post("/mcp", json=body, headers=headers)
-        assert resp.status_code == 200, f"{method} failed ({resp.status_code}): {resp.text}"
-        return _parse_jsonrpc_response(resp)
-
-
-def _parse_jsonrpc_response(resp: httpx.Response) -> dict[str, object]:
-    """Parse a JSON-RPC response from either JSON or SSE format."""
-    content_type = resp.headers.get("content-type", "")
-    if "text/event-stream" in content_type:
-        # SSE: parse the data line
-        for line in resp.text.splitlines():
-            if line.startswith("data: "):
-                return json.loads(line[6:])  # type: ignore[return-value]
-        raise AssertionError(f"No data line in SSE response: {resp.text!r}")
-    else:
-        return resp.json()  # type: ignore[return-value]
 
 
 def _make_app(sessionmaker: async_sessionmaker[AsyncSession]) -> ASGIApp:
@@ -172,7 +81,7 @@ async def test_non_admin_list_tools(
     admin_token, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(app, token=user_token, method="tools/list")
+    result = await mcp_session(app, token=user_token, method="tools/list")
     tools_payload = result.get("result", result)
     tool_names: list[str] = [t["name"] for t in tools_payload.get("tools", [])]  # type: ignore[union-attr]
 
@@ -194,7 +103,7 @@ async def test_non_admin_search_excludes_admin_tools(
     admin_token, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(
+    result = await mcp_session(
         app,
         token=user_token,
         method="tools/call",
@@ -220,7 +129,7 @@ async def test_non_admin_call_admin_tool_blocked(
     admin_token, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(
+    result = await mcp_session(
         app,
         token=user_token,
         method="tools/call",
@@ -272,8 +181,8 @@ non-admin chat session's search."""
 CHAT_REMOVAL_TOOL_NAMES = (
     "detach_mcp_server",
     "remove_skill",
-    "remove_env_credential",
-    "list_env_credential_keys",
+    "remove_agent_key",
+    "list_agent_keys",
 )
 """The four chat-reachable removal tools: never admin-tagged, so they are
 discoverable by a non-admin session's search_tools like RELAXED_TOOL_NAMES,
@@ -289,7 +198,7 @@ async def test_non_admin_search_includes_chat_removal_tool(
     _, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(
+    result = await mcp_session(
         app,
         token=user_token,
         method="tools/call",
@@ -315,7 +224,7 @@ async def test_agent_id_claim_session_discovers_none_of_the_chat_removal_tools(
     token = mint_jwt(account_id=account.id, secret=SECRET.encode(), now=_NOW, agent_id=uuid.uuid4())
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(app, token=token, method="tools/list")
+    result = await mcp_session(app, token=token, method="tools/list")
     payload = result.get("result", result)
     tool_names = {t["name"] for t in payload.get("tools", [])}  # type: ignore[union-attr]
 
@@ -333,7 +242,7 @@ async def test_non_admin_search_includes_relaxed_tool(
     _, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(
+    result = await mcp_session(
         app,
         token=user_token,
         method="tools/call",
@@ -358,7 +267,7 @@ async def test_non_admin_search_excludes_agent_identity_scoped_tool(
     _, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(
+    result = await mcp_session(
         app,
         token=user_token,
         method="tools/call",
@@ -383,7 +292,7 @@ async def test_non_admin_call_self_write_file_refused(
     _, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(
+    result = await mcp_session(
         app,
         token=user_token,
         method="tools/call",
@@ -442,7 +351,7 @@ async def test_non_admin_search_excludes_remaining_admin_tool(
     _, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(
+    result = await mcp_session(
         app,
         token=user_token,
         method="tools/call",
@@ -453,30 +362,6 @@ async def test_non_admin_search_excludes_remaining_admin_tool(
     output_text = " ".join(item.get("text", "") for item in content if isinstance(item, dict))
     assert f"### {tool_name}" not in output_text, (
         f"{tool_name} must NOT be discoverable by a non-admin session; got: {output_text!r}"
-    )
-
-
-async def test_non_admin_search_excludes_skills_sync(
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    """skills_sync is now admin-tagged — non-admin search must not surface it.
-
-    The impl gate remains as defense-in-depth, but the visibility layer
-    hides it from non-admin sessions before they can call it."""
-    _, user_token = await _seed_admin_and_user(sessionmaker)
-    app = _make_app(sessionmaker)
-
-    result = await _mcp_session(
-        app,
-        token=user_token,
-        method="tools/call",
-        params={"name": "search_tools", "arguments": {"query": "sync skills"}},
-    )
-    call_result = result.get("result", result)
-    content = call_result.get("content", [])  # type: ignore[union-attr]
-    output_text = " ".join(item.get("text", "") for item in content if isinstance(item, dict))
-    assert "skills_sync" not in output_text, (
-        f"skills_sync must NOT be discoverable by non-admin; got: {output_text!r}"
     )
 
 
@@ -497,7 +382,7 @@ async def test_discord_vault_token_is_admin_claim_without_internal_denied_admin_
         guild_admin_token = make_jwt(account_id=user_account.id, is_admin=True)
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(
+    result = await mcp_session(
         app,
         token=guild_admin_token,
         method="tools/call",
@@ -506,7 +391,7 @@ async def test_discord_vault_token_is_admin_claim_without_internal_denied_admin_
     call_result = result.get("result", result)
     content = call_result.get("content", [])  # type: ignore[union-attr]
     output_text = " ".join(item.get("text", "") for item in content if isinstance(item, dict))
-    assert "sync_skills" not in output_text, (
+    assert "### sync_skills" not in output_text, (
         f"Discord vault token with is_admin but no internal must NOT see sync_skills; got: {output_text!r}"
     )
 
@@ -518,7 +403,7 @@ async def test_admin_search_includes_admin_tools(
     admin_token, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(
+    result = await mcp_session(
         app,
         token=admin_token,
         method="tools/call",
@@ -541,7 +426,7 @@ async def test_admin_search_includes_fork_agent(
     admin_token, _ = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(
+    result = await mcp_session(
         app,
         token=admin_token,
         method="tools/call",
@@ -571,7 +456,7 @@ async def test_admin_list_tools_returns_meta_tools(
     admin_token, user_token = await _seed_admin_and_user(sessionmaker)
     app = _make_app(sessionmaker)
 
-    result = await _mcp_session(app, token=admin_token, method="tools/list")
+    result = await mcp_session(app, token=admin_token, method="tools/list")
     tools_payload = result.get("result", result)
     tool_names: list[str] = [t["name"] for t in tools_payload.get("tools", [])]  # type: ignore[union-attr]
 

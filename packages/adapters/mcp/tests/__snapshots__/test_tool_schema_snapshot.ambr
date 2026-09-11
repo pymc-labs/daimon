@@ -218,10 +218,10 @@
   dict({
     'archive_agent': dict({
       'description': '''
-        Archive the MA agent and delete from the tenant pool.
+        Delete an agent, for example churn-explorer, by archiving it. Admin-only.
         
-        Also clears any channel or workspace default naming the agent, so turns
-        in those scopes fall back to the next tier instead of failing to resolve.
+        This removes the agent from the tenant pool and clears its channel/workspace
+        defaults so those channels fall back to the next routing tier.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -308,24 +308,15 @@
     }),
     'attach_mcp_server': dict({
       'description': '''
-        Attach a no-auth MCP server to an agent.
+        Add an MCP server that needs no token, such as Context7, to an agent.
         
-        Use this ONLY for MCP servers that do not require authentication.
-        The tool patches the agent's ``mcp_servers`` with
-        ``{name: server_name, type: "url", url: url}`` AND appends a
-        matching ``mcp_toolset`` entry to ``tools`` (required by MA, which
-        rejects an agent whose ``mcp_servers`` entries aren't each
-        referenced by a ``mcp_toolset``). Existing entries are preserved.
-        If a server with the same ``server_name`` is already attached, the
-        new ``url`` replaces it (last-write-wins) and the existing
-        ``mcp_toolset`` is reused (no duplicate). If both ``server_name``
-        and ``url`` already match, this is a no-op.
+        For Linear or other bearer-authenticated endpoints, use
+        ``request_mcp_token`` instead;
+        ``detach_mcp_server`` disconnects it. Fork Daimon with ``fork_agent`` before
+        directly changing its setup. Channel or workspace defaults need admin.
         
-        For MCP servers that REQUIRE an auth token, do NOT collect the
-        token in chat — direct the user to ``/agent-setup`` -> MCPs modal.
-        Tokens sent in chat end up in channel history and MA's
-        tenant-wide session event log; the modal flow is the only
-        supported path for auth-required servers.
+        Connects the server and its tools immediately. Reusing a server name replaces
+        the URL; the same name and URL is a no-op. Other connections are preserved.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -376,7 +367,9 @@
     }),
     'clear_agent_default': dict({
       'description': '''
-        Remove the agent default from a channel or the whole workspace.
+        Stop an agent answering in a channel by clearing its default routing.
+        For example, stop churn-explorer answering in #growth. Use
+        ``set_agent_default`` to choose a replacement instead.
         
         When ``channel_id`` is provided only that channel's default is cleared;
         omit it to clear the workspace-wide default.  If the scope had no
@@ -478,7 +471,8 @@
     }),
     'create_agent': dict({
       'description': '''
-        Create a new agent. Pass fields directly — there is NO ``spec`` wrapper.
+        Create an agent called, for example, churn-explorer. Pass fields directly —
+        there is NO ``spec`` wrapper.
         
         Required: ``name`` and ``model``. Use ``"claude-sonnet-5"`` when the user
         asks for Sonnet and ``"claude-opus-5"`` when they ask for Opus — always
@@ -489,7 +483,7 @@
         e.g. ``[{"url": "https://github.com/owner/repo", "branch": "main"}]``.
         
         Do not pass a ``skills`` field here. To add skills, either sync a repo via
-        ``skill_repos`` or use the ``skills_*`` tools after the agent is created.
+        ``skill_repos`` or use ``sync_skills`` after the agent is created.
       ''',
       'parameters': dict({
         '$defs': dict({
@@ -1530,7 +1524,12 @@
       }),
     }),
     'delete_skill': dict({
-      'description': 'Delete a skill and all its versions.',
+      'description': '''
+        Delete a skill such as eda from the workspace, destroying all versions for every agent.
+        
+        For detaching one agent's reference, use ``remove_skill`` instead.
+        Deleting the shared skill resource is admin-only.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -1583,14 +1582,12 @@
     }),
     'detach_mcp_server': dict({
       'description': '''
-        Detach an attached MCP server from an agent.
+        Disconnect an MCP server such as Linear from an agent. Detach the named
+        connection and its tools while preserving other servers and skills.
         
-        Removes the named entry from ``mcp_servers`` AND its matching
-        ``mcp_toolset`` entry from ``tools`` together — MA rejects an agent
-        whose ``mcp_servers`` entries aren't each referenced by a
-        ``mcp_toolset``, so both must go in the same update. Every other
-        attached server, skill, and tool is preserved. The reserved built-in
-        daimon server cannot be detached.
+        ``attach_mcp_server`` adds public endpoints; ``request_mcp_token`` enrolls
+        authenticated connections. The built-in daimon server cannot be removed.
+        Changing a channel or workspace default needs admin.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1599,6 +1596,7 @@
             'type': 'string',
           }),
           'server_name': dict({
+            'description': 'Name of the attached MCP server to disconnect.',
             'type': 'string',
           }),
         }),
@@ -1611,7 +1609,8 @@
     }),
     'explain_agent_resolution': dict({
       'description': '''
-        Report which agent answers in a channel, and which tier decided it.
+        Who answers in this channel, for example #growth? Report who answers and
+        which routing tier decided it.
         
         Resolution is a cascade: the channel's own default wins, else the
         workspace default, else the deployment default. This reports the winner
@@ -1687,7 +1686,18 @@
       }),
     }),
     'fork_agent': dict({
-      'description': 'Clone an agent within the tenant pool under a new name.',
+      'description': '''
+        Make a copy of Daimon or another agent that you can edit under a new name.
+        Copies its prompt, model, skills, MCP definitions, working-repo binding and
+        recorded GitHub access. Copying access does not freshly verify it.
+        
+        API/service keys are not copied; add them with ``request_agent_key``.
+        Use ``update_agent`` to edit the copy. Daimon cannot be edited directly.
+        
+        The copy answers in no channel until an admin routes it with
+        ``set_agent_default``. Continue configuring it through Daimon with the copy
+        named as the setup target; it cannot already answer mentions by name.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -1707,12 +1717,11 @@
     }),
     'get_agent': dict({
       'description': '''
-        Look up an agent by name.
+        Show what an agent can access: attached MCP servers and skills.
         
-        Returns the agent's attached ``mcp_servers`` (name + url) and
-        ``skills``. Custom skill entries include ``name`` — the resolved
-        display title (``null`` if the underlying skill was deleted);
-        anthropic skill entries have a readable ``skill_id`` and no name.
+        Use ``list_agent_keys`` for stored key names. Configuration does not prove
+        the answering session's access. Returns server names/URLs and skills; custom
+        skills have a display name (null if deleted), Anthropic skills have a readable id.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1940,6 +1949,27 @@
         'type': 'object',
       }),
     }),
+    'list_agent_keys': dict({
+      'description': '''
+        What keys does an agent have? List its stored API key names, never values.
+        
+        Use ``get_agent`` for skills and MCP access, ``request_agent_key`` to add
+        keys or ``remove_agent_key`` to remove them. Stored names on this target
+        are not proof that the answering agent can use those keys.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'agent_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'list_agents': dict({
       'description': '''
         List agents in the tenant pool, including each agent's attached
@@ -1978,27 +2008,6 @@
         'additionalProperties': False,
         'properties': dict({
         }),
-        'type': 'object',
-      }),
-    }),
-    'list_env_credential_keys': dict({
-      'description': '''
-        List the environment variable KEY NAMES currently set on an agent.
-        
-        Returns names only, never a value — so the agent can see what is
-        configured without a value ever entering chat. To add a variable,
-        use ``request_env_credential``.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'agent_name': dict({
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'agent_name',
-        ]),
         'type': 'object',
       }),
     }),
@@ -2309,18 +2318,15 @@
     }),
     'post_github_app_install_link': dict({
       'description': '''
-        Post a button inviting the user to install daimon's GitHub App.
+        Install the GitHub App: post a link inviting the user to grant repository access.
         
-        Call this when the user wants daimon to reach a private repository
-        and has no token to paste, or when a sync failed because the repo is
-        not readable. Posts a button in the thread; clicking it opens the
-        install page on GitHub, where the user chooses which repositories to
-        grant access to.
+        For a private repo with a working token, use ``request_repo_binding`` instead.
+        A token remains the fallback and existing bound tokens keep being used.
         
-        This tool CANNOT tell whether the install happened — a link button
-        gives no signal back. After the user says they installed it, verify
-        by attempting the sync again: the installation is resolved live at
-        that point.
+        Posts a link button in this channel opening GitHub's install page. It cannot
+        tell whether installation happened. Installing alone neither verifies this
+        tenant's access nor binds a working repo; use ``request_repo_binding`` and
+        verify access through the requested operation afterwards.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2693,14 +2699,14 @@
         'type': 'object',
       }),
     }),
-    'remove_env_credential': dict({
+    'remove_agent_key': dict({
       'description': '''
-        Remove one environment variable from an agent.
+        Remove an old API key or token, such as a Toggl key, from an agent's stored keys.
         
-        Idempotent: removing a key that is not currently set still succeeds
-        — the result's ``removed`` flag reports whether the key was actually
-        present. To ADD a variable, use ``request_env_credential`` instead;
-        entry always goes through the private modal flow, never through chat.
+        Use ``request_agent_key`` to add a key privately and ``list_agent_keys`` to
+        inspect stored names. Removing a missing key also succeeds; ``removed`` says
+        whether it was present. This deletes the stored environment variable, never
+        returns its secret value, and does not prove an existing session refreshed.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2709,6 +2715,7 @@
             'type': 'string',
           }),
           'key': dict({
+            'description': 'Stored environment variable name, UPPER_SNAKE, e.g. TOGGL_TOKEN or OPENAI_API_KEY; never the secret value.',
             'type': 'string',
           }),
         }),
@@ -2721,17 +2728,12 @@
     }),
     'remove_skill': dict({
       'description': '''
-        Detach one attached skill from an agent.
+        Stop an agent using an attached skill, such as eda. Remove that one
+        attachment while preserving other skills.
         
-        Accepts either the skill's raw ``skill_id`` or its resolved display
-        name. Every other attached skill and the agent's base tool set are
-        preserved.
-        
-        This is a DIFFERENT operation from ``delete_skill`` /
-        ``skills_delete``, which destroy a skill for every agent in the
-        tenant. ``remove_skill`` only detaches this one agent's reference —
-        the skill resource itself, and any other agent that has it attached,
-        is untouched.
+        ``delete_skill`` destroys the shared workspace skill instead;
+        ``update_agent`` adds existing skills. Accept a skill name or raw ``skill_id``.
+        The resource and other agents stay intact. Changing a default agent needs admin.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2776,15 +2778,18 @@
         'type': 'object',
       }),
     }),
-    'request_env_credential': dict({
+    'request_agent_key': dict({
       'description': '''
-        Request an environment secret from the user via a private modal.
+        Give an agent an API key or token for any service: Toggl, OpenAI,
+        Higgsfield, or a platform that just launched. Unknown services work too.
         
-        Call this INSTEAD of ever accepting a secret value in chat. Posts a
-        button in the thread naming the exact env key; clicking it opens a
-        private form where the user enters the value — it
-        never appears in this channel or in your context. Once added, the
-        credential becomes usable by everyone who talks to ``agent_name``.
+        Never accept secret values in chat; ask for rotation if pasted. For MCP
+        credentials use ``request_mcp_token``; GitHub access uses ``request_repo_binding``.
+        To load .env keys, request each key separately; whole-file import is unavailable.
+        
+        Posts a card in this channel. Only the requester can open its private form;
+        it expires in 30 minutes. Values never appear in chat. Anyone who talks to
+        the agent can use added keys, including on Daimon itself without a fork.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2793,9 +2798,11 @@
             'type': 'string',
           }),
           'channel_id': dict({
+            'description': 'Channel where the requester-only private-input card will be posted.',
             'type': 'string',
           }),
           'key': dict({
+            'description': 'Stored environment variable name, UPPER_SNAKE, e.g. TOGGL_TOKEN or OPENAI_API_KEY; never the secret value.',
             'type': 'string',
           }),
           'purpose': dict({
@@ -2811,17 +2818,19 @@
         'type': 'object',
       }),
     }),
-    'request_mcp_credential': dict({
+    'request_mcp_token': dict({
       'description': '''
-        Request an auth-required MCP server's credential via a private modal.
+        Connect an agent such as research-bot to Linear, Notion or GitHub through an
+        MCP endpoint with a bearer token. Match the endpoint's supported authentication;
+        an API key is not automatically an MCP token, and this does not complete OAuth.
         
-        Call this INSTEAD of ever accepting a token value in chat, and instead
-        of ``attach_mcp_server`` when the server requires authentication.
-        Posts a button in the thread naming the exact server; clicking it
-        opens a private form where the user enters the token —
-        it never appears in this channel or in your context.
-        Once added, the credential becomes usable by everyone who talks to
-        ``agent_name``.
+        Use ``attach_mcp_server`` for public servers without tokens. Never accept
+        credentials in chat. This posted-token enrollment works on Daimon under its
+        own permission rules.
+        
+        Posts a requester-only card in this channel, expiring in 30 minutes. The
+        private form collects the token and attaches the server. Values never appear
+        in chat; everyone talking to the agent can use the connection.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2830,12 +2839,15 @@
             'type': 'string',
           }),
           'channel_id': dict({
+            'description': 'Channel where the requester-only private-input card will be posted.',
             'type': 'string',
           }),
           'server_name': dict({
+            'description': 'Connection name; reusing a name replaces that server entry.',
             'type': 'string',
           }),
           'url': dict({
+            'description': 'MCP endpoint URL accepting bearer authentication, e.g. https://mcp.example.com/mcp.',
             'type': 'string',
           }),
         }),
@@ -2850,14 +2862,16 @@
     }),
     'request_repo_binding': dict({
       'description': '''
-        Request a repo binding for an agent via a private modal.
+        Let an agent read a GitHub working repo or repository, public or private.
         
-        Call this INSTEAD of ever telling the user to open ``/agent-setup``
-        to bind a repository. Posts a button in the thread naming the exact
-        repo and agent; clicking it opens a private form where the
-        user confirms the branch and, only if the repo is private and not
-        otherwise readable, pastes a GitHub token that never appears in this
-        channel or in your context.
+        For a private skill repo use ``request_skill_repo_token``. If the user has
+        no working token, ``post_github_app_install_link`` offers a GitHub App install;
+        installing alone does not bind the repo or verify this tenant's access.
+        
+        Posts a requester-only card in this channel, expiring in 30 minutes. The
+        private form confirms the branch and collects a GitHub token only when needed;
+        values never appear in chat. Saving binds the working repository for future
+        sessions. Existing working tokens remain in use.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2866,12 +2880,14 @@
             'type': 'string',
           }),
           'channel_id': dict({
+            'description': 'Channel where the requester-only private-input card will be posted.',
             'type': 'string',
           }),
           'purpose': dict({
             'type': 'string',
           }),
           'repo_url': dict({
+            'description': 'GitHub repo or repository URL, e.g. https://github.com/owner/repo.',
             'type': 'string',
           }),
         }),
@@ -2884,22 +2900,17 @@
         'type': 'object',
       }),
     }),
-    'request_skill_repo_credential': dict({
+    'request_skill_repo_token': dict({
       'description': '''
-        Ask for a GitHub token so a skill import can read a PRIVATE repo.
+        The skills repo is private: collect a GitHub token to import its skills.
         
-        Call this when importing skills from a repo reports that no
-        credential was available — NOT ``request_repo_binding``. Importing
-        skills from a repo and binding a repo for the agent to check out are
-        different things: this one writes no ``agent_repo_binding`` row, so
-        it will not make the agent start cloning the skill repo. The stored
-        token is shared between the two, so a user who has already bound a
-        repo with a token that can also read this one will not be asked
-        twice.
+        After ``sync_skills`` cannot read a private skill repository, use this form.
+        For a working repo use ``request_repo_binding``. Currently this enrollment
+        also changes the working-repo binding and therefore what the agent clones.
         
-        Pass the same repo url, branch, and path the failed import used —
-        they are carried through the click, and the import re-runs
-        automatically on submit, so there is nothing to call afterwards.
+        Posts a requester-only card, expiring in 30 minutes. Its private form retries
+        import and attachment; tokens never appear in chat. Anyone talking to the
+        agent can use the imported skills. Pass the same repo URL, branch and path.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2912,6 +2923,7 @@
             'type': 'string',
           }),
           'channel_id': dict({
+            'description': 'Channel where the requester-only private-input card will be posted.',
             'type': 'string',
           }),
           'path': dict({
@@ -2922,6 +2934,7 @@
             'type': 'string',
           }),
           'repo_url': dict({
+            'description': 'GitHub repo or repository URL, e.g. https://github.com/owner/repo.',
             'type': 'string',
           }),
         }),
@@ -3190,7 +3203,9 @@
     }),
     'set_agent_default': dict({
       'description': '''
-        Set the agent that responds by default in a channel or the whole workspace.
+        Make an agent answer in a channel or become the whole server/workspace default.
+        For example, make churn-explorer answer in #growth. Changes the agent that answers;
+        use ``clear_agent_default`` to stop that routing.
         
         When ``channel_id`` is provided the default is scoped to that channel;
         omit it to set the workspace-wide default.  Any existing default at the
@@ -3317,88 +3332,6 @@
         'type': 'object',
       }),
     }),
-    'skills_delete': dict({
-      'description': 'Delete a skill and all its versions (alias of ``delete_skill``).',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'name': dict({
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'name',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'skills_get': dict({
-      'description': '''
-        Look up a skill by name (alias of ``get_skill``).
-        
-        Returns detail including version count.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'name': dict({
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'name',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'skills_list': dict({
-      'description': 'List all custom skills (alias of ``list_skills``).',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-        }),
-        'type': 'object',
-      }),
-    }),
-    'skills_sync': dict({
-      'description': '''
-        Import skills from a GitHub repo into the shared library (alias of ``sync_skills``).
-        
-        Discovers SKILL.md and creates or updates them. Pass ``agent_name`` to
-        also attach them to that agent; importing alone attaches nothing.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'agent_name': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'branch': dict({
-            'default': 'main',
-            'type': 'string',
-          }),
-          'path': dict({
-            'default': '',
-            'type': 'string',
-          }),
-          'url': dict({
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'url',
-        ]),
-        'type': 'object',
-      }),
-    }),
     'start_turn': dict({
       'description': '''
         Start a new conversation turn with the agent and return a handle.
@@ -3449,38 +3382,17 @@
     }),
     'sync_skills': dict({
       'description': '''
-        Import skills from a GitHub repo into this workspace's shared skill library.
+        Install skills from a GitHub repo into the workspace's shared skill library.
         
-        Discovers SKILL.md files and creates or updates them. This is an IMPORT,
-        not a per-agent change: the library is visible to every agent in the
-        workspace, and importing alone attaches nothing.
+        First use ``list_skills`` and prefer existing skills; import only a repository
+        the user requested. If the skills repo is private, use ``request_skill_repo_token``;
+        ``request_repo_binding`` provides working-repo access. Never accept tokens in chat.
         
-        Pass ``agent_name`` to also attach everything imported to that agent —
-        which is almost always what someone means by "add this skill to my
-        agent". Omit it only to stock the library without touching any agent.
-        Existing skills on the agent are preserved; the attach is a union.
-        
-        LOCAL-FIRST: before importing an external repo, call ``list_skills`` to
-        see what is already in the library and prefer an existing skill over
-        pulling a near-duplicate. Only import a repo the user explicitly asked for.
-        
-        Report where the skills came from — the returned
-        ``source_url``/``branch``/``path`` echo that provenance, and ``summary``
-        states both what was imported and what was attached.
-        
-        Before calling, inspect the repo structure to determine the correct ``path``
-        parameter (empty string = repo root). ``branch`` defaults to ``"main"``.
-        
-        IF THIS FAILS BECAUSE THE REPO IS PRIVATE AND UNREADABLE, call
-        ``request_repo_binding`` for that repo — do not report the sync as
-        blocked and do not ask the user to paste a token here. This tool
-        deliberately has no token parameter: the credential is supplied
-        out-of-band through a button and modal so it never passes through tool
-        arguments. Once the binding exists, the per-agent tier short-circuits
-        every later sync of that repo with zero GitHub I/O. Credential
-        precedence is documented on ``_resolve_skill_sync_credentials`` above,
-        which delegates to ``resolve_skill_sync_token``; a missing GitHub App
-        installation is NOT a blocker, it is just a later tier.
+        Discovers SKILL.md files and imports or updates skills. Pass ``agent_name`` to
+        also attach them, preserving existing skills; omit it only to stock the library.
+        Importing alone attaches nothing. Report returned source, branch, path and
+        summary. Inspect the repo to choose ``path`` (empty means root); ``branch``
+        defaults to main. Importing is admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3516,20 +3428,18 @@
     }),
     'update_agent': dict({
       'description': '''
-        Patch-update an agent.
+        Change an agent's system prompt or switch its model; add existing skills such as
+        build-models. Scalar ``model``, ``description`` and ``system`` fields replace.
         
-        Scalar fields (``model``, ``description``, ``system``) replace. For
-        ``model``, prefer the current generation — ``"claude-sonnet-5"`` for
-        Sonnet, ``"claude-opus-5"`` for Opus — unless the user names an older
-        version explicitly.
-        List fields (``tools``, ``mcp_servers``, ``skills``) UNION with the
-        agent's current state — caller's entries win on collision. To remove
-        an existing entry, use the ``/agent-setup`` panel.
+        Prefer current-generation ``claude-sonnet-5`` for Sonnet and ``claude-opus-5``
+        for Opus unless an older version is explicitly requested. List fields
+        (``tools``, ``mcp_servers``, ``skills``) are added to, never replaced; shorter
+        lists remove nothing. Use ``remove_skill`` or ``detach_mcp_server`` to remove.
+        Daimon requires ``fork_agent`` first; channel/workspace defaults require admin.
         
-        ``skills`` accepts skill NAMES, e.g.
-        ``skills=["build-models", "compare-models"]`` — names are resolved to MA
-        skill ids server-side. The explicit dict form
-        ``{"type": "custom", "skill_id": "skill_..."}`` still works.
+        Prompt changes replace the system prompt immediately. ``skills`` accepts names such as
+        ``["build-models", "compare-models"]``, resolved server-side; explicit
+        ``{"type": "custom", "skill_id": "skill_..."}`` entries also work.
       ''',
       'parameters': dict({
         '$defs': dict({

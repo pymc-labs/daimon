@@ -66,16 +66,13 @@ MAX_SLACK_BUTTON_LABEL_CHARS: Final[int] = 75
 # builders live here.
 SLACK_ACTION_ID: Final[str] = "credential_request"
 
-# The full label prefix for each kind. "env" and "mcp" reproduce the
-# pre-repo-kind wording byte-for-byte. "repo" cannot reuse the "Add {X}
-# credential: " interpolation — a repo binding is not a credential.
-# "skill_repo" is deliberately worded as an import, not a binding: it shares
-# "repo"'s PAT store but writes NO agent_repo_binding row, so a label saying
-# "bind" would promise a checkout the user never asked for.
+# Shared labels for newly posted buttons and rehydrated controls. Skill import
+# also stores a working-repo binding so later syncs can find its token; the
+# request description explains that side effect before the form is posted.
 _KIND_LABEL_PREFIX: Final[dict[CredentialRequestKind, str]] = {
-    "env": "Add env credential: ",
-    "mcp": "Add MCP credential: ",
-    "repo": "Bind repo: ",
+    "env": "Add key: ",
+    "mcp": "Add MCP token: ",
+    "repo": "Set working repo: ",
     "skill_repo": "Import skills from: ",
 }
 

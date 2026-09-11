@@ -1288,8 +1288,8 @@ class DaimonBot(commands.Bot):
             hints: list[str] = []
             if "agent" in err.missing:
                 hints.append(
-                    "An admin can set the default agent in `/agent-setup` -> "
-                    "**Set as default...** -> [This channel] or [Whole server]."
+                    "An admin can choose who answers in this channel or the whole server "
+                    "by opening `/agent-setup`."
                 )
             if "environment" in err.missing:
                 hints.append(
@@ -1312,8 +1312,7 @@ class DaimonBot(commands.Bot):
             target = thread or message.channel
             await target.send(
                 "The configured agent or environment no longer exists. "
-                "An admin can re-set the agent in `/agent-setup` -> "
-                "**Set as default...**; the environment is "
+                "An admin can choose an existing agent in `/agent-setup`; the environment is "
                 "operator-only via the CLI (`daimon config set environment_name=...`)."
             )
             return
@@ -1555,6 +1554,7 @@ class DaimonBot(commands.Bot):
                     after_message_id=int(prepared.watermark),
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
+                    is_admin=is_admin,
                     unprompted=unprompted,
                 )
             else:
@@ -1564,6 +1564,7 @@ class DaimonBot(commands.Bot):
                     limit=100,
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
+                    is_admin=is_admin,
                     unprompted=unprompted,
                 )
         else:
@@ -1576,6 +1577,7 @@ class DaimonBot(commands.Bot):
                     thread=thread,
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
+                    is_admin=is_admin,
                 )
             else:
                 # Forum/voice channels: fall back to raw message content
@@ -1642,6 +1644,7 @@ class DaimonBot(commands.Bot):
                 bot_user_id=self.user.id if self.user else None,
                 bot_display_name=discord_settings.bot_display_name,
                 omit_oversized_image_urls=True,
+                is_admin=is_admin,
                 unprompted=unprompted,
             )
             if synthetic_prefix:

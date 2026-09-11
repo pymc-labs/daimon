@@ -496,12 +496,23 @@ async def test_handle_app_mention_no_token_when_no_token_row_drops(
         "text": "<@U_BOT> hello",
     }
 
-    await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+    with structlog.testing.capture_logs() as captured:
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
 
     assert len(orchestrate_calls) == 0, (
         "event must be dropped when no token row exists — token-existence is the "
         "tenant liveness signal (STURN-03)"
     )
+
+    # The drop is the operator-visible failure surface — an app_mention
+    # carries no response_url and there is no client to post with, so the log
+    # line at error level is the only place this is visible.
+    dropped_logs = [c for c in captured if c.get("event") == "slack.event_dropped.no_token"]
+    assert len(dropped_logs) == 1, "exactly one slack.event_dropped.no_token log entry expected"
+    assert dropped_logs[0]["log_level"] == "error", (
+        "a tokenless-workspace drop must log at error, not warning"
+    )
+    assert dropped_logs[0]["team_id"] == team_id, "the dropped log must bind the team_id"
 
 
 async def test_handle_app_mention_slack_connect_external_when_external_user_posts_ephemeral(
@@ -736,6 +747,7 @@ def _make_orchestrate_app(
     settings = MagicMock()
     settings.crypto.keys = (SecretStr(crypto_key),) if crypto_key is not None else ()
     settings.slack.max_concurrent_turns_per_tenant = max_concurrent_turns_per_tenant
+    settings.slack.bot_display_name = "daimon"
     settings.mcp.public_url = None
     # app_root_url=None short-circuits _maybe_post_connect_nudge (Task 11) — these
     # orchestration tests don't exercise the connect-nudge flow.
@@ -2644,7 +2656,9 @@ async def test_orchestrate_first_turn_when_no_agent_configured_posts_guidance_an
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("display_name", ["daimon", "research-bot"])
 async def test_run_thread_turn_when_over_balance_blocks_before_session_create(
+    display_name: str,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
@@ -2661,6 +2675,8 @@ async def test_run_thread_turn_when_over_balance_blocks_before_session_create(
     await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
 
     app, _ = _make_orchestrate_app(db_session_factory)
+    assert app.runtime.settings.slack is not None
+    app.runtime.settings.slack.bot_display_name = display_name
 
     event: dict[str, Any] = {
         "type": "app_mention",
@@ -2715,7 +2731,7 @@ async def test_run_thread_turn_when_over_balance_blocks_before_session_create(
         b
         for b in post_bodies
         if str(b.get("text", ""))
-        == "This workspace's daimon credit is depleted. An admin can top up with `/billing`."
+        == f"This workspace's {display_name} credit is depleted. An admin can top up with `/billing`."
     ]
     assert depleted, (
         f"expected the exact D-10 over-balance copy via chat.postMessage, got: {post_bodies}"
@@ -4985,3 +5001,457 @@ async def test_ceiling_breach_releases_tenant_slot_and_thread_flag(
     )
     assert tenant_id not in app._inflight  # pyright: ignore[reportPrivateUsage]
     assert thread_ts_2 not in app._processing  # pyright: ignore[reportPrivateUsage]
+
+
+# ---------------------------------------------------------------------------
+# Per-turn admin lookup and role upsert
+# ---------------------------------------------------------------------------
+
+_USERS_INFO_PATTERN = re.compile(r"https://slack\.com/api/users\.info.*")
+
+
+def _fake_ma_session(session_id: str) -> BetaManagedAgentsSession:
+    """Build a real BetaManagedAgentsSession inline (no MagicMock shortcuts)."""
+    now = datetime.now(UTC)
+    agent_snapshot = BetaManagedAgentsSessionAgent(
+        id="agent_test_id",
+        mcp_servers=[],
+        model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
+        name="test-agent",
+        skills=[],
+        tools=[],
+        type="agent",
+        version=1,
+    )
+    return BetaManagedAgentsSession(
+        outcome_evaluations=[],
+        id=session_id,
+        agent=agent_snapshot,
+        created_at=now,
+        environment_id="env_test_id",
+        metadata={},
+        resources=[],
+        stats=BetaManagedAgentsSessionStats(),
+        status="idle",
+        type="session",
+        updated_at=now,
+        usage=BetaManagedAgentsSessionUsage(),
+        vault_ids=[],
+    )
+
+
+def _users_info_request_count(fake_slack_web_client: Any) -> int:
+    """Count GET requests to users.info recorded by the aioresponses mock."""
+    return sum(
+        len(reqs)
+        for (method, url), reqs in fake_slack_web_client.mock.requests.items()
+        if method == "GET" and url.path == "/api/users.info"
+    )
+
+
+def _override_users_info(mock: Any, *, payload: dict[str, Any]) -> None:
+    """Replace the conftest non-admin users.info stub with the given payload.
+
+    aioresponses matches by insertion order and the conftest baseline is
+    registered with repeat=True, so a plain append never wins — the existing
+    users.info matchers have to be dropped first (mirrors
+    test_credential_requests.py's ``_override_users_info_admin``).
+    """
+    to_remove = [
+        k
+        for k, v in mock._matches.items()  # pyright: ignore[reportUnknownMemberType, reportPrivateUsage]
+        if getattr(v, "url_or_pattern", None) == _USERS_INFO_PATTERN
+    ]
+    for k in to_remove:
+        del mock._matches[k]  # pyright: ignore[reportUnknownMemberType, reportPrivateUsage]
+    mock.get(  # pyright: ignore[reportUnknownMemberType]
+        _USERS_INFO_PATTERN,
+        payload=payload,
+        repeat=True,
+    )
+
+
+class TestPerTurnRoleUpsert:
+    """Slack's per-turn account.role upsert from a live users.info admin lookup.
+
+    Mirrors Discord's TestPerTurnRoleUpsert. A users.info failure leaves the
+    stored role untouched rather than demoting a real admin.
+    """
+
+    async def test_admin_users_info_upserts_account_role_admin(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        fake_slack_web_client: Any,
+    ) -> None:
+        """users.info reporting admin -> account.role == Role.ADMIN after the turn,
+        and users.info is called exactly once."""
+        from daimon.core.stores.accounts import get_account
+        from daimon.core.stores.domain import Role
+        from daimon.core.stores.identity import get_or_create_platform_principal
+
+        team_id = "T_ROLE_ADMIN"
+        channel = "C_TEST"
+        thread_ts = "9100000001.000001"
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+
+        await provision_tenant(
+            db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+        )
+        async with db_session_factory() as s:
+            principal = await get_or_create_platform_principal(
+                s, tenant_id=tenant_id, platform="slack", external_id="U_ROLE_ADMIN"
+            )
+            await s.commit()
+
+        _override_users_info(
+            fake_slack_web_client.mock,
+            payload={
+                "ok": True,
+                "user": {
+                    "id": "U_ROLE_ADMIN",
+                    "name": "admin_user",
+                    "is_admin": True,
+                    "is_owner": False,
+                    "is_primary_owner": False,
+                },
+            },
+        )
+
+        app, _ = _make_orchestrate_app(db_session_factory)
+
+        async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
+            state = TurnState(content=[TextBlock(kind="text", text="Hello!")])
+            await lifecycle.on_terminal_success(state)
+            return state
+
+        event: dict[str, Any] = {
+            "type": "app_mention",
+            "ts": thread_ts,
+            "event_ts": thread_ts,
+            "channel": channel,
+            "user": "U_ROLE_ADMIN",
+            "text": "<@U_BOT> hello",
+        }
+
+        with (
+            patch(
+                "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
+            ) as mock_resolve_agent,
+            patch(
+                "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+            ) as mock_resolve_env,
+            patch(
+                "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
+            ) as mock_create_session,
+            patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+            patch("daimon.adapters.slack.app.deliver_session_outputs", new_callable=AsyncMock),
+        ):
+            mock_resolve_agent.return_value = "agent_test_id"
+            mock_resolve_env.return_value = "env_test_id"
+            mock_create_session.return_value = _fake_ma_session("sess-role-admin")
+            mock_run_turn.side_effect = _fake_run_turn
+
+            await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                event,
+                team_id=team_id,
+                channel=channel,
+                event_ts=thread_ts,
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant_id,
+            )
+
+            while app._bg_tasks:  # pyright: ignore[reportPrivateUsage]
+                await asyncio.gather(
+                    *list(app._bg_tasks),  # pyright: ignore[reportPrivateUsage]
+                    return_exceptions=True,
+                )
+                await asyncio.sleep(0)
+
+        assert _users_info_request_count(fake_slack_web_client) == 1, (
+            "exactly one users.info request must be issued per turn"
+        )
+
+        async with db_session_factory() as s:
+            account = await get_account(s, principal.account_id)
+        assert account is not None, "account must exist after turn"
+        assert account.role == Role.ADMIN, (
+            f"admin users.info signal must set account.role = Role.ADMIN; got: {account.role!r}"
+        )
+
+    async def test_member_users_info_upserts_account_role_user(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        fake_slack_web_client: Any,
+    ) -> None:
+        """users.info reporting a plain member -> account.role == Role.USER after the turn."""
+        from daimon.core.stores.accounts import get_account
+        from daimon.core.stores.domain import Role
+        from daimon.core.stores.identity import get_or_create_platform_principal
+
+        team_id = "T_ROLE_USER"
+        channel = "C_TEST"
+        thread_ts = "9100000002.000001"
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+
+        await provision_tenant(
+            db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+        )
+        async with db_session_factory() as s:
+            principal = await get_or_create_platform_principal(
+                s, tenant_id=tenant_id, platform="slack", external_id="U_ROLE_USER"
+            )
+            await s.commit()
+
+        # conftest's default users.info payload (non-admin) is already registered
+        # by fake_slack_web_client; no override needed.
+
+        app, _ = _make_orchestrate_app(db_session_factory)
+
+        async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
+            state = TurnState(content=[TextBlock(kind="text", text="Hello!")])
+            await lifecycle.on_terminal_success(state)
+            return state
+
+        event: dict[str, Any] = {
+            "type": "app_mention",
+            "ts": thread_ts,
+            "event_ts": thread_ts,
+            "channel": channel,
+            "user": "U_ROLE_USER",
+            "text": "<@U_BOT> hello",
+        }
+
+        with (
+            patch(
+                "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
+            ) as mock_resolve_agent,
+            patch(
+                "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+            ) as mock_resolve_env,
+            patch(
+                "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
+            ) as mock_create_session,
+            patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+            patch("daimon.adapters.slack.app.deliver_session_outputs", new_callable=AsyncMock),
+        ):
+            mock_resolve_agent.return_value = "agent_test_id"
+            mock_resolve_env.return_value = "env_test_id"
+            mock_create_session.return_value = _fake_ma_session("sess-role-user")
+            mock_run_turn.side_effect = _fake_run_turn
+
+            await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                event,
+                team_id=team_id,
+                channel=channel,
+                event_ts=thread_ts,
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant_id,
+            )
+
+            while app._bg_tasks:  # pyright: ignore[reportPrivateUsage]
+                await asyncio.gather(
+                    *list(app._bg_tasks),  # pyright: ignore[reportPrivateUsage]
+                    return_exceptions=True,
+                )
+                await asyncio.sleep(0)
+
+        async with db_session_factory() as s:
+            account = await get_account(s, principal.account_id)
+        assert account is not None, "account must exist after turn"
+        assert account.role == Role.USER, (
+            f"non-admin users.info signal must set account.role = Role.USER; got: {account.role!r}"
+        )
+
+    async def test_users_info_failure_leaves_role_unchanged(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        fake_slack_web_client: Any,
+    ) -> None:
+        """A users.info SlackApiError must leave a pre-existing ADMIN role
+        untouched -- never demoted by a transient lookup failure."""
+        from daimon.core.stores.accounts import get_account, set_role
+        from daimon.core.stores.domain import Role
+        from daimon.core.stores.identity import get_or_create_platform_principal
+
+        team_id = "T_ROLE_LOOKUP_FAIL"
+        channel = "C_TEST"
+        thread_ts = "9100000003.000001"
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+
+        await provision_tenant(
+            db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+        )
+        async with db_session_factory() as s:
+            principal = await get_or_create_platform_principal(
+                s, tenant_id=tenant_id, platform="slack", external_id="U_ROLE_LOOKUP_FAIL"
+            )
+            await set_role(s, principal.account_id, Role.ADMIN)
+            await s.commit()
+
+        # Override users.info with an ok=False body so the SDK raises SlackApiError
+        # (the SDK raises on ok=False regardless of HTTP status; see test_admin.py).
+        _override_users_info(
+            fake_slack_web_client.mock,
+            payload={"ok": False, "error": "internal_error"},
+        )
+
+        app, _ = _make_orchestrate_app(db_session_factory)
+
+        async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
+            state = TurnState(content=[TextBlock(kind="text", text="Hello!")])
+            await lifecycle.on_terminal_success(state)
+            return state
+
+        event: dict[str, Any] = {
+            "type": "app_mention",
+            "ts": thread_ts,
+            "event_ts": thread_ts,
+            "channel": channel,
+            "user": "U_ROLE_LOOKUP_FAIL",
+            "text": "<@U_BOT> hello",
+        }
+
+        with (
+            patch(
+                "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
+            ) as mock_resolve_agent,
+            patch(
+                "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+            ) as mock_resolve_env,
+            patch(
+                "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
+            ) as mock_create_session,
+            patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+            patch("daimon.adapters.slack.app.deliver_session_outputs", new_callable=AsyncMock),
+        ):
+            mock_resolve_agent.return_value = "agent_test_id"
+            mock_resolve_env.return_value = "env_test_id"
+            mock_create_session.return_value = _fake_ma_session("sess-role-lookup-fail")
+            mock_run_turn.side_effect = _fake_run_turn
+
+            await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                event,
+                team_id=team_id,
+                channel=channel,
+                event_ts=thread_ts,
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant_id,
+            )
+
+            while app._bg_tasks:  # pyright: ignore[reportPrivateUsage]
+                await asyncio.gather(
+                    *list(app._bg_tasks),  # pyright: ignore[reportPrivateUsage]
+                    return_exceptions=True,
+                )
+                await asyncio.sleep(0)
+
+        assert _users_info_request_count(fake_slack_web_client) == 1, (
+            "exactly one users.info request must be issued per turn, whatever the outcome"
+        )
+
+        async with db_session_factory() as s:
+            account = await get_account(s, principal.account_id)
+        assert account is not None, "account must exist after turn"
+        assert account.role == Role.ADMIN, (
+            "a users.info lookup failure must leave the pre-existing role unchanged, "
+            f"not demote it; got: {account.role!r}"
+        )
+
+    async def test_admission_failure_performs_no_role_write(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        fake_slack_web_client: Any,
+    ) -> None:
+        """An admission-denied branch (over-balance) must not write account.role
+        even though the live admin lookup already ran before admit()."""
+        from daimon.core.stores.accounts import get_account, set_role
+        from daimon.core.stores.domain import Role
+        from daimon.core.stores.identity import get_or_create_platform_principal
+
+        team_id = "T_ROLE_ADMISSION_DENIED"
+        channel = "C_TEST"
+        thread_ts = "9100000004.000001"
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+
+        await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+        async with db_session_factory() as s:
+            principal = await get_or_create_platform_principal(
+                s, tenant_id=tenant_id, platform="slack", external_id="U_ROLE_ADMISSION_DENIED"
+            )
+            await set_role(s, principal.account_id, Role.ADMIN)
+            await s.commit()
+
+        # Admin users.info payload -- if the write were unconditional (bug), this
+        # would already be ADMIN and the test would pass for the wrong reason;
+        # combined with the pre-seeded ADMIN role above it is neutral either way,
+        # so what actually proves "no write" is mock_over_balance being the sole
+        # reason admit() denies, with create_session/run_turn never called.
+        _override_users_info(
+            fake_slack_web_client.mock,
+            payload={
+                "ok": True,
+                "user": {
+                    "id": "U_ROLE_ADMISSION_DENIED",
+                    "name": "member",
+                    "is_admin": False,
+                    "is_owner": False,
+                    "is_primary_owner": False,
+                },
+            },
+        )
+
+        app, _ = _make_orchestrate_app(db_session_factory)
+
+        event: dict[str, Any] = {
+            "type": "app_mention",
+            "ts": thread_ts,
+            "event_ts": thread_ts,
+            "channel": channel,
+            "user": "U_ROLE_ADMISSION_DENIED",
+            "text": "<@U_BOT> hello",
+        }
+
+        with (
+            patch(
+                "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
+            ) as mock_resolve_agent,
+            patch(
+                "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+            ) as mock_resolve_env,
+            patch(
+                "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            ) as mock_over_balance,
+            patch(
+                "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
+            ) as mock_create_session,
+            patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+        ):
+            mock_resolve_agent.return_value = "agent_test_id"
+            mock_resolve_env.return_value = "env_test_id"
+            mock_over_balance.return_value = True
+
+            await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                event,
+                team_id=team_id,
+                channel=channel,
+                event_ts=thread_ts,
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant_id,
+            )
+
+            mock_create_session.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+            mock_run_turn.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+
+        # The account was pre-seeded ADMIN and the incoming users.info signal was
+        # a plain member (False). If the role write ran despite the admission
+        # denial, it would have flipped to USER. It must still be ADMIN.
+        async with db_session_factory() as s:
+            account = await get_account(s, principal.account_id)
+        assert account is not None, "account must exist (identity resolution runs before the gate)"
+        assert account.role == Role.ADMIN, (
+            f"an admission-denied branch must perform no role write; got: {account.role!r}"
+        )

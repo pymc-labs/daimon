@@ -8,6 +8,7 @@ authors = [{ name = "PyMC Labs" }]
 dependencies = [
     "daimon-core",
     "slack-sdk>=3.42,<4",
+    "aiohttp>=3.9",
     "structlog>=24",
     "anthropic>=0.96",
     "sqlalchemy[asyncio]>=2",

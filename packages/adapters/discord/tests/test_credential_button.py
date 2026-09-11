@@ -260,7 +260,7 @@ async def test_from_custom_id_unknown_token_returns_item_with_no_row_and_fallbac
     item = await CredentialRequestButton.from_custom_id(interaction, MagicMock(), _match(token))
 
     assert item.request_row is None, "an unknown token must yield no row rather than raising"
-    assert item.item.label == "Add credential", "fallback label is used when no row is found"
+    assert item.item.label == "Enter it privately", "fallback label is used when no row is found"
 
 
 async def test_from_custom_id_db_failure_is_logged_and_interaction_check_rejects_gracefully(

@@ -115,7 +115,7 @@ class TestRenderError:
     def test_invalid_token_does_not_leak_ciphertext_detail(self) -> None:
         result = render_error(InvalidToken("gAAAA-ciphertext"), request_id=TEST_RID)
         assert "gAAAA" not in result, "Fernet detail stays in the logs"
-        assert "*Credential error*" in result
+        assert "*Slack token error*" in result
         assert TEST_RID in result
 
     def test_value_error(self) -> None:

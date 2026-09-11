@@ -41,10 +41,10 @@ from daimon.core.credential_requests import (
 from fastmcp.exceptions import ToolError
 
 _KIND_NOUN: dict[CredentialRequestKind, str] = {
-    "env": "an environment secret",
-    "mcp": "an MCP server credential",
-    "repo": "a repo binding",
-    "skill_repo": "a GitHub token to import skills",
+    "env": "an API key",
+    "mcp": "an MCP server token",
+    "repo": "a working repo",
+    "skill_repo": "a GitHub token for a skill repo",
 }
 
 
@@ -58,19 +58,21 @@ def _build_message_body(
 ) -> str:
     if kind == "repo":
         return (
-            f"<@{requester_platform_user_id}> wants to bind a repo to **{agent_name}** "
+            f"<@{requester_platform_user_id}> wants to set a working repo for **{agent_name}** "
             f"(`{target}`) — {purpose}\n"
             "Click the button below to open a private form confirming the branch, "
             "and — only if the repo isn't publicly readable — a GitHub token that "
-            "never appears in this channel."
+            "never appears in this channel. Only the requester can open this form; "
+            "the request expires 30 minutes after creation."
         )
     return (
         f"<@{requester_platform_user_id}> **{agent_name}** needs {_KIND_NOUN[kind]} "
         f"(`{target}`) — {purpose}\n"
-        "Click the button below to enter the value privately in a Discord modal; "
-        "it will never appear in this channel.\n"
-        f"Once added, this credential becomes usable by everyone who talks to "
-        f"**{agent_name}**."
+        "Click the button below to enter the value privately in a private form; "
+        "it will never appear in this channel. Only the requester can open this form; "
+        "the request expires 30 minutes after creation.\n"
+        f"Once added, everyone who talks to "
+        f"**{agent_name}** can use the {'key' if kind == 'env' else 'connection'}."
     )
 
 

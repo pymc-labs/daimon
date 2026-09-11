@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Slack supports `post_github_app_install_link` and the configurable
+  `DAIMON_SLACK__BOT_DISPLAY_NAME`. An unconfigured GitHub App link names the
+  operator setting needed; posting a link does not prove installation or repo access.
+- `daimon agents bind-google` lets operators bind an agent's Google identity
+  and scopes without writing SQL.
+
 - **Organic thread participation (Discord, opt-in).** Ask the agent to follow
   a thread and it keeps replying there unprompted. `DAIMON_THREAD_PARTICIPATION__MODE`
   sets the deployment default (`off` by default, `on`, or `disabled`, which also
@@ -35,6 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Breaking MCP tool changes:** `request_env_credential`,
+  `list_env_credential_keys`, `remove_env_credential`, `request_mcp_credential`,
+  and `request_skill_repo_credential` are now `request_agent_key`,
+  `list_agent_keys`, `remove_agent_key`, `request_mcp_token`, and
+  `request_skill_repo_token`, respectively. The duplicate `skills_sync`,
+  `skills_list`, `skills_get`, and `skills_delete` aliases are removed; use
+  `sync_skills`, `list_skills`, `get_skill`, and `delete_skill`. Update external
+  callers; compatibility aliases are not retained.
+
 - **`DAIMON_SLACK__DEV_ALLOW_ALL_ADMIN`** — the Slack testing-only admin bypass.
   It made the admin check return true before `users.info` was ever called,
   opening every Slack admin gate for every member of every install on the
@@ -44,6 +59,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that relied on it.
 
 ### Security
+
+- Slack refreshes the caller's admin role on every mention; failed lookups do
+  not overwrite a stored role. Both adapters include caller admin status in
+  turn context. Discord turn replies suppress mass mentions.
+- Setup guidance and private-input controls use consistent key/token language,
+  preserve operation permissions and partial results, and avoid obsolete panel
+  redirects or claims that newly stored keys refreshed an existing session.
 
 - Slack mentions queued behind an in-flight turn are now partitioned by author,
   one turn per caller. Previously the whole queue was coalesced into a single

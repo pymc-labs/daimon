@@ -56,11 +56,11 @@ _tools_conftest = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_tools_conftest)
 patch_discord_http = _tools_conftest.patch_discord_http
 
-_request_env_credential_impl = (
-    _credential_requests_mod._request_env_credential_impl  # pyright: ignore[reportPrivateUsage]
+_request_agent_key_impl = (
+    _credential_requests_mod._request_agent_key_impl  # pyright: ignore[reportPrivateUsage]
 )
-_request_mcp_credential_impl = (
-    _credential_requests_mod._request_mcp_credential_impl  # pyright: ignore[reportPrivateUsage]
+_request_mcp_token_impl = (
+    _credential_requests_mod._request_mcp_token_impl  # pyright: ignore[reportPrivateUsage]
 )
 _request_repo_binding_impl = (
     _credential_requests_mod._request_repo_binding_impl  # pyright: ignore[reportPrivateUsage]
@@ -283,11 +283,11 @@ async def _row_count(db_session: AsyncSession) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 1. request_env_credential creates a row + posts a button
+# 1. request_agent_key creates a row + posts a button
 # ---------------------------------------------------------------------------
 
 
-async def test_request_env_credential_creates_row_and_posts_button(
+async def test_request_agent_key_creates_row_and_posts_button(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -303,7 +303,7 @@ async def test_request_env_credential_creates_row_and_posts_button(
     posted: dict[str, Any] = {}
     _patch_successful_post(monkeypatch, message_id="9201", posted=posted)
 
-    result = await _request_env_credential_impl(
+    result = await _request_agent_key_impl(
         runtime,
         auth,
         agent_name="daimon",
@@ -330,11 +330,11 @@ async def test_request_env_credential_creates_row_and_posts_button(
 
 
 # ---------------------------------------------------------------------------
-# 2. request_mcp_credential creates a row + posts a button
+# 2. request_mcp_token creates a row + posts a button
 # ---------------------------------------------------------------------------
 
 
-async def test_request_mcp_credential_creates_row_and_posts_button(
+async def test_request_mcp_token_creates_row_and_posts_button(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -349,7 +349,7 @@ async def test_request_mcp_credential_creates_row_and_posts_button(
     posted: dict[str, Any] = {}
     _patch_successful_post(monkeypatch, message_id="9202", posted=posted)
 
-    result = await _request_mcp_credential_impl(
+    result = await _request_mcp_token_impl(
         runtime,
         auth,
         agent_name="daimon",
@@ -379,10 +379,10 @@ async def test_neither_tool_signature_exposes_a_secret_bearing_parameter() -> No
     register_credential_request_tools(mcp, _runtime(MagicMock()))  # type: ignore[arg-type]
     tools = await mcp.list_tools()
     by_name = {t.name: t for t in tools}
-    assert {"request_env_credential", "request_mcp_credential"} <= by_name.keys(), (
+    assert {"request_agent_key", "request_mcp_token"} <= by_name.keys(), (
         "both tools must be registered"
     )
-    for name in ("request_env_credential", "request_mcp_credential"):
+    for name in ("request_agent_key", "request_mcp_token"):
         param_names = set(by_name[name].parameters.get("properties", {}))
         forbidden = {
             p for p in param_names if any(w in p.lower() for w in ("token", "secret", "value"))
@@ -395,7 +395,7 @@ async def test_neither_tool_signature_exposes_a_secret_bearing_parameter() -> No
 async def test_impl_signatures_have_no_token_secret_or_value_parameter() -> None:
     """Belt-and-suspenders: the underlying impls' own signatures, not just the
     FastMCP-registered schema, carry no token/secret/value parameter."""
-    for fn in (_request_env_credential_impl, _request_mcp_credential_impl):
+    for fn in (_request_agent_key_impl, _request_mcp_token_impl):
         params = set(inspect.signature(fn).parameters)
         forbidden = {p for p in params if any(w in p.lower() for w in ("token", "secret", "value"))}
         assert not forbidden, (
@@ -408,7 +408,7 @@ async def test_impl_signatures_have_no_token_secret_or_value_parameter() -> None
 # ---------------------------------------------------------------------------
 
 
-async def test_request_env_credential_succeeds_for_non_admin_caller(
+async def test_request_agent_key_succeeds_for_non_admin_caller(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -422,7 +422,7 @@ async def test_request_env_credential_succeeds_for_non_admin_caller(
     auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
     _patch_successful_post(monkeypatch, message_id="9203")
 
-    result = await _request_env_credential_impl(
+    result = await _request_agent_key_impl(
         runtime,
         auth,
         agent_name="daimon",
@@ -440,27 +440,27 @@ async def test_request_env_credential_succeeds_for_non_admin_caller(
 # ---------------------------------------------------------------------------
 
 
-async def test_request_env_credential_rejects_slack_caller_without_workspace(
+async def test_request_agent_key_rejects_slack_caller_without_workspace(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(platform="slack", external_id=None, platform_user_id="U123")
     with pytest.raises(ToolError, match="workspace context"):
-        await _request_env_credential_impl(
+        await _request_agent_key_impl(
             runtime, auth, agent_name="daimon", key="OPENAI_API_KEY", purpose="x", channel_id="222"
         )
     assert await _row_count(db_session) == 0, "a rejected slack call must create no row"
 
 
-async def test_request_mcp_credential_rejects_slack_caller_without_workspace(
+async def test_request_mcp_token_rejects_slack_caller_without_workspace(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(platform="slack", external_id=None, platform_user_id="U123")
     with pytest.raises(ToolError, match="workspace context"):
-        await _request_mcp_credential_impl(
+        await _request_mcp_token_impl(
             runtime,
             auth,
             agent_name="daimon",
@@ -476,14 +476,14 @@ async def test_request_mcp_credential_rejects_slack_caller_without_workspace(
 # ---------------------------------------------------------------------------
 
 
-async def test_request_env_credential_rejects_missing_platform_user_id(
+async def test_request_agent_key_rejects_missing_platform_user_id(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(platform_user_id=None)
     with pytest.raises(ToolError, match="platform-bound identity"):
-        await _request_env_credential_impl(
+        await _request_agent_key_impl(
             runtime, auth, agent_name="daimon", key="OPENAI_API_KEY", purpose="x", channel_id="222"
         )
     assert await _row_count(db_session) == 0
@@ -494,14 +494,14 @@ async def test_request_env_credential_rejects_missing_platform_user_id(
 # ---------------------------------------------------------------------------
 
 
-async def test_request_env_credential_rejects_invalid_key(
+async def test_request_agent_key_rejects_invalid_key(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity()
     with pytest.raises(ToolError, match=r"\[A-Za-z_\]\[A-Za-z0-9_\]\*"):
-        await _request_env_credential_impl(
+        await _request_agent_key_impl(
             runtime, auth, agent_name="daimon", key="1BAD-KEY", purpose="x", channel_id="222"
         )
     assert await _row_count(db_session) == 0
@@ -512,7 +512,7 @@ async def test_request_env_credential_rejects_invalid_key(
 # ---------------------------------------------------------------------------
 
 
-async def test_request_env_credential_rejects_unknown_agent(
+async def test_request_agent_key_rejects_unknown_agent(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
@@ -522,7 +522,7 @@ async def test_request_env_credential_rejects_unknown_agent(
     runtime = _runtime(committing_sessionmaker, client=client)
     auth = _auth_identity(tenant_id=tenant.id)
     with pytest.raises(ToolError, match="not found in this tenant"):
-        await _request_env_credential_impl(
+        await _request_agent_key_impl(
             runtime, auth, agent_name="ghost", key="OPENAI_API_KEY", purpose="x", channel_id="222"
         )
     assert await _row_count(db_session) == 0
@@ -533,14 +533,14 @@ async def test_request_env_credential_rejects_unknown_agent(
 # ---------------------------------------------------------------------------
 
 
-async def test_request_mcp_credential_rejects_non_http_url(
+async def test_request_mcp_token_rejects_non_http_url(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity()
     with pytest.raises(ToolError, match="must be http or https"):
-        await _request_mcp_credential_impl(
+        await _request_mcp_token_impl(
             runtime,
             auth,
             agent_name="daimon",
@@ -689,12 +689,12 @@ async def test_request_repo_binding_posts_message_naming_agent_and_repo(
     assert button["custom_id"].startswith(CUSTOM_ID_PREFIX), (
         "the button's custom_id must carry the credential-request prefix"
     )
-    assert button["label"].startswith("Bind repo: "), (
+    assert button["label"].startswith("Set working repo: "), (
         "the button's label must use the repo-kind prefix"
     )
 
 
-async def test_request_env_credential_raises_when_button_post_fails(
+async def test_request_agent_key_raises_when_button_post_fails(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
@@ -710,7 +710,7 @@ async def test_request_env_credential_raises_when_button_post_fails(
     auth = _auth_identity(tenant_id=tenant.id)
 
     with pytest.raises(ToolError, match="posting the button failed"):
-        await _request_env_credential_impl(
+        await _request_agent_key_impl(
             runtime, auth, agent_name="daimon", key="OPENAI_API_KEY", purpose="x", channel_id="222"
         )
 
@@ -795,7 +795,7 @@ def _register_slack_post_defaults(m: Any, *, channel_id: str = "C_CRED") -> None
     )
 
 
-async def test_request_env_credential_posts_slack_button_carrying_the_token(
+async def test_request_agent_key_posts_slack_button_carrying_the_token(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
@@ -818,7 +818,7 @@ async def test_request_env_credential_posts_slack_button_carrying_the_token(
 
     with aioresponses() as m:
         _register_slack_post_defaults(m)
-        result = await _request_env_credential_impl(
+        result = await _request_agent_key_impl(
             runtime,
             auth,
             agent_name="daimon",

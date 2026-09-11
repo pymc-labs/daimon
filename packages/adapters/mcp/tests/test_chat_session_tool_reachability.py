@@ -27,21 +27,15 @@ One outcome is recorded rather than treated as a bug:
   Minting an agent claim into the account-scoped vault credential would
   make them reachable, but that credential is deliberately account-scoped,
   not agent-scoped, so it is out of scope here.
-- ``request_mcp_credential`` / ``request_env_credential`` reject Slack
-  callers and require a platform-bound identity (``auth.platform_user_id``).
-  The session built here carries a Discord-shaped platform claim, so both
-  reach their implementation; on Slack today they would be refused instead.
-  These two tools are Discord-only until a Slack-side implementation lands.
+- ``request_mcp_token`` / ``request_agent_key`` are available on Discord and
+  Slack and require a platform-bound caller. This suite exercises Discord;
+  the golden-query and authorization journeys cover the platform distinction.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import datetime as dt
-import json
 import uuid
-from collections.abc import AsyncIterator
 from typing import NamedTuple
 
 import httpx
@@ -59,9 +53,9 @@ from daimon.testing.factories import make_account, make_platform_principal, make
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from starlette.types import ASGIApp, Message
+from starlette.types import ASGIApp
 
-from .factories import make_jwt, make_ma_agent
+from .factories import make_jwt, make_ma_agent, mcp_session
 
 pytestmark = pytest.mark.asyncio
 
@@ -102,10 +96,9 @@ CHAT_TURN_TOOL_REACHABILITY: dict[str, ExpectedOutcome] = {
     "list_agents": ExpectedOutcome(discoverable=True),
     "get_agent": ExpectedOutcome(discoverable=True),
     "archive_agent": ExpectedOutcome(discoverable=False),
-    # credential_requests.py — never admin-gated; Discord-only (see module
-    # docstring).
-    "request_mcp_credential": ExpectedOutcome(discoverable=True),
-    "request_env_credential": ExpectedOutcome(discoverable=True),
+    # credential_requests.py — requester-only enrollment, not admin-gated.
+    "request_mcp_token": ExpectedOutcome(discoverable=True),
+    "request_agent_key": ExpectedOutcome(discoverable=True),
     # routines.py — ungated by design; needs a platform user identity, which
     # this Discord-shaped session carries.
     "create_routine": ExpectedOutcome(discoverable=True),
@@ -130,13 +123,13 @@ _CALL_ARGS: dict[str, dict[str, object]] = {
     "fork_agent": {"source_name": "demo-agent", "new_name": "demo-fork"},
     "list_agents": {},
     "get_agent": {"name": "demo-agent"},
-    "request_mcp_credential": {
+    "request_mcp_token": {
         "agent_name": "demo-agent",
         "server_name": "ctx7",
         "url": "https://ctx7.example/mcp",
         "channel_id": "channel-1",
     },
-    "request_env_credential": {
+    "request_agent_key": {
         "agent_name": "demo-agent",
         "key": "MY_KEY",
         "purpose": "testing",
@@ -155,83 +148,6 @@ _CALL_ARGS: dict[str, dict[str, object]] = {
     },
     "get_thread_participation": {"thread_id": "thread-1", "channel_id": "channel-1"},
 }
-
-
-@contextlib.asynccontextmanager
-async def _lifespan(app: ASGIApp) -> AsyncIterator[None]:
-    send_queue: asyncio.Queue[Message] = asyncio.Queue()
-    receive_queue: asyncio.Queue[Message] = asyncio.Queue()
-
-    async def receive() -> Message:
-        return await receive_queue.get()
-
-    async def send(message: Message) -> None:
-        await send_queue.put(message)
-
-    async def run_lifespan() -> None:
-        await app({"type": "lifespan", "asgi": {"version": "3.0"}}, receive, send)
-
-    task = asyncio.create_task(run_lifespan())
-
-    await receive_queue.put({"type": "lifespan.startup"})
-    msg = await send_queue.get()
-    assert msg["type"] == "lifespan.startup.complete", msg
-    try:
-        yield
-    finally:
-        await receive_queue.put({"type": "lifespan.shutdown"})
-        msg = await send_queue.get()
-        assert msg["type"] == "lifespan.shutdown.complete", msg
-        await task
-
-
-def _parse_jsonrpc_response(resp: httpx.Response) -> dict[str, object]:
-    content_type = resp.headers.get("content-type", "")
-    if "text/event-stream" in content_type:
-        for line in resp.text.splitlines():
-            if line.startswith("data: "):
-                return json.loads(line[6:])  # type: ignore[return-value]
-        raise AssertionError(f"No data line in SSE response: {resp.text!r}")
-    return resp.json()  # type: ignore[return-value]
-
-
-async def _mcp_session(
-    app: ASGIApp,
-    *,
-    token: str,
-    method: str,
-    params: dict[str, object] | None = None,
-) -> dict[str, object]:
-    headers = {
-        "Accept": "application/json, text/event-stream",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}",
-    }
-    transport = httpx.ASGITransport(app=app)  # pyright: ignore[reportArgumentType]
-    async with _lifespan(app), httpx.AsyncClient(transport=transport, base_url="http://t") as c:
-        init_resp = await c.post(
-            "/mcp",
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "0"},
-                },
-            },
-            headers=headers,
-        )
-        assert init_resp.status_code == 200, f"initialize failed: {init_resp.text}"
-        session_id = init_resp.headers.get("mcp-session-id")
-        if session_id:
-            headers["Mcp-Session-Id"] = session_id
-
-        body = {"jsonrpc": "2.0", "id": 2, "method": method, "params": params or {}}
-        resp = await c.post("/mcp", json=body, headers=headers)
-        assert resp.status_code == 200, f"{method} failed ({resp.status_code}): {resp.text}"
-        return _parse_jsonrpc_response(resp)
 
 
 def _make_app(sessionmaker: async_sessionmaker[AsyncSession], anthropic: AsyncAnthropic) -> ASGIApp:
@@ -301,7 +217,7 @@ async def test_chat_turn_session_matches_recorded_reachability(
     token = await _seed_chat_turn_session(sessionmaker)
     app = _make_app(sessionmaker, _build_client())
 
-    search_result = await _mcp_session(
+    search_result = await mcp_session(
         app,
         token=token,
         method="tools/call",
@@ -312,7 +228,7 @@ async def test_chat_turn_session_matches_recorded_reachability(
     search_text = " ".join(
         item.get("text", "") for item in search_content if isinstance(item, dict)
     )
-    is_discoverable = tool_name in search_text
+    is_discoverable = f"### {tool_name}" in search_text
     assert is_discoverable == expected.discoverable, (
         f"{tool_name}: expected discoverable={expected.discoverable}, got {is_discoverable}; "
         f"search_tools output: {search_text!r}"
@@ -320,7 +236,7 @@ async def test_chat_turn_session_matches_recorded_reachability(
     if not expected.discoverable:
         return
 
-    call_result = await _mcp_session(
+    call_result = await mcp_session(
         app,
         token=token,
         method="tools/call",
@@ -356,7 +272,7 @@ async def test_agent_id_claim_session_discovers_agent_chat_and_self_edit_tools_o
     token = mint_jwt(account_id=account.id, secret=SECRET.encode(), now=_NOW, agent_id=uuid.uuid4())
     app = _make_app(sessionmaker, _build_client())
 
-    result = await _mcp_session(app, token=token, method="tools/list")
+    result = await mcp_session(app, token=token, method="tools/list")
     payload = result.get("result", result)
     tool_names = {t["name"] for t in payload.get("tools", [])}  # type: ignore[union-attr]
 

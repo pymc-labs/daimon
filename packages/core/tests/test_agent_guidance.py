@@ -25,6 +25,32 @@ def test_prepends_block_when_absent() -> None:
     assert "MCP" in out, "must explain MCP vault-bound auth"
 
 
+def test_block_names_no_setup_path() -> None:
+    # The preamble must not name a nested panel path.
+    assert "/agent-setup" not in CREDENTIAL_GUIDANCE_BLOCK, (
+        "block must not name a setup panel path — the preamble's reader is the agent"
+    )
+
+
+def test_replaces_old_style_block_not_stacks() -> None:
+    # A system carrying a stale sentinel-wrapped block (e.g. from before a
+    # preamble rewrite) must be replaced by the current block, never stacked
+    # alongside it — this is what makes a wording change safe to deploy over
+    # live agents.
+    old_block = (
+        "<!-- daimon:credential-guidance v1 -->\nSOME OLD STALE BODY\n"
+        "<!-- /daimon:credential-guidance -->"
+    )
+    system_with_old_block = f"{old_block}\n\nORIGINAL BODY"
+    out = apply_credential_guidance(system_with_old_block)
+    assert out.count("<!-- daimon:credential-guidance v1 -->") == 1, (
+        "must not stack an old-style block alongside the current one"
+    )
+    assert "SOME OLD STALE BODY" not in out, "stale body must be replaced, not preserved"
+    assert CREDENTIAL_GUIDANCE_BLOCK in out, "current block must be present"
+    assert out.endswith("ORIGINAL BODY"), "user's own body must survive the replacement"
+
+
 def test_idempotent_applied_twice_equals_once() -> None:
     once = apply_credential_guidance("base prompt")
     twice = apply_credential_guidance(once)

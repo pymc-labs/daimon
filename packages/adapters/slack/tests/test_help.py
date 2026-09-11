@@ -60,6 +60,8 @@ async def test_handle_help_command_posts_ephemeral_and_no_views_open(
     }
 
     runtime = MagicMock(spec=SlackRuntime)
+    runtime.settings = MagicMock()
+    runtime.settings.slack = None
 
     with patch(
         "daimon.adapters.slack.help.resolve_web_client",
@@ -108,6 +110,8 @@ async def test_handle_help_command_drops_silently_when_no_token(
     }
 
     runtime = MagicMock(spec=SlackRuntime)
+    runtime.settings = MagicMock()
+    runtime.settings.slack = None
 
     with patch(
         "daimon.adapters.slack.help.resolve_web_client",
@@ -142,6 +146,8 @@ async def test_handle_help_command_reports_failure_ephemerally() -> None:
         "channel_id": "C_HELP_TEST",
     }
     runtime = MagicMock(spec=SlackRuntime)
+    runtime.settings = MagicMock()
+    runtime.settings.slack = None
 
     with patch(
         "daimon.adapters.slack.help.resolve_web_client",
@@ -157,3 +163,12 @@ async def test_handle_help_command_reports_failure_ephemerally() -> None:
     assert notice["channel"] == "C_HELP_TEST"
     assert notice["user"] == "U_HELP_TEST"
     assert "rid:" in notice["text"], "the notice must carry a rid for log lookup"
+
+
+def test_help_uses_the_configured_bot_name() -> None:
+    from daimon.adapters.slack.help import build_help_blocks
+
+    text = str(build_help_blocks(display_name="research-bot"))
+    assert "@research-bot help me set up" in text, "help should mention the configured bot"
+    assert "what research-bot stores" in text, "privacy help should use the configured bot"
+    assert "daimon" not in text, "help should contain no hardcoded bot name"

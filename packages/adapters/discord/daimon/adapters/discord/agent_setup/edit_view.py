@@ -1,8 +1,8 @@
 """EditView (LayoutView) + selects + BackButton + open_edit_view launcher.
 
-EditView's container holds a header, two remove selects (skills, MCPs), and
-two button rows: ``Agent…`` / ``GitHub…`` / ``Install App…`` / ``Env vars``
-and ``+ Add skill`` / ``+ Add MCP`` / ``← Back``. ``Agent…`` and ``GitHub…``
+EditView's container holds a header, two remove selects (skills, MCP servers), and
+two button rows: ``Prompt & model`` / ``Working repo`` / ``Install App…`` / ``Keys``
+and ``+ Add skill`` / ``+ Add MCP server`` / ``← Back``. ``Prompt & model`` and ``Working repo``
 each open their modal directly — no intermediate view. ``Install App…`` is a
 link button (rendered only when a GitHub App slug is configured) opening the
 App's install page on GitHub directly; it carries no callback.
@@ -200,10 +200,10 @@ class _McpRemoveSelect(discord.ui.Select["EditView"]):
             )
         if not options:
             super().__init__(
-                placeholder="(no MCPs — use + Add MCP)",
+                placeholder="(no MCP servers — use + Add MCP server)",
                 min_values=1,
                 max_values=1,
-                options=[discord.SelectOption(label="(no MCPs)", value="__none__")],
+                options=[discord.SelectOption(label="(no MCP servers)", value="__none__")],
                 disabled=True,
             )
             return
@@ -275,8 +275,8 @@ class EditView(ExpiringView, discord.ui.LayoutView):
     """F5 Components V2 edit view.
 
     Container with ## ✏️ Editing {agent} header, two remove selects, and two
-    button rows: Agent… · GitHub… · Env vars, then + Add skill · + Add MCP ·
-    ← Back. Agent… and GitHub… each open their modal directly.
+    button rows: Prompt & model · Working repo · Keys, then + Add skill · + Add MCP server ·
+    ← Back. Prompt & model and Working repo each open their modal directly.
 
     Preserves the isolation invariant: this view is ephemeral and
     never edits the main panel message. Mutations re-render this view via
@@ -317,7 +317,7 @@ class EditView(ExpiringView, discord.ui.LayoutView):
         # spec_editable gates the same controls on reachability instead: an
         # agent nobody has scoped is every member's scratchpad; once some
         # channel or the workspace points at it, only an admin may change its
-        # spec. Env vars and GitHub… are per-agent attachments: they never
+        # spec. Keys and Working repo are per-agent attachments: they never
         # enter the agent spec, so the is_system absolutism above does not
         # apply to them — an admin binding a repo to the built-in agent is a
         # supported first-run step. They are subject to their own shared-state
@@ -329,11 +329,11 @@ class EditView(ExpiringView, discord.ui.LayoutView):
         spec_editable = state.is_admin or not state.is_selected_reachable()
         spec_controls_disabled = is_system or not spec_editable
 
-        # Button row 1: Agent… · GitHub… · Env vars.
+        # Button row 1: Prompt & model · Working repo · Keys.
         field_row: discord.ui.ActionRow[EditView] = discord.ui.ActionRow()
 
         agent_btn: discord.ui.Button[EditView] = discord.ui.Button(
-            label="Agent…",
+            label="Prompt & model",
             style=discord.ButtonStyle.secondary,
             disabled=spec_controls_disabled,
         )
@@ -341,7 +341,7 @@ class EditView(ExpiringView, discord.ui.LayoutView):
         field_row.add_item(agent_btn)
 
         github_btn: discord.ui.Button[EditView] = discord.ui.Button(
-            label="GitHub…",
+            label="Working repo",
             style=discord.ButtonStyle.secondary,
         )
         github_btn.callback = self._on_github  # type: ignore[method-assign]
@@ -360,11 +360,11 @@ class EditView(ExpiringView, discord.ui.LayoutView):
             # Not a spec control and no disabled logic: installing an App on
             # GitHub is neither an agent-spec edit nor an attachment write,
             # and GitHub enforces its own install permissions — same reason
-            # the GitHub… and Env vars doors above are exempt from the gate.
+            # the Working repo and Keys controls above are exempt from the gate.
             field_row.add_item(install_app_btn)
 
         env_vars_btn: discord.ui.Button[EditView] = discord.ui.Button(
-            label="Env vars",
+            label="Keys",
             style=discord.ButtonStyle.secondary,
         )
         env_vars_btn.callback = self._on_env_vars  # type: ignore[method-assign]
@@ -372,7 +372,7 @@ class EditView(ExpiringView, discord.ui.LayoutView):
 
         container.add_item(field_row)
 
-        # Button row 2: + Add skill · + Add MCP · ← Back.
+        # Button row 2: + Add skill · + Add MCP server · ← Back.
         btn_row: discord.ui.ActionRow[EditView] = discord.ui.ActionRow()
 
         add_skill_btn: discord.ui.Button[EditView] = discord.ui.Button(
@@ -384,7 +384,7 @@ class EditView(ExpiringView, discord.ui.LayoutView):
         btn_row.add_item(add_skill_btn)
 
         add_mcp_btn: discord.ui.Button[EditView] = discord.ui.Button(
-            label="+ Add MCP",
+            label="+ Add MCP server",
             style=discord.ButtonStyle.success,
             disabled=(user_mcp_count >= AGENT_MCP_CAP) or spec_controls_disabled,
         )

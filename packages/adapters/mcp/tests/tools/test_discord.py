@@ -758,8 +758,8 @@ async def test_post_credential_button_body_mentions_requester_and_exposure(
     assert "demo" in body, "body must name the agent"
     assert "linear" in body, "body must name the exact target"
     assert "syncing Linear issues" in body, "body must include the caller-supplied purpose"
-    assert "usable by everyone who talks to" in body, (
-        "body must disclose that the credential becomes usable by everyone who talks to the agent"
+    assert "everyone who talks to **demo** can use the connection" in body, (
+        "body must disclose that everyone who talks to the agent can use the connection"
     )
     allowed_mentions = posted["json"]["allowed_mentions"]
     assert allowed_mentions["parse"] == ["users"], (

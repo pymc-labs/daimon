@@ -934,3 +934,12 @@ async def test_callback_user_connect_mismatch_attempts_revoke_and_still_returns_
             s, team_id=_SLACK_TEAM_ID, slack_user_id=_SLACK_FOREIGN_USER_ID
         )
     assert row_u2 is None, "no token row should ever be stored for the foreign authed_user"
+
+
+def test_success_html_escapes_configured_bot_name() -> None:
+    response = _success_html(
+        workspace="Acme", signup_credit=Decimal("5.00"), display_name="research<bot>"
+    )
+    body = response.body.decode()
+    assert "@research&lt;bot&gt;" in body, "success instructions must escape the configured name"
+    assert "@daimon" not in body, "success instructions must not retain a hardcoded bot mention"

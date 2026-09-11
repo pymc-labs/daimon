@@ -29,7 +29,7 @@ from daimon.adapters.mcp.tools.skills import (
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.scope import DeploymentDefault
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
-from fastmcp import Client, FastMCP
+from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
@@ -638,84 +638,17 @@ def _registered_mcp(client: AsyncAnthropic, auth: AuthIdentity) -> FastMCP:
     return mcp
 
 
-async def test_register_skill_tools_registers_verb_first_and_alias_names() -> None:
+async def test_register_skill_tools_uses_only_canonical_names() -> None:
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
     )
     mcp = _registered_mcp(build_fake_anthropic(MARouter().dispatch), auth)
     names = {tool.name for tool in await mcp.list_tools()}
-    expected = {
-        "list_skills",
-        "get_skill",
-        "sync_skills",
-        "delete_skill",
-        "skills_list",
-        "skills_get",
-        "skills_sync",
-        "skills_delete",
-    }
-    assert expected.issubset(names), (
-        f"both verb-first and noun-first alias names must be registered; got {names}"
+    assert names == {"list_skills", "get_skill", "sync_skills", "delete_skill"}, (
+        f"the skill catalogue must expose exactly the four canonical names: {names}"
     )
-
-
-async def test_delete_skill_and_alias_both_carry_admin_tag() -> None:
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
-    )
-    mcp = _registered_mcp(build_fake_anthropic(MARouter().dispatch), auth)
     delete_skill = await mcp.get_tool("delete_skill")
-    skills_delete = await mcp.get_tool("skills_delete")
-    assert "admin" in delete_skill.tags, "delete_skill must carry the admin tag"
-    assert "admin" in skills_delete.tags, "skills_delete alias must carry the admin tag"
-
-
-async def test_list_skills_and_alias_dispatch_identically() -> None:
-    # Use _DISPATCH_TEST_TENANT_ID so the skill prefix in _skills_one_router() matches.
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=_DISPATCH_TEST_TENANT_ID,
-        role=Role.ADMIN,
-        is_admin=True,
-    )
-    canonical_mcp = _registered_mcp(build_fake_anthropic(_skills_one_router().dispatch), auth)
-    alias_mcp = _registered_mcp(build_fake_anthropic(_skills_one_router().dispatch), auth)
-
-    async with Client(canonical_mcp) as cc, Client(alias_mcp) as ac:
-        canonical = await cc.call_tool("list_skills", {})
-        alias = await ac.call_tool("skills_list", {})
-    assert canonical.structured_content == alias.structured_content, (
-        "list_skills and its skills_list alias must dispatch to identical behavior"
-    )
-
-
-async def test_get_skill_and_alias_dispatch_identically() -> None:
-    # Use _DISPATCH_TEST_TENANT_ID so tenant_scoped_display_title prefix matches the stub.
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=_DISPATCH_TEST_TENANT_ID,
-        role=Role.ADMIN,
-        is_admin=True,
-    )
-
-    def _router() -> MARouter:
-        router = _skills_one_router()
-        router.add(
-            "GET",
-            r"/v1/skills/sk_1/versions",
-            lambda _req, _m: list_response([{"version": "1"}]),
-        )
-        return router
-
-    canonical_mcp = _registered_mcp(build_fake_anthropic(_router().dispatch), auth)
-    alias_mcp = _registered_mcp(build_fake_anthropic(_router().dispatch), auth)
-
-    async with Client(canonical_mcp) as cc, Client(alias_mcp) as ac:
-        canonical = await cc.call_tool("get_skill", {"name": "my-skill"})
-        alias = await ac.call_tool("skills_get", {"name": "my-skill"})
-    assert canonical.structured_content == alias.structured_content, (
-        "get_skill and its skills_get alias must dispatch to identical behavior"
-    )
+    assert "admin" in delete_skill.tags, "shared skill deletion remains admin-only"
 
 
 async def test_sync_impl_attaches_to_the_named_agent_and_preserves_its_existing_skills(
@@ -825,7 +758,7 @@ async def test_sync_impl_anonymous_404_names_the_credential_remedy() -> None:
         auth = AuthIdentity(
             account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
         )
-        with pytest.raises(ToolError, match="request_skill_repo_credential") as excinfo:
+        with pytest.raises(ToolError, match="request_skill_repo_token") as excinfo:
             await _sync_impl(
                 _runtime(build_fake_anthropic(MARouter().dispatch)),
                 auth,
@@ -859,7 +792,7 @@ async def test_sync_impl_404_with_a_token_does_not_blame_credentials() -> None:
                 path="",
             )
 
-    assert "request_skill_repo_credential" not in str(excinfo.value), (
+    assert "request_skill_repo_token" not in str(excinfo.value), (
         "a 404 on an authenticated fetch is a bad url/branch, not a missing credential"
     )
 
@@ -897,7 +830,7 @@ async def test_sync_impl_refuses_attach_when_registry_skill_collides_with_scoped
         mock_fetch.return_value = FetchResult(path=tmp_path, cleanup_dir=cleanup_dir)
         mock_sync.return_value = outcomes
 
-        def on_skills_list(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        def on_list_skills(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
             return list_response(
                 [
                     SkillListResponse(
@@ -932,7 +865,7 @@ async def test_sync_impl_refuses_attach_when_registry_skill_collides_with_scoped
             return httpx.Response(500, json={"error": "must not be called"})
 
         router = MARouter()
-        router.add("GET", r"/v1/skills", on_skills_list)
+        router.add("GET", r"/v1/skills", on_list_skills)
         router.add(
             "GET",
             r"/v1/agents$",

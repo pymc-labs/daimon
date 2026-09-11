@@ -35,7 +35,10 @@ def _require_admin(auth: AuthIdentity) -> None:  # pyright: ignore[reportUnusedF
     """
     if not auth.is_admin:
         raise ToolError(
-            "Changing my setup needs Manage Server — ask a server admin to use /agent-setup"
+            "This operation requires a workspace or server admin. Tell the caller who can "
+            "make the change and give them a sentence the admin can say, preserving "
+            "the requested action and target from the conversation. They are not available "
+            "to this permission check; do not invent missing details. Do not retry the mutation."
         )
 
 

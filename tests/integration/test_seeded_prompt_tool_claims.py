@@ -17,11 +17,9 @@ and in every skill it references (not just `workspace-setup`), is checked:
   call-syntax reference to a name that turns out not to exist at all fails
   as "unregistered".
 - If it is a real tool, it must be discoverable by a chat-turn-shaped
-  session (the same shape wave 2's `test_chat_session_tool_reachability.py`
-  built: an account subject, no `agent_id` claim, no `is_admin` claim, a
-  Discord-shaped platform claim) — unless it is in the short, commented
-  exception list below, for the handful of names the skill names *only* to
-  warn the model away from them.
+  session: an account subject, no `agent_id` claim, and a Discord platform
+  identity. Admin-only tools may be named for a handoff, but must remain
+  hidden from the member session and discoverable to the admin session.
 """
 
 from __future__ import annotations
@@ -41,6 +39,7 @@ from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
+    DiscordSettings,
     McpSettings,
     Settings,
 )
@@ -72,16 +71,15 @@ DEFAULTS = REPO_ROOT / "defaults"
 # network — plain English words in the surrounding prose never match it.
 _TOKEN_RE = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b")
 
-# Names the skill deliberately introduces ONLY to warn the model away from
-# them (a real, registered tool that is NOT reachable from a chat turn,
-# named on purpose to distinguish it from a chat-reachable sibling). Keep
-# this short — each entry needs a reason.
-_INTENTIONAL_NON_CHAT_MENTIONS: dict[str, str] = {
-    # named only to distinguish it from remove_skill, its chat-reachable sibling
-    "delete_skill": "tenant-wide destructive skill delete; admin-only, panel-only",
-    # admin-only, so an ADMIN chat turn does reach it — this test's chat
-    # session is deliberately non-admin, which is the only reason it is here
-    "archive_agent": "destructive agent delete; admin-gated, so absent from a non-admin chat turn",
+# Naming a gated operation lets a member hand the exact request to an admin.
+# These are still real tools: both their admin visibility and member hiding
+# are checked below, rather than exempting them from registry validation.
+_ADMIN_HANDOFF_TOOLS: set[str] = {
+    "delete_skill",
+    "archive_agent",
+    "sync_skills",
+    "set_agent_default",
+    "clear_agent_default",
 }
 
 
@@ -221,7 +219,7 @@ async def _search_text(
     result = await call("tools/call", {"name": "search_tools", "arguments": {"query": query}})
     payload = result.get("result", result)
     content = payload.get("content", [])  # type: ignore[union-attr]
-    return " ".join(item.get("text", "") for item in content if isinstance(item, dict))
+    return "\n".join(item.get("text", "") for item in content if isinstance(item, dict))
 
 
 def _make_app(sessionmaker: async_sessionmaker[AsyncSession]) -> ASGIApp:
@@ -229,6 +227,7 @@ def _make_app(sessionmaker: async_sessionmaker[AsyncSession]) -> ASGIApp:
         settings=Settings(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+            discord=DiscordSettings(bot_token=SecretStr("test-discord-token")),
             mcp=McpSettings(jwt_secret=SecretStr(SECRET), public_url=HttpUrl("https://x/mcp")),
         ),
         sessionmaker=sessionmaker,
@@ -240,6 +239,13 @@ async def _seed_admin_token(sessionmaker: async_sessionmaker[AsyncSession]) -> s
     async with sessionmaker() as s, s.begin():
         tenant = await make_tenant(s, platform="discord", workspace_id="prompt-claims-admin")
         account = await make_account(s, tenant=tenant)
+        await make_platform_principal(
+            s,
+            platform="discord",
+            external_id="discord-admin-1",
+            tenant=tenant,
+            account=account,
+        )
         await accounts.set_role(s, account.id, Role.ADMIN)
         account_id = account.id
     return mint_jwt(account_id=account_id, secret=SECRET.encode(), now=_NOW)
@@ -248,7 +254,7 @@ async def _seed_admin_token(sessionmaker: async_sessionmaker[AsyncSession]) -> s
 async def _seed_chat_turn_token(sessionmaker: async_sessionmaker[AsyncSession]) -> str:
     """A token shaped exactly like a Discord chat turn: account subject, no
     `agent_id` claim, no `is_admin` claim, a Discord-bound platform identity —
-    the same shape wave 2's `test_chat_session_tool_reachability.py` built."""
+    the same identity shape used by the adapter."""
     async with sessionmaker() as s, s.begin():
         tenant = await make_tenant(s, platform="discord", workspace_id="prompt-claims-chat-turn")
         account = await make_account(s, tenant=tenant)
@@ -266,16 +272,7 @@ async def _seed_chat_turn_token(sessionmaker: async_sessionmaker[AsyncSession]) 
 async def test_seeded_prompt_and_skill_tool_claims_are_chat_turn_reachable(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Every tool-name-shaped token the seeded prompt or its referenced
-    skills name must be one a chat-turn-shaped session can actually reach.
-
-    Regression coverage note (verified manually, not asserted here — the
-    check needs a live edit to prove): temporarily appending a fabricated
-    tool name, or a real admin-only tool name like `sync_skills`, to
-    `defaults/agents/daimon.yaml`'s system block makes this test fail and
-    names the offending token in the failure message. Both were confirmed
-    during development and reverted before this file was committed.
-    """
+    """Setup guidance names reachable tools and preserves role-specific discovery."""
     system_text, skill_bodies = _collect_texts()
 
     candidates: dict[str, str] = {}
@@ -302,14 +299,17 @@ async def test_seeded_prompt_and_skill_tool_claims_are_chat_turn_reachable(
     all_text = "\n".join([system_text, *skill_bodies.values()])
     offending: list[str] = []
     for token, source in sorted(candidates.items()):
-        if token in _INTENTIONAL_NON_CHAT_MENTIONS:
+        heading = rf"^### {re.escape(token)}\b"
+        is_registered = re.search(heading, admin_search_text[token], re.MULTILINE) is not None
+        is_chat_discoverable = re.search(heading, chat_search_text[token], re.MULTILINE) is not None
+        if token in _ADMIN_HANDOFF_TOOLS:
+            assert is_registered, f"admin handoff names an undiscoverable tool: {token}"
+            assert not is_chat_discoverable, f"admin-only tool is exposed to a member: {token}"
             continue
-        is_registered = token in admin_search_text[token]
         if not is_registered and not _is_call_syntax(token, all_text):
             # Not a real tool, and not written as a call — an ordinary
             # identifier-shaped word (a parameter name, a YAML key, ...).
             continue
-        is_chat_discoverable = token in chat_search_text[token]
         if not is_chat_discoverable:
             reason = (
                 "registered but not reachable from a chat turn"

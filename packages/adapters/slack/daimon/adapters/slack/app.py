@@ -24,6 +24,7 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
+from daimon.adapters.slack.admin import resolve_admin_status
 from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
     handle_agent_setup_command,
@@ -73,6 +74,7 @@ from daimon.adapters.slack.help import handle_help_command
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.memory import handle_memory_command
+from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.output_delivery import deliver_session_outputs
 from daimon.adapters.slack.privacy_panel.actions import (
     handle_privacy_block_action,
@@ -91,7 +93,7 @@ from daimon.adapters.slack.routines_panel.submit import (
     run_routines_create_submission,
     run_routines_delete_submission,
 )
-from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.runtime import SlackRuntime, resolve_bot_display_name
 from daimon.adapters.slack.vision import (
     SlackFile,
     download_as_image_blocks,
@@ -105,6 +107,8 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.slack_oauth import build_slack_connect_url
+from daimon.core.stores.accounts import set_role
+from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.slack_connect_prompts import mark_connect_prompted, was_connect_prompted
 from daimon.core.stores.slack_event_dedup import insert_if_new
@@ -868,7 +872,7 @@ class SlackApp:
             async with self.runtime.sessionmaker() as s:
                 row = await get_slack_bot_token(s, team_id=team_id)
             if row is None:
-                log.warning("slack.event_dropped.no_token", team_id=team_id)
+                log.error("slack.event_dropped.no_token", team_id=team_id)
                 return
 
             # (3) PER-EVENT CLIENT — decrypt and construct; NEVER cache on self/runtime.
@@ -976,9 +980,13 @@ class SlackApp:
             user=slack_user_id,
             thread_ts=thread_ts,
             text=(
-                "👋 Tip: connect your Slack account and daimon can read any channel "
+                "👋 Tip: connect your Slack account and "
+                f"{escape_mrkdwn(resolve_bot_display_name(self.runtime.settings))} "
+                "can read any channel "
                 "or DM *you* can see — no invites needed — plus search your messages "
-                f"(in a DM with daimon).\nConnect: {connect_url}\n"
+                "(in a DM with "
+                f"{escape_mrkdwn(resolve_bot_display_name(self.runtime.settings))}).\n"
+                f"Connect: {connect_url}\n"
                 "_The link is personal and expires in about an hour. If your "
                 "workspace requires admin approval for app permissions, an admin "
                 "may need to approve first. Disconnect any time via `/privacy`._"
@@ -1215,6 +1223,16 @@ class SlackApp:
         No try/except — errors propagate to the listener boundary in
         ``_handle_app_mention``.
         """
+        # --- Live admin lookup: one users.info per turn, before admit().
+        # admin_status distinguishes "not an admin" (False) from "lookup failed"
+        # (None) so the role write below can skip on failure rather than
+        # demoting a real admin on a transient Slack error. is_admin is the
+        # single local Task 2's context builders also consume — a second lookup
+        # would violate the one-call-per-turn constraint.
+        author_id = str(event.get("user") or "")
+        admin_status = await resolve_admin_status(web_client, user_id=author_id)
+        is_admin = bool(admin_status)
+
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- D-01 admit(). ---
         try:
@@ -1222,7 +1240,7 @@ class SlackApp:
                 self.runtime.turn_deps,
                 tenant_id=tenant_id,
                 platform="slack",
-                external_user_id=str(event.get("user") or ""),
+                external_user_id=author_id,
                 channel_id=channel,
                 now=datetime.now(UTC),
             )
@@ -1236,14 +1254,10 @@ class SlackApp:
             hints: list[str] = []
             if "agent" in err.missing:
                 hints.append(
-                    "An admin can set the default agent in `/agent-setup` → "
-                    "*Set as default…* → [This channel] or [Whole workspace]."
+                    "Ask a workspace admin to choose who answers here with `/agent-setup`."
                 )
             if "environment" in err.missing:
-                hints.append(
-                    "Environment is operator-only — an operator can set it via the CLI "
-                    "(`daimon config set environment_name=...`)."
-                )
+                hints.append("Ask the operator to configure an environment for this channel.")
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
@@ -1264,9 +1278,8 @@ class SlackApp:
                 thread_ts=thread_id,
                 text=(
                     "The configured agent or environment no longer exists. "
-                    "An admin can re-set the agent in `/agent-setup` → "
-                    "*Set as default…*; the environment is operator-only via the CLI "
-                    "(`daimon config set environment_name=...`)."
+                    "Ask a workspace admin to choose an existing agent with `/agent-setup`, "
+                    "or ask the operator to restore the environment."
                 ),
             )
             return
@@ -1283,7 +1296,9 @@ class SlackApp:
                     channel=channel,
                     thread_ts=thread_id,
                     text=(
-                        "This workspace's daimon credit is depleted. "
+                        f"This workspace's "
+                        f"{escape_mrkdwn(resolve_bot_display_name(self.runtime.settings))} "
+                        "credit is depleted. "
                         "An admin can top up with `/billing`."
                     ),
                 )
@@ -1309,6 +1324,19 @@ class SlackApp:
         agent = admission.agent
         _lc_agent_name: str = agent.name
         _lc_model_id: str = agent.model.id
+
+        # --- Per-turn role upsert: sync account.role from live Slack admin status
+        # Gated on the users.info lookup having succeeded above --
+        # on lookup failure admin_status is None and the stored role is left
+        # alone, never granted and never revoked on a transient Slack error.
+        if admin_status is not None:
+            async with self.runtime.sessionmaker() as _role_session:
+                await set_role(
+                    _role_session,
+                    admission.account_id,
+                    Role.ADMIN if is_admin else Role.USER,
+                )
+                await _role_session.commit()
 
         # lifecycle_holder tracks whichever SlackTurnLifecycle actually
         # completed the turn -- recovery_lifecycle rebuilds a fresh one against
@@ -1458,7 +1486,6 @@ class SlackApp:
             user_text = (
                 content_override if content_override is not None else str(event.get("text") or "")
             )
-            author_id = str(event.get("user") or "")
             if not reused:
                 # First turn: replay thread history (one Slack page from the root).
                 user_message = await build_context_xml(
@@ -1467,6 +1494,7 @@ class SlackApp:
                     thread_ts=thread_id,
                     user_query=user_text,
                     author_id=author_id,
+                    is_admin=is_admin,
                     proxy=proxy_ctx,
                 )
             elif watermark is not None:
@@ -1478,6 +1506,7 @@ class SlackApp:
                     watermark_ts=watermark,
                     user_query=user_text,
                     author_id=author_id,
+                    is_admin=is_admin,
                     proxy=proxy_ctx,
                 )
             else:
@@ -1541,6 +1570,7 @@ class SlackApp:
                     thread_ts=thread_id,
                     user_query=user_text,
                     author_id=author_id,
+                    is_admin=is_admin,
                     proxy=proxy_ctx,
                 )
                 if synthetic_prefix:

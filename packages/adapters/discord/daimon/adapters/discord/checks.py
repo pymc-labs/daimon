@@ -142,7 +142,8 @@ def require_manage_guild(  # noqa: UP047  -- ParamSpec used for decorator generi
     ) -> None:
         if not is_guild_admin(interaction):
             await interaction.response.send_message(
-                "Changing my setup needs Manage Server — ask a server admin to use /agent-setup",
+                "🛡️ Viewing scheduled routines needs a server admin (Manage Server). "
+                "Ask one: “Please open `/routines` to review this server’s scheduled routines.”",
                 ephemeral=True,
             )
             return

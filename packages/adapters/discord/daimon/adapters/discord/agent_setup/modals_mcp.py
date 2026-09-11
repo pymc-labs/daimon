@@ -111,7 +111,8 @@ class AddMcpModal(discord.ui.Modal, title="Add MCP server"):
                 err_type=type(err).__name__,
             )
             await interaction.followup.send(
-                f"Failed to add MCP **{name}**: `{type(err).__name__}: {err}`",
+                f"Could not confirm adding MCP server **{name}** to **{selected_name}**. "
+                "Open `/agent-setup` to check its MCP servers before trying again.",
                 ephemeral=True,
             )
             return
@@ -128,7 +129,8 @@ class AddMcpModal(discord.ui.Modal, title="Add MCP server"):
         if selected is None:
             await interaction.followup.send(
                 f"MCP **{name}** registered on the agent, but no agent is "
-                "selected — cannot write vault credential.",
+                "selected, so its token was not saved. Open `/agent-setup` to select the agent "
+                "and add the server again.",
                 ephemeral=True,
             )
             return
@@ -145,7 +147,8 @@ class AddMcpModal(discord.ui.Modal, title="Add MCP server"):
             )
             await interaction.followup.send(
                 f"MCP **{name}** registered on the agent, but could not find "
-                f"agent **{selected.name}** on MA — vault credential not written.",
+                f"agent **{selected.name}**, so its token was not saved. "
+                "Open `/agent-setup` to check whether the agent still exists.",
                 ephemeral=True,
             )
             return
@@ -154,9 +157,8 @@ class AddMcpModal(discord.ui.Modal, title="Add MCP server"):
         mcp = self.runtime.settings.mcp
         if mcp.public_url is None or mcp.jwt_secret is None:
             await interaction.followup.send(
-                f"MCP **{name}** registered on the agent, but daimon-mcp is "
-                "not configured (public_url / jwt_secret missing) — vault "
-                "credential not written.",
+                f"MCP server **{name}** was added, but its token was not saved. "
+                "Ask the operator to finish setting up this deployment, then add the server again.",
                 ephemeral=True,
             )
             return
@@ -213,16 +215,11 @@ class AddMcpModal(discord.ui.Modal, title="Add MCP server"):
                 agent_name=selected_name,
                 err_type=type(err).__name__,
             )
-            # Surface only the exception class name to the user — never the
-            # stringified exception. `str(err)` for SDK / network exceptions
-            # may include the request envelope, which has historically been
-            # observed to include kwargs (token-leak surface). Operators get
-            # the full traceback via `_log.exception` above.
+            # The server definition was saved; token storage spans multiple writes.
+            # Keep unexpected exception details in the operator log.
             await interaction.followup.send(
-                f"MCP **{name}** registered on the agent, but storing its "
-                f"auth token in the per-agent vault failed "
-                f"(`{type(err).__name__}`). Tool calls to this server will "
-                "401 until re-added.",
+                f"MCP server **{name}** was added, but saving its token did not finish. "
+                "Open `/agent-setup` and add the server again to retry its connection.",
                 ephemeral=True,
             )
         from daimon.adapters.discord.agent_setup.edit_view import EditView

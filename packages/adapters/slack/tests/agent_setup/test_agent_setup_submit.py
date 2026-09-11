@@ -1708,7 +1708,7 @@ async def test_run_edit_repo_submission_blank_pat_binds_anon_when_repo_public(
     assert row.proof_at is not None, "proof_at must be recorded"
 
     texts = _ephemeral_texts_for(client_fake)
-    assert any("Saved repo + auth" in t for t in texts), (
+    assert any("Saved working repo access" in t for t in texts), (
         "user should see the plain save confirmation"
     )
     assert not any("App-covered" in t for t in texts), (

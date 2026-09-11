@@ -238,6 +238,44 @@ class TestCleanReplace:
         overflow_sends = len(sends) - initial_sends
         assert overflow_sends >= 1, "overflow chunks should be posted as new sends"
 
+    async def test_final_answer_with_everyone_disables_all_mention_channels(self) -> None:
+        """T-22-01: a final answer containing ``@everyone`` (reachable via prompt
+        injection through tool output) must not ping the guild. The clean-replace
+        edit must carry an AllowedMentions with everyone/roles/users all disabled."""
+        lc, sends, edits = _make_lifecycle()
+
+        await lc.on_sse_event(_thinking_event())
+        state = _make_success_state("@everyone check this out")
+        await lc.on_terminal_success(state)
+
+        replace_edit = edits[-1]
+        mentions = replace_edit[1].get("allowed_mentions")
+        assert mentions is not None, "clean-replace edit must carry allowed_mentions"
+        assert not mentions.everyone, "everyone mentions must be disabled"
+        assert not mentions.roles, "role mentions must be disabled"
+        assert not mentions.users, "user mentions must be disabled"
+
+    async def test_overflow_chunk_disables_all_mention_channels(self) -> None:
+        """The overflow-chunk send (posted after the first chunk) must carry the
+        same none-everything AllowedMentions as the clean-replace edit."""
+        lc, sends, edits = _make_lifecycle()
+
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())  # establishes message_ref before terminal
+        initial_sends = len(sends)
+
+        long_text = "@everyone " + "x" * 4000
+        state = TurnState(content=[TextBlock(kind="text", text=long_text)])
+        await lc.on_terminal_success(state)
+
+        overflow = sends[initial_sends:]
+        assert overflow, "overflow chunks should be posted as new sends"
+        mentions = overflow[0].get("allowed_mentions")
+        assert mentions is not None, "overflow send must carry allowed_mentions"
+        assert not mentions.everyone, "everyone mentions must be disabled"
+        assert not mentions.roles, "role mentions must be disabled"
+        assert not mentions.users, "user mentions must be disabled"
+
 
 # ---------------------------------------------------------------------------
 # SPEC-R7: Error embed on terminal failure
@@ -373,6 +411,25 @@ class TestSealedResponsePersistence:
         content_sends = [s for s in sends[initial_sends:] if "content" in s]
         assert len(content_sends) == 1, "sealed answer should post exactly once across ticks"
         assert content_sends[0]["content"] == answer, "the sealed text posts verbatim"
+
+    async def test_sealed_answer_disables_all_mention_channels(self) -> None:
+        """T-22-01: the sealed pre-tool answer send (reachable via prompt
+        injection through tool output) must disable everyone/role/user mentions."""
+        lc, sends, edits = _make_lifecycle()
+        await lc.on_sse_event(_thinking_event())
+        initial_sends = len(sends)
+
+        answer = "@everyone the full diagnosis is: " + "x" * 600
+        state = _sealed_state(answer)
+        await lc.on_render(state)
+
+        content_sends = [s for s in sends[initial_sends:] if "content" in s]
+        assert len(content_sends) == 1
+        mentions = content_sends[0].get("allowed_mentions")
+        assert mentions is not None, "sealed answer send must carry allowed_mentions"
+        assert not mentions.everyone, "everyone mentions must be disabled"
+        assert not mentions.roles, "role mentions must be disabled"
+        assert not mentions.users, "user mentions must be disabled"
 
     async def test_on_render_keeps_short_narration_suppressed(self) -> None:
         """Sealed text under the threshold is narration and never posts as a

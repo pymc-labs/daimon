@@ -98,7 +98,7 @@ _log = structlog.get_logger()
 # Shown when the lookup in from_custom_id found nothing (unknown token or a
 # DB failure) — the real label (naming the exact target) only exists once a
 # row is found, so this is the best available fallback for a dead button.
-_FALLBACK_LABEL = "Add credential"
+_FALLBACK_LABEL = "Enter it privately"
 
 _NO_LONGER_VALID = "This request is no longer valid — ask again."
 _WRONG_REQUESTER = "This request was for someone else — ask again in your own thread."

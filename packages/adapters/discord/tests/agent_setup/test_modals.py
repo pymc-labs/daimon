@@ -1064,9 +1064,13 @@ async def test_skill_modal_toasts_failure_on_exception(
     call_kwargs = interaction.followup.send.call_args
     assert call_kwargs.kwargs.get("ephemeral") is True, "exception toast must be ephemeral"
     content = call_kwargs.kwargs.get("content") or str(call_kwargs)
-    assert "network error during sync" in content or "RuntimeError" in content, (
-        "exception toast must include the error type or message"
+    assert "network error during sync" not in content and "RuntimeError" not in content, (
+        "raw exception text must not be shown to people"
     )
+    assert "**research-bot**" in content and "/agent-setup" in content, (
+        "the failure must name the target and a working next step"
+    )
+    assert "Some skills may have been saved" in content, "the failure must allow partial success"
 
 
 # ----- 11. Anon-bind public-visibility guard (quick task 260616-45k) -----

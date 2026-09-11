@@ -265,7 +265,7 @@ async def test_list_skills_end_to_end(
     mcp = app.state.mcp  # type: ignore[attr-defined]
 
     async with Client(mcp) as client:
-        result = await client.call_tool("skills_list", {})
+        result = await client.call_tool("list_skills", {})
         skills = json.loads(result.content[0].text)  # type: ignore[union-attr]
         assert [s["name"] for s in skills] == ["e2e-skill"], (
             "should list the e2e skill with bare name"

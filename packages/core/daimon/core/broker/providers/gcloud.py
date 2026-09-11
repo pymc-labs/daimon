@@ -52,7 +52,10 @@ class GcloudTokenProvider:
             binding = await get_agent_google_binding(session, agent_id=agent_id)
         if binding is None:
             raise NoBindingError(
-                "Agent not bound to a Google identity — operator must configure via agent-setup."
+                "This agent has no Google identity bound. Google access is "
+                "configured per deployment by the operator running it, not "
+                "from chat — tell them to run `daimon agents bind-google "
+                "<agent> <email> --scopes <scope>...` to bind one."
             )
         sa_json_text = settings.credentials.google_sa_json.get_secret_value()
         try:

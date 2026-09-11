@@ -164,12 +164,11 @@ async def test_get_cli_token_audit_log_has_no_token_value(
 async def test_get_cli_token_no_binding_maps_to_tool_error(
     cli_token_app: tuple[FastMCP, uuid.UUID, str, async_sessionmaker[AsyncSession], Settings],
 ) -> None:
-    """No credential row → tool surfaces a ToolError instructing
-    the user to bind a PAT via the agent-setup repo-auth panel."""
+    """An account-only caller needs operator help, not a target-agent repo binding."""
     mcp, _account_id, _plaintext_token, _sessionmaker, _settings = cli_token_app
 
     async with Client(mcp) as client:
-        with pytest.raises(ToolError, match="agent-setup repo-auth panel"):
+        with pytest.raises(ToolError, match="operator.*account"):
             await client.call_tool("get_cli_token", {"service": "github"})
 
 

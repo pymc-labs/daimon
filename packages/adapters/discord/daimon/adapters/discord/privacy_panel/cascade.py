@@ -47,7 +47,7 @@ def build_cascade_preview_container(
     if preview.github_credentials.count > 0:
         ex = preview.github_credentials.example or "—"
         n = preview.github_credentials.count
-        will_happen_rows.append(f"-# 🔑 Delete **{n}** stored GitHub credential(s) (`{ex}`)")
+        will_happen_rows.append(f"-# 🔑 Delete **{n}** stored GitHub token(s) (`{ex}`)")
     if preview.github_oauth_states.count > 0:
         will_happen_rows.append(
             f"-# 🤝 Remove **{preview.github_oauth_states.count}** GitHub OAuth handshake record(s)"
@@ -58,7 +58,7 @@ def build_cascade_preview_container(
         )
     if preview.agent_github_binding.count > 0:
         n = preview.agent_github_binding.count
-        will_happen_rows.append(f"-# 🤖 Remove **{n}** per-agent GitHub credential link(s)")
+        will_happen_rows.append(f"-# 🤖 Remove **{n}** per-agent GitHub token link(s)")
     if preview.slack_user_tokens.count > 0:
         will_happen_rows.append(
             f"-# 🔐 Remove **{preview.slack_user_tokens.count}** Slack user token(s)"
@@ -75,7 +75,7 @@ def build_cascade_preview_container(
         *(will_happen_rows if will_happen_rows else ["-# _(nothing to delete)_"]),
         "",
         "🔐 **What stays in Managed Agents**",
-        "-# Agent definitions, system prompts, MCP credentials",
+        "-# Agent definitions, system prompts, MCP tokens",
         "-# Session transcripts, turn message content",
         "-# Skill repo references — the repos themselves stay on GitHub",
         "-# Retention is governed by Anthropic's Managed Agents policy.",
