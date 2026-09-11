@@ -57,6 +57,7 @@ from daimon.core.stores.thread_sessions import (
     mark_turn_active,
     update_watermark,
 )
+from daimon.core.thread_naming import strip_mentions
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.ceiling import turn_deadline
@@ -1393,8 +1394,9 @@ class DaimonBot(commands.Bot):
         # embed and edits it in place once SSE events flow.
         is_thread_mention = thread is not None
         if thread is None:
+            placeholder_name = f"Chat with {agent.name}"
             thread = await message.create_thread(
-                name=f"Chat with {agent.name}",
+                name=placeholder_name,
                 auto_archive_duration=10080,
             )
             # Register the thread as processing IMMEDIATELY — no await between
@@ -1410,14 +1412,16 @@ class DaimonBot(commands.Bot):
             if created_thread_ids is not None:
                 created_thread_ids.append(thread.id)
             # Title catches up in the background: the Haiku call must not
-            # delay the thread the user is waiting to see. Attachment-only
-            # mentions have nothing to title and skip the (metered) call.
+            # delay the thread the user is waiting to see. Once the mention
+            # tokens are gone an attachment-only message has nothing to
+            # title, so it skips the (metered) call.
             naming = self.runtime.settings.thread_naming
-            opening_text = content_override if content_override is not None else message.content
-            if naming.enabled and opening_text.strip():
+            opening_text = strip_mentions(message.content)
+            if naming.enabled and opening_text:
                 self._spawn(
                     auto_name_thread(
                         thread=thread,
+                        expected_name=placeholder_name,
                         message_text=opening_text,
                         anthropic=self.runtime.anthropic,
                         sessionmaker=self.runtime.sessionmaker,

@@ -64,9 +64,13 @@ def _naming_router(text: str) -> MARouter:
     return router
 
 
-def _thread(thread_id: int = 4242) -> Any:
+_PLACEHOLDER = "Chat with test-agent"
+
+
+def _thread(thread_id: int = 4242, *, name: str = _PLACEHOLDER) -> Any:
     thread = MagicMock(spec=discord.Thread)
     thread.id = thread_id
+    thread.name = name
     thread.edit = AsyncMock()
     return thread
 
@@ -93,6 +97,7 @@ async def test_auto_name_thread_renames_and_meters_haiku_call_to_author(
 
     await auto_name_thread(
         thread=thread,
+        expected_name=_PLACEHOLDER,
         message_text="<@999> why does my PyMC model diverge on the M2 Mac?",
         anthropic=build_fake_anthropic(_naming_router("PyMC Divergences on M2 Mac").dispatch),
         sessionmaker=db_session_factory,
@@ -104,9 +109,9 @@ async def test_auto_name_thread_renames_and_meters_haiku_call_to_author(
 
     thread.edit.assert_awaited_once_with(name="PyMC Divergences on M2 Mac")
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
-    assert [(r.model, r.platform_user_id, r.input_tokens) for r in rows] == [
-        (THREAD_NAMING_MODEL, "555", 120)
-    ], "the naming call must be metered to the tenant under the message author"
+    assert [(r.model, r.platform_user_id, r.input_tokens, r.managed_session_id) for r in rows] == [
+        (THREAD_NAMING_MODEL, "555", 120, "thread-naming:4242")
+    ], "the naming call must be metered to the tenant under the author, keyed on the thread"
     balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant.id)
     assert balance < Decimal("5.00"), "the tenant ledger must carry the naming debit"
 
@@ -121,6 +126,7 @@ async def test_auto_name_thread_keeps_placeholder_but_still_meters_when_model_de
 
     await auto_name_thread(
         thread=thread,
+        expected_name=_PLACEHOLDER,
         message_text="<@999> hey",
         anthropic=build_fake_anthropic(_naming_router("NONE").dispatch),
         sessionmaker=db_session_factory,
@@ -151,6 +157,7 @@ async def test_auto_name_thread_swallows_api_error_without_metering_or_rename(
 
     await auto_name_thread(
         thread=thread,
+        expected_name=_PLACEHOLDER,
         message_text="<@999> help with sampling",
         anthropic=build_fake_anthropic(router.dispatch),
         sessionmaker=db_session_factory,
@@ -179,6 +186,7 @@ async def test_auto_name_thread_meters_even_when_discord_rejects_the_edit(
 
     await auto_name_thread(
         thread=thread,
+        expected_name=_PLACEHOLDER,
         message_text="<@999> help with sampling",
         anthropic=build_fake_anthropic(_naming_router("Sampling Help").dispatch),
         sessionmaker=db_session_factory,
@@ -190,6 +198,36 @@ async def test_auto_name_thread_meters_even_when_discord_rejects_the_edit(
 
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
     assert len(rows) == 1, "the Haiku tokens were spent before Discord refused the rename"
+
+
+async def test_auto_name_thread_skips_call_when_thread_already_renamed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A member or the agent renamed the thread before Haiku answered: the
+    deliberate title wins, and no tokens are spent finding out."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    thread = _thread(name="My Own Title")
+
+    def refuse(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no model call is allowed once the placeholder is gone")
+
+    await auto_name_thread(
+        thread=thread,
+        expected_name=_PLACEHOLDER,
+        message_text="help with sampling",
+        anthropic=build_fake_anthropic(refuse),
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        platform_user_id="555",
+        markup=Decimal("1.0"),
+        max_input_chars=2000,
+    )
+
+    thread.edit.assert_not_awaited()
+    rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
+    assert rows == [], "no call, no usage row"
 
 
 # ---------------------------------------------------------------------------
@@ -391,8 +429,11 @@ async def test_on_message_spawns_rename_of_new_thread_only_when_naming_enabled(
     mock_auto_name.assert_awaited_once()
     spawned = mock_auto_name.await_args.kwargs
     assert spawned["thread"] is thread, "the rename must target the thread just created"
-    assert spawned["message_text"] == "<@999> my PyMC model diverges", (
-        "the opening message is what gets titled"
+    assert spawned["message_text"] == "my PyMC model diverges", (
+        "the opening message, minus the bot mention, is what gets titled"
+    )
+    assert spawned["expected_name"] == "Chat with test-agent", (
+        "the task must know the placeholder so it never overwrites a deliberate rename"
     )
     assert (spawned["tenant_id"], spawned["platform_user_id"]) == (tenant_id, "555"), (
         "the naming call must be billed to the turn's tenant under the message author"

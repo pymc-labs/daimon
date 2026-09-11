@@ -26,6 +26,7 @@ log = structlog.get_logger()
 async def auto_name_thread(
     *,
     thread: discord.Thread,
+    expected_name: str,
     message_text: str,
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -36,10 +37,20 @@ async def auto_name_thread(
 ) -> None:
     """Title ``thread`` from ``message_text``; the placeholder stays on any failure.
 
+    ``expected_name`` is the placeholder the thread was created with. If the
+    thread already carries another name (the agent or a member renamed it
+    while Haiku was thinking), the placeholder is gone and this task must
+    not clobber the deliberate title; checked before the call, to save the
+    tokens, and again before the edit.
+
     Metering runs before the rename: tokens were spent whether or not
-    Discord accepts the edit. A metering DB error propagates to the
-    background-task supervisor, never silently.
+    Discord accepts the edit. The usage row is keyed on the thread id, so a
+    replay for the same thread cannot bill twice. A metering DB error
+    propagates to the background-task supervisor, never silently.
     """
+    if thread.name != expected_name:
+        log.info("thread.autoname_skipped", thread_id=thread.id, reason="already_renamed")
+        return
     try:
         suggestion = await suggest_thread_name(
             anthropic, message_text=message_text, max_input_chars=max_input_chars
@@ -56,12 +67,17 @@ async def auto_name_thread(
         input_tokens=suggestion.usage.input_tokens,
         output_tokens=suggestion.usage.output_tokens,
         cache_read_input_tokens=suggestion.usage.cache_read_input_tokens,
+        managed_session_id=f"thread-naming:{thread.id}",
+        event_id="title",
         markup=markup,
         pricing=MODEL_PRICING.get(THREAD_NAMING_MODEL),
     )
 
     if suggestion.name is None:
-        log.info("thread.autoname_skipped", thread_id=thread.id)
+        log.info("thread.autoname_skipped", thread_id=thread.id, reason="no_topic")
+        return
+    if thread.name != expected_name:
+        log.info("thread.autoname_skipped", thread_id=thread.id, reason="already_renamed")
         return
     try:
         await thread.edit(name=suggestion.name)
