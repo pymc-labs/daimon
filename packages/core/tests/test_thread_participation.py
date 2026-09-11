@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import pytest
 from daimon.core.thread_participation import (
-    AutoRespondSnapshot,
     ClassifierMessage,
     ClassifierVerdict,
     ParticipationMode,
     ParticipationScope,
+    ParticipationSnapshot,
     ResolvedParticipation,
     Respond,
     Skip,
     SkipReason,
     build_classifier_prompt,
+    build_participation_explanation,
     build_participation_note,
     decide_post_classifier,
     decide_pre_classifier,
@@ -51,35 +52,44 @@ def test_resolve_participation_cascade(
     thread: ParticipationMode | None,
     expected: ResolvedParticipation,
 ) -> None:
-    assert (
-        resolve_participation(
-            deployment=deployment, workspace=workspace, channel=channel, thread=thread
-        )
-        == expected
+    resolved = resolve_participation(
+        deployment=deployment, workspace=workspace, channel=channel, thread=thread
+    )
+    assert resolved == expected, (
+        f"cascade deployment={deployment} workspace={workspace} channel={channel} "
+        f"thread={thread} should resolve to {expected}, got {resolved}"
     )
 
 
 def test_open_snapshot_asks_the_classifier() -> None:
-    snap = AutoRespondSnapshot(mode=ON, auto_responses_in_window=0, max_per_window=20)
-    assert decide_pre_classifier(snap) == Respond()
+    snapshot = ParticipationSnapshot(mode=ON, auto_responses_in_window=0, max_per_window=20)
+    assert decide_pre_classifier(snapshot) == Respond(), (
+        "an on thread under its cap is worth a classifier call"
+    )
 
 
 @pytest.mark.parametrize("mode", [OFF, DISABLED])
 def test_anything_but_on_skips_before_the_classifier(mode: ParticipationMode) -> None:
-    snap = AutoRespondSnapshot(mode=mode, auto_responses_in_window=0, max_per_window=20)
-    assert decide_pre_classifier(snap) == Skip(SkipReason.NOT_ON)
+    snapshot = ParticipationSnapshot(mode=mode, auto_responses_in_window=0, max_per_window=20)
+    assert decide_pre_classifier(snapshot) == Skip(SkipReason.NOT_ON), (
+        f"mode {mode} must skip before any model call"
+    )
 
 
 def test_hourly_cap_is_inclusive() -> None:
-    snap = AutoRespondSnapshot(mode=ON, auto_responses_in_window=20, max_per_window=20)
-    assert decide_pre_classifier(snap) == Skip(SkipReason.RATE_LIMITED)
+    snapshot = ParticipationSnapshot(mode=ON, auto_responses_in_window=20, max_per_window=20)
+    assert decide_pre_classifier(snapshot) == Skip(SkipReason.RATE_LIMITED), (
+        "the hourly cap is reached at max_per_window, not one past it"
+    )
 
 
 def test_post_classifier_maps_verdicts() -> None:
-    assert decide_post_classifier(ClassifierVerdict("respond", "asked")) == Respond()
+    assert decide_post_classifier(ClassifierVerdict("respond", "asked")) == Respond(), (
+        "a respond verdict runs the turn"
+    )
     assert decide_post_classifier(ClassifierVerdict("silence", "chatter")) == Skip(
         SkipReason.CLASSIFIER_SILENCED
-    )
+    ), "a silence verdict skips, and says why"
 
 
 @pytest.mark.parametrize(
@@ -90,11 +100,15 @@ def test_post_classifier_maps_verdicts() -> None:
     ],
 )
 def test_parse_accepts_plain_and_fenced_json(text: str) -> None:
-    assert parse_classifier_response(text) == ClassifierVerdict("respond", "asked")
+    assert parse_classifier_response(text) == ClassifierVerdict("respond", "asked"), (
+        "a fenced verdict parses the same as a bare one"
+    )
 
 
 def test_parse_defaults_missing_reason() -> None:
-    assert parse_classifier_response('{"decision": "silence"}') == ClassifierVerdict("silence", "")
+    assert parse_classifier_response('{"decision": "silence"}') == ClassifierVerdict(
+        "silence", ""
+    ), "a verdict without a reason is still a verdict"
 
 
 @pytest.mark.parametrize("text", ["not json", "[1]", '{"decision": "maybe"}', '{"x": 1}'])
@@ -112,9 +126,13 @@ def test_prompt_labels_bot_escapes_content_and_groups_the_burst() -> None:
         ],
         bot_display_name="daimon",
     )
-    assert '<msg author="daimon">1 &lt; 2</msg>' in prompt
-    assert "<candidates>" in prompt and prompt.count("user:") == 2
-    assert "author='user:Al \"A\" B'" in prompt
+    assert '<msg author="daimon">1 &lt; 2</msg>' in prompt, (
+        "the bot's own messages are labelled by display name and content is escaped"
+    )
+    assert "<candidates>" in prompt and prompt.count("user:") == 2, (
+        "the burst is grouped under <candidates> and humans are labelled user:"
+    )
+    assert "author='user:Al \"A\" B'" in prompt, "a quoted display name is attribute-escaped"
 
 
 def test_participation_note_reports_the_effective_tier() -> None:
@@ -124,11 +142,32 @@ def test_participation_note_reports_the_effective_tier() -> None:
         requested=ON,
         effective=ResolvedParticipation(DISABLED, "channel"),
     )
-    assert "thread t1 is set to on" in note and "disabled at the channel level" in note
+    assert "thread t1 is set to on" in note and "disabled at the channel level" in note, (
+        "the note reports the write and the wider scope that still silences it"
+    )
     note = build_participation_note(
         scope=ParticipationScope.WORKSPACE,
         scope_id=None,
         requested=None,
         effective=ResolvedParticipation(OFF, "deployment"),
     )
-    assert note.startswith("the whole workspace now inherits") and "@mentioned" in note
+    assert note.startswith("the whole workspace now inherits") and "@mentioned" in note, (
+        "clearing a scope reports the inheritance and what now happens there"
+    )
+
+
+def test_participation_explanation_names_the_winning_tier() -> None:
+    on = build_participation_explanation(ResolvedParticipation(ON, "thread"), thread_id="t1")
+    assert "I follow thread t1" in on and "thread tier is set to on" in on, (
+        "an on cascade explains which tier turned it on"
+    )
+    disabled = build_participation_explanation(
+        ResolvedParticipation(DISABLED, "workspace"), thread_id=None
+    )
+    assert "only reply in here when @mentioned" in disabled and "workspace tier" in disabled, (
+        "a disabled cascade says so and names the tier that cannot be overridden"
+    )
+    off = build_participation_explanation(ResolvedParticipation(OFF, "deployment"), thread_id="t1")
+    assert "deployment tier is the" in off and "it is off" in off, (
+        "an off cascade names the narrowest tier with a setting"
+    )

@@ -134,16 +134,25 @@ async def record_auto_response(
     message_id: str,
     created_at: datetime | None = None,
 ) -> ThreadAutoResponseRow:
-    """Append one ledger row. `created_at` exists so tests can backdate; production omits it."""
-    kwargs: dict[str, object] = {
-        "tenant_id": tenant_id,
-        "platform": platform,
-        "thread_id": thread_id,
-        "message_id": message_id,
-    }
-    if created_at is not None:
-        kwargs["created_at"] = created_at
-    orm = ThreadAutoResponse(**kwargs)
+    """Append one ledger row. `created_at` exists so tests can backdate; production omits it.
+
+    Two constructor calls rather than a kwargs splat: omitting `created_at`
+    entirely is what lets the column default apply, and both calls stay
+    type-checked.
+    """
+    orm = (
+        ThreadAutoResponse(
+            tenant_id=tenant_id, platform=platform, thread_id=thread_id, message_id=message_id
+        )
+        if created_at is None
+        else ThreadAutoResponse(
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            message_id=message_id,
+            created_at=created_at,
+        )
+    )
     session.add(orm)
     await session.flush()
     await session.refresh(orm)

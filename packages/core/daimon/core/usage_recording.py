@@ -89,6 +89,7 @@ async def _record_tool_model_usage(
     pricing: ModelRates | None,
     reason: str,
     session_prefix: str,
+    idempotency_prefix: str,
 ) -> None:
     """One usage_events row plus one debit ledger row for a model call made outside a turn.
 
@@ -96,6 +97,9 @@ async def _record_tool_model_usage(
     first. `managed_session_id`/`event_id` default to fresh synthetic ids
     (`{session_prefix}:{uuid4()}` / `uuid4()`), so each call is its own
     billing unit unless the caller threads ids for an idempotency assertion.
+    `idempotency_prefix` is separate from `session_prefix` because the ledger
+    key is a stored identity: media debits were keyed `media:` before this
+    function existed and must keep that prefix.
     Exceptions are NOT swallowed (see module docstring).
     """
     if managed_session_id is None:
@@ -125,7 +129,7 @@ async def _record_tool_model_usage(
             tenant_id=tenant_id,
             delta_usd=-debit,
             reason=reason,
-            idempotency_key=f"{session_prefix}:{managed_session_id}:{event_id}",
+            idempotency_key=f"{idempotency_prefix}:{managed_session_id}:{event_id}",
         )
 
 
@@ -158,6 +162,7 @@ async def record_media_usage(
         pricing=pricing,
         reason="media_debit",
         session_prefix="gemini",
+        idempotency_prefix="media",
     )
 
 
@@ -188,4 +193,5 @@ async def record_classifier_usage(
         pricing=pricing,
         reason="classifier_debit",
         session_prefix="classifier",
+        idempotency_prefix="classifier",
     )

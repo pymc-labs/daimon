@@ -406,6 +406,14 @@ async def test_record_media_usage_idempotent_under_replay(
     assert balance_after > Decimal("49.90"), (
         "only one media debit must occur even when the same call is replayed"
     )
+    debits = [
+        entry
+        for entry in await tenant_ledger.list_for_tenant(db_session, tenant_id=tenant.id)
+        if entry.reason == "media_debit"
+    ]
+    assert [entry.idempotency_key for entry in debits] == [
+        "media:gemini:fixed-session-3:evt_media_idem"
+    ], "the media debit key is stored history: its prefix must stay `media:`"
 
 
 async def test_record_media_usage_propagates_db_errors_no_swallow(

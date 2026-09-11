@@ -73,7 +73,7 @@ class SkipReason(StrEnum):
 
 
 @dataclass(frozen=True)
-class AutoRespondSnapshot:
+class ParticipationSnapshot:
     """Everything the pre-classifier gates need, gathered by the adapter."""
 
     mode: ParticipationMode
@@ -91,14 +91,14 @@ class Skip:
     reason: SkipReason
 
 
-AutoRespondDecision = Respond | Skip
+ParticipationDecision = Respond | Skip
 
 
-def decide_pre_classifier(snap: AutoRespondSnapshot) -> AutoRespondDecision:
+def decide_pre_classifier(snapshot: ParticipationSnapshot) -> ParticipationDecision:
     """Apply every gate that needs no model call. `Respond` means "ask the classifier"."""
-    if snap.mode is not ParticipationMode.ON:
+    if snapshot.mode is not ParticipationMode.ON:
         return Skip(SkipReason.NOT_ON)
-    if snap.auto_responses_in_window >= snap.max_per_window:
+    if snapshot.auto_responses_in_window >= snapshot.max_per_window:
         return Skip(SkipReason.RATE_LIMITED)
     return Respond()
 
@@ -113,9 +113,12 @@ class ClassifierMessage:
     is_bot: bool
 
 
+ClassifierDecision = Literal["respond", "silence"]
+
+
 @dataclass(frozen=True)
 class ClassifierVerdict:
-    decision: str  # "respond" | "silence"
+    decision: ClassifierDecision
     reason: str
 
 
@@ -176,9 +179,13 @@ def parse_classifier_response(text: str) -> ClassifierVerdict:
         raise ValueError(f"classifier output is not an object: {text!r}")
     payload = cast(dict[str, object], raw)
     decision = payload.get("decision")
-    if not isinstance(decision, str) or decision not in ("respond", "silence"):
-        raise ValueError(f"unexpected decision: {decision!r}")
-    return ClassifierVerdict(decision=decision, reason=str(payload.get("reason", "")))
+    reason = str(payload.get("reason", ""))
+    # Branch per literal so the verdict's type is narrowed by the check itself.
+    if decision == "respond":
+        return ClassifierVerdict(decision="respond", reason=reason)
+    if decision == "silence":
+        return ClassifierVerdict(decision="silence", reason=reason)
+    raise ValueError(f"unexpected decision: {decision!r}")
 
 
 def _strip_code_fence(text: str) -> str:
@@ -190,10 +197,13 @@ def _strip_code_fence(text: str) -> str:
     return body.strip()
 
 
-def decide_post_classifier(verdict: ClassifierVerdict) -> AutoRespondDecision:
-    if verdict.decision == "respond":
-        return Respond()
-    return Skip(SkipReason.CLASSIFIER_SILENCED)
+def decide_post_classifier(verdict: ClassifierVerdict) -> ParticipationDecision:
+    """Exhaustive over `ClassifierDecision`: a new verdict value fails type-checking here."""
+    match verdict.decision:
+        case "respond":
+            return Respond()
+        case "silence":
+            return Skip(SkipReason.CLASSIFIER_SILENCED)
 
 
 # --- Notes returned by the participation tool ---------------------------------
@@ -204,6 +214,31 @@ def scope_label(scope: ParticipationScope, scope_id: str | None) -> str:
         "the whole workspace"
         if scope is ParticipationScope.WORKSPACE
         else f"{scope.value} {scope_id}"
+    )
+
+
+def build_participation_explanation(
+    effective: ResolvedParticipation, *, thread_id: str | None
+) -> str:
+    """One sentence naming the winning tier, so "why are you (not) replying here" is answerable.
+
+    Lives in core beside `build_participation_note` because it is the same
+    pure cascade-to-prose mapping; the participation tool only renders it.
+    """
+    where = f"thread {thread_id}" if thread_id is not None else "here"
+    if effective.mode is ParticipationMode.ON:
+        return (
+            f"I follow {where}: the {effective.tier} tier is set to on, so I may reply "
+            "to messages that call for it without being addressed first."
+        )
+    if effective.mode is ParticipationMode.DISABLED:
+        return (
+            f"I only reply in {where} when @mentioned: the {effective.tier} tier is "
+            "disabled, and no narrower scope can turn it back on."
+        )
+    return (
+        f"I only reply in {where} when @mentioned: the {effective.tier} tier is the "
+        "narrowest one with a setting, and it is off."
     )
 
 

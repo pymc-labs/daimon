@@ -13,6 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
+from daimon.core.thread_participation import ParticipationMode
 from pydantic import BaseModel, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -248,8 +249,8 @@ class ThreadParticipationSettings(BaseModel):
     requests. `on` follows every thread unless a lower tier says otherwise.
     """
 
-    mode: Literal["on", "off", "disabled"] = Field(
-        default="off",
+    mode: ParticipationMode = Field(
+        default=ParticipationMode.OFF,
         description=(
             "Deployment default for replying in threads unprompted. off: mention-only "
             "until a thread, channel or workspace is turned on. disabled: mention-only "

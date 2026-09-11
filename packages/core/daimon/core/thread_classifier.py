@@ -1,4 +1,4 @@
-"""Auto-respond classifier: one small model call, fail closed to silence.
+"""Thread-participation classifier: one small model call, fail closed to silence.
 
 The shell half of `daimon.core.thread_participation`. This is a plain
 `messages.create` call, not a Managed Agents session; the caller meters it to
