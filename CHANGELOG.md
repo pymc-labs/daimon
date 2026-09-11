@@ -18,8 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from below. In an `on` thread a burst of messages is judged once after a
   quiet period by a metered Haiku classifier, gated by balance, cap and an
   hourly per-thread ledger, then answered as an ordinary turn flagged
-  `unprompted="true"` so the agent stays brief. Turns that fail admission stay
-  silent. Existing deployments are unaffected; migration
+  `unprompted="true"` so the agent stays brief. An unprompted turn is silent
+  until it has something to say: no "thinking" embed goes up front, a turn that
+  ends with nothing to add leaves no trace in the thread, and the messages it
+  does post suppress the push notification. Turns that fail admission stay
+  silent too. Existing deployments are unaffected; migration
   `0014_thread_participation` adds two empty tables.
 
 ### Removed
