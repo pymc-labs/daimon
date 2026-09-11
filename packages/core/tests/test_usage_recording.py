@@ -439,3 +439,76 @@ async def test_record_media_usage_propagates_db_errors_no_swallow(
             output_tokens=1,
             cache_read_input_tokens=0,
         )
+
+
+# ---------------------------------------------------------------------------
+# record_thread_naming_usage — Haiku thread-title spend
+# ---------------------------------------------------------------------------
+
+
+async def test_record_thread_naming_usage_writes_row_and_debits_ledger(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10.00"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    await db_session.flush()
+
+    rates = MODEL_PRICING["claude-haiku-4-5"]
+    await usage_recording.record_thread_naming_usage(
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        platform_user_id="u1",
+        model_id="claude-haiku-4-5",
+        input_tokens=120,
+        output_tokens=9,
+        cache_read_input_tokens=0,
+        managed_session_id="thread-naming:fixed",
+        event_id="evt_name_1",
+        pricing=rates,
+    )
+
+    rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
+    assert [(r.model, r.input_tokens, r.output_tokens) for r in rows] == [
+        ("claude-haiku-4-5", 120, 9)
+    ], "exactly one Haiku usage row must be written with the reported tokens"
+    expected_cost = (120 * rates.input + 9 * rates.output) / 1_000_000
+    balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant.id)
+    assert abs(balance - (Decimal("10.00") - Decimal(str(expected_cost)))) < Decimal("0.000001"), (
+        "the tenant must be debited cost_of(usage, pricing) for the naming call"
+    )
+
+
+async def test_record_thread_naming_usage_idempotent_under_replay(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    for _ in range(2):
+        await usage_recording.record_thread_naming_usage(
+            sessionmaker=db_session_factory,
+            tenant_id=tenant.id,
+            platform_user_id="u1",
+            model_id="claude-haiku-4-5",
+            input_tokens=50,
+            output_tokens=5,
+            cache_read_input_tokens=0,
+            managed_session_id="thread-naming:replay",
+            event_id="evt_name_replay",
+            pricing=MODEL_PRICING["claude-haiku-4-5"],
+        )
+
+    rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
+    assert len(rows) == 1, "replaying the same (session, event) must not add a second row"
+    count = (
+        await db_session.execute(
+            select(func.count()).select_from(UsageEvent).where(UsageEvent.tenant_id == tenant.id)
+        )
+    ).scalar_one()
+    assert count == 1, "raw row count must agree with the store read"
