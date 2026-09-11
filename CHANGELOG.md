@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does post suppress the push notification. Turns that fail admission stay
   silent too. Existing deployments are unaffected; migration
   `0014_thread_participation` adds two empty tables.
+- **Discord threads get a real title.** A thread daimon opens for a mention is
+  renamed from the opening message by a short Haiku call, replacing the static
+  "Chat with <agent>" placeholder once the title is ready; the call is metered
+  to the tenant like any other model call and can be turned off with
+  `DAIMON_THREAD_NAMING__ENABLED=false`. A new `rename_thread` MCP tool lets
+  the agent retitle a thread on request: anyone who can post in a thread
+  daimon opened may rename it, other threads need Manage Threads. Slack threads
+  have no title, so both are Discord-only.
 
 ### Removed
 

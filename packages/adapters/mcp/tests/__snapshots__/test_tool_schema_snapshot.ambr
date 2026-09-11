@@ -2750,6 +2750,32 @@
         'type': 'object',
       }),
     }),
+    'rename_thread': dict({
+      'description': '''
+        Rename a Discord thread; ``name`` is the new title (1-100 characters).
+        
+        Use when the user asks to rename or retitle a thread, including the
+        one you are chatting in — ``thread_id`` is the thread's channel id.
+        Anyone who can post in a thread daimon opened may rename it; other
+        threads need Manage Threads. Discord-only: Slack threads have no title.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'name': dict({
+            'type': 'string',
+          }),
+          'thread_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'thread_id',
+          'name',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'request_env_credential': dict({
       'description': '''
         Request an environment secret from the user via a private modal.

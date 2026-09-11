@@ -98,6 +98,7 @@ source_modules = [
     "daimon.core.skill_zip",
     "daimon.core.skills",
     "daimon.core.specs",
+    "daimon.core.thread_naming",
     "daimon.core.turn",
     "daimon.core.wizard",
     "daimon.core.wizard_sweep",

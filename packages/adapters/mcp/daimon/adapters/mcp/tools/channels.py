@@ -25,6 +25,7 @@ from daimon.adapters.mcp.tools.discord import (
     _parse_link_impl,  # pyright: ignore[reportPrivateUsage]
     _read_channel_impl,  # pyright: ignore[reportPrivateUsage]
     _read_thread_impl,  # pyright: ignore[reportPrivateUsage]
+    _rename_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _search_messages_impl,  # pyright: ignore[reportPrivateUsage]
     _send_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -191,6 +192,24 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         return await _create_thread_impl(
             runtime, auth, channel_id=channel_id, name=name, content=content
         )
+
+    @mcp.tool(tags={"discord"})  # pyright: ignore[reportArgumentType]
+    async def rename_thread(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        thread_id: str,
+        name: str,
+    ) -> ThreadRow:
+        """Rename a Discord thread; ``name`` is the new title (1-100 characters).
+
+        Use when the user asks to rename or retitle a thread, including the
+        one you are chatting in — ``thread_id`` is the thread's channel id.
+        Anyone who can post in a thread daimon opened may rename it; other
+        threads need Manage Threads. Discord-only: Slack threads have no title.
+        """
+        auth = await _auth(ctx)
+        if auth.platform == "slack":
+            raise _slack_unsupported("rename_thread")
+        return await _rename_thread_impl(runtime, auth, thread_id=thread_id, name=name)
 
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def parse_link(  # pyright: ignore[reportUnusedFunction]

@@ -77,6 +77,8 @@ SECTION_TITLES: dict[str, str] = {
     "report_host": "Report Host",
     "sentry": "Sentry",
     "billing": "Billing Policy",
+    "support": "Support",
+    "thread_naming": "Thread Naming",
     "artifacts": "Artifacts",
 }
 

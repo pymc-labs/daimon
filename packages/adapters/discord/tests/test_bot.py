@@ -21,7 +21,7 @@ from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAg
 from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
-from daimon.core.config import McpSettings
+from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -104,6 +104,7 @@ def _make_runtime(
     discord_settings.max_concurrent_turns_per_tenant = max_concurrent_turns_per_tenant
     discord_settings.per_caller_thread_sessions = per_caller_thread_sessions
     settings.discord = discord_settings
+    settings.thread_naming = ThreadNamingSettings(enabled=False)
     anthropic = AsyncMock()
     # A live agent/environment by default -- admit() now reads archived_at off
     # the retrieved agent, so an unconfigured AsyncMock (whose attributes are

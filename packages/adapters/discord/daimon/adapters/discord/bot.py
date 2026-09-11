@@ -27,6 +27,7 @@ from daimon.adapters.discord.gating import is_participation_candidate, should_pr
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.thread_naming import auto_name_thread
 from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.adapters.discord.thread_send import safe_thread_send
 from daimon.adapters.discord.views import CancelView
@@ -56,6 +57,7 @@ from daimon.core.stores.thread_sessions import (
     mark_turn_active,
     update_watermark,
 )
+from daimon.core.thread_naming import strip_mentions
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.ceiling import turn_deadline
@@ -1392,8 +1394,9 @@ class DaimonBot(commands.Bot):
         # embed and edits it in place once SSE events flow.
         is_thread_mention = thread is not None
         if thread is None:
+            placeholder_name = f"Chat with {agent.name}"
             thread = await message.create_thread(
-                name=f"Chat with {agent.name}",
+                name=placeholder_name,
                 auto_archive_duration=10080,
             )
             # Register the thread as processing IMMEDIATELY — no await between
@@ -1408,6 +1411,26 @@ class DaimonBot(commands.Bot):
             self._processing.add(thread.id)
             if created_thread_ids is not None:
                 created_thread_ids.append(thread.id)
+            # Title catches up in the background: the Haiku call must not
+            # delay the thread the user is waiting to see. Once the mention
+            # tokens are gone an attachment-only message has nothing to
+            # title, so it skips the (metered) call.
+            naming = self.runtime.settings.thread_naming
+            opening_text = strip_mentions(message.content)
+            if naming.enabled and opening_text:
+                self._spawn(
+                    auto_name_thread(
+                        thread=thread,
+                        expected_name=placeholder_name,
+                        message_text=opening_text,
+                        anthropic=self.runtime.anthropic,
+                        sessionmaker=self.runtime.sessionmaker,
+                        tenant_id=tenant_id,
+                        platform_user_id=str(message.author.id),
+                        markup=self.runtime.settings.billing.markup,
+                        max_input_chars=naming.max_input_chars,
+                    )
+                )
 
         # --- Wire lifecycle with send/edit callables ---
         async def _send_embed(**kwargs: Any) -> discord.Message:

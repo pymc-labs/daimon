@@ -195,3 +195,36 @@ async def record_classifier_usage(
         session_prefix="classifier",
         idempotency_prefix="classifier",
     )
+
+
+async def record_thread_naming_usage(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    platform_user_id: str | None,
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_input_tokens: int,
+    managed_session_id: str | None = None,
+    event_id: str | None = None,
+    markup: Decimal = Decimal("1.0"),
+    pricing: ModelRates | None = None,
+) -> None:
+    """The Haiku call behind an automatic thread title, billed to the message's author."""
+    await _record_tool_model_usage(
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
+        platform_user_id=platform_user_id,
+        model_id=model_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        managed_session_id=managed_session_id,
+        event_id=event_id,
+        markup=markup,
+        pricing=pricing,
+        reason="thread_naming_debit",
+        session_prefix="thread-naming",
+        idempotency_prefix="thread-naming",
+    )

@@ -19,7 +19,10 @@ from fastmcp.exceptions import ToolError
 async def rest_client(token: str) -> AsyncIterator[discord.Client]:
     """Per-call REST-only ``discord.Client``. Closes its HTTP session on exit."""
     client = discord.Client(intents=discord.Intents.default())
-    await client.http.static_login(token)
+    me = await client.http.static_login(token)
+    # Client.login would set this; REST-only mode must do it by hand so tools
+    # can tell daimon's own threads apart (rename_thread's ownership check).
+    client._connection.user = discord.ClientUser(state=client._connection, data=me)  # pyright: ignore[reportPrivateUsage]
     try:
         yield client
     finally:

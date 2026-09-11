@@ -1,6 +1,7 @@
-"""Unit tests for Discord thread-creation implementation (_create_thread_impl).
+"""Unit tests for the Discord thread implementations (_create_thread_impl,
+_rename_thread_impl).
 
-Each test calls the private ``_create_thread_impl`` directly with a hand-built
+Each test calls the private impl directly with a hand-built
 ``AuthIdentity`` and a transport-level patched ``discord.http.HTTPClient``.
 Inline route handlers and payload helpers per this file (no cross-test-file
 imports) so SDK-payload drift breaks the relevant test.
@@ -21,6 +22,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.discord._threads import (
     _create_thread_impl,  # pyright: ignore[reportPrivateUsage]
+    _rename_thread_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.config import (
     AnthropicSettings,
@@ -49,8 +51,13 @@ pytestmark = pytest.mark.asyncio
 
 _VIEW_CHANNEL = 1 << 10
 _SEND_MESSAGES = 1 << 11
+_MANAGE_THREADS = 1 << 34
 _CREATE_PUBLIC_THREADS = 1 << 35
 _SEND_MESSAGES_IN_THREADS = 1 << 38
+
+# The fake ``static_login`` in conftest reports the bot as user "1"; a thread
+# with that owner_id is one daimon opened, any other owner is a human's.
+_BOT_USER_ID = "1"
 
 # A real-looking snowflake (2026-ish), deliberately far from the tiny thread_id
 # ("444") used below, so a last_activity that used the thread's own snowflake
@@ -216,11 +223,13 @@ def _thread_payload(
     archived: bool = False,
     message_count: int = 0,
     last_message_id: str | None = None,
+    owner_id: str = "1",
+    locked: bool = False,
 ) -> dict[str, Any]:
     return {
         "id": thread_id,
         "parent_id": parent_id,
-        "owner_id": "1",
+        "owner_id": owner_id,
         "name": name,
         "type": thread_type,
         "guild_id": guild_id,
@@ -228,6 +237,7 @@ def _thread_payload(
         "member_count": 1,
         "thread_metadata": {
             "archived": archived,
+            "locked": locked,
             "auto_archive_duration": 1440,
             "archive_timestamp": "2026-01-01T00:00:00+00:00",
         },
@@ -525,3 +535,240 @@ async def test_create_thread_forbidden_from_create_maps_to_named_tool_error(
     assert isinstance(exc_info.value.__cause__, discord.Forbidden), (
         "the ToolError must chain the original discord.Forbidden via `from err`"
     )
+
+
+# ---------------------------------------------------------------------------
+# rename_thread
+# ---------------------------------------------------------------------------
+
+
+def _rename_handler(
+    *,
+    everyone_perms: int,
+    owner_id: str,
+    captured_patch: dict[str, Any] | None = None,
+    patches: list[dict[str, Any]] | None = None,
+    archived: bool = False,
+    locked: bool = False,
+) -> Any:
+    """Route table for a rename: guild/member hydration, the thread GET, its
+    parent GET (``_ensure_thread_parent_cached``) and the PATCH itself.
+    ``patches`` collects every PATCH body in order when more than one is
+    expected (the unarchive-then-rename path)."""
+
+    async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", everyone_perms)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}" and route.method == "GET":
+            if route.channel_id == 444:
+                return _thread_payload(
+                    thread_id="444",
+                    parent_id="222",
+                    owner_id=owner_id,
+                    archived=archived,
+                    locked=locked,
+                )
+            return _text_channel_payload(channel_id="222")
+        if route.path == "/channels/{channel_id}" and route.method == "PATCH":
+            assert captured_patch is not None or patches is not None, (
+                "PATCH must not be reached in a denial test"
+            )
+            assert route.channel_id == 444, "the rename must target the thread itself"
+            body = cast(dict[str, Any], kwargs["json"])
+            if patches is not None:
+                patches.append(body)
+            if captured_patch is not None:
+                captured_patch.update(kwargs)
+            return _thread_payload(
+                thread_id="444",
+                parent_id="222",
+                owner_id=owner_id,
+                name=str(body.get("name", "test-thread")),
+                archived=bool(body.get("archived", False)),
+            )
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    return handler
+
+
+async def test_rename_thread_bot_owned_thread_renames_with_post_permission_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A participant (view + send_messages_in_threads, no manage_threads) may
+    rename a thread daimon opened; the PATCH carries the validated name and the
+    row reflects Discord's post-edit state."""
+    captured: dict[str, Any] = {}
+    patch_discord_http(
+        monkeypatch,
+        _rename_handler(
+            everyone_perms=_VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS,
+            owner_id=_BOT_USER_ID,
+            captured_patch=captured,
+        ),
+    )
+
+    row = await _rename_thread_impl(
+        _runtime_with_discord_token(), _auth(), thread_id="444", name="  Renamed Title  "
+    )
+
+    assert captured["json"]["name"] == "Renamed Title", (
+        "the PATCH body must carry the stripped, validated name"
+    )
+    assert row.id == "444" and row.name == "Renamed Title", (
+        "the returned row must reflect the thread as Discord reports it after the edit"
+    )
+
+
+async def test_rename_thread_human_owned_thread_denied_without_manage_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Renaming someone else's thread is moderation: a mere participant is
+    refused before any PATCH."""
+    patch_discord_http(
+        monkeypatch,
+        _rename_handler(everyone_perms=_VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS, owner_id="777"),
+    )
+    with pytest.raises(ToolError, match="manage_threads"):
+        await _rename_thread_impl(
+            _runtime_with_discord_token(), _auth(), thread_id="444", name="Renamed Title"
+        )
+
+
+async def test_rename_thread_human_owned_thread_allowed_with_manage_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    patch_discord_http(
+        monkeypatch,
+        _rename_handler(
+            everyone_perms=_VIEW_CHANNEL | _MANAGE_THREADS,
+            owner_id="777",
+            captured_patch=captured,
+        ),
+    )
+    row = await _rename_thread_impl(
+        _runtime_with_discord_token(), _auth(), thread_id="444", name="Renamed Title"
+    )
+    assert captured["json"]["name"] == "Renamed Title", "manage_threads must unlock the rename"
+    assert row.name == "Renamed Title", "row must carry the new name"
+
+
+async def test_rename_thread_bot_owned_thread_denied_without_post_permission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Viewing alone is not participating: a read-only member cannot rename
+    even daimon's own thread."""
+    patch_discord_http(
+        monkeypatch, _rename_handler(everyone_perms=_VIEW_CHANNEL, owner_id=_BOT_USER_ID)
+    )
+    with pytest.raises(ToolError, match="send_messages_in_threads"):
+        await _rename_thread_impl(
+            _runtime_with_discord_token(), _auth(), thread_id="444", name="Renamed Title"
+        )
+
+
+async def test_rename_thread_rejects_channel_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | _MANAGE_THREADS)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}" and route.method == "GET":
+            return _text_channel_payload(channel_id="222")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="not a thread"):
+        await _rename_thread_impl(
+            _runtime_with_discord_token(), _auth(), thread_id="222", name="Renamed Title"
+        )
+
+
+async def test_rename_thread_rejects_empty_name_before_any_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        raise AssertionError(f"no request expected, got {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="must not be empty"):
+        await _rename_thread_impl(
+            _runtime_with_discord_token(), _auth(), thread_id="444", name="   "
+        )
+
+
+async def test_rename_thread_locked_bot_owned_thread_denied_without_manage_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Locking is moderation state: a participant cannot retitle a locked
+    thread even though daimon owns it and could perform the edit."""
+    patch_discord_http(
+        monkeypatch,
+        _rename_handler(
+            everyone_perms=_VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS,
+            owner_id=_BOT_USER_ID,
+            locked=True,
+        ),
+    )
+    with pytest.raises(ToolError, match="locked or archived"):
+        await _rename_thread_impl(
+            _runtime_with_discord_token(), _auth(), thread_id="444", name="Renamed Title"
+        )
+
+
+async def test_rename_thread_archived_thread_is_unarchived_first_by_manage_threads_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discord refuses every other edit on an archived thread (code 50083), so
+    the rename unarchives first, then sets the name — two PATCHes in order."""
+    patches: list[dict[str, Any]] = []
+    patch_discord_http(
+        monkeypatch,
+        _rename_handler(
+            everyone_perms=_VIEW_CHANNEL | _MANAGE_THREADS,
+            owner_id="777",
+            patches=patches,
+            archived=True,
+        ),
+    )
+    row = await _rename_thread_impl(
+        _runtime_with_discord_token(), _auth(), thread_id="444", name="Renamed Title"
+    )
+    assert patches == [{"archived": False}, {"name": "Renamed Title"}], (
+        "an archived thread must be unarchived before the name edit, in that order"
+    )
+    assert row.name == "Renamed Title", "row must carry the new name"
+
+
+async def test_rename_thread_maps_generic_discord_refusal_to_tool_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | _MANAGE_THREADS)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}" and route.method == "GET":
+            if route.channel_id == 444:
+                return _thread_payload(thread_id="444", parent_id="222", owner_id="777")
+            return _text_channel_payload(channel_id="222")
+        if route.path == "/channels/{channel_id}" and route.method == "PATCH":
+            response = MagicMock()
+            response.status = 400
+            response.reason = "Bad Request"
+            raise discord.HTTPException(response, {"code": 50035, "message": "Invalid Form Body"})
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with pytest.raises(ToolError, match="discord refused the rename"):
+        await _rename_thread_impl(
+            _runtime_with_discord_token(), _auth(), thread_id="444", name="Renamed Title"
+        )
