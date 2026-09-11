@@ -1,6 +1,6 @@
 """Discord-action MCP tools: read_thread, read_channel, list_channels,
 list_threads, search_messages, parse_link, get_message, send_message,
-create_thread.
+create_thread, rename_thread.
 
 Mirrors ``tools/routines.py`` shape: each ``@mcp.tool`` closure delegates to a
 module-private ``_*_impl`` function that takes ``(runtime, auth, **kwargs)``.
@@ -94,6 +94,9 @@ from daimon.adapters.mcp.tools.discord._send import (
 )
 from daimon.adapters.mcp.tools.discord._threads import (
     _create_thread_impl as _create_thread_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.discord._threads import (
+    _rename_thread_impl as _rename_thread_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._wizard import (
     PostedWizard as PostedWizard,

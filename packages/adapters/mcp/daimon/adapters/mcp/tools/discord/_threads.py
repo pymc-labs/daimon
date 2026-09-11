@@ -1,6 +1,6 @@
-"""Discord thread-creation implementation.
+"""Discord thread creation and renaming.
 
-Provides: _create_thread_impl.
+Provides: _create_thread_impl, _rename_thread_impl.
 
 Follows the locked sequence from ``_read.py``'s module docstring: validate
 inputs -> rest_client -> _resolve_member FIRST -> _resolve_channel ->
@@ -26,8 +26,14 @@ from daimon.adapters.mcp.tools.discord._client import (
     rest_client,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._models import ThreadRow
+from daimon.adapters.mcp.tools.discord._read import (
+    _to_thread_row,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_create_thread_permission,  # pyright: ignore[reportPrivateUsage]
+    _check_rename_thread_permission,  # pyright: ignore[reportPrivateUsage]
+    _check_thread_view,  # pyright: ignore[reportPrivateUsage]
+    _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
 )
 from fastmcp.exceptions import ToolError
 
@@ -101,3 +107,39 @@ async def _create_thread_impl(  # pyright: ignore[reportUnusedFunction]
             message_count=1,
             last_activity=starter.created_at.isoformat(),
         )
+
+
+async def _rename_thread_impl(  # pyright: ignore[reportUnusedFunction]
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    thread_id: str,
+    name: str,
+) -> ThreadRow:
+    """Rename a thread the caller can see; who may is decided by
+    ``_check_rename_thread_permission``. Returns the thread as Discord
+    reports it after the edit."""
+    validated_name = _validate_thread_name(name)
+    user_id = _require_discord_identity(auth)
+    guild_id = _require_guild_id(auth)
+    token = _require_bot_token(runtime)
+
+    async with rest_client(token) as c:
+        _, member = await _resolve_member(c, guild_id, user_id)
+        raw_channel = await _resolve_channel(c, thread_id)
+        channel = _require_guild_channel(raw_channel, guild_id)
+        if not isinstance(channel, discord.Thread):
+            raise ToolError("not a thread — rename_thread takes a thread id")
+
+        await _ensure_thread_parent_cached(channel)
+        await _check_thread_view(c, channel, member, user_id)
+        bot_user_id = c.user.id if c.user is not None else None
+        _check_rename_thread_permission(channel, member, bot_user_id=bot_user_id)
+
+        try:
+            renamed = await channel.edit(name=validated_name)
+        except discord.Forbidden as e:
+            raise ToolError(
+                "daimon is missing the manage_threads permission needed to rename this thread"
+            ) from e
+        return _to_thread_row(renamed)

@@ -52,6 +52,30 @@ def _check_create_thread_permission(  # pyright: ignore[reportUnusedFunction]
         raise ToolError("missing send_messages_in_threads permission")
 
 
+def _check_rename_thread_permission(  # pyright: ignore[reportUnusedFunction]
+    thread: discord.Thread, member: discord.Member, *, bot_user_id: int | None
+) -> None:
+    """Renaming someone else's thread is moderation, so it takes manage_threads
+    exactly as Discord itself requires. A thread daimon opened for a chat is
+    the caller's own conversation: being able to post in it is enough, and
+    daimon, as the thread's owner, performs the edit on their behalf. Requires
+    the parent cached (``_ensure_thread_parent_cached``) first."""
+    if member.guild_permissions.administrator:
+        return
+    perms = thread.permissions_for(member)
+    if not perms.view_channel:
+        raise ToolError("missing view_channel permission")
+    if perms.manage_threads:
+        return
+    if bot_user_id is None or thread.owner_id != bot_user_id:
+        raise ToolError(
+            "missing manage_threads permission — only threads daimon opened can be "
+            "renamed without it"
+        )
+    if not perms.send_messages_in_threads:
+        raise ToolError("missing send_messages_in_threads permission")
+
+
 async def _ensure_thread_parent_cached(  # pyright: ignore[reportUnusedFunction]
     thread: discord.Thread,
 ) -> discord.TextChannel | discord.ForumChannel:
