@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import uuid
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -31,6 +32,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import thread_participation as store
+from daimon.core.thread_classifier import ClassifierOutcome
 from daimon.core.thread_participation import (
     ClassifierVerdict,
     ParticipationMode,
@@ -59,11 +61,12 @@ def _make_runtime(
     discord_settings.max_concurrent_turns_per_tenant = cap
     discord_settings.qa_bot_user_ids = ()
     discord_settings.bot_display_name = "daimon"
-    discord_settings.thread_participation = ThreadParticipationSettings(
+    settings.discord = discord_settings
+    settings.billing.markup = Decimal("1.0")
+    settings.thread_participation = ThreadParticipationSettings(
         mode=mode,  # pyright: ignore[reportArgumentType]  # Literal narrowing from the test's str
         quiet_seconds=quiet_seconds,
     )
-    settings.discord = discord_settings
     return DiscordRuntime(
         settings=settings,
         anthropic=AsyncMock(),
@@ -141,9 +144,9 @@ class _FakeClassifier:
         self.decision = decision
         self.calls: list[dict[str, Any]] = []
 
-    async def __call__(self, anthropic: Any, **kwargs: Any) -> ClassifierVerdict:
+    async def __call__(self, anthropic: Any, **kwargs: Any) -> ClassifierOutcome:
         self.calls.append(kwargs)
-        return ClassifierVerdict(self.decision, "fake")
+        return ClassifierOutcome(ClassifierVerdict(self.decision, "fake"), usage=None)
 
 
 @pytest.fixture
@@ -172,8 +175,12 @@ async def _drain_timer(bot: DaimonBot, thread_id: int = THREAD_ID) -> None:
 
 @pytest_asyncio.fixture
 async def tenant_id(db_session_factory: async_sessionmaker[AsyncSession]) -> uuid.UUID:
+    # Trial credit: the balance gate runs before the classifier, as it does for a mention.
     result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id=str(GUILD_ID)
+        db_session_factory,
+        platform="discord",
+        workspace_id=str(GUILD_ID),
+        signup_credit=Decimal("10"),
     )
     return result.tenant_id
 

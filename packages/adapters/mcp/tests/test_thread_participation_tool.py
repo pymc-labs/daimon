@@ -53,6 +53,7 @@ def verified_scopes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Participation
 
     The real `_verify_scope` is exercised against a fake Discord HTTP layer in
     `tools/test_thread_participation_verify.py`; here the cascade logic is under test.
+    Patched on the tool module, which is where the tool looks it up.
     """
     calls: list[tuple[ParticipationScope, str | None]] = []
 
@@ -62,24 +63,18 @@ def verified_scopes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Participation
         calls.append((scope, scope_id))
         return _CHANNEL if scope is ParticipationScope.THREAD else None
 
-    monkeypatch.setattr(tool_module, "_verify_scope", fake)
+    monkeypatch.setattr(tool_module, "verify_participation_scope", fake)
     return calls
 
 
 def _settings(mode: Literal["on", "off", "disabled"], *, discord: bool = True) -> Settings:
-    """A real Settings so `settings.discord.thread_participation` is the real model."""
+    """A real Settings so `settings.thread_participation` is the real model."""
     return Settings(
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
         anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
         mcp=McpSettings(jwt_secret=SecretStr("a" * 32), public_url=HttpUrl("https://x/mcp")),
-        discord=(
-            DiscordSettings(
-                bot_token=SecretStr("test-bot-token"),
-                thread_participation=ThreadParticipationSettings(mode=mode),
-            )
-            if discord
-            else None
-        ),
+        discord=DiscordSettings(bot_token=SecretStr("test-bot-token")) if discord else None,
+        thread_participation=ThreadParticipationSettings(mode=mode),
     )
 
 

@@ -762,11 +762,13 @@ class DaimonBot(commands.Bot):
         if discord_settings is None:
             return
         responder = AutoResponder(
-            settings=discord_settings.thread_participation,
+            settings=self.runtime.settings.thread_participation,
             sessionmaker=self.runtime.sessionmaker,
             anthropic=self.runtime.anthropic,
             bot_user_id=self.user.id,
             bot_display_name=discord_settings.bot_display_name,
+            billing_config=self.runtime.billing_config,
+            markup=self.runtime.settings.billing.markup,
         )
         try:
             # Cascade first: it says `off` for almost every message, so the
@@ -789,7 +791,7 @@ class DaimonBot(commands.Bot):
             return
 
         now = asyncio.get_running_loop().time()
-        quiet_seconds = discord_settings.thread_participation.quiet_seconds
+        quiet_seconds = self.runtime.settings.thread_participation.quiet_seconds
         batch = self._auto_pending.setdefault(thread_id, _AutoBatch(messages=[], first_at=now))
         batch.messages.append(message)
         del batch.messages[:-_AUTO_BATCH_MAX_MESSAGES]
@@ -913,7 +915,7 @@ class DaimonBot(commands.Bot):
             # organic thread participation, which has its own gates.
             if is_auto_respond_candidate(
                 available=discord_settings is not None
-                and discord_settings.thread_participation.mode != "disabled",
+                and self.runtime.settings.thread_participation.mode != "disabled",
                 author_is_bot=message.author.bot,
                 bot_mentioned=bot_mentioned,
                 in_thread=isinstance(message.channel, discord.Thread),

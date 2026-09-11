@@ -9,25 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Organic thread participation (Discord, opt-in).** An agent can be asked to
-  follow a thread and then keep replying in it. `DAIMON_DISCORD__THREAD_PARTICIPATION__MODE`
-  sets the deployment default: `off` (the default — mention-only, until someone
-  turns a scope on), `on`, or `disabled` (mention-only, and requests to turn it
-  on are refused). Below that, the `set_thread_participation` tool writes a
-  cascade of workspace, channel and thread scopes — any member may set a
-  thread, channel and workspace are admin (Manage Server) — where the narrowest
-  scope with a setting wins and a `disabled` tier cannot be overridden below
-  itself. In a thread that resolves to `on`, a burst of messages is judged once
-  after a quiet period (`DAIMON_DISCORD__THREAD_PARTICIPATION__QUIET_SECONDS`,
-  default 8) by a Haiku classifier that decides whether a reply adds anything,
-  with an hourly per-thread cap as a backstop; auto turns carry an
-  `unprompted="true"` hint so the agent keeps them short, and one that fails
-  admission (credit depleted, cap, missing config) stays silent instead of
-  posting the notice a mention would earn (a failure after the turn has
-  started still renders, since the thinking embed is already up). A burst
-  is judged for the newest message's author only, so nobody's words run on
-  someone else's session. Off by default, so
-  existing deployments behave exactly as before. Migration
+- **Organic thread participation (Discord, opt-in).** Ask the agent to follow
+  a thread and it keeps replying there unprompted. `DAIMON_THREAD_PARTICIPATION__MODE`
+  sets the deployment default (`off` by default, `on`, or `disabled`, which also
+  refuses requests to turn it on); the `set_thread_participation` tool writes
+  workspace, channel and thread scopes below it (thread by any member, wider
+  scopes by Manage Server), narrowest wins, `disabled` cannot be overridden
+  from below. In an `on` thread a burst of messages is judged once after a
+  quiet period by a metered Haiku classifier, gated by balance, cap and an
+  hourly per-thread ledger, then answered as an ordinary turn flagged
+  `unprompted="true"` so the agent stays brief. Turns that fail admission stay
+  silent. Existing deployments are unaffected; migration
   `0014_thread_participation` adds two empty tables.
 
 ### Removed

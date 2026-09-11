@@ -238,13 +238,14 @@ class HubSettings(BaseModel):
 class ThreadParticipationSettings(BaseModel):
     """Organic thread participation: replying in a thread unprompted.
 
-    `mode` is the deployment tier of a cascade (deployment, workspace,
-    channel, thread) that the agent's `set_thread_participation` tool writes
-    the other tiers of. `off` (the default) changes nothing for anyone: no
-    classifier runs and every server behaves as today until someone asks the
-    agent to follow a thread, or an admin turns a channel or the workspace
-    on. `disabled` also refuses those requests. `on` follows every thread
-    unless a lower tier says otherwise.
+    Platform-agnostic settings (the store and tool are keyed by platform);
+    only the Discord adapter reads them today. `mode` is the deployment tier
+    of a cascade (deployment, workspace, channel, thread) that the agent's
+    `set_thread_participation` tool writes the other tiers of. `off` (the
+    default) changes nothing for anyone: no classifier runs and every server
+    behaves as today until someone asks the agent to follow a thread, or an
+    admin turns a channel or the workspace on. `disabled` also refuses those
+    requests. `on` follows every thread unless a lower tier says otherwise.
     """
 
     mode: Literal["on", "off", "disabled"] = Field(
@@ -355,10 +356,6 @@ class DiscordSettings(BaseModel):
             "to a distinct name (e.g. 'daimon-staging') so a non-production "
             "deployment is visibly distinct in-channel."
         ),
-    )
-    thread_participation: ThreadParticipationSettings = Field(
-        default_factory=ThreadParticipationSettings,
-        description="Replying in threads unprompted. See ThreadParticipationSettings.",
     )
 
 
@@ -784,6 +781,10 @@ class Settings(BaseSettings):
     mcp: McpSettings = Field(default_factory=McpSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     discord: DiscordSettings | None = None
+    thread_participation: ThreadParticipationSettings = Field(
+        default_factory=ThreadParticipationSettings,
+        description="Replying in threads unprompted. See ThreadParticipationSettings.",
+    )
     slack: SlackSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)

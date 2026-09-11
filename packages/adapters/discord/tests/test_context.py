@@ -621,6 +621,7 @@ class TestBuildDeltaXml:
 
     @pytest.mark.asyncio
     async def test_delta_unprompted_marks_the_user_query(self) -> None:
+        """The continuation builder flags an unprompted trigger the same way the full one does."""
         m1 = _make_message(msg_id=1, content="prior")
         trigger = _make_message(msg_id=10, content="anyone?", author_id=200)
 
@@ -629,8 +630,8 @@ class TestBuildDeltaXml:
         )
         default, _ = await build_delta_xml(_make_thread([m1, trigger]), trigger, after_message_id=1)
 
-        assert ' unprompted="true">' in marked
-        assert ' unprompted="true"' not in default
+        assert ' unprompted="true">' in marked, "an unprompted delta turn must flag its trigger"
+        assert ' unprompted="true"' not in default, "a mention-driven delta turn is unchanged"
 
     @pytest.mark.asyncio
     async def test_delta_none_after_falls_back_to_full(self) -> None:

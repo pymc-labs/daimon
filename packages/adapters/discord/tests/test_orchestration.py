@@ -1806,9 +1806,8 @@ class TestUnpromptedAdmission:
         bot = _make_bot(_make_runtime(tenant.id, db_session_factory))
         message = _make_thread_message(content="what about the residuals?")
 
-        result = await bot._orchestrate(message, "123456", tenant.id, unprompted=True)  # pyright: ignore[reportPrivateUsage]
+        await bot._orchestrate(message, "123456", tenant.id, unprompted=True)  # pyright: ignore[reportPrivateUsage]
 
-        assert result is None
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -1830,8 +1829,7 @@ class TestUnpromptedAdmission:
         bot = _make_bot(_make_runtime(tenant.id, db_session_factory))
 
         unprompted = _make_thread_message(content="and the priors?")
-        result = await bot._orchestrate(unprompted, "123456", tenant.id, unprompted=True)  # pyright: ignore[reportPrivateUsage]
-        assert result is None
+        await bot._orchestrate(unprompted, "123456", tenant.id, unprompted=True)  # pyright: ignore[reportPrivateUsage]
         unprompted.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
 
         mention = _make_thread_message()

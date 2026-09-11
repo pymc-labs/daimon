@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -20,7 +21,9 @@ import pytest
 from daimon.adapters.discord import auto_respond
 from daimon.adapters.discord.auto_respond import AutoResponder
 from daimon.core.config import ThreadParticipationSettings
+from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores import thread_participation as store
+from daimon.core.thread_classifier import ClassifierOutcome, ClassifierUsage
 from daimon.core.thread_participation import (
     ClassifierMessage,
     ClassifierVerdict,
@@ -77,9 +80,12 @@ class _FakeClassifier:
         self.decision = decision
         self.calls: list[dict[str, Any]] = []
 
-    async def __call__(self, anthropic: Any, **kwargs: Any) -> ClassifierVerdict:
+    async def __call__(self, anthropic: Any, **kwargs: Any) -> ClassifierOutcome:
         self.calls.append(kwargs)
-        return ClassifierVerdict(self.decision, "fake")
+        return ClassifierOutcome(
+            ClassifierVerdict(self.decision, "fake"),
+            ClassifierUsage(input_tokens=1200, output_tokens=20, cache_read_input_tokens=0),
+        )
 
 
 @pytest.fixture
@@ -96,7 +102,22 @@ def _responder(sessionmaker: async_sessionmaker[AsyncSession], **overrides: Any)
         anthropic=MagicMock(),
         bot_user_id=BOT_ID,
         bot_display_name="daimon",
+        billing_config=None,
+        markup=Decimal("1.0"),
     )
+
+
+async def _funded_tenant(session: AsyncSession) -> Any:
+    """A tenant with trial credit: the balance gate runs before the classifier."""
+    tenant = await make_tenant(session)
+    await tenant_ledger.insert_entry(
+        session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    return tenant
 
 
 async def _set(
@@ -120,7 +141,7 @@ async def test_resolve_walks_the_cascade_from_real_rows(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant = await make_tenant(db_session)
+    tenant = await _funded_tenant(db_session)
     await _set(
         db_session, tenant.id, ParticipationScope.THREAD, str(THREAD_ID), ParticipationMode.ON
     )
@@ -150,7 +171,7 @@ async def test_rate_limited_thread_skips_without_a_classifier_call(
     db_session_factory: async_sessionmaker[AsyncSession],
     classifier: _FakeClassifier,
 ) -> None:
-    tenant = await make_tenant(db_session)
+    tenant = await _funded_tenant(db_session)
     for i in range(2):
         await store.record_auto_response(
             db_session,
@@ -183,7 +204,7 @@ async def test_a_burst_is_one_classifier_call_over_the_window_around_it(
     db_session_factory: async_sessionmaker[AsyncSession],
     classifier: _FakeClassifier,
 ) -> None:
-    tenant = await make_tenant(db_session)
+    tenant = await _funded_tenant(db_session)
     await db_session.commit()
     history = [
         _msg(author_id=ALICE_ID, content="fit this", message_id=1),
@@ -216,7 +237,7 @@ async def test_classifier_silence_is_final(
     classifier: _FakeClassifier,
 ) -> None:
     classifier.decision = "silence"
-    tenant = await make_tenant(db_session)
+    tenant = await _funded_tenant(db_session)
     await db_session.commit()
 
     assert (
@@ -233,7 +254,7 @@ async def test_a_mode_that_is_not_on_never_reaches_the_classifier(
     db_session_factory: async_sessionmaker[AsyncSession],
     classifier: _FakeClassifier,
 ) -> None:
-    tenant = await make_tenant(db_session)
+    tenant = await _funded_tenant(db_session)
     await db_session.commit()
 
     assert (
@@ -252,7 +273,7 @@ async def test_record_writes_one_ledger_row(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant = await make_tenant(db_session)
+    tenant = await _funded_tenant(db_session)
     await db_session.commit()
 
     await _responder(db_session_factory).record(
@@ -270,3 +291,47 @@ async def test_record_writes_one_ledger_row(
             )
             == 1
         )
+
+
+async def test_a_depleted_tenant_never_pays_for_the_classifier(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    classifier: _FakeClassifier,
+) -> None:
+    tenant = await make_tenant(db_session)  # no credit at all
+    await db_session.commit()
+    candidates = _candidates("anyone?")
+
+    assert (
+        await _responder(db_session_factory, mode="on").should_respond(
+            _thread(candidates), candidates, tenant_id=tenant.id, resolved=ON_THREAD
+        )
+        is False
+    ), "a tenant the mention path would refuse is refused here too"
+    assert classifier.calls == [], "the balance gate must run before the model call"
+
+
+async def test_the_classifier_call_is_metered_to_the_caller(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    classifier: _FakeClassifier,
+) -> None:
+    tenant = await _funded_tenant(db_session)
+    await db_session.commit()
+    candidates = _candidates("what about the prior?")
+
+    await _responder(db_session_factory, mode="on").should_respond(
+        _thread(candidates), candidates, tenant_id=tenant.id, resolved=ON_THREAD
+    )
+
+    async with db_session_factory() as session:
+        rows = await usage_events.list_for_tenant(session, tenant_id=tenant.id)
+        ledger = await tenant_ledger.list_for_tenant(session, tenant_id=tenant.id)
+    (row,) = rows
+    assert row.model == "claude-haiku-4-5" and row.platform_user_id == str(ALICE_ID), (
+        "one usage row, priced at the classifier model, attributed to the caller"
+    )
+    debits = [entry for entry in ledger if entry.reason == "classifier_debit"]
+    assert len(debits) == 1 and debits[0].delta_usd < 0, (
+        "the tenant, not the operator, carries the classifier's cost"
+    )

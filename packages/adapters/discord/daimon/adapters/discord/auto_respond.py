@@ -14,15 +14,19 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.config import ThreadParticipationSettings
+from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores.thread_participation import (
     count_auto_responses_since,
     get_participation_modes,
     record_auto_response,
 )
+from daimon.core.tenant_balance import is_over_balance
 from daimon.core.thread_classifier import classify
 from daimon.core.thread_participation import (
     AutoRespondSnapshot,
@@ -34,6 +38,7 @@ from daimon.core.thread_participation import (
     decide_pre_classifier,
     resolve_participation,
 )
+from daimon.core.usage_recording import record_classifier_usage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -53,12 +58,16 @@ class AutoResponder:
         anthropic: AsyncAnthropic,
         bot_user_id: int,
         bot_display_name: str,
+        billing_config: BillingConfig | None,
+        markup: Decimal,
     ) -> None:
         self._settings = settings
         self._sessionmaker = sessionmaker
         self._anthropic = anthropic
         self._bot_user_id = bot_user_id
         self._bot_display_name = bot_display_name
+        self._billing_config = billing_config
+        self._markup = markup
 
     async def resolve(
         self, *, tenant_id: uuid.UUID, thread: discord.Thread
@@ -87,7 +96,14 @@ class AutoResponder:
         tenant_id: uuid.UUID,
         resolved: ResolvedParticipation,
     ) -> bool:
-        """Run the gates and, if they pass, the classifier. Logs every skip with its reason."""
+        """Run the gates and, if they pass, the classifier. Logs every skip with its reason.
+
+        The balance and cap gates run here, before the classifier, on the
+        caller the turn would run as: a tenant that could not be admitted
+        must not pay for the question of whether to admit it. The call that
+        does run is metered to the tenant like any other model spend.
+        """
+        caller_id = str(candidates[-1].author.id)
         async with self._sessionmaker() as session:
             in_window = await count_auto_responses_since(
                 session,
@@ -111,8 +127,22 @@ class AutoResponder:
                 tier=resolved.tier,
             )
             return False
+        if await is_over_balance(sessionmaker=self._sessionmaker, tenant_id=tenant_id):
+            log.info(
+                "thread_participation.skipped", reason="over_balance", thread_id=str(thread.id)
+            )
+            return False
+        if await is_over_cap(
+            billing_config=self._billing_config,
+            sessionmaker=self._sessionmaker,
+            tenant_id=tenant_id,
+            user_id=caller_id,
+            now=datetime.now(UTC),
+        ):
+            log.info("thread_participation.skipped", reason="over_cap", thread_id=str(thread.id))
+            return False
         recent = await self._recent_window(thread, exclude_ids={m.id for m in candidates})
-        verdict = await classify(
+        outcome = await classify(
             self._anthropic,
             model=self._settings.classifier_model,
             bot_display_name=self._bot_display_name,
@@ -124,6 +154,19 @@ class AutoResponder:
                 for m in candidates
             ],
         )
+        if outcome.usage is not None:
+            await record_classifier_usage(
+                sessionmaker=self._sessionmaker,
+                tenant_id=tenant_id,
+                platform_user_id=caller_id,
+                model_id=self._settings.classifier_model,
+                input_tokens=outcome.usage.input_tokens,
+                output_tokens=outcome.usage.output_tokens,
+                cache_read_input_tokens=outcome.usage.cache_read_input_tokens,
+                markup=self._markup,
+                pricing=MODEL_PRICING.get(self._settings.classifier_model),
+            )
+        verdict = outcome.verdict
         post = decide_post_classifier(verdict)
         event = (
             "thread_participation.skipped"

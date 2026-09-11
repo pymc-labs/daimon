@@ -56,6 +56,9 @@ from daimon.adapters.mcp.tools.discord._models import (
 from daimon.adapters.mcp.tools.discord._models import (
     ThreadRow as ThreadRow,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.discord._participation import (
+    verify_participation_scope as verify_participation_scope,
+)
 from daimon.adapters.mcp.tools.discord._read import (
     _get_message_impl as _get_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
