@@ -38,6 +38,7 @@ from daimon.core.thread_participation import (
     ParticipationMode,
     ParticipationScope,
     ResolvedParticipation,
+    build_participation_explanation,
     build_participation_note,
     resolve_participation,
     scope_label,
@@ -107,7 +108,7 @@ def _deployment_mode(runtime: McpRuntime) -> ParticipationMode:
     """The deployment tier. Without a Discord settings block there is no bot to follow anything."""
     if runtime.settings.discord is None:
         return ParticipationMode.DISABLED
-    return ParticipationMode(runtime.settings.thread_participation.mode)
+    return runtime.settings.thread_participation.mode
 
 
 def _target_scope(
@@ -227,24 +228,6 @@ async def _set_thread_participation_impl(
     )
 
 
-def _explain(effective: ResolvedParticipation, *, thread_id: str | None) -> str:
-    where = f"thread {thread_id}" if thread_id is not None else "here"
-    if effective.mode is ParticipationMode.ON:
-        return (
-            f"I follow {where}: the {effective.tier} tier is set to on, so I may reply "
-            "to messages that call for it without being addressed first."
-        )
-    if effective.mode is ParticipationMode.DISABLED:
-        return (
-            f"I only reply in {where} when @mentioned: the {effective.tier} tier is "
-            "disabled, and no narrower scope can turn it back on."
-        )
-    return (
-        f"I only reply in {where} when @mentioned: the {effective.tier} tier is the "
-        "narrowest one with a setting, and it is off."
-    )
-
-
 async def _get_thread_participation_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -280,7 +263,7 @@ async def _get_thread_participation_impl(
         thread_mode=modes.thread.value if modes.thread is not None else None,
         effective_mode=effective.mode.value,
         effective_tier=effective.tier,
-        explanation=_explain(effective, thread_id=thread_id),
+        explanation=build_participation_explanation(effective, thread_id=thread_id),
     )
 
 
@@ -294,30 +277,16 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
     ) -> ThreadParticipationResult:
         """Start or stop replying in a thread without being addressed each time.
 
-        Following is OFF everywhere by default, and that is the right default —
-        prefer to leave it off. Turn a thread on only when the user asks you to
-        follow it, stay in it, or keep replying in it, or when a live
-        back-and-forth clearly needs your replies to continue. Turn it off with
-        ``mode="off"`` the moment someone asks you to stop following, to be
-        quiet, or to leave the thread alone. When it is on you still choose
-        silence far more often than speech: nothing here obliges you to reply.
+        Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
+        thread (its parent is looked up, so ``channel_id`` is optional);
+        ``channel_id`` from ``<channel role="parent_channel">`` alone for a
+        channel; neither for the workspace. Channel and workspace scope need
+        Manage Server.
 
-        Which ids to pass (Discord only; the tool refuses elsewhere):
-        - a thread: ``thread_id`` from ``<thread role="current_thread">``. The
-          thread must exist in this server and be visible to the caller; its
-          parent channel is looked up, so ``channel_id`` is optional here.
-        - a whole channel: ``channel_id`` only. **Admin action** (Manage Server).
-        - the whole workspace: neither id. **Admin action** (Manage Server).
-
-        Modes: ``on`` follow, ``off`` do not follow, ``disabled`` lock a channel
-        or workspace off so no narrower scope can turn it back on (not valid for
-        a single thread — use ``off``), ``inherit`` remove this scope's own
-        setting so it follows whatever the wider scope says.
-
-        The narrowest scope with a setting wins, except that a ``disabled``
-        scope wins over everything below it. Read the returned ``note`` back to
-        the user: a thread turned on under a disabled channel is still silent,
-        and the note says so rather than promising something that will not happen.
+        Modes: ``on`` follow, ``off`` do not, ``disabled`` lock a channel or
+        workspace so nothing below can turn it on (not valid for a thread),
+        ``inherit`` drop this scope's setting. Read the returned ``note`` back
+        to the user.
         """
         return await _set_thread_participation_impl(
             runtime, await _auth(ctx), mode, thread_id, channel_id
@@ -331,20 +300,14 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
     ) -> ThreadParticipationStatus:
         """Report whether you follow a thread or channel, and which tier decided it.
 
-        Use it when someone asks whether you are following this thread, why you
-        did or did not reply unprompted, or before changing a setting — the tier
-        that currently wins is the tier worth changing.
-
-        Pass ``thread_id`` from ``<thread role="current_thread">`` for a
-        thread (its parent channel is looked up), ``channel_id`` from
-        ``<channel role="parent_channel">`` alone for a channel, neither for
-        the workspace. Not gated: any member can ask, about threads and
-        channels they can see.
+        Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
+        thread (its parent is looked up, so ``channel_id`` is optional);
+        ``channel_id`` from ``<channel role="parent_channel">`` alone for a
+        channel; neither for the workspace. Reading needs no Manage Server;
+        changing channel or workspace scope does.
 
         Reports every tier (deployment, workspace, channel, thread) plus the
-        winner, so "why" is answerable without guessing. Following is off by
-        default, so an all-unset cascade answering ``off`` is the normal state,
-        not a misconfiguration.
+        winner. Read the returned ``explanation`` back to the user.
         """
         return await _get_thread_participation_impl(
             runtime, await _auth(ctx), thread_id, channel_id

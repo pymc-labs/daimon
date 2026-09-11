@@ -46,13 +46,13 @@ async def verify_participation_scope(
         return None
     guild_id = _require_guild_id(auth)
     user_id = _require_discord_identity(auth)
-    async with rest_client(_require_bot_token(runtime)) as c:
-        _, member = await _resolve_member(c, guild_id, user_id)
-        target = _require_guild_channel(await _resolve_channel(c, scope_id), guild_id)
+    async with rest_client(_require_bot_token(runtime)) as client:
+        _, member = await _resolve_member(client, guild_id, user_id)
+        target = _require_guild_channel(await _resolve_channel(client, scope_id), guild_id)
         if scope is ParticipationScope.THREAD:
             if not isinstance(target, discord.Thread):
                 raise ToolError("thread_id does not name a thread — pass a channel as channel_id")
-            await _check_thread_view(c, target, member, user_id)
+            await _check_thread_view(client, target, member, user_id)
             return str(target.parent_id)
         if isinstance(target, discord.Thread):
             raise ToolError("channel_id names a thread — pass it as thread_id instead")

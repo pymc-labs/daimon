@@ -8,7 +8,6 @@ worse than no rule at all.
 from __future__ import annotations
 
 import uuid
-from typing import Literal
 from unittest.mock import MagicMock
 
 import pytest
@@ -67,7 +66,7 @@ def verified_scopes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Participation
     return calls
 
 
-def _settings(mode: Literal["on", "off", "disabled"], *, discord: bool = True) -> Settings:
+def _settings(mode: ParticipationMode, *, discord: bool = True) -> Settings:
     """A real Settings so `settings.thread_participation` is the real model."""
     return Settings(
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
@@ -80,7 +79,7 @@ def _settings(mode: Literal["on", "off", "disabled"], *, discord: bool = True) -
 
 def _runtime(
     sessionmaker: async_sessionmaker[AsyncSession],
-    mode: Literal["on", "off", "disabled"] = "off",
+    mode: ParticipationMode = ParticipationMode.OFF,
     *,
     discord: bool = True,
 ) -> McpRuntime:
@@ -306,7 +305,7 @@ async def test_deployment_disabled_refuses_every_scope(
 
     with pytest.raises(ToolError) as exc_info:
         await _set_thread_participation_impl(
-            _runtime(committing_sessionmaker, "disabled"),
+            _runtime(committing_sessionmaker, ParticipationMode.DISABLED),
             _auth(tenant_id=tenant_id, admin=True),
             "on",
             _THREAD,
@@ -502,7 +501,7 @@ async def test_get_refuses_a_non_discord_caller_too(
 
     with pytest.raises(ToolError, match="Discord"):
         await _get_thread_participation_impl(
-            _runtime(committing_sessionmaker, "on"),
+            _runtime(committing_sessionmaker, ParticipationMode.ON),
             _auth(tenant_id=tenant_id, admin=False, platform="slack"),
             None,
             None,
