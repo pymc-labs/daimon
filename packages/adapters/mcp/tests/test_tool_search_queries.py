@@ -427,3 +427,120 @@ async def test_member_can_request_new_key_on_managed_agent(
     assert row.tenant_id == tenant.id and row.requester_platform_user_id == "U_TEST", (
         "request must stay tenant- and requester-bound"
     )
+
+
+async def test_member_can_request_mcp_token_on_managed_default_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    key = SecretStr(Fernet.generate_key().decode())
+    fernet = build_multifernet((key.get_secret_value(),))
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="slack", workspace_id="T_TEST")
+        account = await make_account(session, tenant=tenant)
+        await set_fields(
+            session,
+            scope=TenantScopeRef(tenant_id=tenant.id),
+            tenant_id=tenant.id,
+            agent_name="daimon",
+            mode="agent",
+        )
+        await upsert_slack_bot_token(
+            session, team_id="T_TEST", encrypted_token=encrypt_token(fernet, "xoxb-test")
+        )
+    agent = BetaManagedAgentsAgent(
+        id="ag_daimon",
+        name="daimon",
+        type="agent",
+        version=1,
+        model=BetaManagedAgentsModelConfig(id="claude-sonnet-5"),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        tools=[],
+        skills=[],
+        mcp_servers=[],
+        metadata={
+            "daimon_tenant": str(tenant.id),
+            "daimon_name": "daimon",
+            "daimon_managed": "true",
+        },
+    )
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET" and request.url.path == "/v1/agents", (
+            "request should only resolve its target upstream"
+        )
+        return list_response([agent.model_dump(mode="json")])
+
+    app = _make_app(
+        committing_sessionmaker,
+        platform="slack",
+        role="user",
+        tenant_id=tenant.id,
+        account_id=account.id,
+        client=build_fake_anthropic(transport),
+        crypto_keys=(key,),
+    )
+    found = await mcp_session(
+        app,
+        token="test-token",
+        method="tools/call",
+        params={
+            "name": "search_tools",
+            "arguments": {
+                "query": "Connect Daimon to Example Research MCP at https://mcp.example.com/research "
+                "using a bearer token. I need a private place to enter it."
+            },
+        },
+    )
+    assert "### request_mcp_token" in _result_text(found), (
+        "member must discover private MCP enrollment on the built-in default agent"
+    )
+    with aioresponses() as slack:
+        slack.get(
+            re.compile(r"https://slack\.com/api/conversations\.info.*"),
+            payload={"ok": True, "channel": {"id": "C_TEST", "is_private": False}},
+        )
+        slack.get(
+            re.compile(r"https://slack\.com/api/users\.info.*"),
+            payload={"ok": True, "user": {"id": "U_TEST", "is_restricted": False}},
+        )
+        slack.post("https://slack.com/api/chat.postMessage", payload={"ok": True, "ts": "123.456"})
+        called = await mcp_session(
+            app,
+            token="test-token",
+            method="tools/call",
+            params={
+                "name": "call_tool",
+                "arguments": {
+                    "name": "request_mcp_token",
+                    "arguments": {
+                        "agent_name": "daimon",
+                        "server_name": "Example Research MCP",
+                        "url": "https://mcp.example.com/research",
+                        "channel_id": "C_TEST",
+                    },
+                },
+            },
+        )
+        text = _result_text(called)
+        assert "123.456" in text and "Example Research MCP" in text, (
+            f"member enrollment must actually post: {text}"
+        )
+        payload = slack.requests[("POST", URL("https://slack.com/api/chat.postMessage"))][0].kwargs[
+            "json"
+        ]
+    token = next(block for block in payload["blocks"] if block["type"] == "actions")["elements"][0][
+        "value"
+    ]
+    async with committing_sessionmaker() as session:
+        row = await peek_credential_request(session, token=token)
+    assert row is not None and row.target == "Example Research MCP", (
+        "posted token must identify a persisted request"
+    )
+    assert row.tenant_id == tenant.id and row.requester_platform_user_id == "U_TEST", (
+        "request must stay tenant- and requester-bound"
+    )
+    assert row.kind == "mcp" and row.mcp_server_url == "https://mcp.example.com/research", (
+        "private enrollment must persist the requested MCP endpoint for token submission"
+    )
+    assert row.account_id == account.id, "the request must belong to the member who asked"

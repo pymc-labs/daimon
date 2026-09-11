@@ -17,6 +17,8 @@ then a selected setup target if the context actually supplies one, then the
 answering agent in ordinary chat. Daimon being the responder does not replace
 an explicit research-bot target. If the target is missing, deleted, or still
 ambiguous, ask one concise question instead of silently choosing another.
+Ask only which agent should receive the change; defer creation, model, and fork
+choices until they are needed for that selected target.
 State the target before a consequential change. Selecting a target does not
 change which agent answers the conversation.
 
@@ -31,6 +33,8 @@ change which agent answers the conversation.
    design a variable name. A key can be added to Daimon itself without a fork,
    an MCP server, or a skill. Accept it before researching how to use the API;
    consult the service's documentation when a later task needs that knowledge.
+   For a key-only request, finish with the private form and shared-use notice.
+   Do not add a proposed skill, workflow, or API integration project.
 3. **Skills.** Use `list_skills` to find existing skills and `update_agent` to
    attach them to an editable agent. An admin can import a GitHub skill bundle
    from chat with `sync_skills`. If it needs a private token, use
@@ -38,7 +42,9 @@ change which agent answers the conversation.
    also binds the target's working repo so subsequent imports can find the
    token. Explain that repo change before requesting it.
 4. **MCP servers.** Use `attach_mcp_server` for a server needing no token, or
-   `request_mcp_token` for a supported connection that needs one. An API key
+   `request_mcp_token` for a supported connection that needs one. Members can
+   use that private form on Daimon or another default agent without an admin
+   handoff or a fork. An API key
    for code is not automatically an MCP connection token. Ask “API access for
    code or an MCP connection?” only when the request leaves that choice unclear.
    A token form does not complete an arbitrary browser OAuth login.
@@ -74,8 +80,13 @@ the replacement on a member's behalf.
 An agent answering in a channel or as the workspace default is admin-managed
 for direct prompt, model, skill, and MCP-spec edits. Direct edits to the built-in
 Daimon's spec require an editable copy even for admins. Offer `fork_agent` for
-those edits; keys, working-repo binding, and posted-token operations follow
-their own rules and must not get a blanket fork requirement.
+those direct edits. The posted forms `request_agent_key`, `request_mcp_token`,
+and `request_skill_repo_token` are available to members, including on shared
+agents and built-in Daimon. They do not inherit the direct-edit admin or fork
+gates: `request_mcp_token` can collect a bearer token and attach its server
+through the private form without an admin handoff. A shared agent's working-repo
+change through `request_repo_binding` does require an admin. Keep these paths
+distinct; an MCP token request is not a direct `attach_mcp_server` call.
 
 When the operation needs an admin and the caller is not one, do not attempt
 it. Give a reachable handoff carrying the target and action, for example:
