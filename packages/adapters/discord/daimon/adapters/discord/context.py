@@ -140,6 +140,7 @@ async def build_context_xml(
     bot_user_id: int | None = None,
     bot_display_name: str = "daimon",
     omit_oversized_image_urls: bool = False,
+    unprompted: bool = False,
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context from thread history for the turn driver.
 
@@ -152,6 +153,9 @@ async def build_context_xml(
     ``image_attachments`` is the list of image-type attachments found in
     the thread history (for the caller to pass as vision content blocks).
     The trigger message is excluded from thread_history.
+
+    ``unprompted=True`` marks the trigger as one nobody @mentioned (organic
+    thread participation), so the agent knows it chose to speak.
     """
     messages = [m async for m in thread.history(limit=limit)]
     messages.sort(key=lambda m: m.created_at)
@@ -203,6 +207,9 @@ async def build_context_xml(
         f" author_name={quoteattr(trigger.author.display_name)}"
         f" user_id={quoteattr(str(trigger.author.id))}"
         f" timestamp={quoteattr(trigger.created_at.isoformat())}"
+        # Only present when true: every mention-driven turn keeps its
+        # byte-for-byte existing shape.
+        + (' unprompted="true"' if unprompted else "")
     )
     trigger_content = escape(
         _strip_bot_mention(trigger.content, bot_user_id, bot_display_name=bot_display_name)
@@ -221,6 +228,7 @@ async def build_delta_xml(
     bot_user_id: int | None = None,
     bot_display_name: str = "daimon",
     omit_oversized_image_urls: bool = False,
+    unprompted: bool = False,
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context for a continuation turn (delta since watermark).
 
@@ -248,7 +256,11 @@ async def build_delta_xml(
     """
     if after_message_id is None:
         return await build_context_xml(
-            thread, trigger, bot_user_id=bot_user_id, bot_display_name=bot_display_name
+            thread,
+            trigger,
+            bot_user_id=bot_user_id,
+            bot_display_name=bot_display_name,
+            unprompted=unprompted,
         )
 
     after_obj = discord.Object(id=after_message_id)
@@ -286,6 +298,9 @@ async def build_delta_xml(
         f" author_name={quoteattr(trigger.author.display_name)}"
         f" user_id={quoteattr(str(trigger.author.id))}"
         f" timestamp={quoteattr(trigger.created_at.isoformat())}"
+        # Only present when true: every mention-driven turn keeps its
+        # byte-for-byte existing shape.
+        + (' unprompted="true"' if unprompted else "")
     )
     trigger_content = escape(
         _strip_bot_mention(trigger.content, bot_user_id, bot_display_name=bot_display_name)

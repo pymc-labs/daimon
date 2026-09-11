@@ -1863,6 +1863,48 @@
         'type': 'object',
       }),
     }),
+    'get_thread_participation': dict({
+      'description': '''
+        Report whether you follow a thread or channel, and which tier decided it.
+        
+        Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
+        thread (its parent is looked up, so ``channel_id`` is optional);
+        ``channel_id`` from ``<channel role="parent_channel">`` alone for a
+        channel; neither for the workspace. Reading needs no Manage Server;
+        changing channel or workspace scope does.
+        
+        Reports every tier (deployment, workspace, channel, thread) plus the
+        winner. Read the returned ``explanation`` back to the user.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'thread_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'get_turn_cost': dict({
       'description': '''
         Return one finished turn's raw provider cost, before markup.
@@ -3189,6 +3231,62 @@
         'required': list([
           'repo_url',
           'default_branch',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_thread_participation': dict({
+      'description': '''
+        Start or stop replying in a thread without being addressed each time.
+        
+        Scope: ``thread_id`` from ``<thread role="current_thread">`` for a
+        thread (its parent is looked up, so ``channel_id`` is optional);
+        ``channel_id`` from ``<channel role="parent_channel">`` alone for a
+        channel; neither for the workspace. Channel and workspace scope need
+        Manage Server.
+        
+        Modes: ``on`` follow, ``off`` do not, ``disabled`` lock a channel or
+        workspace so nothing below can turn it on (not valid for a thread),
+        ``inherit`` drop this scope's setting. Read the returned ``note`` back
+        to the user.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'mode': dict({
+            'enum': list([
+              'on',
+              'off',
+              'disabled',
+              'inherit',
+            ]),
+            'type': 'string',
+          }),
+          'thread_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'mode',
         ]),
         'type': 'object',
       }),

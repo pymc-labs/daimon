@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Coroutine
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 import anthropic as _anthropic
 import sentry_sdk
@@ -22,10 +23,11 @@ from daimon.adapters.discord.context import (
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
-from daimon.adapters.discord.gating import should_process_message
+from daimon.adapters.discord.gating import is_participation_candidate, should_process_message
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.adapters.discord.thread_send import safe_thread_send
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.vision import (
@@ -54,6 +56,7 @@ from daimon.core.stores.thread_sessions import (
     mark_turn_active,
     update_watermark,
 )
+from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.gating import should_admit_turn
@@ -188,6 +191,28 @@ def _pick_post_channel(guild: discord.Guild) -> discord.abc.Messageable | None:
     return next((c for c in guild.text_channels if c.permissions_for(me).send_messages), None)
 
 
+@dataclass
+class _ParticipationBatch:
+    """Unmentioned messages piling up in one followed thread, and the timer watching them.
+
+    The timer restarts on every new message, so the batch is only judged once
+    the thread has gone quiet: a rapid human back-and-forth costs one
+    classifier call at the end, not one per message.
+    """
+
+    messages: list[discord.Message]
+    first_at: float
+    timer: asyncio.Task[None] | None = None
+
+
+# A batch keeps only this many newest messages (the classifier window is the
+# same size), and stops restarting its timer once it has waited this many quiet
+# periods, so a thread that never goes quiet is still judged on a bounded delay
+# with a bounded prompt.
+_PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = 10
+_PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = 6
+
+
 class DaimonBot(commands.Bot):
     """Discord bot process. Slash commands + turn pipeline."""
 
@@ -204,6 +229,12 @@ class DaimonBot(commands.Bot):
         # Incremented before the turn starts; decremented in a finally that brackets
         # the whole drain loop so the slot is always released.
         self._inflight: dict[uuid.UUID, int] = {}
+        # Organic thread participation: per-thread quiet-period batches, keyed
+        # by thread id. Populated only for threads that resolved to `on`.
+        self._participation_pending: dict[int, _ParticipationBatch] = {}
+        # Built on first use, not here: it needs `self.user`, which the gateway
+        # only supplies once the bot is ready.
+        self._participant: ThreadParticipant | None = None
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
         # Track spawned background tasks so they aren't GC'd; discard on done.
@@ -233,6 +264,11 @@ class DaimonBot(commands.Bot):
         bot.close() unconditionally so the gateway disconnects cleanly.
         """
         self.draining = True
+        # Pending auto batches are unasked-for turns that have not started;
+        # dropping them is free, whereas letting a timer fire mid-drain would
+        # admit a new turn the drain is trying to stop.
+        for thread_id in list(self._participation_pending):
+            self._cancel_participation_batch(thread_id)
         log.info("discord.draining", inflight_threads=len(self._processing))
         deadline = asyncio.get_running_loop().time() + _DRAIN_GRACE_S
         while self._processing and asyncio.get_running_loop().time() < deadline:
@@ -695,23 +731,214 @@ class DaimonBot(commands.Bot):
         if self._inflight[tenant_id] <= 0:
             self._inflight.pop(tenant_id, None)
 
+    def _cancel_participation_batch(self, thread_id: int) -> None:
+        """Drop a thread's pending auto batch and its timer, if any."""
+        batch = self._participation_pending.pop(thread_id, None)
+        if batch is not None and batch.timer is not None:
+            batch.timer.cancel()
+
+    def _thread_participant(self, *, bot_user_id: int, bot_display_name: str) -> ThreadParticipant:
+        """The bot's one participant, built on first use and reused after that."""
+        if self._participant is None:
+            self._participant = ThreadParticipant(
+                settings=self.runtime.settings.thread_participation,
+                sessionmaker=self.runtime.sessionmaker,
+                anthropic=self.runtime.anthropic,
+                bot_user_id=bot_user_id,
+                bot_display_name=bot_display_name,
+                billing_config=self.runtime.billing_config,
+                markup=self.runtime.settings.billing.markup,
+            )
+        return self._participant
+
+    async def _maybe_participate(self, message: discord.Message) -> None:
+        """Organic thread participation: an unmentioned human message in a guild thread.
+
+        Reached only after the mention gate said no. Where the mention path
+        posts a notice (tenant still provisioning, decision failure), this
+        path stays silent: nobody asked, so nothing is owed, and a chatty
+        failure mode would be worse than the missing reply.
+
+        Nothing is decided here: the message joins the thread's batch and the
+        quiet timer restarts. A thread the cascade resolves to anything but
+        `on` costs exactly one indexed read and returns -- no liveness read,
+        no classifier, no timer, no turn.
+        """
+        if self.draining or self.user is None:
+            return
+        if message.guild is None or not isinstance(message.channel, discord.Thread):
+            return
+        thread = message.channel
+        thread_id = thread.id
+        if thread_id in self._processing:
+            # The in-flight turn's delta context already carries this message.
+            return
+        guild_id = str(message.guild.id)
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+        discord_settings = self.runtime.settings.discord
+        if discord_settings is None:
+            return
+        responder = self._thread_participant(
+            bot_user_id=self.user.id, bot_display_name=discord_settings.bot_display_name
+        )
+        try:
+            # Cascade first: it says `off` for almost every message, so the
+            # tenant liveness read is only paid by threads actually followed.
+            resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
+            if resolved.mode is not ParticipationMode.ON:
+                log.debug(
+                    "thread_participation.not_following",
+                    thread_id=str(thread_id),
+                    mode=resolved.mode.value,
+                    tier=resolved.tier,
+                )
+                return
+            tr = await get_tenant_liveness(self.runtime.sessionmaker, tenant_id)
+            if tr is None or tr.archived_at is not None or tr.provision_status != "ready":
+                return
+        except Exception as exc:  # noqa: BLE001 -- unasked-for turn: log, stay silent
+            log.exception("thread_participation.decision_failed", thread_id=str(thread_id))
+            sentry_sdk.capture_exception(exc)
+            return
+
+        now = asyncio.get_running_loop().time()
+        quiet_seconds = self.runtime.settings.thread_participation.quiet_seconds
+        batch = self._participation_pending.setdefault(
+            thread_id, _ParticipationBatch(messages=[], first_at=now)
+        )
+        batch.messages.append(message)
+        del batch.messages[:-_PARTICIPATION_BATCH_MAX_MESSAGES]
+        if batch.timer is not None:
+            if now - batch.first_at >= quiet_seconds * _PARTICIPATION_BATCH_MAX_QUIET_PERIODS:
+                return  # waited long enough: let the running timer fire as scheduled
+            batch.timer.cancel()
+        batch.timer = self._spawn(
+            self._participation_quiet_timer(
+                quiet_seconds, thread, guild_id=guild_id, tenant_id=tenant_id, responder=responder
+            )
+        )
+
+    async def _participation_quiet_timer(
+        self,
+        quiet_seconds: float,
+        thread: discord.Thread,
+        *,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        responder: ThreadParticipant,
+    ) -> None:
+        """Wait out the quiet period, then judge the batch. Cancelled = a newer message won."""
+        await asyncio.sleep(quiet_seconds)
+        await self._participation_fire(
+            thread, guild_id=guild_id, tenant_id=tenant_id, responder=responder
+        )
+
+    async def _participation_fire(
+        self,
+        thread: discord.Thread,
+        *,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        responder: ThreadParticipant,
+    ) -> None:
+        """The thread went quiet: judge the whole batch once, then run at most one turn."""
+        thread_id = thread.id
+        batch = self._participation_pending.pop(thread_id, None)
+        if batch is None or not batch.messages:
+            return
+        if self.draining or thread_id in self._processing:
+            return
+        discord_settings = self.runtime.settings.discord
+        if discord_settings is None:
+            return
+        # One turn = one caller (see _drain_pending_mentions): the newest
+        # message's author is the caller, and only their messages are judged.
+        # Coalescing other authors' text onto this caller's session would
+        # reopen the confused-deputy hole the mention path closed.
+        trigger = batch.messages[-1]
+        candidates = [m for m in batch.messages if m.author.id == trigger.author.id]
+        try:
+            # Re-resolved rather than carried from the batch: the quiet window
+            # is long enough for someone to turn the thread off mid-burst.
+            resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
+            if not await responder.should_respond(
+                thread, candidates, trigger=trigger, tenant_id=tenant_id, resolved=resolved
+            ):
+                return
+        except Exception as exc:  # noqa: BLE001 -- unasked-for turn: log, stay silent
+            log.exception("thread_participation.decision_failed", thread_id=str(thread_id))
+            sentry_sdk.capture_exception(exc)
+            return
+        if self.draining or thread_id in self._processing:
+            return  # a drain or a mention landed while the classifier was deciding
+
+        cap = discord_settings.max_concurrent_turns_per_tenant
+        count = self._inflight.get(tenant_id, 0)
+        if not should_admit_turn(current_in_flight=count, cap=cap):
+            log.info(
+                "turn.skipped.concurrency_shed",
+                tenant_id=str(tenant_id),
+                guild_id=guild_id,
+                channel_id=str(thread_id),
+                in_flight=count,
+                cap=cap,
+            )
+            return
+        self._inflight[tenant_id] = count + 1
+        self._processing.add(thread_id)
+        try:
+            # The ledger row is written when the turn is admitted, not when it
+            # answers: spend starts here, and a turn the agent ends in silence
+            # (or one that fails) must still count against the hourly cap.
+            try:
+                await responder.record(
+                    tenant_id=tenant_id, thread_id=thread_id, message_id=str(trigger.id)
+                )
+            except Exception:  # noqa: BLE001 -- best-effort ledger: a miss loosens the cap by one
+                log.exception("thread_participation.record_failed", thread_id=str(thread_id))
+            # The newest message is the trigger; the delta context carries the
+            # rest of the batch, since they all landed after the watermark.
+            await self._handle_mention(trigger, guild_id, tenant_id, unprompted=True)
+            await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
+        finally:
+            self._processing.discard(thread_id)
+            self._pending.pop(thread_id, None)
+            self._release_inflight(tenant_id)
+
     async def on_message(self, message: discord.Message) -> None:
         """Gate on mention, resolve TenantContext once + run the non-ready self-heal gate,
         then orchestrate a turn in a thread."""
         discord_settings = self.runtime.settings.discord
+        # Explicit @-mention only. `mentioned_in` returns True for @everyone/@here
+        # (it short-circuits on message.mention_everyone), which would make the bot
+        # reply to every mass ping. message.mentions excludes @everyone/@here and
+        # role mentions, so this triggers only on a direct user mention of the bot.
+        bot_mentioned = self.user is not None and any(
+            user.id == self.user.id for user in message.mentions
+        )
         if not should_process_message(
             author_is_bot=message.author.bot,
             author_id=str(message.author.id),
-            # Explicit @-mention only. `mentioned_in` returns True for @everyone/@here
-            # (it short-circuits on message.mention_everyone), which would make the bot
-            # reply to every mass ping. message.mentions excludes @everyone/@here and
-            # role mentions, so this triggers only on a direct user mention of the bot.
-            bot_mentioned=self.user is not None
-            and any(user.id == self.user.id for user in message.mentions),
+            bot_mentioned=bot_mentioned,
             guild_id=str(message.guild.id) if message.guild else None,
             self_user_id=str(self.user.id) if self.user is not None else None,
             qa_bot_user_ids=discord_settings.qa_bot_user_ids if discord_settings else (),
         ):
+            # Not a mention. The only other way a message starts a turn is
+            # organic thread participation, which has its own gates.
+            if is_participation_candidate(
+                # No Discord settings block means no bot to follow anything.
+                deployment_mode=(
+                    self.runtime.settings.thread_participation.mode
+                    if discord_settings is not None
+                    else ParticipationMode.DISABLED
+                ),
+                author_is_bot=message.author.bot,
+                bot_mentioned=bot_mentioned,
+                in_thread=isinstance(message.channel, discord.Thread),
+                guild_id=str(message.guild.id) if message.guild else None,
+            ):
+                await self._maybe_participate(message)
             return
         if self.draining:
             return  # stop admitting new mentions during drain
@@ -758,6 +985,12 @@ class DaimonBot(commands.Bot):
                 "DaimonBot requires discord settings; "
                 "the __main__.py entrypoint validates this at boot time"
             )
+
+            # An explicit mention supersedes any batch waiting out its quiet
+            # period in this thread: this turn's context carries those messages
+            # anyway, so judging them separately would only duplicate the reply.
+            if isinstance(message.channel, discord.Thread):
+                self._cancel_participation_batch(message.channel.id)
 
             # Per-thread mention queueing. Check before claiming an in-flight slot
             # so that queued mentions never consume a slot they won't use.
@@ -924,6 +1157,7 @@ class DaimonBot(commands.Bot):
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        unprompted: bool = False,
     ) -> None:
         """Orchestrate thread creation/lookup, session lifecycle, and turn execution.
 
@@ -942,6 +1176,9 @@ class DaimonBot(commands.Bot):
         ``message.attachments`` wholesale for the turn -- it carries the merged
         attachments from ALL of the queued author's messages, not just
         ``message``'s own.
+
+        ``unprompted`` marks a turn nobody @mentioned (organic thread
+        participation) so the context tells the agent it chose to speak.
         """
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid)
@@ -953,6 +1190,7 @@ class DaimonBot(commands.Bot):
                 content_override=content_override,
                 created_thread_ids=created_thread_ids,
                 attachments_override=attachments_override,
+                unprompted=unprompted,
             )
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             log.warning("turn.failed", error=str(exc), channel_id=str(message.channel.id))
@@ -995,6 +1233,7 @@ class DaimonBot(commands.Bot):
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        unprompted: bool = False,
     ) -> None:
         """Core orchestration logic extracted for clean error boundary.
 
@@ -1007,6 +1246,9 @@ class DaimonBot(commands.Bot):
         wholesale for the attachment split below -- the drain path uses this to
         carry the merged attachments from all of a queued author's messages
         (for the merged-attachments path).
+
+        ``unprompted`` marks the trigger as one nobody @mentioned; it reaches
+        the agent as an attribute on the ``<user_query>`` element.
         """
         if self.user is None:
             log.warning("orchestrate_called_before_ready")
@@ -1038,6 +1280,8 @@ class DaimonBot(commands.Bot):
                 channel_id=parent_channel_id,
                 missing=list(err.missing),
             )
+            if unprompted:
+                return  # nobody asked; a notice per quiet burst would spam the thread
             target = thread or message.channel
             hints: list[str] = []
             if "agent" in err.missing:
@@ -1061,6 +1305,8 @@ class DaimonBot(commands.Bot):
                 daimon_tag=err.daimon_tag,
                 tenant_id=str(err.tenant_id),
             )
+            if unprompted:
+                return
             target = thread or message.channel
             await target.send(
                 "The configured agent or environment no longer exists. "
@@ -1070,6 +1316,17 @@ class DaimonBot(commands.Bot):
             )
             return
         except AdmissionDenied as err:
+            if unprompted:
+                # An unprompted turn that cannot be admitted stays silent: the
+                # balance or cap notice is owed to someone who asked, and every
+                # quiet burst would otherwise repost it.
+                log.info(
+                    "thread_participation.skipped",
+                    reason=err.reason,
+                    guild_id=guild_id,
+                    tenant_id=str(tenant_id),
+                )
+                return
             target = thread or message.channel
             if err.reason == "balance_depleted":
                 log.info("turn.skipped.over_balance", guild_id=guild_id, tenant_id=str(tenant_id))
@@ -1159,14 +1416,19 @@ class DaimonBot(commands.Bot):
         async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:
             await msg.edit(**kwargs)
 
+        async def _delete_message(msg: discord.Message) -> None:
+            await msg.delete()
+
         cancel = asyncio.Event()
         cancel_view = CancelView(allowed_user_id=message.author.id, cancel=cancel)
         lifecycle = DiscordTurnLifecycle(
             send=_send_embed,
             edit=_edit_message,
+            delete=_delete_message,
             agent_name=agent.name,
             model_id=agent.model.id,
             cancel_view=cancel_view,
+            unprompted=unprompted,
         )
         await lifecycle.post_initial()
 
@@ -1270,6 +1532,7 @@ class DaimonBot(commands.Bot):
                     after_message_id=int(prepared.watermark),
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
+                    unprompted=unprompted,
                 )
             else:
                 user_message, _ = await build_context_xml(
@@ -1278,6 +1541,7 @@ class DaimonBot(commands.Bot):
                     limit=100,
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
+                    unprompted=unprompted,
                 )
         else:
             if content_override is not None:
@@ -1355,6 +1619,7 @@ class DaimonBot(commands.Bot):
                 bot_user_id=self.user.id if self.user else None,
                 bot_display_name=discord_settings.bot_display_name,
                 omit_oversized_image_urls=True,
+                unprompted=unprompted,
             )
             if synthetic_prefix:
                 full_message = synthetic_prefix + "\n" + full_message
@@ -1364,6 +1629,7 @@ class DaimonBot(commands.Bot):
             new_lifecycle = DiscordTurnLifecycle(
                 send=_send_embed,
                 edit=_edit_message,
+                delete=_delete_message,
                 agent_name=agent.name,
                 model_id=agent.model.id,
                 cancel_view=CancelView(allowed_user_id=message.author.id, cancel=cancel_event),
@@ -1371,6 +1637,7 @@ class DaimonBot(commands.Bot):
                 # embed is edited into this turn's answer rather than left
                 # standing next to a second, successful message.
                 adopt_message_ref=lifecycle.message_ref,
+                unprompted=unprompted,
             )
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle

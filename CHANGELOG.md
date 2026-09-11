@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Organic thread participation (Discord, opt-in).** Ask the agent to follow
+  a thread and it keeps replying there unprompted. `DAIMON_THREAD_PARTICIPATION__MODE`
+  sets the deployment default (`off` by default, `on`, or `disabled`, which also
+  refuses requests to turn it on); the `set_thread_participation` tool writes
+  workspace, channel and thread scopes below it (thread by any member, wider
+  scopes by Manage Server), narrowest wins, `disabled` cannot be overridden
+  from below. In an `on` thread a burst of messages is judged once after a
+  quiet period by a metered Haiku classifier, gated by balance, cap and an
+  hourly per-thread ledger, then answered as an ordinary turn flagged
+  `unprompted="true"` so the agent stays brief. An unprompted turn is silent
+  until it has something to say: no "thinking" embed goes up front, a turn that
+  ends with nothing to add leaves no trace in the thread, and the messages it
+  does post suppress the push notification. Turns that fail admission stay
+  silent too. Existing deployments are unaffected; migration
+  `0014_thread_participation` adds two empty tables.
+
 ### Removed
 
 - **`DAIMON_SLACK__DEV_ALLOW_ALL_ADMIN`** — the Slack testing-only admin bypass.

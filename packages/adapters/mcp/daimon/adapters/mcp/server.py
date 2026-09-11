@@ -55,6 +55,9 @@ from daimon.adapters.mcp.tools.media import register_media_tools, register_uploa
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
 from daimon.adapters.mcp.tools.publish import register_publish_tools
+from daimon.adapters.mcp.tools.thread_participation import (
+    register_thread_participation_tools,
+)
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
@@ -293,6 +296,7 @@ def create_mcp_app(
     register_notebook_tools(mcp, runtime)  # notebook publish (raises when unconfigured)
     register_publish_tools(mcp, runtime)  # report publish/delete (raises when unconfigured)
     register_propagation_tools(mcp, runtime)  # set/clear agent default
+    register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
 
     register_upload_tool(mcp, runtime=runtime)
 

@@ -574,3 +574,16 @@ class SupportEscalationRow(BaseModel):
     note: str
     delivered_at: datetime | None
     created_at: datetime
+
+
+class ThreadAutoResponseRow(BaseModel):
+    """One reply the agent posted in a thread unprompted (the rate-limit ledger)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    platform: str
+    thread_id: str
+    message_id: str
+    created_at: datetime

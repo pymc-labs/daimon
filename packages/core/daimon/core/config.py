@@ -13,6 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
+from daimon.core.thread_participation import ParticipationMode
 from pydantic import BaseModel, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -233,6 +234,56 @@ class HubSettings(BaseModel):
     @property
     def discord_configured(self) -> bool:
         return self.discord_client_id is not None and self.discord_client_secret is not None
+
+
+class ThreadParticipationSettings(BaseModel):
+    """Organic thread participation: replying in a thread unprompted.
+
+    Platform-agnostic settings (the store and tool are keyed by platform);
+    only the Discord adapter reads them today. `mode` is the deployment tier
+    of a cascade (deployment, workspace, channel, thread) that the agent's
+    `set_thread_participation` tool writes the other tiers of. `off` (the
+    default) changes nothing for anyone: no classifier runs and every server
+    behaves as today until someone asks the agent to follow a thread, or an
+    admin turns a channel or the workspace on. `disabled` also refuses those
+    requests. `on` follows every thread unless a lower tier says otherwise.
+    """
+
+    mode: ParticipationMode = Field(
+        default=ParticipationMode.OFF,
+        description=(
+            "Deployment default for replying in threads unprompted. off: mention-only "
+            "until a thread, channel or workspace is turned on. disabled: mention-only "
+            "and cannot be turned on. on: follow every thread unless turned off below."
+        ),
+    )
+    quiet_seconds: float = Field(
+        default=8.0,
+        gt=0,
+        description=(
+            "How long a followed thread must be quiet after an unprompted message before "
+            "the agent decides whether to reply. A burst of messages is judged once, at "
+            "the end."
+        ),
+    )
+    max_per_hour: int = Field(
+        default=20,
+        ge=1,
+        description="Backstop: maximum unprompted replies per thread per rolling hour.",
+    )
+    recent_messages_window: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="How many earlier thread messages the classifier sees before deciding.",
+    )
+    classifier_model: str = Field(
+        default="claude-haiku-4-5",
+        description=(
+            "Model that decides whether a burst of unprompted messages deserves a reply. "
+            "One short call per quiet burst; a small, fast model is the point."
+        ),
+    )
 
 
 class DiscordSettings(BaseModel):
@@ -731,6 +782,10 @@ class Settings(BaseSettings):
     mcp: McpSettings = Field(default_factory=McpSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     discord: DiscordSettings | None = None
+    thread_participation: ThreadParticipationSettings = Field(
+        default_factory=ThreadParticipationSettings,
+        description="Replying in threads unprompted. See ThreadParticipationSettings.",
+    )
     slack: SlackSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)

@@ -927,3 +927,139 @@ async def test_adopted_message_ref_edits_instead_of_posting_a_second_message() -
     assert {ref for ref, _ in edited} == {"failed-attempt-message"}, (
         "every write must target the failed attempt's message, overwriting its error embed"
     )
+
+
+# ---------------------------------------------------------------------------
+# Unprompted turns: silent until the agent actually speaks
+# ---------------------------------------------------------------------------
+
+
+def _make_unprompted_lifecycle() -> tuple[
+    DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]], list[Any]
+]:
+    """Recorder lifecycle for an organic-thread-participation turn.
+
+    Returns (lifecycle, sends, edits, deletes).
+    """
+    sends: list[dict[str, Any]] = []
+    edits: list[tuple[Any, dict[str, Any]]] = []
+    deletes: list[Any] = []
+
+    async def fake_send(**kwargs: Any) -> object:
+        sends.append(kwargs)
+        return _SENTINEL_REF
+
+    async def fake_edit(ref: Any, **kwargs: Any) -> None:
+        edits.append((ref, kwargs))
+
+    async def fake_delete(ref: Any) -> None:
+        deletes.append(ref)
+
+    lc = DiscordTurnLifecycle(
+        send=fake_send,
+        edit=fake_edit,
+        delete=fake_delete,
+        agent_name="test-agent",
+        model_id="claude-sonnet-4-6",
+        unprompted=True,
+    )
+    return lc, sends, edits, deletes
+
+
+class TestUnpromptedTurn:
+    async def test_post_initial_posts_nothing(self) -> None:
+        """Nobody asked, so the thinking embed does not go up before the turn."""
+        lc, sends, edits, _ = _make_unprompted_lifecycle()
+
+        await lc.post_initial()
+
+        assert sends == [] and edits == [], "an unprompted turn announces nothing up front"
+
+    async def test_a_turn_that_ends_empty_leaves_nothing_behind(self) -> None:
+        """No text and no tool activity: no embed, and no 'Turn cancelled.' notice."""
+        lc, sends, edits, deletes = _make_unprompted_lifecycle()
+
+        await lc.post_initial()
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+        await lc.on_terminal_success(TurnState())
+
+        assert sends == [], "thinking alone is not something to say"
+        assert edits == [], "there is no embed to edit into 'Turn cancelled.'"
+        assert deletes == [], "nothing was posted, so nothing needs deleting"
+        assert lc.was_answered is False, "a silent turn did not answer"
+
+    async def test_an_embed_posted_before_a_silent_end_is_deleted(self) -> None:
+        """Text that streams and then vanishes (a cancel) takes its embed with it."""
+        lc, sends, _, deletes = _make_unprompted_lifecycle()
+
+        await lc.on_sse_event(_message_event("thinking out loud"))
+        await lc.on_render(TurnState(content=[TextBlock(kind="text", text="partial")]))
+        await lc.on_terminal_success(TurnState())
+
+        assert len(sends) == 1, "the embed went up while there was content"
+        assert deletes == [_SENTINEL_REF], "the embed is removed once the turn says nothing"
+        assert lc.final_message_id is None, "a deleted embed is not a watermark"
+
+    async def test_a_tool_trail_with_no_answer_is_removed_too(self) -> None:
+        """Tools ran, nothing was said: a mention would keep the done embed, an
+        unprompted turn deletes it, since nobody watched those tools run."""
+        lc, sends, edits, deletes = _make_unprompted_lifecycle()
+        tool_only = TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
+                )
+            ]
+        )
+
+        await lc.on_render(tool_only)
+        await lc.on_terminal_success(tool_only)
+
+        assert len(sends) == 1, "the embed went up when the tool ran"
+        assert deletes == [_SENTINEL_REF], "no final answer means the embed comes down"
+        assert not any("content" in kwargs for kwargs in edits), "no 'done' state is left behind"
+        assert lc.was_answered is False, "a tool trail is not an answer to an unasked question"
+
+    async def test_the_embed_appears_once_content_arrives(self) -> None:
+        """The first render carrying real output is what posts the embed."""
+        lc, sends, _, _ = _make_unprompted_lifecycle()
+
+        await lc.on_sse_event(_thinking_event())
+        await lc.on_render(TurnState())
+        assert sends == [], "thinking is not content"
+
+        await lc.on_render(
+            TurnState(
+                content=[
+                    ToolUseBlock(
+                        kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
+                    )
+                ]
+            )
+        )
+
+        assert len(sends) == 1, "tool activity is visible work, so the embed goes up"
+        assert "embeds" in sends[0], "the post carries the activity embed"
+
+    async def test_every_send_suppresses_the_notification(self) -> None:
+        """`silent=True` is Discord's suppress-notification flag: no ping for a reply
+        nobody asked for."""
+        lc, sends, _, _ = _make_unprompted_lifecycle()
+
+        await lc.on_render(TurnState(content=[TextBlock(kind="text", text="here it is")]))
+        await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="x" * 3000)]))
+
+        assert sends, "the turn spoke, so it posted"
+        assert all(kwargs.get("silent") is True for kwargs in sends), (
+            "every message an unprompted turn sends is silent"
+        )
+
+    async def test_a_mention_turn_keeps_sending_with_no_silent_flag(self) -> None:
+        """The mention path is unchanged: no silent kwarg, embed up front."""
+        lc, sends, _ = _make_lifecycle()
+
+        await lc.post_initial()
+
+        assert len(sends) == 1, "a mention still gets its thinking embed immediately"
+        assert "silent" not in sends[0], "mention turns notify as they always have"

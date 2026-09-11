@@ -50,6 +50,7 @@ log = structlog.get_logger()
 
 SendFn = Callable[..., Awaitable[Any]]
 EditFn = Callable[..., Awaitable[None]]
+DeleteFn = Callable[[Any], Awaitable[None]]
 
 _DEBOUNCE_S = 10.0
 
@@ -74,6 +75,13 @@ def _map_sse_event(event: RawMessageStreamEvent) -> EmbedEvent | None:
         text = "".join(getattr(p, "text", "") for p in parts).strip()
         return EmbedEvent(kind="message", label=text)
     return None
+
+
+def _has_visible_output(state: TurnState) -> bool:
+    """Whether the turn has produced anything a reader would see: text or a tool call."""
+    return any(
+        isinstance(block, ToolUseBlock) or bool(block.text.strip()) for block in state.content
+    )
 
 
 def build_discord_embed(data: EmbedData) -> discord.Embed:
@@ -117,9 +125,17 @@ class DiscordTurnLifecycle:
         cancel_view: discord.ui.View | None = None,
         clock: Callable[[], float] = time.monotonic,
         adopt_message_ref: Any | None = None,
+        delete: DeleteFn | None = None,
+        unprompted: bool = False,
     ) -> None:
         self._send = send
         self._edit = edit
+        self._delete = delete
+        # Nobody asked for an unprompted turn, so it stays invisible until it
+        # has something to show: no up-front thinking embed, no "Turn
+        # cancelled." left behind, and every message it does post suppresses
+        # the push notification.
+        self._unprompted = unprompted
         self._agent_name = agent_name
         self._model_id = model_id
         self._clock = clock
@@ -160,7 +176,12 @@ class DiscordTurnLifecycle:
         provisions the session. Runs before the turn starts (and therefore
         before any render tick exists), so this is the one place that
         deliberately flushes directly instead of waiting on `on_render`.
+
+        An unprompted turn posts nothing here: the render path posts the
+        embed once the turn has content or tool activity.
         """
+        if self._unprompted:
+            return
         await self._maybe_flush()
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
@@ -173,6 +194,16 @@ class DiscordTurnLifecycle:
         if embed_event is None:
             return
         self._state = update(self._state, embed_event)
+
+    async def _send_message(self, **kwargs: Any) -> Any:
+        """Send through the injected callable, silencing unprompted turns.
+
+        `silent=True` is Discord's suppress-notification flag: a reply nobody
+        asked for shows up in the thread without pinging anyone.
+        """
+        if self._unprompted:
+            kwargs["silent"] = True
+        return await self._send(**kwargs)
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
         """Render the activity embed plus the optional text-preview embed below it."""
@@ -189,7 +220,7 @@ class DiscordTurnLifecycle:
         now = self._clock()
         if self._message_ref is None:
             # First post — immediate, no debounce
-            self._message_ref = await self._send(
+            self._message_ref = await self._send_message(
                 embeds=self._build_embeds(now), view=self._cancel_view
             )
             self._last_flush = now
@@ -237,7 +268,7 @@ class DiscordTurnLifecycle:
         data = to_embed_data(self._state, now=now)
         embed = build_discord_embed(data)
         if self._message_ref is None:
-            self._message_ref = await self._send(embeds=[embed], view=None)
+            self._message_ref = await self._send_message(embeds=[embed], view=None)
         else:
             await self._edit(self._message_ref, embeds=[embed], view=None)
 
@@ -253,11 +284,20 @@ class DiscordTurnLifecycle:
                 continue
             self._persisted_sealed_indices.add(index)
             for chunk in split_for_discord_safe(text):
-                await self._send(content=chunk)
+                await self._send_message(content=chunk)
             log.info("turn.sealed_response_posted", block_index=index, chars=len(text))
 
     async def on_terminal_success(self, state: TurnState) -> None:
         await self._persist_sealed_responses(state)
+        if self._unprompted and not extract_final_response(state.content):
+            # No final answer on a turn nobody asked for: leave the thread as
+            # it was. A tool trail with nothing to say is noise here, not a
+            # "done" state worth keeping (unlike a mention, where the caller
+            # watched the tools run); sealed text already posted stays.
+            self._terminal = True
+            await self._discard_embed()
+            log.info("turn.terminal_success", has_text=False, unprompted=True)
+            return
         self._apply_usage(state)
         self._state = update(self._state, EmbedEvent(kind="done", label=""))
         await self._flush_terminal()
@@ -281,11 +321,17 @@ class DiscordTurnLifecycle:
         await self._edit(self._message_ref, content=chunks[0], embed=None, view=None)
         # Overflow: subsequent chunks posted as new messages
         for chunk in chunks[1:]:
-            await self._send(content=chunk)
+            await self._send_message(content=chunk)
 
         log.info("turn.terminal_success")
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
+        if self._unprompted and self._message_ref is None:
+            # Same rule as an empty answer: an unprompted turn that never
+            # spoke does not announce its own failure into the thread.
+            self._terminal = True
+            log.warning("turn.terminal_failure", error=str(err), unprompted=True)
+            return
         self._apply_usage(state)
         self._state = update(self._state, EmbedEvent(kind="error", label=str(err)[:100]))
         await self._flush_terminal()
@@ -298,7 +344,21 @@ class DiscordTurnLifecycle:
         if self._terminal:
             return
         await self._persist_sealed_responses(state)
+        if self._unprompted and self._message_ref is None and not _has_visible_output(state):
+            return  # nothing to show yet, and nobody asked: stay invisible
         await self._maybe_flush()
+
+    async def _discard_embed(self) -> None:
+        """Delete the embed this turn posted, if any, and forget it. Best effort."""
+        if self._message_ref is None or self._delete is None:
+            return
+        try:
+            await self._delete(self._message_ref)
+        except discord.HTTPException:
+            # Already gone, or no permission: a stale embed beats failing a
+            # turn that otherwise ended cleanly.
+            log.info("turn.embed_discard_failed", exc_info=True)
+        self._message_ref = None
 
     async def on_reconnect(self, reason: ReconnectReason) -> None:
         pass
