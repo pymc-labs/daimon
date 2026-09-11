@@ -29,7 +29,7 @@ from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAg
 from daimon.adapters.discord.agent_setup import write as discord_write
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
-from daimon.core.config import McpSettings
+from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -103,6 +103,7 @@ class DiscordDriver:
         discord_settings.max_concurrent_turns_per_tenant = 100
         discord_settings.bot_display_name = "daimon"
         settings.discord = discord_settings
+        settings.thread_naming = ThreadNamingSettings(enabled=False)
         anthropic = build_fake_anthropic(router.dispatch)
         resolver_cache = new_resolver_cache()
         deployment_default = DeploymentDefault(agent_name="test-agent", environment_name="test-env")
