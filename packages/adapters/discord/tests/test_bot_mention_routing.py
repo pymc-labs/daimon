@@ -29,6 +29,7 @@ from anthropic.types.beta.beta_packages import BetaPackages
 from anthropic.types.beta.beta_unrestricted_network import BetaUnrestrictedNetwork
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.core.config import ThreadNamingSettings
 from daimon.core.ma_identity import derive_tenant_uuid as _derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError, new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -114,6 +115,7 @@ def _make_runtime(
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100  # effectively uncapped in tests
     settings.discord = discord_settings
+    settings.thread_naming = ThreadNamingSettings(enabled=False)
     anthropic = AsyncMock()
     anthropic.beta.agents.retrieve = AsyncMock(return_value=_make_fake_agent())
     anthropic.beta.environments.retrieve = AsyncMock(return_value=_make_fake_environment())

@@ -27,6 +27,7 @@ from daimon.adapters.discord.gating import is_participation_candidate, should_pr
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.thread_naming import auto_name_thread
 from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.adapters.discord.thread_send import safe_thread_send
 from daimon.adapters.discord.views import CancelView
@@ -1408,6 +1409,24 @@ class DaimonBot(commands.Bot):
             self._processing.add(thread.id)
             if created_thread_ids is not None:
                 created_thread_ids.append(thread.id)
+            # Title catches up in the background: the Haiku call must not
+            # delay the thread the user is waiting to see. Attachment-only
+            # mentions have nothing to title and skip the (metered) call.
+            naming = self.runtime.settings.thread_naming
+            opening_text = content_override if content_override is not None else message.content
+            if naming.enabled and opening_text.strip():
+                self._spawn(
+                    auto_name_thread(
+                        thread=thread,
+                        message_text=opening_text,
+                        anthropic=self.runtime.anthropic,
+                        sessionmaker=self.runtime.sessionmaker,
+                        tenant_id=tenant_id,
+                        platform_user_id=str(message.author.id),
+                        markup=self.runtime.settings.billing.markup,
+                        max_input_chars=naming.max_input_chars,
+                    )
+                )
 
         # --- Wire lifecycle with send/edit callables ---
         async def _send_embed(**kwargs: Any) -> discord.Message:
