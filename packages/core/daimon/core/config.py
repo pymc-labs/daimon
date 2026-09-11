@@ -371,6 +371,15 @@ class SlackSettings(BaseModel):
     ``app_token`` for Socket Mode.
     """
 
+    bot_display_name: str = Field(
+        default="daimon",
+        # Keep surrounding Block Kit copy within Slack's limits and exclude
+        # mention, markdown, and emoji-shortcode metacharacters.
+        min_length=1,
+        max_length=32,
+        pattern=r"^[^\\`@#:]+$",
+        description="The bot's presented name in Slack setup, help, and privacy messages.",
+    )
     signing_secret: SecretStr = Field(
         description=(
             "Slack request-signing secret used to verify inbound HTTP "
@@ -408,7 +417,7 @@ class SlackSettings(BaseModel):
 
 
 class GithubSettings(BaseModel):
-    """GitHub repo-auth config (App-or-PAT; no OAuth flow). All fields are
+    """GitHub repository access config (App-or-PAT; no OAuth flow). All fields are
     optional so deployments without GitHub App or PAT config keep working.
 
     Cloning via the GitHub App requires only app_id + app_private_key.

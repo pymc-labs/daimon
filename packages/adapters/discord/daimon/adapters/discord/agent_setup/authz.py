@@ -16,7 +16,7 @@ the field it writes is part of the agent spec:
   reconciler's spec hash: an admin bypass would leave permanent, silent drift
   against the repo defaults that reconcile never notices.
 
-- Per-agent attachments — the repo binding and the env vars — route through
+- Per-agent attachments — the repo binding and the keys — route through
   `refuse_if_shared_and_not_admin`. Attachments never enter the agent spec, so
   the system-agent absolutism above does not apply to them, and an admin
   binding a repo to the seeded agent is the first-run onboarding step. That
@@ -67,8 +67,8 @@ _REACHABLE_AGENT_MESSAGE = (
 _SHARED_AGENT_MESSAGE = (
     "This agent is shared — it either ships with the deployment or is the "
     "current default for this channel or the server — so changing its repo or "
-    "environment variables needs Manage Server. Fork it to make an editable "
-    "copy; the fork starts with no environment variables of its own."
+    "keys needs Manage Server. Ask a server admin to make this change in `/agent-setup`, "
+    "or fork it to make an editable copy; the fork starts with no keys of its own."
 )
 
 

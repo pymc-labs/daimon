@@ -18,7 +18,7 @@ shape, same evaluate-then-spawn discipline, same boundary catch tuple.
 Threat register:
 - Creation (new agent, fork) is open to every workspace member — there is
   nothing an admin has approved for a brand-new agent.
-- Per-agent attachments (repo binding, inline token, env variables) never
+- Per-agent attachments (repo binding, inline token, keys) never
   enter the agent spec, so they are exempt from the spec gate's absolutism
   about defaults-managed agents — an admin configuring the workspace's
   built-in agent is a supported first-run step. They are NOT open to
@@ -547,7 +547,7 @@ def evaluate_paste_secrets_submission(payload: dict[str, Any]) -> SubmitDecision
     if len(parsed) > _SECRET_CAP:
         return _error_decision(
             "paste_secrets__content",
-            f"Too many secrets: {len(parsed)} provided, maximum is {_SECRET_CAP}.",
+            f"Too many keys: {len(parsed)} provided, maximum is {_SECRET_CAP}.",
             meta=meta,
             payload=payload,
         )
@@ -759,7 +759,10 @@ async def run_edit_agent_submission(
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
-            text=f":white_check_mark: Updated `{agent_name}`. Takes effect on the next session.",
+            text=(
+                f":white_check_mark: Updated `{agent_name}`. "
+                "Existing sessions may still use the previous setup."
+            ),
         )
     except (DaimonError, anthropic.APIError, SlackApiError, SQLAlchemyError) as exc:
         log.error(
@@ -984,7 +987,7 @@ async def run_edit_repo_submission(
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
-            text=f":white_check_mark: Saved repo + auth for `{agent_name}`.",
+            text=f":white_check_mark: Saved working repo access for `{agent_name}`.",
         )
     except (DaimonError, anthropic.APIError, SlackApiError, SQLAlchemyError) as exc:
         log.error(
@@ -1364,11 +1367,12 @@ async def run_paste_secrets_submission(
         if n == 1:
             confirm_text = (
                 f":white_check_mark: Added `{key_names_written[0]}`. "
-                "Takes effect on the next session."
+                "Existing sessions may still use the previous setup."
             )
         else:
             confirm_text = (
-                f":white_check_mark: Added {n} secrets. Takes effect on the next session."
+                f":white_check_mark: Added {n} keys. "
+                "Existing sessions may still use the previous setup."
             )
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
@@ -1387,7 +1391,10 @@ async def run_paste_secrets_submission(
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
-            text=":x: Failed to write secrets. Check operator logs.",
+            text=(
+                ":x: Keys could not be saved. "
+                "Ask the operator to check the failure, then try again."
+            ),
         )
 
 

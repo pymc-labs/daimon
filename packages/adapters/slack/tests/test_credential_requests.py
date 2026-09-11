@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -58,7 +59,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.credential_requests import build_skill_repo_target, mint_request_token
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.report import Action, ResourceOutcome
-from daimon.core.github_credentials import build_multifernet, encrypt_token
+from daimon.core.github_credentials import build_multifernet, encrypt_token, get_pat
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.credential_requests import (
@@ -586,6 +587,13 @@ async def test_mcp_submission_with_unconfigured_mcp_refuses_before_the_consume(
         "a config refusal must land before the consume so the request survives"
     )
     assert ("POST", _EPHEMERAL_URL) in fake_slack_web_client.mock.requests
+    receipt = " ".join(_ephemeral_texts(fake_slack_web_client))
+    assert "Ask the operator" in receipt and "Nothing was saved" in receipt, (
+        "an unconfigured deployment should give an operator handoff and truthful save status"
+    )
+    assert "public_url" not in receipt and "jwt_secret" not in receipt, (
+        "the person should not receive internal deployment setting names"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -769,3 +777,60 @@ async def test_skill_repo_submission_binds_and_attaches_the_imported_skills(
     assert any("Attached 1 to `daimon`" in t for t in _ephemeral_texts(fake_slack_web_client)), (
         "the success ephemeral must report the attach half, not just the import"
     )
+
+
+@pytest.mark.parametrize("fails_after_storage", [False, True])
+async def test_skill_repo_failure_receipt_reflects_confirmed_token_storage(
+    fails_after_storage: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    tenant_id, fernet_key = await _seed_team(db_session)
+    agent_id = uuid.uuid4()
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="skill_repo",
+        agent_id=agent_id,
+        target=build_skill_repo_target("https://github.com/o/skills", "main", ""),
+    )
+    await db_session.commit()
+    checks = 0
+
+    def github_response(request: httpx.Request) -> httpx.Response:
+        nonlocal checks
+        checks += 1
+        if checks == 1 or (checks == 2 and fails_after_storage):
+            return httpx.Response(200, json={})
+        return httpx.Response(403, text="sensitive-upstream-detail")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(github_response)) as http_client:
+        runtime = replace(_build_runtime(fernet_key, db_session_factory), http_client=http_client)
+        await run_skill_repo_credential_submission(
+            runtime,
+            team_id=_TEAM_ID,
+            user_id=_USER_ID,
+            channel_id=_CHANNEL_ID,
+            message_ts=_MESSAGE_TS,
+            token=token,
+            value="ghp_test_private_value",
+        )
+    stored = await get_pat(
+        principal_id=derive_guild_account_uuid(tenant_id=tenant_id),
+        agent_id=agent_id,
+        sessionmaker=db_session_factory,
+        fernet=build_multifernet((fernet_key,)),
+    )
+    receipt = " ".join(_ephemeral_texts(fake_slack_web_client))
+    assert (stored is not None) == fails_after_storage, (
+        "fixture must fail at the intended write stage"
+    )
+    assert ("Token stored" in receipt) == fails_after_storage, (
+        "receipt must report only confirmed storage"
+    )
+    assert "retry" in receipt, "failed setup must offer a reachable retry"
+    assert "sensitive-upstream-detail" not in receipt, (
+        "upstream details must stay out of the receipt"
+    )
+    assert "ghp_test_private_value" not in receipt, "the private token must stay out of the receipt"

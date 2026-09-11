@@ -25,7 +25,7 @@ decided post-ack, server-side, never trusted from the rendered view):
     submits is refused at submission instead.
   - Shared-state gated via ``refuse_if_shared_and_not_admin`` in
     ``agent_setup.gate``: edit_repo_form and remove_secret. Repo bindings and
-    env variables are per-agent attachments that never enter the agent spec, so
+    keys are per-agent attachments that never enter the agent spec, so
     they are exempt from the spec gate's absolutism about defaults-managed
     agents — an admin configuring the workspace's built-in agent is a supported
     first-run step. A non-admin is refused whenever the target is the built-in
@@ -241,7 +241,8 @@ def _render_mcp_config_ephemeral(*, agent_name: str, public_url: str, jwt: str) 
         "Add to your MCP config:\n"
         f"```json\n{mcp_json_block}\n```\n\n"
         f"_This token grants access to {agent_name} only. "
-        "Revoke it from /agent-setup → MCPs._"
+        "To disconnect, remove this MCP configuration from your coding tool. "
+        "Ask the operator to revoke the access token._"
     )
 
 
@@ -1211,8 +1212,8 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                     channel=channel_id or user_id,
                     user=user_id,
                     text=(
-                        ":x: MCP URL / JWT secret not configured. "
-                        "Ask the operator to set DAIMON_MCP__PUBLIC_URL and DAIMON_MCP__JWT_SECRET."
+                        "This deployment is not finished being set up. Ask the operator to finish "
+                        "setup, then try again. Nothing was saved."
                     ),
                 )
                 return

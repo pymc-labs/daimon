@@ -9,6 +9,7 @@ import discord
 import pytest
 from daimon.adapters.discord.checks import (
     refuse_if_not_admin,
+    require_manage_guild,
     require_registered_guild,
     resolve_tenant_for_interaction,
 )
@@ -230,3 +231,25 @@ async def test_refuse_if_not_admin_uses_followup_when_already_acked() -> None:
     interaction.response.send_message.assert_not_awaited()
     interaction.followup.send.assert_awaited_once()
     assert interaction.followup.send.call_args.kwargs.get("ephemeral") is True
+
+
+async def test_routines_refusal_gives_an_admin_the_requested_action() -> None:
+    called = False
+
+    @require_manage_guild
+    async def routines(self: object, interaction: discord.Interaction) -> None:
+        nonlocal called
+        called = True
+
+    interaction = _admin_gate_interaction(is_admin=False)
+    await routines(object(), interaction)
+
+    assert called is False, "a member must not run the admin command"
+    message = interaction.response.send_message.call_args.args[0]
+    assert "server admin (Manage Server)" in message, "the refusal must name the required role"
+    assert "Please open `/routines`" in message, "the handover must preserve the requested action"
+    assert "this server’s scheduled routines" in message, "the handover must preserve the target"
+    assert "/agent-setup" not in message and "->" not in message, "the next step must be reachable"
+    assert interaction.response.send_message.call_args.kwargs["ephemeral"] is True, (
+        "the refusal is private to the caller"
+    )

@@ -59,8 +59,8 @@ _SEEDED_AGENT_MESSAGE = (
 _SHARED_AGENT_MESSAGE = (
     ":lock: This agent is shared — it is either the workspace's built-in agent or the "
     "current default for this workspace or a channel — so changing its repo or its "
-    "environment variables needs workspace-admin permission. Fork it to get an "
-    "editable copy you own; the fork starts with no environment variables of its own."
+    "keys needs workspace-admin permission. Fork it to get an "
+    "editable copy you own; the fork starts with no keys of its own."
 )
 
 

@@ -1,7 +1,7 @@
 """Clone-credential resolution for App-or-PAT repo auth.
 
 Owns the mode decisions (pure) and the token-resolution orchestrations
-(shell, injected httpx) for BOTH of daimon's independent GitHub-repo-auth
+(shell, injected httpx) for BOTH of daimon's independent GitHub-clone-auth
 callers: the per-agent clone path (`agent_repo_binding`, a bound repo with a
 recorded proof of access) and the skill-sync path (a bare repo URL that may
 have no binding row at all). No DB access, no module-level singletons —
@@ -324,7 +324,7 @@ async def resolve_clone_token(
         )
     raise DaimonError(
         f"No credential is authorized to clone {binding.repo_url}. Re-bind this repo "
-        "with a GitHub token that can read it, from the agent setup panel's GitHub option."
+        "with a GitHub token that can read it, using request_repo_binding."
     )
 
 

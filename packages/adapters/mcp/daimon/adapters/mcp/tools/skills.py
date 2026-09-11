@@ -70,7 +70,7 @@ class SkillDetail(BaseModel):
 
 
 class SkillSyncResult(BaseModel):
-    """Outcome of a ``skills_sync`` call, carrying provenance AND attachment state.
+    """Outcome of a ``sync_skills`` call, carrying provenance AND attachment state.
 
     Synced skills land in the tenant-wide skill registry, so the result echoes
     where they came from (``source_url`` / ``branch`` / ``path``) — the model
@@ -293,7 +293,7 @@ async def _sync_impl(
                     f"No GitHub credential was available for {url!r}, and an "
                     "unauthenticated fetch got HTTP 404 — which GitHub returns "
                     "for a private repo as well as a missing one. If this repo "
-                    "is private, call `request_skill_repo_credential` with this "
+                    "is private, call `request_skill_repo_token` with this "
                     "url/branch/path to post a button the user can paste a "
                     "token into; it syncs on submit. If it is public, re-check "
                     "the url and branch."
@@ -406,38 +406,17 @@ def register_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         path: str = "",
         agent_name: str | None = None,
     ) -> SkillSyncResult:
-        """Import skills from a GitHub repo into this workspace's shared skill library.
+        """Install skills from a GitHub repo into the workspace's shared skill library.
 
-        Discovers SKILL.md files and creates or updates them. This is an IMPORT,
-        not a per-agent change: the library is visible to every agent in the
-        workspace, and importing alone attaches nothing.
+        First use ``list_skills`` and prefer existing skills; import only a repository
+        the user requested. If the skills repo is private, use ``request_skill_repo_token``;
+        ``request_repo_binding`` provides working-repo access. Never accept tokens in chat.
 
-        Pass ``agent_name`` to also attach everything imported to that agent —
-        which is almost always what someone means by "add this skill to my
-        agent". Omit it only to stock the library without touching any agent.
-        Existing skills on the agent are preserved; the attach is a union.
-
-        LOCAL-FIRST: before importing an external repo, call ``list_skills`` to
-        see what is already in the library and prefer an existing skill over
-        pulling a near-duplicate. Only import a repo the user explicitly asked for.
-
-        Report where the skills came from — the returned
-        ``source_url``/``branch``/``path`` echo that provenance, and ``summary``
-        states both what was imported and what was attached.
-
-        Before calling, inspect the repo structure to determine the correct ``path``
-        parameter (empty string = repo root). ``branch`` defaults to ``"main"``.
-
-        IF THIS FAILS BECAUSE THE REPO IS PRIVATE AND UNREADABLE, call
-        ``request_repo_binding`` for that repo — do not report the sync as
-        blocked and do not ask the user to paste a token here. This tool
-        deliberately has no token parameter: the credential is supplied
-        out-of-band through a button and modal so it never passes through tool
-        arguments. Once the binding exists, the per-agent tier short-circuits
-        every later sync of that repo with zero GitHub I/O. Credential
-        precedence is documented on ``_resolve_skill_sync_credentials`` above,
-        which delegates to ``resolve_skill_sync_token``; a missing GitHub App
-        installation is NOT a blocker, it is just a later tier."""
+        Discovers SKILL.md files and imports or updates skills. Pass ``agent_name`` to
+        also attach them, preserving existing skills; omit it only to stock the library.
+        Importing alone attaches nothing. Report returned source, branch, path and
+        summary. Inspect the repo to choose ``path`` (empty means root); ``branch``
+        defaults to main. Importing is admin-only."""
         return await _sync_impl(runtime, await _auth(ctx), url, branch, path, agent_name)
 
     @mcp.tool
@@ -452,39 +431,8 @@ def register_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"admin"})
     async def delete_skill(ctx: Context, name: str) -> None:  # pyright: ignore[reportUnusedFunction]
-        """Delete a skill and all its versions."""
-        await _delete_impl(runtime, await _auth(ctx), name)
+        """Delete a skill such as eda from the workspace, destroying all versions for every agent.
 
-    # Back-compat aliases under the old noun-first names. Each delegates to the
-    # same ``_*_impl`` so dispatch is identical; the docstring steers search
-    # toward the canonical verb-first name.
-    @mcp.tool(tags={"admin"})
-    async def skills_sync(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context,
-        url: str,
-        branch: str = "main",
-        path: str = "",
-        agent_name: str | None = None,
-    ) -> SkillSyncResult:
-        """Import skills from a GitHub repo into the shared library (alias of ``sync_skills``).
-
-        Discovers SKILL.md and creates or updates them. Pass ``agent_name`` to
-        also attach them to that agent; importing alone attaches nothing."""
-        return await _sync_impl(runtime, await _auth(ctx), url, branch, path, agent_name)
-
-    @mcp.tool
-    async def skills_list(ctx: Context) -> list[SkillInfo]:  # pyright: ignore[reportUnusedFunction]
-        """List all custom skills (alias of ``list_skills``)."""
-        return await _list_impl(runtime, await _auth(ctx))
-
-    @mcp.tool
-    async def skills_get(ctx: Context, name: str) -> SkillDetail:  # pyright: ignore[reportUnusedFunction]
-        """Look up a skill by name (alias of ``get_skill``).
-
-        Returns detail including version count."""
-        return await _get_impl(runtime, await _auth(ctx), name)
-
-    @mcp.tool(tags={"admin"})
-    async def skills_delete(ctx: Context, name: str) -> None:  # pyright: ignore[reportUnusedFunction]
-        """Delete a skill and all its versions (alias of ``delete_skill``)."""
+        For detaching one agent's reference, use ``remove_skill`` instead.
+        Deleting the shared skill resource is admin-only."""
         await _delete_impl(runtime, await _auth(ctx), name)

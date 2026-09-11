@@ -132,6 +132,34 @@ def _render_message(
     return lines
 
 
+def _render_user_query(
+    trigger: discord.Message,
+    bot_user_id: int | None,
+    *,
+    bot_display_name: str,
+    is_admin: bool,
+    unprompted: bool = False,
+) -> str:
+    """Render the ``<user_query>`` element for a turn's trigger message.
+
+    All three builders use this renderer so initial, delta and reseeded
+    context carry the same author, timestamp and permission attributes.
+    ``is_admin`` uses the lowercase literal ``"true"``/``"false"`` so the
+    model knows whether the caller can make an admin-gated change.
+    """
+    attrs = (
+        f" author_name={quoteattr(trigger.author.display_name)}"
+        f" user_id={quoteattr(str(trigger.author.id))}"
+        f" timestamp={quoteattr(trigger.created_at.isoformat())}"
+        f" is_admin={quoteattr('true' if is_admin else 'false')}"
+        + (' unprompted="true"' if unprompted else "")
+    )
+    content = escape(
+        _strip_bot_mention(trigger.content, bot_user_id, bot_display_name=bot_display_name)
+    )
+    return f"<user_query{attrs}>{content}</user_query>"
+
+
 async def build_context_xml(
     thread: discord.Thread,
     trigger: discord.Message,
@@ -140,6 +168,7 @@ async def build_context_xml(
     bot_user_id: int | None = None,
     bot_display_name: str = "daimon",
     omit_oversized_image_urls: bool = False,
+    is_admin: bool = False,
     unprompted: bool = False,
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context from thread history for the turn driver.
@@ -203,19 +232,16 @@ async def build_context_xml(
     lines.append("</context>")
 
     # user_query sits outside <context>, separated by a blank line
-    trigger_attrs = (
-        f" author_name={quoteattr(trigger.author.display_name)}"
-        f" user_id={quoteattr(str(trigger.author.id))}"
-        f" timestamp={quoteattr(trigger.created_at.isoformat())}"
-        # Only present when true: every mention-driven turn keeps its
-        # byte-for-byte existing shape.
-        + (' unprompted="true"' if unprompted else "")
-    )
-    trigger_content = escape(
-        _strip_bot_mention(trigger.content, bot_user_id, bot_display_name=bot_display_name)
-    )
     lines.append("")
-    lines.append(f"<user_query{trigger_attrs}>{trigger_content}</user_query>")
+    lines.append(
+        _render_user_query(
+            trigger,
+            bot_user_id,
+            bot_display_name=bot_display_name,
+            is_admin=is_admin,
+            unprompted=unprompted,
+        )
+    )
 
     return "\n".join(lines), image_atts
 
@@ -228,6 +254,7 @@ async def build_delta_xml(
     bot_user_id: int | None = None,
     bot_display_name: str = "daimon",
     omit_oversized_image_urls: bool = False,
+    is_admin: bool = False,
     unprompted: bool = False,
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context for a continuation turn (delta since watermark).
@@ -260,6 +287,7 @@ async def build_delta_xml(
             trigger,
             bot_user_id=bot_user_id,
             bot_display_name=bot_display_name,
+            is_admin=is_admin,
             unprompted=unprompted,
         )
 
@@ -294,19 +322,16 @@ async def build_delta_xml(
     lines.append("</thread_delta>")
     lines.append("</context>")
 
-    trigger_attrs = (
-        f" author_name={quoteattr(trigger.author.display_name)}"
-        f" user_id={quoteattr(str(trigger.author.id))}"
-        f" timestamp={quoteattr(trigger.created_at.isoformat())}"
-        # Only present when true: every mention-driven turn keeps its
-        # byte-for-byte existing shape.
-        + (' unprompted="true"' if unprompted else "")
-    )
-    trigger_content = escape(
-        _strip_bot_mention(trigger.content, bot_user_id, bot_display_name=bot_display_name)
-    )
     lines.append("")
-    lines.append(f"<user_query{trigger_attrs}>{trigger_content}</user_query>")
+    lines.append(
+        _render_user_query(
+            trigger,
+            bot_user_id,
+            bot_display_name=bot_display_name,
+            is_admin=is_admin,
+            unprompted=unprompted,
+        )
+    )
 
     return "\n".join(lines), image_atts
 
@@ -320,6 +345,7 @@ async def build_channel_context_xml(
     bot_user_id: int | None = None,
     bot_display_name: str = "daimon",
     omit_oversized_image_urls: bool = False,
+    is_admin: bool = False,
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context from parent channel history for a channel-mention turn.
 
@@ -358,15 +384,11 @@ async def build_channel_context_xml(
         )
     lines.append("</channel_context>")
 
-    trigger_attrs = (
-        f" author_name={quoteattr(trigger.author.display_name)}"
-        f" user_id={quoteattr(str(trigger.author.id))}"
-        f" timestamp={quoteattr(trigger.created_at.isoformat())}"
-    )
-    trigger_content = escape(
-        _strip_bot_mention(trigger.content, bot_user_id, bot_display_name=bot_display_name)
-    )
     lines.append("")
-    lines.append(f"<user_query{trigger_attrs}>{trigger_content}</user_query>")
+    lines.append(
+        _render_user_query(
+            trigger, bot_user_id, bot_display_name=bot_display_name, is_admin=is_admin
+        )
+    )
 
     return "\n".join(lines), image_atts

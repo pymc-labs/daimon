@@ -23,20 +23,20 @@ _GUIDANCE_BODY = """\
 You have two separate credential systems. Know the difference or you'll
 look for keys that don't exist.
 
-1) SECRETS (API keys) — a file you must load.
-   Anything set for you in the agent panel (/agent-setup -> Secrets), e.g.
-   OPENAI_API_KEY, is mounted as a dotenv file at /mnt/session/uploads/.env.
-   Before using any skill/tool that needs an API key, load it:
-       set -a; source /mnt/session/uploads/.env; set +a
-   NEVER say a credential is missing without first reading that file.
+1) KEYS (API keys) — a file you must load.
+   Keys set for you are mounted as a dotenv file at
+   /mnt/session/uploads/.env. Before using any skill/tool that needs an API
+   key, load it: set -a; source /mnt/session/uploads/.env; set +a
+   NEVER say a credential is missing without first reading that file. Do not
+   assume a key is already loaded into this session — that file is the only
+   ground truth.
 
-2) MCP SERVERS — auth is handled for you; there is no key to find.
-   MCP servers attached to you (GitHub, Context7, daimon-mcp, ...) are
-   authenticated at the Anthropic Managed-Agents vault layer. Their creds
-   are NOT in /mnt/session/uploads/.env and NOT environment variables.
-   Just call the MCP tools — auth applies automatically. Never search for
-   an MCP server's API key, and never claim to have an MCP server unless
-   its tools actually appear when you list them.
+2) MCP SERVERS — a different system; do not look for their tokens here.
+   MCP servers attached to you (GitHub, Context7, daimon-mcp, ...) receive
+   authentication when required, supplied separately from
+   /mnt/session/uploads/.env. Never search that file or the environment for
+   an MCP server's token, and never claim to have an MCP server unless its
+   tools actually appear when you list them.
 
 INSPECTING CONFIG IS NOT LEAKING IT. The protected asset is a secret's
 VALUE, never its existence. Reading /mnt/session/uploads/.env, listing that

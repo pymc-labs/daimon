@@ -94,7 +94,7 @@ async def mint_token(*, rt: CliRuntime, os_user: str | None) -> None:
     "mint-agent-token",
     help=(
         "Mint a long-lived, revocable agent-scoped MCP token. This is an "
-        "operator and testing door, NOT the production path — reports mint "
+        "operator and testing command — reports mint "
         "their own tokens when published, and a token minted here is "
         "revoked with the same revocation the publishing side uses."
     ),
@@ -131,7 +131,7 @@ async def mint_agent_token(
 ) -> None:
     """Async body for `daimon mcp mint-agent-token`.
 
-    This is an operator and testing door, NOT the production path: reports
+    This is an operator and testing command: reports
     mint their own agent-scoped token when they are published
     (`ensure_reader_variant` + `mint_agent_mcp_token`), and a token minted
     here is revoked with the same `revoke_mcp_token` the publishing side

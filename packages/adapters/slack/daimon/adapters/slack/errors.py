@@ -61,7 +61,7 @@ def render_error(exc: Exception, *, request_id: str) -> str:
     if isinstance(exc, InvalidToken):
         # Fernet failures mean a stored bot token could not be decrypted; the
         # detail is operator-facing and belongs in the logs, not the channel.
-        return f"❌ *Credential error*: the workspace token could not be read.\n{rid}"
+        return f"❌ *Slack token error*: the workspace token could not be read.\n{rid}"
     if isinstance(exc, ValueError):
         return f"⚠️ *Invalid input*: {escape_mrkdwn(str(exc))}\n{rid}"
     return f"❌ *Unexpected error*: {escape_mrkdwn(str(exc))}\n{rid}"

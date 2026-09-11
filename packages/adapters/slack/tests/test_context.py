@@ -13,7 +13,12 @@ import re
 
 from aioresponses import aioresponses as AioResponsesMock
 from daimon.adapters.slack.attachments import ProxyUrlContext
-from daimon.adapters.slack.context import _render_message, build_context_xml, build_delta_xml
+from daimon.adapters.slack.context import (
+    _render_message,
+    _user_query_open_tag,
+    build_context_xml,
+    build_delta_xml,
+)
 from daimon.core.slack_file_token import verify_file_token
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -283,7 +288,8 @@ def test_render_message_omits_attachments_when_no_proxy_configured() -> None:
 
 
 async def test_build_context_xml_renders_author_id_on_user_query() -> None:
-    """When author_id is given, it appears as an attribute on <user_query>."""
+    """When author_id is given, it appears as an attribute on <user_query>,
+    alongside is_admin (default False when unspecified)."""
     with AioResponsesMock() as mock:
         mock.get(
             _REPLIES_PATTERN,
@@ -294,8 +300,30 @@ async def test_build_context_xml_renders_author_id_on_user_query() -> None:
             client, channel="C1", thread_ts="100.0", user_query="hi", author_id="U0BDWSMCB26"
         )
 
-    assert '<user_query author_id="U0BDWSMCB26">' in xml, (
+    assert '<user_query author_id="U0BDWSMCB26" is_admin="false">' in xml, (
         "author_id must be rendered as a quoted attribute so the agent can mention the asker"
+    )
+
+
+async def test_build_context_xml_renders_is_admin_true_on_user_query() -> None:
+    """is_admin=True renders the lowercase literal "true", matching Discord's shape."""
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={"ok": True, "messages": [], "has_more": False},
+        )
+        client = _make_client()
+        xml = await build_context_xml(
+            client,
+            channel="C1",
+            thread_ts="100.0",
+            user_query="hi",
+            author_id="U0BDWSMCB26",
+            is_admin=True,
+        )
+
+    assert '<user_query author_id="U0BDWSMCB26" is_admin="true">' in xml, (
+        "is_admin=True must render the lowercase literal 'true' on <user_query>"
     )
 
 
@@ -314,7 +342,8 @@ async def test_build_context_xml_omits_author_id_attr_when_empty() -> None:
 
 
 async def test_build_delta_xml_renders_author_id_on_user_query() -> None:
-    """Delta builder also carries author_id onto <user_query>."""
+    """Delta builder also carries author_id onto <user_query>, with is_admin
+    defaulting to False when unspecified."""
     with AioResponsesMock() as mock:
         mock.get(
             _REPLIES_PATTERN,
@@ -330,4 +359,80 @@ async def test_build_delta_xml_renders_author_id_on_user_query() -> None:
             author_id="U123",
         )
 
-    assert '<user_query author_id="U123">' in xml, "delta user_query must carry author_id"
+    assert '<user_query author_id="U123" is_admin="false">' in xml, (
+        "delta user_query must carry author_id and is_admin"
+    )
+
+
+async def test_build_delta_xml_renders_is_admin_true_on_user_query() -> None:
+    """Delta builder propagates is_admin=True the same way build_context_xml does."""
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={"ok": True, "messages": [], "has_more": False},
+        )
+        client = _make_client()
+        xml = await build_delta_xml(
+            client,
+            channel="C1",
+            thread_ts="100.0",
+            watermark_ts="105.0",
+            user_query="more",
+            author_id="U123",
+            is_admin=True,
+        )
+
+    assert '<user_query author_id="U123" is_admin="true">' in xml, (
+        "delta user_query must carry is_admin=True"
+    )
+
+
+async def test_build_context_xml_reseed_shaped_call_carries_is_admin() -> None:
+    """The dead-session recovery reseed closure in app.py calls build_context_xml
+    with the same keyword shape as the ordinary first turn (author_id + is_admin);
+    this seam test drives that exact shape since test_app.py's orchestration
+    tests mock the builders wholesale and cannot see a missed keyword here."""
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={"ok": True, "messages": [], "has_more": False},
+        )
+        client = _make_client()
+        xml = await build_context_xml(
+            client,
+            channel="C1",
+            thread_ts="100.0",
+            user_query="reseed query",
+            author_id="U_RESEED",
+            is_admin=True,
+            proxy=None,
+        )
+
+    assert '<user_query author_id="U_RESEED" is_admin="true">' in xml, (
+        "the reseed-shaped call must carry is_admin the same as the ordinary first turn"
+    )
+
+
+def test_user_query_open_tag_renders_is_admin_true() -> None:
+    """_user_query_open_tag renders is_admin as the lowercase literal 'true'."""
+    assert _user_query_open_tag("U1", True) == '<user_query author_id="U1" is_admin="true">', (
+        "is_admin=True must render the lowercase literal 'true', not Python's True"
+    )
+
+
+def test_user_query_open_tag_renders_is_admin_false() -> None:
+    """_user_query_open_tag renders is_admin as the lowercase literal 'false'."""
+    assert _user_query_open_tag("U1", False) == '<user_query author_id="U1" is_admin="false">', (
+        "is_admin=False must render the lowercase literal 'false'"
+    )
+
+
+def test_user_query_open_tag_empty_author_id_stays_bare() -> None:
+    """Back-compat: an empty author_id renders the bare tag regardless of is_admin,
+    matching the pre-existing empty-author_id test's contract exactly."""
+    assert _user_query_open_tag("", True) == "<user_query>", (
+        "empty author_id must render the bare tag even when is_admin=True"
+    )
+    assert _user_query_open_tag("", False) == "<user_query>", (
+        "empty author_id must render the bare tag when is_admin=False"
+    )

@@ -186,11 +186,11 @@ def test_edit_view_button_labels_in_row_order(account_id: uuid.UUID) -> None:
     view = EditView(state, runtime=runtime, allowed_user_id=42)
     btn_labels = [b.label for b in _walk_buttons(view)]
     assert btn_labels == [
-        "Agent…",
-        "GitHub…",
-        "Env vars",
+        "Prompt & model",
+        "Working repo",
+        "Keys",
         "+ Add skill",
-        "+ Add MCP",
+        "+ Add MCP server",
         "← Back",
     ], f"button labels must be exactly the flat row order; got {btn_labels}"
 
@@ -234,11 +234,11 @@ def test_edit_view_omits_install_app_button_when_slug_unset(account_id: uuid.UUI
     view = EditView(state, runtime=runtime, allowed_user_id=42)
     btn_labels = [b.label for b in _walk_buttons(view)]
     assert btn_labels == [
-        "Agent…",
-        "GitHub…",
-        "Env vars",
+        "Prompt & model",
+        "Working repo",
+        "Keys",
         "+ Add skill",
-        "+ Add MCP",
+        "+ Add MCP server",
         "← Back",
     ], "no link button must render when app_slug is unset"
     first_row_buttons = _walk_buttons(view)[:3]
@@ -287,7 +287,7 @@ def test_edit_view_timeout(account_id: uuid.UUID) -> None:
     assert view.timeout == 300, "EditView must use timeout=300"
 
 
-# --- Agent…/GitHub… buttons --------------------------------------------------
+# --- Prompt & model/Working repo buttons --------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -303,13 +303,13 @@ async def test_edit_view_agent_button_opens_agent_section_modal(
     runtime.settings.github.app_slug = None
 
     view = EditView(state, runtime=runtime, allowed_user_id=42)
-    agent_btn = _find_button(view, "Agent…")
+    agent_btn = _find_button(view, "Prompt & model")
     assert agent_btn.callback is not None
     await agent_btn.callback(mock_interaction)
 
     mock_interaction.response.send_modal.assert_called_once()
     modal = mock_interaction.response.send_modal.call_args.args[0]
-    assert isinstance(modal, AgentSectionModal), "Agent… must open AgentSectionModal"
+    assert isinstance(modal, AgentSectionModal), "Prompt & model must open AgentSectionModal"
 
 
 @pytest.mark.asyncio
@@ -325,13 +325,13 @@ async def test_edit_view_github_button_opens_repo_auth_modal(
     runtime.settings.github.app_slug = None
 
     view = EditView(state, runtime=runtime, allowed_user_id=42)
-    github_btn = _find_button(view, "GitHub…")
+    github_btn = _find_button(view, "Working repo")
     assert github_btn.callback is not None
     await github_btn.callback(mock_interaction)
 
     mock_interaction.response.send_modal.assert_called_once()
     modal = mock_interaction.response.send_modal.call_args.args[0]
-    assert isinstance(modal, RepoAuthModal), "GitHub… must open RepoAuthModal directly"
+    assert isinstance(modal, RepoAuthModal), "Working repo must open RepoAuthModal directly"
     mock_interaction.response.send_message.assert_not_called()
 
 
@@ -480,7 +480,7 @@ def test_edit_view_user_mcps_empty_disables_mcp_select(account_id: uuid.UUID) ->
     assert mcp_select.disabled is True, "empty mcp select must be disabled"
     assert len(mcp_select.options) == 1, "empty select must carry one dummy option"
     assert mcp_select.options[0].value == "__none__", "dummy option value must be __none__"
-    assert mcp_select.placeholder == "(no MCPs — use + Add MCP)", (
+    assert mcp_select.placeholder == "(no MCP servers — use + Add MCP server)", (
         f"empty-mcp placeholder mismatch; got {mcp_select.placeholder!r}"
     )
 
@@ -509,7 +509,7 @@ def test_edit_view_add_mcp_button_disabled_at_cap(account_id: uuid.UUID) -> None
     runtime.settings.github.app_slug = None
 
     view = EditView(state, runtime=runtime, allowed_user_id=42)
-    add_mcp = _find_button(view, "+ Add MCP")
+    add_mcp = _find_button(view, "+ Add MCP server")
     assert add_mcp.disabled is True, "Add MCP must be disabled at 20-MCP cap"
 
 
@@ -583,8 +583,8 @@ async def test_edit_view_remove_paths_never_mutate_main_panel(
 
 
 def test_env_vars_button_label_has_no_plus(account_id: uuid.UUID) -> None:
-    """The Env vars button opens a sub-view (not an add action), so its label is
-    'Env vars', not '+ Env vars'."""
+    """The Keys button opens a sub-view (not an add action), so its label is
+    'Keys', not '+ Keys'."""
     selected = _entry("agent")
     state = PanelState(roster=[selected], selected=selected, account_id=account_id)
     runtime = MagicMock()
@@ -593,12 +593,12 @@ def test_env_vars_button_label_has_no_plus(account_id: uuid.UUID) -> None:
 
     view = EditView(state, runtime=runtime, allowed_user_id=42)
     labels = [b.label for b in _walk_buttons(view) if b.label is not None]
-    assert "Env vars" in labels, "Env vars button must be labeled 'Env vars'"
-    assert "+ Env vars" not in labels, "the '+' prefix must be dropped from the Env vars button"
+    assert "Keys" in labels, "Keys button must be labeled 'Keys'"
+    assert "+ Keys" not in labels, "the '+' prefix must be dropped from the Keys button"
 
 
 def test_edit_view_env_vars_button_always_enabled(account_id: uuid.UUID) -> None:
-    """Env vars are per-agent daimon state, never part of the agent spec, so the
+    """Keys are per-agent daimon state, never part of the agent spec, so the
     button is always enabled — for the seeded/system agent exactly like any other."""
     selected = RosterEntry(
         name="sys",
@@ -612,14 +612,14 @@ def test_edit_view_env_vars_button_always_enabled(account_id: uuid.UUID) -> None
     runtime.settings.github.app_slug = None
 
     view = EditView(state, runtime=runtime, allowed_user_id=42)
-    assert _find_button(view, "Env vars").disabled is False, (
-        "the seeded/system agent's Env vars button must be enabled"
+    assert _find_button(view, "Keys").disabled is False, (
+        "the seeded/system agent's Keys button must be enabled"
     )
 
     user_selected = _entry("bot")
     user_state = PanelState(roster=[user_selected], selected=user_selected, account_id=account_id)
     user_view = EditView(user_state, runtime=runtime, allowed_user_id=42)
-    assert _find_button(user_view, "Env vars").disabled is False, "user agents can open Env vars"
+    assert _find_button(user_view, "Keys").disabled is False, "user agents can open Keys"
 
 
 # --- Spec-control reachability gate ---------------------------
@@ -643,7 +643,7 @@ def test_edit_view_non_admin_reachable_non_system_disables_spec_controls(
     account_id: uuid.UUID,
 ) -> None:
     """A non-admin editing a reachable, non-system agent gets the five
-    spec-touching controls disabled; GitHub… and Env vars stay enabled.
+    spec-touching controls disabled; Working repo and Keys stay enabled.
 
     Enabled is not unguarded: the attachment gate refuses those two on click,
     so the caller reads why they cannot bind a repo instead of staring at a
@@ -661,15 +661,17 @@ def test_edit_view_non_admin_reachable_non_system_disables_spec_controls(
     runtime.settings.github.app_slug = None
 
     view = EditView(state, runtime=runtime, allowed_user_id=42)
-    assert _find_button(view, "Agent…").disabled is True, "Agent… must be disabled"
+    assert _find_button(view, "Prompt & model").disabled is True, "Prompt & model must be disabled"
     assert _find_button(view, "+ Add skill").disabled is True, "+ Add skill must be disabled"
-    assert _find_button(view, "+ Add MCP").disabled is True, "+ Add MCP must be disabled"
+    assert _find_button(view, "+ Add MCP server").disabled is True, (
+        "+ Add MCP server must be disabled"
+    )
     skill_select = next(s for s in _walk_selects(view) if isinstance(s, _SkillRemoveSelect))  # pyright: ignore[reportPrivateUsage]
     mcp_select = next(s for s in _walk_selects(view) if isinstance(s, _McpRemoveSelect))  # pyright: ignore[reportPrivateUsage]
     assert skill_select.disabled is True, "skill remove select must be disabled"
     assert mcp_select.disabled is True, "mcp remove select must be disabled"
-    assert _find_button(view, "GitHub…").disabled is False, "GitHub… must stay enabled"
-    assert _find_button(view, "Env vars").disabled is False, "Env vars must stay enabled"
+    assert _find_button(view, "Working repo").disabled is False, "Working repo must stay enabled"
+    assert _find_button(view, "Keys").disabled is False, "Keys must stay enabled"
 
 
 def test_edit_view_non_admin_unreachable_non_system_enables_spec_controls(
@@ -690,9 +692,11 @@ def test_edit_view_non_admin_unreachable_non_system_enables_spec_controls(
     runtime.settings.github.app_slug = None
 
     view = EditView(state, runtime=runtime, allowed_user_id=42)
-    assert _find_button(view, "Agent…").disabled is False, "Agent… must be enabled"
+    assert _find_button(view, "Prompt & model").disabled is False, "Prompt & model must be enabled"
     assert _find_button(view, "+ Add skill").disabled is False, "+ Add skill must be enabled"
-    assert _find_button(view, "+ Add MCP").disabled is False, "+ Add MCP must be enabled"
+    assert _find_button(view, "+ Add MCP server").disabled is False, (
+        "+ Add MCP server must be enabled"
+    )
     skill_select = next(s for s in _walk_selects(view) if isinstance(s, _SkillRemoveSelect))  # pyright: ignore[reportPrivateUsage]
     mcp_select = next(s for s in _walk_selects(view) if isinstance(s, _McpRemoveSelect))  # pyright: ignore[reportPrivateUsage]
     assert skill_select.disabled is False, "skill remove select must be enabled"
@@ -709,7 +713,9 @@ def test_edit_view_admin_reachable_non_system_enables_spec_controls(account_id: 
     runtime.settings.github.app_slug = None
 
     view = EditView(state, runtime=runtime, allowed_user_id=42)
-    assert _find_button(view, "Agent…").disabled is False, "Agent… must be enabled for an admin"
+    assert _find_button(view, "Prompt & model").disabled is False, (
+        "Prompt & model must be enabled for an admin"
+    )
 
 
 def test_edit_view_reachable_system_agent_disables_spec_controls_for_admin_too(
@@ -729,11 +735,11 @@ def test_edit_view_reachable_system_agent_disables_spec_controls_for_admin_too(
     runtime.settings.github.app_slug = None
 
     view = EditView(state, runtime=runtime, allowed_user_id=42)
-    assert _find_button(view, "Agent…").disabled is True, (
-        "Agent… must stay disabled on a system agent even for an admin"
+    assert _find_button(view, "Prompt & model").disabled is True, (
+        "Prompt & model must stay disabled on a system agent even for an admin"
     )
-    assert _find_button(view, "GitHub…").disabled is False, "GitHub… is not spec-gated"
-    assert _find_button(view, "Env vars").disabled is False, "Env vars is not spec-gated"
+    assert _find_button(view, "Working repo").disabled is False, "Working repo is not spec-gated"
+    assert _find_button(view, "Keys").disabled is False, "Keys is not spec-gated"
 
 
 # --- Back / open_edit_view edit-in-place -----------------------------------
@@ -1053,7 +1059,7 @@ async def test_edit_view_github_button_refuses_for_non_admin_on_reachable_agent(
     account_id: uuid.UUID,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The GitHub… button stays clickable for everyone, but a non-admin
+    """The Working repo button stays clickable for everyone, but a non-admin
     clicking it on a currently-reachable agent gets the refusal instead of the
     modal — so no GitHub token is ever typed into a form that would be
     rejected on submit."""
@@ -1073,8 +1079,8 @@ async def test_edit_view_github_button_refuses_for_non_admin_on_reachable_agent(
     runtime.deployment_default = DeploymentDefault(agent_name="bot")
 
     view = EditView(state, runtime=runtime, allowed_user_id=42)
-    github_btn = _find_button(view, "GitHub…")
-    assert github_btn.disabled is False, "GitHub… must stay clickable for a non-admin"
+    github_btn = _find_button(view, "Working repo")
+    assert github_btn.disabled is False, "Working repo must stay clickable for a non-admin"
     assert github_btn.callback is not None
 
     interaction = _non_admin_interaction(guild_id=guild_id)
@@ -1113,7 +1119,7 @@ async def test_edit_view_github_button_opens_modal_for_admin_on_system_agent(
     runtime.settings.github.app_slug = None
 
     view = EditView(state, runtime=runtime, allowed_user_id=42)
-    github_btn = _find_button(view, "GitHub…")
+    github_btn = _find_button(view, "Working repo")
     assert github_btn.callback is not None
 
     interaction = _admin_interaction()
@@ -1133,7 +1139,7 @@ async def test_env_vars_paste_modal_refuses_on_reachable_agent_for_non_admin(
     """`put_agent_file` is an upsert and the files are mounted read-write on
     every session of the agent, so a non-admin pasting over the workspace's
     current default agent would overwrite secrets everyone in the install
-    depends on. The Env vars button still opens for them; the write does not."""
+    depends on. The Keys button still opens for them; the write does not."""
     from daimon.adapters.discord.agent_setup.credentials import PasteSecretModal
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.ma_resolver import new_resolver_cache
@@ -1182,7 +1188,7 @@ async def test_env_vars_paste_modal_refuses_on_reachable_agent_for_non_admin(
         row = await get_agent_file(
             session, tenant_id=tenant.id, agent_id=agent_id, key="XERO_API_KEY"
         )
-    assert row is None, "a non-admin must not write env vars onto the workspace's default agent"
+    assert row is None, "a non-admin must not write keys onto the workspace's default agent"
     interaction.response.defer.assert_not_called()
     interaction.response.send_message.assert_called_once()
     assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is True

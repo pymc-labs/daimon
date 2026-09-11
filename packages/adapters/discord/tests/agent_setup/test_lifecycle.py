@@ -188,8 +188,9 @@ def _source_ma_agent(
     ).model_dump(mode="json")
 
 
-@pytest.mark.asyncio
+@pytest.mark.parametrize("refresh_fails", [False, True])
 async def test_fork_creates_new_ma_agent_via_direct_create(
+    refresh_fails: bool,
     db_session_factory: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
@@ -244,7 +245,9 @@ async def test_fork_creates_new_ma_agent_via_direct_create(
     interaction = MagicMock()
     interaction.user.id = 42
     interaction.response.defer = AsyncMock()
-    interaction.edit_original_response = AsyncMock()
+    interaction.edit_original_response = AsyncMock(
+        side_effect=RuntimeError("private failure detail") if refresh_fails else None
+    )
     interaction.followup.send = AsyncMock()
 
     await modal.on_submit(interaction)
@@ -260,7 +263,15 @@ async def test_fork_creates_new_ma_agent_via_direct_create(
     assert body["metadata"]["daimon_account"] != str(account_id), (
         "SC-2: personal account must not be the ownership stamp"
     )
-    interaction.followup.send.assert_not_called()
+    if refresh_fails:
+        message = interaction.followup.send.call_args.args[0]
+        assert "Created **source-bot-v2**" in message, "a refresh failure must preserve success"
+        assert "/agent-setup" in message, "the person needs a working way to see the copy"
+        assert "RuntimeError" not in message and "private failure detail" not in message, (
+            "raw exception text must not be shown to people"
+        )
+    else:
+        interaction.followup.send.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -548,3 +559,38 @@ async def test_delete_last_agent_disables_section_buttons(
     assert interaction.edit_original_response.await_count >= 1, (
         "panel must re-render after delete so the empty-state view replaces the old view"
     )
+
+
+async def test_fork_upstream_failure_names_both_agents_without_exception_details(
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": "private failure detail"},
+            },
+        )
+
+    runtime = _runtime(build_stub_anthropic(handler), tenant_id)
+    source = _entry("source-bot")
+    state = PanelState(roster=[source], selected=source, account_id=account_id)
+    modal = ForkAgentModal(state, runtime=runtime, allowed_user_id=42)
+    modal.name_in._value = "source-bot-v2"  # pyright: ignore[reportPrivateUsage]  # Discord input boundary
+    interaction = MagicMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    await modal.on_submit(interaction)
+
+    message = interaction.followup.send.call_args.args[0]
+    assert "**source-bot**" in message and "**source-bot-v2**" in message, (
+        "the failure must preserve the source and requested copy"
+    )
+    assert "/agent-setup" in message, "the next step must be a working command"
+    assert "BadRequestError" not in message and "private failure detail" not in message, (
+        "raw exception text must not be shown to people"
+    )
+    assert "Nothing was saved" not in message, "an upstream error does not prove no partial write"

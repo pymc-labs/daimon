@@ -1,119 +1,132 @@
 ---
 name: workspace-setup
-description: First-time workspace setup and agent-roster operations for a daimon workspace — repo binding, skills, MCP servers, credentials, routines, and what's admin-managed versus open to build.
+description: First-time workspace setup and agent-roster operations for a Daimon workspace — working repo, keys, skills, MCP servers, routines, and which changes need an admin.
 ---
 
 # workspace-setup
 
 ## Setting up a workspace for the first time
 
-When someone asks to configure this agent or get a workspace started ("help
-me set up", "configure me", "get me started"), walk through the following, in
-order, and confirm the shape with the user before you consider it done:
+For an open-ended setup request, establish what the person wants the agent to
+do, then configure only what that needs. A specific request such as “add a
+Higgsfield key so people here can try it” is already a complete setup intent;
+do not turn it into a full setup interview.
 
-1. **Repository.** Ask which GitHub repository they want the agent working
-   against, then call
-   `request_repo_binding(agent_name, repo_url, purpose, channel_id)` — never
-   accept a GitHub token in chat (see "Credentials never travel through
-   chat" below). This posts a button naming the exact repo and agent; the
-   user completes the bind by clicking it, which opens a private form
-   asking for the branch and, only if the repo is private, a GitHub token.
-   They only need to paste a token if the repo isn't publicly readable.
-2. **Skills.** Call `list_skills` to see what's already available in this
-   workspace, and prefer an existing one over asking for a near-duplicate.
-   Attaching an existing skill to an agent works via
-   `update_agent(name, skills=[...])`. Bringing a brand-new skill bundle into
-   the workspace from a GitHub repository is an admin action, done from
-   `/agent-setup`'s Skills door — not from chat.
-3. **Additional MCP servers.** For a server that needs no auth token, collect
-   a name and URL, confirm with the user, then call
-   `attach_mcp_server(agent_name, server_name, url)`. For one that needs a
-   token, never accept it in chat — call
-   `request_mcp_credential(agent_name, server_name, url, channel_id)` instead
-   (see "Credentials never travel through chat" below).
-4. **Confirm the final shape** — repository, skills, MCP servers — with the
-   user before calling it done.
+Choose the target before changing anything: an explicitly named agent wins,
+then a selected setup target if the context actually supplies one, then the
+answering agent in ordinary chat. Daimon being the responder does not replace
+an explicit research-bot target. If the target is missing, deleted, or still
+ambiguous, ask one concise question instead of silently choosing another.
+State the target before a consequential change. Selecting a target does not
+change which agent answers the conversation.
 
-If the agent doing the configuring is the one this deployment ships with,
-steps 2 and 3 can't target it directly — it isn't editable at all (see "When
-an operation is refused"). Offer to `fork_agent` it into an editable copy
-first, then run these steps against the fork.
+1. **Working repo.** Use `request_repo_binding` for the requested GitHub repo.
+   Collect tokens only through its private form. A GitHub App install link is
+   informational: installing alone does not verify this workspace's access or
+   bind the repo. Use the working token path where access is needed; do not
+   say an existing token stopped being used after an App install.
+2. **Keys.** Use `request_agent_key` for an API key the agent will use in code,
+   including a key for an unfamiliar or newly launched service. Infer and state
+   a conventional name such as `HIGGSFIELD_API_KEY`; do not ask the person to
+   design a variable name. A key can be added to Daimon itself without a fork,
+   an MCP server, or a skill. Accept it before researching how to use the API;
+   consult the service's documentation when a later task needs that knowledge.
+3. **Skills.** Use `list_skills` to find existing skills and `update_agent` to
+   attach them to an editable agent. An admin can import a GitHub skill bundle
+   from chat with `sync_skills`. If it needs a private token, use
+   `request_skill_repo_token`: submission imports and attaches the skills and
+   also binds the target's working repo so subsequent imports can find the
+   token. Explain that repo change before requesting it.
+4. **MCP servers.** Use `attach_mcp_server` for a server needing no token, or
+   `request_mcp_token` for a supported connection that needs one. An API key
+   for code is not automatically an MCP connection token. Ask “API access for
+   code or an MCP connection?” only when the request leaves that choice unclear.
+   A token form does not complete an arbitrary browser OAuth login.
+5. **Confirm the result.** Explain what changed and what still needs doing.
+   Read partial-success warnings: a saved token with a failed attachment is
+   not a connected server, and an imported skill is not necessarily attached.
 
 ## Roster operations
 
-| Tool | What it does |
-|---|---|
-| `list_agents` | List every agent in this workspace. |
-| `get_agent` | Get one agent's full configuration by name. |
-| `create_agent` | Create a new agent from scratch. |
-| `fork_agent` | Clone an existing agent under a new name — the way to get an editable copy of an agent you can't edit directly. |
-| `update_agent` | Patch-update an agent's model, prompt, tools, skills, or MCP servers. Omitted fields are left alone; passing `[]` for a list field clears it. |
-| `attach_mcp_server` | Attach a new MCP server to an agent. |
-| `detach_mcp_server` | Remove an attached MCP server from an agent, and its matching tool entry, together. |
-| `remove_skill` | Detach one skill from one agent. |
-| `list_env_credential_keys` | List the environment-variable KEY NAMES set on an agent — never values. |
-| `remove_env_credential` | Remove one environment variable from an agent. |
-| `create_routine` | Schedule a recurring turn (see "Scheduled routines" below). |
+Use `list_agents` and `get_agent` to find and inspect agents. `create_agent`
+creates one; `fork_agent` makes an editable copy, including a copy of Daimon.
+Use `update_agent` for Prompt & model or skill additions. Use `remove_skill`
+and `detach_mcp_server` for removal, rather than replacing lists through
+`update_agent`. Removing a skill from one agent is different from
+`delete_skill`, which deletes it from the workspace library. `archive_agent`
+and `delete_skill` are admin-only.
 
-`remove_skill` only detaches this one agent's reference to a skill — the
-skill itself, and every other agent using it, are untouched. That is a
-DIFFERENT operation from **delete_skill**, which deletes the skill for the
-entire workspace; don't reach for it when a user just means "stop this agent
-using X."
+When creating an agent and no model was requested, use the built-in Daimon's
+model, read through `get_agent`, as the fallback and state that choice.
+Confirm the new name and model, carry its returned identity into subsequent
+setup, and say whether it answers anywhere. Creation alone does not route
+mentions to the new agent.
 
-## When an operation is refused
+## Permissions and refusals
 
-Anyone can build and configure their own agent. But an agent that is
-currently set as the default for a channel or for the whole workspace is
-admin-managed — changing its prompt, model, skills, or MCP servers needs a
-workspace admin, because people are already relying on that configuration.
-And the agent this deployment ships with can't be edited at all, by anyone,
-admin included — fork it (`fork_agent`) to get an editable copy, and
-configure that instead. Deleting an agent (**archive_agent**) is admin-only
-in the same way — a workspace admin can archive from chat; for anyone else
-it goes through `/agent-setup` or the `daimon agents archive` CLI command.
+An admin means Manage Server on Discord or a workspace admin on Slack. Read
+`is_admin` on the newest `<user_query>` and check the requested operation's
+rule. A member can ask setup questions, create an agent, and contribute a new
+key to Daimon. Do not turn non-admin status into a blanket setup refusal.
+For replacing a shared key, hand the request to an admin rather than attempting
+the replacement on a member's behalf.
 
-## Credentials never travel through chat
+An agent answering in a channel or as the workspace default is admin-managed
+for direct prompt, model, skill, and MCP-spec edits. Direct edits to the built-in
+Daimon's spec require an editable copy even for admins. Offer `fork_agent` for
+those edits; keys, working-repo binding, and posted-token operations follow
+their own rules and must not get a blanket fork requirement.
 
-`request_env_credential`, `request_mcp_credential`, and
-`request_repo_binding` post a single-use, expiring button in the thread;
-clicking it opens a private modal where the user enters the value, so it
-never enters channel history or the session log. They work the same way on
-Discord and Slack, so on either platform post the button rather than
-sending the user to `/agent-setup`.
+When the operation needs an admin and the caller is not one, do not attempt
+it. Give a reachable handoff carrying the target and action, for example:
+“Ask an admin to say in this conversation: ‘Make research-bot answer in this
+channel.’” If no agent answers in the current channel, name the existing
+`/agent-setup` entry rather than telling the person to talk to an unreachable
+agent. Do not invent panel paths or a new setup entry.
 
-If a user pastes a token or secret in chat anyway: acknowledge that you saw
-it, call no tool with it, and tell them to rotate it immediately — it is
-already in this channel's history and in the tenant-wide session log,
-neither of which the bot can scrub. Then post the right button so the
-replacement is entered privately. Once a credential is added via either
-tool, it becomes usable by everyone who talks to that agent — say so when
-you post the button.
+An operator-only problem needs the person running the deployment, not a
+workspace admin. Name the blocker and the requested fix without exposing
+internal exceptions. Never report a failed save as successful or erase the
+successful half of a partial result.
+
+## Keys and tokens stay in private forms
+
+Use `request_agent_key`, `request_mcp_token`, `request_skill_repo_token`, or
+`request_repo_binding` in the current conversation. These tools collect no
+secret value in their arguments; the requester enters it in a private form.
+The request expires, but a saved key does not expire with the request.
+State the shared-use consequence once: “Anyone who talks to research-bot can
+use it.” Do not force a separate setup conversation for a key request.
+
+If someone pastes a value in chat, acknowledge the exposure and ask them to
+rotate it. Never repeat the value or pass it to any tool. Post the appropriate
+private form for the replacement; do not claim the model never saw the pasted
+value or that the bot removed it from history.
+
+Stored keys and available session resources are different facts.
+`list_agent_keys` describes the target's stored names, never values, and does
+not prove the responder can use them. `remove_agent_key` removes a stored key
+from the target. Inspect the mounted `.env` by name only when needed, following
+the key-handling preamble. Do not claim a save refreshed an existing session
+or tested the service. If multiple available keys plausibly fit the task,
+ask one concise question.
+
+After a confirmed save, continue the original task when the needed resources
+are actually available, or give a concrete supported next request. Do not
+duplicate a confirmation card in prose, automatically charge a paid service
+for a test, or offer an unrelated skill-authoring project.
 
 ## Which agent answers where
 
-Members reach an agent only by @mentioning the bot in the channel they're
-posting in — there is one bot for the whole workspace, not one bot per agent,
-so no configuration step ever adds a new bot to the server. What a mention
-resolves to — which agent answers — is controlled by the binding path below,
-not by anything the member does.
+There is one bot account per deployment, not one per agent. A mention resolves
+the channel override, then the workspace default, then the deployment default.
+Use `explain_agent_resolution` to inspect that choice.
 
-Two admin-only tools control that binding, scoped by whether a channel is given:
-
-```
-set_agent_default(agent_name, channel_id)   # channel_id given -> this channel only
-set_agent_default(agent_name)               # channel_id omitted -> workspace-wide default
-clear_agent_default(channel_id)             # clears one channel's override
-clear_agent_default()                       # clears the workspace-wide default
-```
-
-Resolution cascades channel override first, then the workspace default — a
-channel with its own override always wins over the workspace default, and
-clearing a channel's override falls it back to whatever the workspace
-default resolves to next. Both tools require a workspace admin (Manage
-Server); a non-admin caller is refused with no write. The equivalent surface
-without chat is the setup panel's **Set as default…** door, which writes the
-same channel/workspace scopes and shows the same cascade.
+Admins use `set_agent_default` and `clear_agent_default` to change who answers:
+with `channel_id` they affect that channel; without it they affect the workspace
+default. Clearing an override exposes the next tier, which may still resolve
+to the same agent. Say what scope will change before calling the tool. Do not
+promise a running conversation will switch responders or continue automatically.
 
 ## Following threads
 
@@ -141,16 +154,13 @@ Server), and a non-admin caller is refused with no write. Discord only for now.
 
 ## Scheduled routines
 
-The agent creates routines itself, with
-`create_routine(agent_name, cron_expr, timezone, trigger_message)`. Confirm
-the agent, the cron expression, the timezone, and the trigger message back to
-the user before calling it, and confirm the created routine back afterward.
+Use `create_routine` after confirming the agent, schedule, timezone, and task.
+Report the actual creation result and any remaining setup needed for the task.
 
-## Changing a running resource vs. changing the repo defaults
+## Live configuration and repository defaults
 
-The live tools above (`update_agent`, `attach_mcp_server`, and the rest)
-change the deployed resource the user is talking to, right now. Editing
-`defaults/*.yaml` in the repository only changes what a fresh install seeds
-going forward — it does not change any agent that is already running. Only
-touch the YAML when a user explicitly asks to change the repo's seed
-defaults or open a PR against them.
+The live tools change deployed resources. Repository defaults are operator-owned
+seeded specifications: the next defaults apply reconciles managed resources
+for existing tenants as well as new installs. User-owned forks are separate.
+Edit repository defaults only when asked to change those deployment defaults
+or open a PR for them; they are not a substitute for a workspace setup tool.

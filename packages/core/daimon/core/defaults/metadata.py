@@ -59,8 +59,8 @@ def build_metadata(
     `client.beta.environments.create` so LIST-by-client-filter can recover the
     daimon tenant and local name deterministically.
 
-    When `account_id` is provided, stamp `daimon_account=str(account_id)` so the
-    The `/agent-setup` panel can filter the roster to the invoking user.
+    When `account_id` is provided, stamp `daimon_account=str(account_id)` so
+    the roster can be filtered to the invoking user's own agents.
     When `account_id` is `None`, the `daimon_account` key is omitted entirely —
     this preserves the "tenant-scoped / no account" semantics of the seeded
     default agent (everyone's agent).

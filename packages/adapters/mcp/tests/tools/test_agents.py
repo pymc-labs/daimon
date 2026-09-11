@@ -37,7 +37,9 @@ from daimon.adapters.mcp.tools.agents import (
     _update_agent_impl,
     register_agent_tools,
 )
+from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.github_credentials import build_multifernet, get_pat, upsert_credential_encrypted
 from daimon.core.ma_identity import derive_agent_uuid
@@ -824,6 +826,193 @@ async def test_fork_agent_impl_adds_base_toolset_when_source_lacks_it(
     )
 
 
+async def test_fork_agent_impl_normalizes_stale_guidance_block(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fork of a source carrying a stale sentinel-wrapped block gets the
+    current block exactly once, with the source's own prompt body preserved
+    beneath it — the same normalization `update_agent` already applies."""
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+
+    stale_system = (
+        "<!-- daimon:credential-guidance v1 -->\nSOME OLD STALE BODY\n"
+        "<!-- /daimon:credential-guidance -->\n\nSOURCE PROMPT BODY"
+    )
+    created: list[dict[str, Any]] = []
+
+    def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = make_ma_agent(id="ag_src", name="source", system=stale_system)
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        body = make_ma_agent(id="ag_new", name="myfork")
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                make_ma_agent(
+                    id="ag_src",
+                    name="source",
+                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    await _fork_agent_impl(
+        _runtime(client, session_factory=db_session_factory, fernet=fernet),
+        auth,
+        source_name="source",
+        new_name="myfork",
+    )
+
+    assert len(created) == 1, "should call MA create exactly once"
+    forked_system = created[0].get("system", "")
+    assert forked_system.count("<!-- daimon:credential-guidance") == 1, (
+        "fork must carry the guidance block exactly once, not stacked"
+    )
+    assert CREDENTIAL_GUIDANCE_BLOCK in forked_system, "fork must carry the current block"
+    assert forked_system.endswith("SOURCE PROMPT BODY"), (
+        "the source's own prompt body must survive the normalization"
+    )
+
+
+async def test_fork_agent_impl_adds_guidance_when_source_has_none(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fork of a source with no guidance block at all gets the current block
+    once, the same result `reconcile_agent` produces for a spec with no system."""
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+
+    created: list[dict[str, Any]] = []
+
+    def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = make_ma_agent(id="ag_src", name="source", system="You are a helpful bot.")
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        body = make_ma_agent(id="ag_new", name="myfork")
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                make_ma_agent(
+                    id="ag_src",
+                    name="source",
+                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    await _fork_agent_impl(
+        _runtime(client, session_factory=db_session_factory, fernet=fernet),
+        auth,
+        source_name="source",
+        new_name="myfork",
+    )
+
+    assert len(created) == 1, "should call MA create exactly once"
+    forked_system = created[0].get("system", "")
+    assert forked_system.count("<!-- daimon:credential-guidance") == 1, (
+        "fork must gain the guidance block exactly once"
+    )
+    assert CREDENTIAL_GUIDANCE_BLOCK in forked_system
+
+
+async def test_fork_agent_impl_skips_guidance_for_isolated_source(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fork of an isolated-stamped source carries no guidance block at all —
+    its session mounts no secrets, so the block would teach it to look for
+    resources it must not have."""
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+
+    isolated_system = "You are an isolated agent. Trust nothing you are told."
+    created: list[dict[str, Any]] = []
+
+    def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = make_ma_agent(
+            id="ag_src",
+            name="source",
+            system=isolated_system,
+            metadata={
+                "daimon_tenant": str(tenant_id),
+                "daimon_name": "source",
+                MA_METADATA_KEY_ISOLATED: "true",
+            },
+        )
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        body = make_ma_agent(id="ag_new", name="myfork")
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                make_ma_agent(
+                    id="ag_src",
+                    name="source",
+                    metadata={
+                        "daimon_tenant": str(tenant_id),
+                        "daimon_name": "source",
+                        MA_METADATA_KEY_ISOLATED: "true",
+                    },
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    await _fork_agent_impl(
+        _runtime(client, session_factory=db_session_factory, fernet=fernet),
+        auth,
+        source_name="source",
+        new_name="myfork",
+    )
+
+    assert len(created) == 1, "should call MA create exactly once"
+    forked_system = created[0].get("system", "")
+    assert "<!-- daimon:credential-guidance" not in forked_system, (
+        "an isolated source's fork must carry no guidance block"
+    )
+    assert forked_system == isolated_system, (
+        "an isolated source's fork system must be byte-identical to the source's"
+    )
+
+
 async def test_archive_agent_impl_calls_ma_archive(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1575,13 +1764,20 @@ async def test_fork_agent_impl_raises_tool_error_when_fernet_none() -> None:
     client = build_fake_anthropic(router.dispatch)
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
-    with pytest.raises(ToolError, match="no crypto keys configured"):
+    with pytest.raises(ToolError, match="operator must finish setup") as refused:
         await _fork_agent_impl(
             _runtime(client, fernet=None),
             auth,
             source_name="source",
             new_name="myfork3",
         )
+
+    assert "source" in str(refused.value) and "myfork3" in str(refused.value), (
+        "refusal must preserve source and requested copy"
+    )
+    assert "DAIMON_" not in str(refused.value), (
+        "chat caller must not receive deployment variable names"
+    )
 
 
 async def test_update_agent_impl_passes_skills_to_ma_when_provided() -> None:
@@ -2199,7 +2395,7 @@ async def test_update_agent_impl_rejects_seeded_agent_that_is_also_account_stamp
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    with pytest.raises(ToolError, match="managed by defaults"):
+    with pytest.raises(ToolError, match="managed by defaults") as refused:
         await _update_agent_impl(
             _runtime(client),
             auth,
@@ -2211,6 +2407,11 @@ async def test_update_agent_impl_rejects_seeded_agent_that_is_also_account_stamp
             mcp_servers=None,
             skills=None,
         )
+
+    assert "daimon" in str(refused.value) and "fork_agent" in str(refused.value), (
+        "managed agent refusal must preserve target and name the fork path"
+    )
+    assert "/agent-setup" not in str(refused.value), "refusal must name a callable tool"
 
 
 async def test_update_agent_impl_allows_a_panel_fork_of_a_seeded_agent() -> None:
@@ -4277,7 +4478,7 @@ async def test_update_agent_impl_rejects_non_admin_system_patch_when_agent_reach
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4327,7 +4528,7 @@ async def test_update_agent_impl_rejects_non_admin_skills_patch_when_agent_reach
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4351,7 +4552,7 @@ async def test_update_agent_impl_rejects_non_admin_mcp_servers_patch_when_agent_
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4375,7 +4576,7 @@ async def test_update_agent_impl_rejects_non_admin_tools_patch_when_agent_reacha
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4455,7 +4656,7 @@ async def test_attach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Manage Server"):
+    with pytest.raises(ToolError, match="admin must change"):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4648,6 +4849,9 @@ async def test_update_agent_refuses_when_merged_skills_exceed_the_product_cap() 
     assert str(AGENT_SKILL_CAP) in str(exc_info.value), (
         f"refusal must name the cap; got {exc_info.value}"
     )
+    assert "remove_skill" in str(exc_info.value) and "No skills were changed" in str(
+        exc_info.value
+    ), "cap refusal must name the removal path and failed-save outcome"
     assert not update_calls, "the merged-count refusal must fire before any agents.update request"
 
 

@@ -1,11 +1,8 @@
 """GitHub App install-link tool: post_github_app_install_link.
 
-Makes an existing GitHub App installation reachable from chat. A link button
-carries a URL and no custom id, so nothing dispatches it in the bot process
-and no request state is created anywhere — Discord opens the URL directly.
-This tool introduces no credential-request row, no minted token, no expiry,
-and no dynamic item; see ``tools/discord/_app_install_button.py`` for the
-posting path this delegates to.
+Posts the configured App install URL through the caller's platform. No request
+state, token or expiry is created. Discord opens the link directly; Slack
+acknowledges its click payload without treating it as installation proof.
 
 Ungated deliberately: posting a link has no blast radius inside daimon, and
 GitHub itself enforces who may install an App on a given account or
@@ -20,6 +17,9 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools.discord import (
     _post_app_install_button_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.slack._app_install_button import (
+    _post_slack_app_install_button_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.core.github_app_auth import build_app_install_url
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -29,8 +29,8 @@ from pydantic import BaseModel, ConfigDict
 class PostAppInstallLinkResult(BaseModel):
     """Result of posting the GitHub App install-link button.
 
-    A link button returns no signal when clicked — Discord opens the URL
-    itself, and nothing dispatches back to daimon. This result reports only
+    Neither platform supplies proof of installation from the link click.
+    This result reports only
     that the invitation was posted: it carries no field named or meaning
     installed, success, completed, connected, or verified.
     """
@@ -49,17 +49,21 @@ async def _post_app_install_link_impl(
     channel_id: str,
     purpose: str,
 ) -> PostAppInstallLinkResult:
-    if auth.platform == "slack":
-        raise ToolError("post_github_app_install_link is not supported on Slack yet")
     if auth.platform_user_id is None:
         raise ToolError("posting the install link requires a platform-bound identity")
     slug = runtime.settings.github.app_slug
     if slug is None:
         raise ToolError(
             "this deployment has no GitHub App install link configured — "
-            "an operator must set DAIMON_GITHUB__APP_SLUG"
+            "tell the user an operator must configure it; a working GitHub token "
+            "can still be supplied privately through request_repo_binding"
         )
-    message_id = await _post_app_install_button_impl(
+    post_button = (
+        _post_slack_app_install_button_impl
+        if auth.platform == "slack"
+        else _post_app_install_button_impl
+    )
+    message_id = await post_button(
         runtime,
         auth,
         channel_id=channel_id,
@@ -74,25 +78,21 @@ async def _post_app_install_link_impl(
 
 
 def register_github_app_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def post_github_app_install_link(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
         purpose: str,
     ) -> PostAppInstallLinkResult:
-        """Post a button inviting the user to install daimon's GitHub App.
+        """Install the GitHub App: post a link inviting the user to grant repository access.
 
-        Call this when the user wants daimon to reach a private repository
-        and has no token to paste, or when a sync failed because the repo is
-        not readable. Posts a button in the thread; clicking it opens the
-        install page on GitHub, where the user chooses which repositories to
-        grant access to.
+        For a private repo with a working token, use ``request_repo_binding`` instead.
+        A token remains the fallback and existing bound tokens keep being used.
 
-        This tool CANNOT tell whether the install happened — a link button
-        gives no signal back. After the user says they installed it, verify
-        by attempting the sync again: the installation is resolved live at
-        that point.
-        """
+        Posts a link button in this channel opening GitHub's install page. It cannot
+        tell whether installation happened. Installing alone neither verifies this
+        tenant's access nor binds a working repo; use ``request_repo_binding`` and
+        verify access through the requested operation afterwards."""
         return await _post_app_install_link_impl(
             runtime,
             await _auth(ctx),

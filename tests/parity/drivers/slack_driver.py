@@ -33,6 +33,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.slack.agent_setup import write as slack_write
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
+from daimon.core.config import SlackSettings
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_resolver import new_resolver_cache
@@ -51,6 +52,7 @@ _POST_JSON_METHODS: tuple[str, ...] = (
     "chat.update",
     "chat.postEphemeral",
 )
+_USERS_INFO_PATTERN = re.compile(r"https://slack\.com/api/users\.info.*")
 _REACTIONS_ADD_PATTERN = re.compile(r"https://slack\.com/api/reactions\.add.*")
 _CONVERSATIONS_REPLIES_PATTERN = re.compile(r"https://slack\.com/api/conversations\.replies.*")
 
@@ -71,6 +73,14 @@ def _register_slack_defaults(mock: AioResponsesMock) -> None:
     that module lives under a package's `tests/` tree, not on the
     `daimon.testing` import path.
     """
+    mock.get(  # pyright: ignore[reportUnknownMemberType]  # aioresponses has no type stubs
+        _USERS_INFO_PATTERN,
+        payload={
+            "ok": True,
+            "user": {"is_admin": False, "is_owner": False, "is_primary_owner": False},
+        },
+        repeat=True,
+    )
     for method in _POST_JSON_METHODS:
         mock.post(  # pyright: ignore[reportUnknownMemberType]
             f"{_SLACK_API_BASE}/{method}",
@@ -152,7 +162,11 @@ class SlackDriver:
     ) -> SlackRuntime:
         settings = MagicMock()
         settings.crypto.keys = (SecretStr(fernet_key),)
-        settings.slack.max_concurrent_turns_per_tenant = 100
+        settings.slack = SlackSettings(
+            signing_secret=SecretStr("parity-signing-secret"),
+            app_token=SecretStr("xapp-parity-test"),
+            max_concurrent_turns_per_tenant=100,
+        )
         settings.mcp.public_url = None
         settings.mcp.app_root_url = None
         settings.mcp.jwt_secret = None

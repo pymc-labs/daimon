@@ -195,7 +195,7 @@ def _build_body_text(state: PanelState) -> str:
         mcp_lines = "\n".join(
             f"**{m.get('name', '?')}** — `{m.get('url', '?')}`" for m in user_mcps
         )
-        groups.append(f"🔌 **MCPs**\n{mcp_lines}")
+        groups.append(f"🔌 **MCP servers**\n{mcp_lines}")
 
     # Repo group: shown when at least one of repo/auth is set, or the shared
     # service account is the agent's only source of GitHub access. No longer
@@ -285,7 +285,7 @@ def _build_body_text(state: PanelState) -> str:
     if not user_mcps:
         missing.append("＋ MCP")
     if not has_secrets:
-        missing.append("＋ env vars")
+        missing.append("＋ keys")
     if missing and not groups and not (has_repo or has_auth or has_secrets or skills or user_mcps):
         # All resources empty — hint replaces all groups.
         hint = " · ".join(missing) + " — via **Edit**"
@@ -904,8 +904,8 @@ class ForkAgentModal(discord.ui.Modal, title="Fork agent"):
                 err, tenant_id=tenant_id, guild_id=interaction.guild_id, rid=rid
             )
             await interaction.followup.send(
-                f"Failed to fork **{self._source.name}** → **{new_name}**: "
-                f"`{type(err).__name__}: {err}`",
+                f"Could not finish copying **{self._source.name}** to **{new_name}**. "
+                "Open `/agent-setup` to check whether the copy was created before trying again.",
                 ephemeral=True,
             )
             return
@@ -941,7 +941,8 @@ class ForkAgentModal(discord.ui.Modal, title="Fork agent"):
                 err, tenant_id=tenant_id, guild_id=interaction.guild_id, rid=rid
             )
             await interaction.followup.send(
-                f"Forked **{new_name}** but failed to refresh panel: `{type(err).__name__}: {err}`",
+                f"Created **{new_name}**, but could not refresh the panel. "
+                "Open `/agent-setup` to see the copy.",
                 ephemeral=True,
             )
             return

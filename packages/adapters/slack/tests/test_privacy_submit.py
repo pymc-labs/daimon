@@ -197,6 +197,7 @@ async def test_run_purge_and_update_deletes_account_rows_and_calls_views_update(
     fake_anthropic = build_fake_anthropic(router.dispatch)
 
     settings = MagicMock()
+    settings.slack = None
     settings.crypto.keys = (SecretStr("placeholder"),)
     runtime = SlackRuntime(
         settings=settings,
@@ -253,6 +254,7 @@ async def test_run_purge_and_update_aborts_when_account_does_not_match_submitter
     await db_session.commit()
 
     settings = MagicMock()
+    settings.slack = None
     settings.crypto.keys = (SecretStr("placeholder"),)
     runtime = SlackRuntime(
         settings=settings,

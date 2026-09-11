@@ -29,7 +29,7 @@ import anthropic
 import structlog
 from daimon.adapters.slack.privacy_panel.read import resolve_privacy_account
 from daimon.adapters.slack.privacy_panel.views import build_deleting_view, build_post_delete_view
-from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.runtime import SlackRuntime, resolve_bot_display_name
 from daimon.core.errors import DaimonError
 from daimon.core.purge import purge_account
 from slack_sdk.errors import SlackApiError
@@ -204,7 +204,9 @@ async def run_purge_and_update(
         )
         await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id,
-            view=build_post_delete_view(result),
+            view=build_post_delete_view(
+                result, display_name=resolve_bot_display_name(runtime.settings)
+            ),
         )
     except (DaimonError, anthropic.APIError, SlackApiError) as exc:
         log.error(

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -734,7 +735,11 @@ async def test_mcp_modal_unconfigured_mcp_reports_misconfiguration_no_consume_no
     await modal.on_submit(interaction)
 
     message = interaction.followup.send.call_args.args[0]
-    assert "not configured" in message, "must report the daimon-mcp misconfiguration"
+    assert "Ask the operator to finish setup" in message, "must name who can fix setup"
+    assert "Nothing was saved" in message, "the guard runs before any value is written"
+    assert "public_url" not in message and "jwt_secret" not in message, (
+        "internal setting names must not be shown to people"
+    )
 
     # The token must still be unconsumed -- retry with configured settings must succeed.
     retry_runtime = _runtime(
@@ -755,12 +760,12 @@ async def test_mcp_modal_unconfigured_mcp_reports_misconfiguration_no_consume_no
     retry_interaction = _interaction()
     await retry_modal.on_submit(retry_interaction)
     retry_message = retry_interaction.followup.send.call_args.args[0]
-    assert "not configured" not in retry_message, (
+    assert "Ask the operator to finish setup" not in retry_message, (
         "the request must still be consumable once daimon-mcp is configured"
     )
 
 
-async def test_mcp_modal_vault_write_failure_surfaces_only_exception_class_name(
+async def test_mcp_modal_vault_write_failure_keeps_exception_details_private(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -781,7 +786,7 @@ async def test_mcp_modal_vault_write_failure_surfaces_only_exception_class_name(
     await modal.on_submit(interaction)
 
     message = interaction.followup.send.call_args.args[0]
-    assert "APIConnectionError" in message, "only the exception class name is surfaced"
+    assert "APIConnectionError" not in message, "exception class names stay in operator logs"
     assert "secret=abc123" not in message, (
         "the stringified exception (which can carry the request envelope) must never reach the user"
     )
@@ -816,7 +821,8 @@ async def test_mcp_modal_disables_the_button_even_when_the_write_below_it_fails(
         "a consumed request disables its button regardless of the write's outcome"
     )
     message = interaction.followup.send.call_args.args[0]
-    assert "APIConnectionError" in message, "the failure is still reported in the reply"
+    assert "saving the MCP token did not finish" in message, "the failure must still be reported"
+    assert "APIConnectionError" not in message, "exception classes stay in operator logs"
 
 
 async def test_mcp_modal_never_logs_the_raw_token(
@@ -1108,7 +1114,8 @@ async def test_repo_modal_never_leaks_the_pasted_token(
         assert "can't access this repo" in message
     elif scenario == "unexpected_exception":
         message = _sent_message(interaction)
-        assert "ConnectError" in message, "only the exception class name must be surfaced"
+        assert "ConnectError" not in message, "exception classes stay in operator logs"
+        assert "working repo did not finish" in message, "the failed operation must be clear"
     elif scenario == "refused_by_gate":
         assert _sent_message(interaction) == _SHARED_AGENT_MESSAGE
         assert not any(
@@ -1225,4 +1232,62 @@ async def test_skill_repo_modal_attaches_the_imported_skills_to_the_requested_ag
     attached_ids = {entry["skill_id"] for entry in updates[-1]["skills"]}
     assert "skill_01imported" in attached_ids, (
         "the newly imported skill must be attached to the agent the request named"
+    )
+
+
+@pytest.mark.parametrize("failure_stage", ["verification", "authorization", "import"])
+async def test_skill_repo_failure_reports_only_confirmed_token_saves(
+    failure_stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_skill_repo_request(
+        db_session_factory,
+        ma_agent_id="agent_skill_repo_failure",
+        target=build_skill_repo_target("https://github.com/o/skills-repo", "main", ""),
+    )
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_stub_anthropic(),
+        crypto_keys=(Fernet.generate_key().decode(),),
+    )
+    probes = 0
+
+    def github_response(request: httpx.Request) -> httpx.Response:
+        nonlocal probes
+        if request.url.path == "/repos/o/skills-repo":
+            probes += 1
+            if failure_stage == "verification":
+                raise httpx.ConnectError("private upstream detail", request=request)
+            if failure_stage == "authorization" and probes == 2:
+                return httpx.Response(403)
+            return httpx.Response(200, json={"private": True})
+        raise httpx.ConnectError("private upstream detail", request=request)
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        partial(original_client, transport=httpx.MockTransport(github_response)),
+    )
+    modal = SkillRepoModal(runtime=runtime, request_row=row)
+    modal.pat_in._value = "ghp_skill_failure_token"  # pyright: ignore[reportPrivateUsage]  # Discord input boundary
+    interaction = _admin_interaction()
+
+    await modal.on_submit(interaction)
+
+    message = interaction.followup.send.call_args.args[0]
+    async with db_session_factory() as session:
+        binding = await get_binding(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    if failure_stage == "import":
+        assert binding is not None, "the working-repo binding was committed before import failed"
+        assert "Token saved" in message, "an import failure must preserve confirmed save success"
+    else:
+        assert binding is None, "failed authorization must not bind the repo"
+        assert "Token saved" not in message and "Token stored" not in message, (
+            "a failure before storage must not claim that the token was saved"
+        )
+    assert "retry" in message, "a consumed request needs a concrete retry instruction"
+    assert "private upstream detail" not in message and "ConnectError" not in message, (
+        "unexpected exception details stay in operator logs"
     )

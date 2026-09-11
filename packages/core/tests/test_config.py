@@ -13,6 +13,7 @@ from daimon.core.config import (
     HubSettings,
     McpSettings,
     Settings,
+    SlackSettings,
     load_settings,
 )
 from pydantic import HttpUrl, PostgresDsn, SecretStr, ValidationError
@@ -682,3 +683,20 @@ def test_thread_naming_parsed_from_top_level_nested_env(monkeypatch: pytest.Monk
     assert settings.thread_naming.max_input_chars == 500, (
         "DAIMON_THREAD_NAMING__MAX_INPUT_CHARS must override the input bound"
     )
+
+
+def test_slack_display_name_defaults_to_daimon() -> None:
+    settings = SlackSettings(signing_secret=SecretStr("test"), app_token=SecretStr("xapp-test"))
+    assert settings.bot_display_name == "daimon", "unset display name must preserve existing copy"
+
+
+@pytest.mark.parametrize(
+    "name", ["", "a" * 33, "bot@name", "bot#name", "bot:name", "bot`name", "bot\\name"]
+)
+def test_slack_display_name_rejects_invalid_names(name: str) -> None:
+    with pytest.raises(ValidationError):
+        SlackSettings(
+            signing_secret=SecretStr("test"),
+            app_token=SecretStr("xapp-test"),
+            bot_display_name=name,
+        )

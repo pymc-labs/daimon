@@ -351,10 +351,10 @@ def build_l1_view(
 
 _SECTION_TABS: list[tuple[str, str]] = [
     ("Agent", "agent_setup__tab:agent"),
-    ("Repo+Auth", "agent_setup__tab:repo_auth"),
+    ("Working repo", "agent_setup__tab:repo_auth"),
     ("Skills", "agent_setup__tab:skills"),
-    ("MCPs", "agent_setup__tab:mcps"),
-    ("Secrets", "agent_setup__tab:secrets"),
+    ("MCP servers", "agent_setup__tab:mcps"),
+    ("Keys", "agent_setup__tab:secrets"),
 ]
 
 _ACTIVE_SECTION_TO_ACTION_ID: dict[str, str] = {
@@ -531,7 +531,7 @@ def build_repo_auth_section(
     repo: str | None,
     pat_last4: str | None,
 ) -> list[dict[str, Any]]:
-    """Build the Repo+Auth section blocks for the L2 editor.
+    """Build the Working repo section blocks for the L2 editor.
 
     The repo binding and its PAT are a per-agent attachment, not part of the
     agent spec an admin approves — the edit control renders for every
@@ -542,12 +542,12 @@ def build_repo_auth_section(
         pat_last4: Pre-masked PAT display string (e.g. ``****abcd``), or None.
 
     Returns:
-        List of Block Kit blocks for the Repo+Auth section.
+        List of Block Kit blocks for the Working repo section.
     """
     repo_text = (
-        f":file_folder: *Repo:* `{escape_mrkdwn(repo)}`"
+        f":file_folder: *Working repo:* `{escape_mrkdwn(repo)}`"
         if repo
-        else ":file_folder: *Repo:* _(none)_"
+        else ":file_folder: *Working repo:* _(none)_"
     )
     pat_text = (
         f":key: *PAT:* `{escape_mrkdwn(pat_last4)}`" if pat_last4 else ":key: *PAT:* _(none)_"
@@ -574,7 +574,7 @@ def build_repo_auth_section(
                 {
                     "type": "button",
                     "action_id": "agent_setup__edit_repo_form",
-                    "text": {"type": "plain_text", "text": "Edit repo + auth"},
+                    "text": {"type": "plain_text", "text": "Edit working repo"},
                 },
             ],
         }
@@ -678,7 +678,7 @@ def build_mcps_section(
     can_edit_spec: bool,
     is_admin: bool = False,
 ) -> list[dict[str, Any]]:
-    """Build the MCPs section blocks for the L2 editor.
+    """Build the MCP servers section blocks for the L2 editor.
 
     MCP servers are part of the agent spec an admin approves when the agent
     becomes reachable, so Add MCP server / Remove MCP follow
@@ -698,7 +698,7 @@ def build_mcps_section(
                        Gates Connect via MCP only.
 
     Returns:
-        List of Block Kit blocks for the MCPs section.
+        List of Block Kit blocks for the MCP servers section.
     """
     if mcps:
         mcps_text = "\n".join(
@@ -728,7 +728,7 @@ def build_mcps_section(
             {
                 "type": "static_select",
                 "action_id": "agent_setup__remove_mcp",
-                "placeholder": {"type": "plain_text", "text": "Remove MCP…"},
+                "placeholder": {"type": "plain_text", "text": "Remove MCP server…"},
                 "options": [
                     {
                         "text": {
@@ -774,9 +774,9 @@ def build_secrets_section(
     agent_name: str,
     secret_names: list[str],
 ) -> list[dict[str, Any]]:
-    """Build the Secrets section blocks for the L2 editor.
+    """Build the Keys section blocks for the L2 editor.
 
-    Env-variable credentials are a per-agent attachment, not part of the
+    Keys are a per-agent attachment, not part of the
     agent spec an admin approves — Add/Remove render for every
     member, on every agent, regardless of admin status or reachability.
 
@@ -790,12 +790,12 @@ def build_secrets_section(
         secret_names: List of secret KEY NAMES (values never passed here).
 
     Returns:
-        List of Block Kit blocks for the Secrets section.
+        List of Block Kit blocks for the Keys section.
     """
     if secret_names:
         keys_text = " · ".join(f"`{escape_mrkdwn(name)}`" for name in secret_names)
     else:
-        keys_text = "_-# + add your first secret_"
+        keys_text = "_Add your first key_"
 
     blocks: list[dict[str, Any]] = [
         {
@@ -823,14 +823,14 @@ def build_secrets_section(
                 {
                     "type": "button",
                     "action_id": "agent_setup__paste_secrets",
-                    "text": {"type": "plain_text", "text": "Add secrets"},
+                    "text": {"type": "plain_text", "text": "Add keys"},
                 },
                 {
                     "type": "static_select",
                     "action_id": "agent_setup__remove_secret",
                     "placeholder": {
                         "type": "plain_text",
-                        "text": "Remove secret…",
+                        "text": "Remove key…",
                     },
                     "options": [
                         {
@@ -1074,7 +1074,7 @@ def build_l3_edit_repo_form(
     agent_name: str,
     parent_section: str | None = "repo_auth",
 ) -> dict[str, Any]:
-    """Build the Edit Repo+Auth input form (L3 push).
+    """Build the Edit Working repo input form (L3 push).
 
     PAT field is always empty (write-only; blank = keep existing).
 
@@ -1096,7 +1096,7 @@ def build_l3_edit_repo_form(
             agent_name=agent_name,
             parent_section=parent_section,
         ),
-        "title": {"type": "plain_text", "text": "Repo + Auth"},
+        "title": {"type": "plain_text", "text": "Working repo"},
         "submit": {"type": "plain_text", "text": "Save"},
         "blocks": [
             {
@@ -1283,7 +1283,7 @@ def build_l3_paste_secrets_form(
     agent_name: str,
     parent_section: str | None = "secrets",
 ) -> dict[str, Any]:
-    """Build the Paste Secrets input form (L3 push).
+    """Build the Add keys input form (L3 push).
 
     Accepts KEY=VALUE lines (multiline). Values never appear in any block or
     block_id — they only exist in the user's textarea input and are parsed on
@@ -1307,7 +1307,7 @@ def build_l3_paste_secrets_form(
             agent_name=agent_name,
             parent_section=parent_section,
         ),
-        "title": {"type": "plain_text", "text": "Add secrets"},
+        "title": {"type": "plain_text", "text": "Add keys"},
         "submit": {"type": "plain_text", "text": "Save"},
         "blocks": [
             {

@@ -357,9 +357,10 @@ async def test_add_mcp_modal_unconfigured_mcp_sends_ephemeral_error_no_vault_wri
 
     interaction.followup.send.assert_called_once()
     content = str(interaction.followup.send.call_args)
-    assert "daimon-mcp" in content or "configured" in content, (
-        "ephemeral error must indicate MCP is not configured"
+    assert "was added, but its token was not saved" in content, (
+        "the saved server definition must be distinguished from the unsaved token"
     )
+    assert "Ask the operator" in content, "must name who can finish setup"
     assert vault_calls == [], "no vault API calls must occur when MCP is unconfigured"
 
 

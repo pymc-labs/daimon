@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
+from xml.etree import ElementTree
 
 import discord
 import pytest
@@ -125,6 +126,62 @@ class TestBuildContextXml:
         assert "<message" not in result, "no messages should appear in empty thread"
         assert "<user_query" in result, "should have user_query element"
         assert "what's up?" in result, "trigger content should appear in user_query"
+
+    @pytest.mark.asyncio
+    async def test_build_context_xml_is_admin_true_for_guild_admin(self) -> None:
+        """build_context_xml renders is_admin="true" when the caller is a guild admin."""
+        trigger = _make_message(msg_id=10, content="delete the vault key")
+        thread = _make_thread([trigger])
+
+        result, _ = await build_context_xml(thread, trigger, is_admin=True)
+
+        assert 'is_admin="true"' in result, (
+            'build_context_xml must carry is_admin="true" on the user_query for an admin caller'
+        )
+
+    @pytest.mark.asyncio
+    async def test_build_context_xml_is_admin_false_for_non_admin(self) -> None:
+        """build_context_xml renders is_admin="false" for a non-admin caller and by default."""
+        trigger = _make_message(msg_id=10, content="what's up?")
+        thread = _make_thread([trigger])
+
+        explicit_result, _ = await build_context_xml(thread, trigger, is_admin=False)
+        default_result, _ = await build_context_xml(thread, trigger)
+
+        assert 'is_admin="false"' in explicit_result, (
+            'build_context_xml must carry is_admin="false" for a non-admin caller'
+        )
+        assert 'is_admin="false"' in default_result, (
+            "is_admin must default to False so a forgetful caller is described as non-admin, "
+            "never as admin"
+        )
+
+    @pytest.mark.asyncio
+    async def test_build_context_xml_reseed_shaped_call_carries_is_admin(self) -> None:
+        """Dead-session recovery reseed calls build_context_xml the same way an ordinary
+        turn does. bot.py's ``_reseed_user_message`` closure calls build_context_xml with
+        ``limit=100``, ``bot_user_id``, ``bot_display_name``,
+        ``omit_oversized_image_urls=True`` and ``is_admin=is_admin`` -- this test drives
+        that exact keyword shape directly, because test_orchestration.py mocks the
+        builders wholesale and cannot see a missed keyword at that call site.
+        """
+        trigger = _make_message(msg_id=10, content="recover this thread")
+        thread = _make_thread([trigger])
+
+        result, _ = await build_context_xml(
+            thread,
+            trigger,
+            limit=100,
+            bot_user_id=None,
+            bot_display_name="daimon",
+            omit_oversized_image_urls=True,
+            is_admin=True,
+        )
+
+        assert 'is_admin="true"' in result, (
+            "the dead-session recovery reseed path must carry is_admin exactly as the "
+            "ordinary turn it replaces does"
+        )
 
     @pytest.mark.asyncio
     async def test_build_context_xml_channel_id_is_parent_channel_id(self) -> None:
@@ -468,22 +525,76 @@ class TestBuildContextXml:
         assert "reply" in history_section, "non-starter history still rendered"
         assert "<user_query" in result, "user_query still present after starter fetch failure"
 
-    @pytest.mark.asyncio
-    async def test_unprompted_marks_the_user_query(self) -> None:
-        """Organic participation flags the trigger; a mention leaves the element as-is."""
+    @pytest.mark.parametrize("is_admin", [False, True])
+    async def test_unprompted_marks_the_user_query(self, is_admin: bool) -> None:
+        """Participation and authorization describe the same trigger independently."""
         trigger = _make_message(msg_id=10, content="anyone?", author_id=200)
 
-        marked, _ = await build_context_xml(_make_thread([trigger]), trigger, unprompted=True)
-        default, _ = await build_context_xml(_make_thread([trigger]), trigger)
-
-        assert "<user_query" in marked and ' unprompted="true">' in marked, (
-            "the attribute closes the opening tag, after the timestamp"
+        marked, _ = await build_context_xml(
+            _make_thread([trigger]), trigger, unprompted=True, is_admin=is_admin
         )
-        assert ' unprompted="true"' not in default, "a mention-driven turn is unchanged"
+        default, _ = await build_context_xml(_make_thread([trigger]), trigger, is_admin=is_admin)
+
+        marked_query = ElementTree.fromstring(f"<root>{marked}</root>").find("user_query")
+        default_query = ElementTree.fromstring(f"<root>{default}</root>").find("user_query")
+        assert marked_query is not None and default_query is not None, (
+            "both contexts need a trigger"
+        )
+        assert marked_query.attrib["unprompted"] == "true", "organic turns must mark their trigger"
+        assert marked_query.attrib["is_admin"] == str(is_admin).lower(), (
+            "organic participation must preserve the caller's actual authority"
+        )
+        assert default_query.attrib["is_admin"] == str(is_admin).lower(), (
+            "mention-driven turns must carry the same caller authority"
+        )
+        assert "unprompted" not in default_query.attrib, "mention-driven triggers omit the flag"
 
 
 class TestBuildDeltaXml:
     """Tests for build_delta_xml() — continuation turn delta builder."""
+
+    @pytest.mark.asyncio
+    async def test_delta_xml_is_admin_true_for_guild_admin(self) -> None:
+        """build_delta_xml renders is_admin="true" when the caller is a guild admin."""
+        trigger = _make_message(msg_id=99, content="follow-up")
+        thread = _make_thread([])
+
+        result, _ = await build_delta_xml(
+            thread, trigger, after_message_id=50, bot_user_id=None, is_admin=True
+        )
+
+        assert 'is_admin="true"' in result, (
+            'build_delta_xml must carry is_admin="true" on the user_query for an admin caller'
+        )
+
+    @pytest.mark.asyncio
+    async def test_delta_xml_is_admin_false_by_default(self) -> None:
+        """build_delta_xml renders is_admin="false" when the caller is not a guild admin."""
+        trigger = _make_message(msg_id=99, content="follow-up")
+        thread = _make_thread([])
+
+        result, _ = await build_delta_xml(thread, trigger, after_message_id=50, bot_user_id=None)
+
+        assert 'is_admin="false"' in result, "is_admin must default to False on build_delta_xml too"
+
+    @pytest.mark.asyncio
+    async def test_delta_xml_with_no_watermark_carries_is_admin_through_fallback(self) -> None:
+        """When after_message_id is None, the build_context_xml fallback must still carry is_admin.
+
+        build_delta_xml falls back to build_context_xml for a full snapshot; that
+        fallback call site is easy to leave is_admin off since it is a delegation,
+        not a direct render.
+        """
+        trigger = _make_message(msg_id=99, content="first turn")
+        thread = _make_thread([trigger])
+
+        result, _ = await build_delta_xml(
+            thread, trigger, after_message_id=None, bot_user_id=None, is_admin=True
+        )
+
+        assert 'is_admin="true"' in result, (
+            "the after_message_id=None fallback to build_context_xml must not drop is_admin"
+        )
 
     @pytest.mark.asyncio
     async def test_delta_includes_only_post_watermark_messages(self) -> None:
@@ -619,19 +730,42 @@ class TestBuildDeltaXml:
         )
         assert "follow-up" in result, "trigger must appear in user_query"
 
-    @pytest.mark.asyncio
-    async def test_delta_unprompted_marks_the_user_query(self) -> None:
-        """The continuation builder flags an unprompted trigger the same way the full one does."""
+    @pytest.mark.parametrize("is_admin", [False, True])
+    @pytest.mark.parametrize("after_message_id", [1, None])
+    async def test_delta_unprompted_marks_the_user_query(
+        self, is_admin: bool, after_message_id: int | None
+    ) -> None:
+        """Delta and full-history fallback preserve both trigger attributes."""
         m1 = _make_message(msg_id=1, content="prior")
         trigger = _make_message(msg_id=10, content="anyone?", author_id=200)
 
         marked, _ = await build_delta_xml(
-            _make_thread([m1, trigger]), trigger, after_message_id=1, unprompted=True
+            _make_thread([m1, trigger]),
+            trigger,
+            after_message_id=after_message_id,
+            unprompted=True,
+            is_admin=is_admin,
         )
-        default, _ = await build_delta_xml(_make_thread([m1, trigger]), trigger, after_message_id=1)
+        default, _ = await build_delta_xml(
+            _make_thread([m1, trigger]),
+            trigger,
+            after_message_id=after_message_id,
+            is_admin=is_admin,
+        )
 
-        assert ' unprompted="true">' in marked, "an unprompted delta turn must flag its trigger"
-        assert ' unprompted="true"' not in default, "a mention-driven delta turn is unchanged"
+        marked_query = ElementTree.fromstring(f"<root>{marked}</root>").find("user_query")
+        default_query = ElementTree.fromstring(f"<root>{default}</root>").find("user_query")
+        assert marked_query is not None and default_query is not None, (
+            "both contexts need a trigger"
+        )
+        assert marked_query.attrib["unprompted"] == "true", "organic turns must mark their trigger"
+        assert marked_query.attrib["is_admin"] == str(is_admin).lower(), (
+            "delta and fallback must preserve the caller's actual authority"
+        )
+        assert default_query.attrib["is_admin"] == str(is_admin).lower(), (
+            "mention-driven delta and fallback must carry the same caller authority"
+        )
+        assert "unprompted" not in default_query.attrib, "mention-driven triggers omit the flag"
 
     @pytest.mark.asyncio
     async def test_delta_none_after_falls_back_to_full(self) -> None:
@@ -739,6 +873,32 @@ class TestBuildDeltaXml:
 
 class TestBuildChannelContextXml:
     """Tests for build_channel_context_xml() — channel-mention backfill builder."""
+
+    @pytest.mark.asyncio
+    async def test_channel_context_xml_is_admin_true_for_guild_admin(self) -> None:
+        """build_channel_context_xml renders is_admin="true" when the caller is a guild admin."""
+        trigger = _make_message(msg_id=10, content="<@999> delete the vault key")
+        channel = _make_text_channel([trigger])
+        thread = _make_thread([trigger], thread_id=900, parent_id=42)
+
+        result, _ = await build_channel_context_xml(channel, trigger, thread=thread, is_admin=True)
+
+        assert 'is_admin="true"' in result, (
+            'build_channel_context_xml must carry is_admin="true" for an admin caller'
+        )
+
+    @pytest.mark.asyncio
+    async def test_channel_context_xml_is_admin_false_by_default(self) -> None:
+        """build_channel_context_xml renders is_admin="false" when omitted (the safe default)."""
+        trigger = _make_message(msg_id=10, content="<@999> hello")
+        channel = _make_text_channel([trigger])
+        thread = _make_thread([trigger], thread_id=900, parent_id=42)
+
+        result, _ = await build_channel_context_xml(channel, trigger, thread=thread)
+
+        assert 'is_admin="false"' in result, (
+            "is_admin must default to False on build_channel_context_xml too"
+        )
 
     @pytest.mark.asyncio
     async def test_channel_context_carries_thread_and_parent_channel_ids(self) -> None:

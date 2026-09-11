@@ -68,15 +68,9 @@ import discord
 
 log = structlog.get_logger()
 
-# Kept character-identical to the panel gate's `_SHARED_AGENT_MESSAGE`
-# (agent_setup's authz module) on purpose — a test asserts the two strings
-# are equal, so a future edit to one without the other goes red rather than
-# drifting silently.
 _SHARED_AGENT_MESSAGE: Final[str] = (
-    "This agent is shared — it either ships with the deployment or is the "
-    "current default for this channel or the server — so changing its repo or "
-    "environment variables needs Manage Server. Fork it to make an editable "
-    "copy; the fork starts with no environment variables of its own."
+    "Changing this shared agent's working repo needs a server admin (Manage Server). "
+    "Ask a server admin to set the working repo in `/agent-setup`."
 )
 
 

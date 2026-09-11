@@ -35,6 +35,11 @@ class SlackRuntime:
     deployment_default: DeploymentDefault = field(default_factory=DeploymentDefault)
 
 
+def resolve_bot_display_name(settings: Settings) -> str:
+    """Use the configured Slack name, including when the Slack block is absent."""
+    return settings.slack.bot_display_name if settings.slack is not None else "daimon"
+
+
 def build_turn_deps(
     settings: Settings,
     anthropic: AsyncAnthropic,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,8 @@ from unittest.mock import MagicMock
 
 import discord.http
 import pytest
+from aioresponses import aioresponses
+from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.github_app import (
@@ -32,11 +35,17 @@ from daimon.core.config import (
     GithubSettings,
     Settings,
 )
+from daimon.core.github_app_auth import build_app_install_url
+from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
+from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+from daimon.testing.ma import build_stub_anthropic
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from yarl import URL
 
 # Load patch_discord_http directly from the sibling conftest.py by file path —
 # same trick test_credential_requests.py uses to dodge the "from conftest
@@ -281,22 +290,8 @@ async def test_result_model_has_no_success_shaped_field() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Slack caller is rejected
+# 3. Platform-bound callers
 # ---------------------------------------------------------------------------
-
-
-async def test_post_app_install_link_rejects_slack_caller(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _runtime()
-    auth = _auth_identity(platform="slack", external_id=None, platform_user_id="U123")
-    captured = _outbound_request_count(monkeypatch)
-
-    with pytest.raises(ToolError, match="not supported on Slack"):
-        await _post_app_install_link_impl(
-            runtime, auth, channel_id="222", purpose="reading a private repo"
-        )
-    assert captured == [], "a rejected slack call must post nothing"
 
 
 # ---------------------------------------------------------------------------
@@ -323,23 +318,22 @@ async def test_post_app_install_link_rejects_missing_platform_user_id(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("platform", ["discord", "slack"])
 async def test_post_app_install_link_rejects_unset_slug(
     monkeypatch: pytest.MonkeyPatch,
+    platform: str,
 ) -> None:
     runtime = _runtime(app_slug=None)
-    auth = _auth_identity()
+    auth = _auth_identity(platform=platform)
     captured = _outbound_request_count(monkeypatch)
 
-    with pytest.raises(ToolError, match="no GitHub App install link configured"):
+    with pytest.raises(ToolError, match="no GitHub App install link configured") as refused:
         await _post_app_install_link_impl(
             runtime, auth, channel_id="222", purpose="reading a private repo"
         )
     assert captured == [], "an unset slug must post zero outbound Discord requests"
 
-
-# ---------------------------------------------------------------------------
-# 6. Caller lacking send permission is refused by the reused permission check
-# ---------------------------------------------------------------------------
+    assert "DAIMON_" not in str(refused.value), "operator refusal must not expose settings names"
 
 
 async def test_post_app_install_link_rejects_caller_without_send_permission(
@@ -374,3 +368,80 @@ async def test_impl_signature_has_no_token_secret_or_value_parameter() -> None:
     assert not forbidden, (
         f"_post_app_install_link_impl must not accept a secret-bearing parameter, found {forbidden}"
     )
+
+
+@pytest.mark.parametrize("is_private", [False, True])
+async def test_slack_install_link_checks_access_before_posting(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    is_private: bool,
+) -> None:
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    async with sessionmaker.begin() as session:
+        await upsert_slack_bot_token(
+            session, team_id="T_TEST", encrypted_token=encrypt_token(fernet, "xoxb-test")
+        )
+    runtime = McpRuntime(
+        session_factory=sessionmaker,
+        client=build_stub_anthropic(),
+        settings=_runtime().settings,
+        deployment_default=DeploymentDefault(),
+        fernet=fernet,
+    )
+    auth = _auth_identity(platform="slack", external_id="T_TEST", platform_user_id="U_TEST")
+    with aioresponses() as transport:
+        transport.get(
+            re.compile(r"https://slack\.com/api/conversations\.info.*"),
+            payload={
+                "ok": True,
+                "channel": {"id": "C_TEST", "is_private": is_private},
+            },
+        )
+        transport.get(
+            re.compile(r"https://slack\.com/api/users\.info.*"),
+            payload={
+                "ok": True,
+                "user": {"id": "U_TEST", "is_restricted": False},
+            },
+        )
+        if is_private:
+            transport.get(
+                re.compile(r"https://slack\.com/api/conversations\.members.*"),
+                payload={
+                    "ok": True,
+                    "members": [],
+                    "response_metadata": {"next_cursor": ""},
+                },
+            )
+            with pytest.raises(ToolError, match="missing channel access"):
+                await _post_app_install_link_impl(
+                    runtime, auth, channel_id="C_TEST", purpose="read our repo"
+                )
+            assert (
+                "POST",
+                URL("https://slack.com/api/chat.postMessage"),
+            ) not in transport.requests, "denial must post nothing"
+        else:
+            transport.post(
+                "https://slack.com/api/chat.postMessage", payload={"ok": True, "ts": "123.456"}
+            )
+            result = await _post_app_install_link_impl(
+                runtime, auth, channel_id="C_TEST", purpose="read our repo"
+            )
+            assert result.message_id == "123.456", (
+                "Slack result should report the message timestamp"
+            )
+            payload = transport.requests[("POST", URL("https://slack.com/api/chat.postMessage"))][
+                0
+            ].kwargs["json"]
+            buttons = [
+                element
+                for block in payload["blocks"]
+                if block["type"] == "actions"
+                for element in block["elements"]
+            ]
+            assert len(buttons) == 1, "install invitation must have one button"
+            assert buttons[0]["url"] == build_app_install_url("acme-daimon"), (
+                "URL must use configured slug"
+            )
+            assert buttons[0]["action_id"], "Slack link must have an inert action identifier"
+            assert "value" not in buttons[0], "install link should carry no credential request"

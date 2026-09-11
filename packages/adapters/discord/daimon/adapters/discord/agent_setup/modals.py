@@ -73,7 +73,7 @@ _SYSTEM_PROMPT_MAX = 4000
 the Agent modal omits them rather than failing to open (preserved on submit)."""
 
 
-class AgentSectionModal(discord.ui.Modal, title="Agent"):
+class AgentSectionModal(discord.ui.Modal, title="Prompt & model"):
     """Edit system prompt + model. Name field shown read-only; never rebound."""
 
     def __init__(
@@ -174,7 +174,8 @@ class AgentSectionModal(discord.ui.Modal, title="Agent"):
                 err_type=type(err).__name__,
             )
             await interaction.followup.send(
-                f"Failed to update **{agent_name}**: `{type(err).__name__}: {err}`",
+                f"Could not confirm the update to **{agent_name}**. "
+                "Open `/agent-setup` to check its prompt and model before trying again.",
                 ephemeral=True,
             )
             return
@@ -187,7 +188,7 @@ class AgentSectionModal(discord.ui.Modal, title="Agent"):
         )
 
 
-class RepoAuthModal(discord.ui.Modal, title="GitHub — repo pin + token"):
+class RepoAuthModal(discord.ui.Modal, title="Working repo"):
     """Bind a repo URL, store a GitHub token, or both.
 
     Repo URL is optional: a token submitted with no repo is verified against
@@ -434,6 +435,11 @@ class RepoAuthModal(discord.ui.Modal, title="GitHub — repo pin + token"):
             )
             if coverage_note is not None:
                 await interaction.followup.send(coverage_note, ephemeral=True)
+        except DaimonError as err:
+            await interaction.followup.send(
+                f"Working repo for **{agent_name}**: {err}", ephemeral=True
+            )
+            return
         except Exception as err:
             _log.exception(
                 "agent_setup.repo_auth.failed",
@@ -444,7 +450,9 @@ class RepoAuthModal(discord.ui.Modal, title="GitHub — repo pin + token"):
                 err_type=type(err).__name__,
             )
             await interaction.followup.send(
-                f"Failed to bind repo for **{agent_name}**: `{type(err).__name__}: {err}`",
+                f"Could not finish connecting the working repo for **{agent_name}**. "
+                "Some changes may have been saved. Open `/agent-setup` to check the working repo "
+                "before trying again.",
                 ephemeral=True,
             )
             return
@@ -516,7 +524,8 @@ class AddSkillModal(discord.ui.Modal, title="Add skill repo"):
                 err_type=type(err).__name__,
             )
             await interaction.followup.send(
-                f"Failed to queue skill sync for **{agent_name}**: `{type(err).__name__}: {err}`",
+                f"Could not refresh the skill repo change for **{agent_name}**. "
+                "Open `/agent-setup` to check its skills before trying again.",
                 ephemeral=True,
             )
             return
@@ -543,7 +552,9 @@ class AddSkillModal(discord.ui.Modal, title="Add skill repo"):
                     err_type=type(sync_err).__name__,
                 )
                 await interaction.followup.send(
-                    f"✗ Sync failed for **{agent_name}**: `{type(sync_err).__name__}: {sync_err}`",
+                    f"Could not finish importing skills for **{agent_name}**. "
+                    "Some skills may have been saved. Open `/agent-setup` to check its skills "
+                    "before trying again.",
                     ephemeral=True,
                 )
                 return

@@ -297,9 +297,9 @@ def _page(
 
 _SCOPES_HTML = """
 <ul class="scope-list">
-  <li>see when you @mention daimon <code>app_mentions:read</code></li>
+  <li>see when you @mention the bot <code>app_mentions:read</code></li>
   <li>post replies and status updates <code>chat:write</code></li>
-  <li>run daimon&#39;s slash commands (e.g. <code>/agent-setup</code>) <code>commands</code></li>
+  <li>run setup commands (e.g. <code>/agent-setup</code>) <code>commands</code></li>
   <li>check who&#39;s an admin before admin actions <code>users:read</code></li>
   <li>read recent messages in public channels it&#39;s added to <code>channels:history</code></li>
   <li>read recent messages in private channels it&#39;s added to <code>groups:history</code></li>
@@ -325,6 +325,7 @@ def _install_landing_html(
     *,
     authorize_url: str,
     signup_credit: Decimal,
+    display_name: str = "daimon",
 ) -> HTMLResponse:
     """Branded install landing page (Page 1 per UI-SPEC).
 
@@ -333,15 +334,16 @@ def _install_landing_html(
     """
     safe_href = html.escape(authorize_url, quote=True)
     credit = _format_credit(signup_credit)
+    safe_name = html.escape(display_name, quote=False)
     body = f"""
 <h1>your server just hired a data scientist</h1>
 <p class="subtitle">· by daimon</p>
-<p>add daimon to your Slack workspace and get {credit} of credit on us — data
+<p>add {safe_name} to your Slack workspace and get {credit} of credit on us — data
 analysis, code review, and research, all from Slack.</p>
-<h2>what daimon will be able to do</h2>
+<h2>what {safe_name} will be able to do</h2>
 {_SCOPES_HTML}
 <a class="btn" href="{safe_href}">Add to Slack</a>
-<p class="footer">daimon reads channels you invite it to — and, for members who
+<p class="footer">{safe_name} reads channels you invite it to — and, for members who
 connect their account, whatever they can already see.</p>
 """
     return _page(title="add daimon to Slack", state_bar="", body_html=body)
@@ -351,6 +353,7 @@ def _success_html(
     *,
     workspace: str,
     signup_credit: Decimal,
+    display_name: str = "daimon",
 ) -> HTMLResponse:
     """Branded success page (Page 2 per UI-SPEC).
 
@@ -359,10 +362,11 @@ def _success_html(
     """
     safe = html.escape(workspace, quote=False)
     credit = _format_credit(signup_credit)
+    safe_name = html.escape(display_name, quote=False)
     body = f"""
 <h1>installed in {safe}</h1>
-<p>next: @mention <code>@daimon</code> in any channel, or run
-<code>/agent-setup</code> to get started.</p>
+<p>next: @mention <code>@{safe_name}</code> in a channel you have invited it to,
+or run <code>/agent-setup</code> to choose who answers where.</p>
 <p>you get {credit} of credit on us.</p>
 <p class="dim">you can close this tab and head back to Slack.</p>
 """
@@ -534,6 +538,9 @@ def build_oauth_slack_routes(
         return _install_landing_html(
             authorize_url=authorize_url,
             signup_credit=settings.billing.signup_credit,
+            display_name=settings.slack.bot_display_name
+            if settings.slack is not None
+            else "daimon",
         )
 
     async def callback_handler(request: Request) -> Response:
@@ -674,6 +681,9 @@ def build_oauth_slack_routes(
         return _success_html(
             workspace=result.team_name or team_id,
             signup_credit=settings.billing.signup_credit,
+            display_name=settings.slack.bot_display_name
+            if settings.slack is not None
+            else "daimon",
         )
 
     async def connect_handler(request: Request) -> Response:

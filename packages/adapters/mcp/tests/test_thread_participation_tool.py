@@ -41,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 pytestmark = pytest.mark.asyncio
 
-_D28_MESSAGE = "Changing my setup needs Manage Server — ask a server admin to use /agent-setup"
+_ADMIN_REQUIRED = "requires a workspace or server admin"
 _CHANNEL = "chan-1"
 _THREAD = "thread-1"
 
@@ -250,7 +250,7 @@ async def test_non_admin_cannot_set_a_channel_and_writes_nothing(
             _CHANNEL,
         )
 
-    assert str(exc_info.value) == _D28_MESSAGE, "channel scope is an admin action"
+    assert _ADMIN_REQUIRED in str(exc_info.value), "channel scope is an admin action"
     assert (await _modes(db_session, tenant_id)).channel is None, (
         "a refused call must write no channel row"
     )
@@ -271,7 +271,7 @@ async def test_non_admin_cannot_set_the_workspace_and_writes_nothing(
             None,
         )
 
-    assert str(exc_info.value) == _D28_MESSAGE, "workspace scope is an admin action"
+    assert _ADMIN_REQUIRED in str(exc_info.value), "workspace scope is an admin action"
     assert (await _modes(db_session, tenant_id)).workspace is None, (
         "a refused call must write no workspace row"
     )

@@ -4,7 +4,8 @@ Covers:
 - _is_admin_signal pure decision: each of is_admin / is_owner / is_primary_owner
   independently resolves to True; all-False resolves to False.
 - resolve_is_admin shell call: admin user → True; regular member → False;
-  users.info failure (SlackApiError) → False with no re-raise (fail-closed).
+  users.info failure → False with no re-raise (fail-closed), for BOTH an
+  API-level SlackApiError and a transport-level aiohttp error.
 
 Transport-level fakes only (aioresponses, via fresh contexts per test).
 No AsyncMock on client.* methods.
@@ -128,3 +129,48 @@ async def test_resolve_is_admin_returns_false_and_does_not_raise_on_slack_api_er
         result = await resolve_is_admin(client, user_id="U_TEST")
 
     assert result is False, "resolve_is_admin should return False (fail-closed) on SlackApiError"
+
+
+@pytest.mark.asyncio
+async def test_resolve_admin_status_returns_none_and_does_not_raise_on_transport_error() -> None:
+    """A connection failure degrades to None instead of killing the caller.
+
+    aiohttp's ClientConnectionError is NOT a SlackApiError subclass, so a catch
+    of SlackApiError alone lets it escape. Every Slack mention-turn calls this
+    once, so an escaping transport error takes the whole turn down on a
+    transient network blip.
+    """
+    import aiohttp
+    from daimon.adapters.slack.admin import resolve_admin_status
+    from slack_sdk.web.async_client import AsyncWebClient
+
+    with AioResponsesMock() as mock:
+        mock.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO_PATTERN,
+            exception=aiohttp.ClientConnectionError("connection refused"),
+        )
+        client = AsyncWebClient(token="xoxb-test")
+        result = await resolve_admin_status(client, user_id="U_TEST")
+
+    assert result is None, (
+        "resolve_admin_status should return None (lookup failed) on a transport error, not raise"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_is_admin_returns_false_and_does_not_raise_on_transport_error() -> None:
+    """The fail-closed wrapper collapses a transport failure to False."""
+    import aiohttp
+    from slack_sdk.web.async_client import AsyncWebClient
+
+    with AioResponsesMock() as mock:
+        mock.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO_PATTERN,
+            exception=aiohttp.ClientConnectionError("connection refused"),
+        )
+        client = AsyncWebClient(token="xoxb-test")
+        result = await resolve_is_admin(client, user_id="U_TEST")
+
+    assert result is False, (
+        "resolve_is_admin should return False (fail-closed) on a transport error"
+    )

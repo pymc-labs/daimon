@@ -406,7 +406,7 @@ def test_body_text_shows_env_group_without_repo_group(account_id: uuid.UUID) -> 
 
 
 def test_body_text_missing_hint_names_env_vars(account_id: uuid.UUID) -> None:
-    """The missing-resource hint names 'env vars', not 'secrets'."""
+    """The missing-resource hint names 'keys', not 'secrets'."""
     selected = _entry_with("bot")
     state = PanelState(
         roster=[selected],
@@ -417,7 +417,7 @@ def test_body_text_missing_hint_names_env_vars(account_id: uuid.UUID) -> None:
     )
     container = build_panel_container(state, thumbnail_url=None)
     text = _container_text(container)
-    assert "＋ env vars" in text, "missing-resource hint must say ＋ env vars"
+    assert "＋ keys" in text, "missing-resource hint must say ＋ keys"
     assert "＋ secrets" not in text, "the hint must not still say ＋ secrets"
 
 

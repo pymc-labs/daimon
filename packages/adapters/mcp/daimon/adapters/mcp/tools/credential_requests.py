@@ -1,26 +1,9 @@
-"""Credential-request tools: request_env_credential, request_mcp_credential,
-request_repo_binding.
+"""Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 
-These three tools replace the "go open /agent-setup" redirect for a task that
-needs an env secret, an auth-required MCP server, or a repo bound to an
-agent: the agent mints a single-use, TTL-bounded ``credential_requests`` row
-and posts a target-naming button in the thread (``tools/discord/`` or
-``tools/slack/_credential_button.py``, by the caller's platform). Clicking
-the button opens a native modal in a different process (the platform bot,
-worker VM) — the secret itself never travels through either process's tool
-arguments, so
-none of the three tools below has a token/secret/value parameter, and none
-should ever be added.
-
-Deliberately NOT admin-gated — the chat-mutation admin check other tools call
-at the top of their impl is intentionally absent here. Authorization for the
-actual credential write happens at click time instead, when the button's
-click gate compares the clicking user against
-``requester_platform_user_id`` on the minted row. This widens today's
-admin-only credential writes (``/agent-setup``'s mutation buttons are
-``is_admin``-only) in exchange for one-click UX — a deliberate, accepted
-trade documented here so a future reviewer does not "fix" the omission by
-adding that admin gate back.
+These tools create single-use, expiring request rows and post a target-naming
+card through the caller's platform. Secret values never enter tool arguments.
+Submission checks requester identity; these enrollment paths deliberately do
+not inherit the admin gate for direct agent-spec mutations.
 """
 
 from __future__ import annotations
@@ -28,6 +11,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime
+from typing import Annotated
 from urllib.parse import urlparse
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -51,7 +35,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.credential_requests import create_credential_request
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # Mirrors packages/adapters/discord/daimon/adapters/discord/agent_setup/credentials.py's
 # _POSIX_KEY_RE. Duplicated rather than imported: the Discord adapter and the
@@ -164,7 +148,7 @@ async def _mint_and_post(
     )
 
 
-async def _request_env_credential_impl(
+async def _request_agent_key_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
@@ -176,7 +160,7 @@ async def _request_env_credential_impl(
     requester = _require_requestable_platform(auth)
     if not _POSIX_KEY_RE.match(key):
         raise ToolError(
-            "env key must match [A-Za-z_][A-Za-z0-9_]* "
+            "key must match [A-Za-z_][A-Za-z0-9_]* "
             "(letters, digits, underscores; must not start with a digit)"
         )
     agent_id = await _resolve_agent_uuid(runtime, auth, agent_name)
@@ -194,7 +178,7 @@ async def _request_env_credential_impl(
     )
 
 
-async def _request_mcp_credential_impl(
+async def _request_mcp_token_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
@@ -233,7 +217,7 @@ async def _request_mcp_credential_impl(
 # would be silently discarded — the exact class of surface-that-lies this
 # tool exists not to become. The modal collects the branch instead,
 # defaulting to `main`.
-async def _request_skill_repo_credential_impl(
+async def _request_skill_repo_token_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
@@ -305,22 +289,37 @@ async def _request_repo_binding_impl(
 
 def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
-    async def request_env_credential(  # pyright: ignore[reportUnusedFunction]
+    async def request_agent_key(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
-        key: str,
+        key: Annotated[
+            str,
+            Field(
+                description=(
+                    "Stored environment variable name, UPPER_SNAKE, e.g. TOGGL_TOKEN "
+                    "or OPENAI_API_KEY; never the secret value."
+                )
+            ),
+        ],
         purpose: str,
-        channel_id: str,
+        channel_id: Annotated[
+            str,
+            Field(
+                description="Channel where the requester-only private-input card will be posted."
+            ),
+        ],
     ) -> RequestCredentialResult:
-        """Request an environment secret from the user via a private modal.
+        """Give an agent an API key or token for any service: Toggl, OpenAI,
+        Higgsfield, or a platform that just launched. Unknown services work too.
 
-        Call this INSTEAD of ever accepting a secret value in chat. Posts a
-        button in the thread naming the exact env key; clicking it opens a
-        private form where the user enters the value — it
-        never appears in this channel or in your context. Once added, the
-        credential becomes usable by everyone who talks to ``agent_name``.
-        """
-        return await _request_env_credential_impl(
+        Never accept secret values in chat; ask for rotation if pasted. For MCP
+        credentials use ``request_mcp_token``; GitHub access uses ``request_repo_binding``.
+        To load .env keys, request each key separately; whole-file import is unavailable.
+
+        Posts a card in this channel. Only the requester can open its private form;
+        it expires in 30 minutes. Values never appear in chat. Anyone who talks to
+        the agent can use added keys, including on Daimon itself without a fork."""
+        return await _request_agent_key_impl(
             runtime,
             await _auth(ctx),
             agent_name=agent_name,
@@ -330,24 +329,37 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         )
 
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
-    async def request_mcp_credential(  # pyright: ignore[reportUnusedFunction]
+    async def request_mcp_token(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
-        server_name: str,
-        url: str,
-        channel_id: str,
+        server_name: Annotated[
+            str, Field(description="Connection name; reusing a name replaces that server entry.")
+        ],
+        url: Annotated[
+            str,
+            Field(
+                description="MCP endpoint URL accepting bearer authentication, e.g. https://mcp.example.com/mcp."
+            ),
+        ],
+        channel_id: Annotated[
+            str,
+            Field(
+                description="Channel where the requester-only private-input card will be posted."
+            ),
+        ],
     ) -> RequestCredentialResult:
-        """Request an auth-required MCP server's credential via a private modal.
+        """Connect an agent such as research-bot to Linear, Notion or GitHub through an
+        MCP endpoint with a bearer token. Match the endpoint's supported authentication;
+        an API key is not automatically an MCP token, and this does not complete OAuth.
 
-        Call this INSTEAD of ever accepting a token value in chat, and instead
-        of ``attach_mcp_server`` when the server requires authentication.
-        Posts a button in the thread naming the exact server; clicking it
-        opens a private form where the user enters the token —
-        it never appears in this channel or in your context.
-        Once added, the credential becomes usable by everyone who talks to
-        ``agent_name``.
-        """
-        return await _request_mcp_credential_impl(
+        Use ``attach_mcp_server`` for public servers without tokens. Never accept
+        credentials in chat. This posted-token enrollment works on Daimon under its
+        own permission rules.
+
+        Posts a requester-only card in this channel, expiring in 30 minutes. The
+        private form collects the token and attaches the server. Values never appear
+        in chat; everyone talking to the agent can use the connection."""
+        return await _request_mcp_token_impl(
             runtime,
             await _auth(ctx),
             agent_name=agent_name,
@@ -356,41 +368,34 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             channel_id=channel_id,
         )
 
-    # The docstring below deliberately does NOT name the skill-import tool.
-    # That tool is admin-gated; this one is not (matching its sibling
-    # `request_*` tools), so naming it would disclose a gated tool's existence
-    # to every principal that can discover this one —
-    # `test_chat_session_tool_reachability` asserts against exactly that by
-    # searching the rendered tool text for the gated name. Kept as a comment
-    # rather than a docstring paragraph because the docstring IS prompt
-    # context: it is rendered into every model's tool list, where an internal
-    # rationale is noise.
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
-    async def request_skill_repo_credential(  # pyright: ignore[reportUnusedFunction]
+    async def request_skill_repo_token(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
-        repo_url: str,
+        repo_url: Annotated[
+            str,
+            Field(description="GitHub repo or repository URL, e.g. https://github.com/owner/repo."),
+        ],
         purpose: str,
-        channel_id: str,
+        channel_id: Annotated[
+            str,
+            Field(
+                description="Channel where the requester-only private-input card will be posted."
+            ),
+        ],
         branch: str = "main",
         path: str = "",
     ) -> RequestCredentialResult:
-        """Ask for a GitHub token so a skill import can read a PRIVATE repo.
+        """The skills repo is private: collect a GitHub token to import its skills.
 
-        Call this when importing skills from a repo reports that no
-        credential was available — NOT ``request_repo_binding``. Importing
-        skills from a repo and binding a repo for the agent to check out are
-        different things: this one writes no ``agent_repo_binding`` row, so
-        it will not make the agent start cloning the skill repo. The stored
-        token is shared between the two, so a user who has already bound a
-        repo with a token that can also read this one will not be asked
-        twice.
+        After ``sync_skills`` cannot read a private skill repository, use this form.
+        For a working repo use ``request_repo_binding``. Currently this enrollment
+        also changes the working-repo binding and therefore what the agent clones.
 
-        Pass the same repo url, branch, and path the failed import used —
-        they are carried through the click, and the import re-runs
-        automatically on submit, so there is nothing to call afterwards.
-        """
-        return await _request_skill_repo_credential_impl(
+        Posts a requester-only card, expiring in 30 minutes. Its private form retries
+        import and attachment; tokens never appear in chat. Anyone talking to the
+        agent can use the imported skills. Pass the same repo URL, branch and path."""
+        return await _request_skill_repo_token_impl(
             runtime,
             await _auth(ctx),
             agent_name=agent_name,
@@ -405,19 +410,28 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
     async def request_repo_binding(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
-        repo_url: str,
+        repo_url: Annotated[
+            str,
+            Field(description="GitHub repo or repository URL, e.g. https://github.com/owner/repo."),
+        ],
         purpose: str,
-        channel_id: str,
+        channel_id: Annotated[
+            str,
+            Field(
+                description="Channel where the requester-only private-input card will be posted."
+            ),
+        ],
     ) -> RequestCredentialResult:
-        """Request a repo binding for an agent via a private modal.
+        """Let an agent read a GitHub working repo or repository, public or private.
 
-        Call this INSTEAD of ever telling the user to open ``/agent-setup``
-        to bind a repository. Posts a button in the thread naming the exact
-        repo and agent; clicking it opens a private form where the
-        user confirms the branch and, only if the repo is private and not
-        otherwise readable, pastes a GitHub token that never appears in this
-        channel or in your context.
-        """
+        For a private skill repo use ``request_skill_repo_token``. If the user has
+        no working token, ``post_github_app_install_link`` offers a GitHub App install;
+        installing alone does not bind the repo or verify this tenant's access.
+
+        Posts a requester-only card in this channel, expiring in 30 minutes. The
+        private form confirms the branch and collects a GitHub token only when needed;
+        values never appear in chat. Saving binds the working repository for future
+        sessions. Existing working tokens remain in use."""
         return await _request_repo_binding_impl(
             runtime,
             await _auth(ctx),

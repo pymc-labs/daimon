@@ -463,8 +463,8 @@ class SeededSkill(Base):
 
 class AgentGithubBinding(Base):
     """Per-agent GitHub credential overlay. Day-1 always empty; populated by
-    Discord agent-setup panel. Single credential per principal day-1,
-    so no github_login discriminator.
+    the working-repo binding path (`request_repo_binding`). Single credential
+    per principal day-1, so no github_login discriminator.
     """
 
     __tablename__ = "agent_github_binding"
@@ -476,9 +476,10 @@ class AgentGithubBinding(Base):
 class AgentGoogleBinding(Base):
     """Per-agent Google Workspace identity overlay.
 
-    Empty day-1; populated by the agent-setup panel. Holds the email
-    + scope set the token broker mints credentials for via domain-wide
-    delegation against the tenant service account.
+    Empty day-1; populated by an operator running `daimon agents bind-google
+    <agent> <email> --scopes <scope>...`. Holds the email + scope set the
+    token broker mints credentials for via domain-wide delegation against
+    the tenant service account.
     """
 
     __tablename__ = "agent_google_binding"

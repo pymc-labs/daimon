@@ -1,8 +1,8 @@
 """AST lint over discord.ui.Modal subclasses.
 
 Catches Discord-API violations before they reach send_modal: TextInput labels
-longer than 45 codepoints, Modals containing more than 5 components, Modals
-containing Select-style components, and TextInputs missing a label kwarg.
+longer than 45 codepoints, Modals containing more than 5 top-level components,
+and TextInputs missing a label kwarg.
 stdlib-only; CI-shaped (default path: packages/adapters/discord/daimon).
 """
 
@@ -41,6 +41,21 @@ _SELECT_NAMES = {
     "MentionableSelect",
 }
 
+# Every constructor Modal.add_item accepts as a top-level child. Matches
+# discord.ui.modal.Modal.add_item's flat `len(self._children) >= 5` check —
+# there is no separate cap per component type, and a bare top-level Select is
+# a legal child in discord.py 2.7.1 (Modal.to_components auto-wraps it in an
+# ActionRow exactly as it does a bare TextInput).
+_MODAL_CHILD_NAMES = {
+    "TextInput",
+    "Label",
+    "RadioGroup",
+    "CheckboxGroup",
+    "FileUpload",
+    "TextDisplay",
+    *_SELECT_NAMES,
+}
+
 
 def _is_modal_base(base: ast.expr) -> bool:
     """Match ``discord.ui.Modal`` or ``Modal`` in the bases tuple."""
@@ -59,14 +74,16 @@ def _is_text_input(node: ast.expr) -> bool:
     return isinstance(func, ast.Name) and func.id == "TextInput"
 
 
-def _is_select(node: ast.expr) -> bool:
-    """Match ``discord.ui.Select(...)`` or ``Select(...)`` call."""
+def _is_modal_child(node: ast.expr) -> bool:
+    """Match a call to any constructor ``Modal.add_item`` treats as a child:
+    ``discord.ui.X(...)`` or ``X(...)`` where ``X`` is in ``_MODAL_CHILD_NAMES``.
+    """
     if not isinstance(node, ast.Call):
         return False
     func = node.func
-    if isinstance(func, ast.Attribute) and func.attr in _SELECT_NAMES:
+    if isinstance(func, ast.Attribute) and func.attr in _MODAL_CHILD_NAMES:
         return True
-    return isinstance(func, ast.Name) and func.id in _SELECT_NAMES
+    return isinstance(func, ast.Name) and func.id in _MODAL_CHILD_NAMES
 
 
 def _label_kwarg(call: ast.Call) -> ast.expr | None:
@@ -124,39 +141,56 @@ def _module_int_constants(tree: ast.Module) -> dict[str, int]:
     return constants
 
 
+def _collect_modal_children(cls: ast.ClassDef) -> list[ast.Call]:
+    """Every top-level modal-child constructor call in the class body,
+    counted once each.
+
+    Matches ``Modal.add_item``'s flat ``len(self._children) >= 5`` check
+    (discord/ui/modal.py): the count is over top-level children only,
+    whatever their type. A candidate call nested inside another candidate's
+    arguments — e.g. the ``Select`` inside ``Label(component=Select(...))`` —
+    is *not* counted separately, because it is not a separate item passed to
+    ``add_item``; it is consumed by the outer ``Label``, which itself counts
+    as one child. ``ast.walk`` is depth-first and would find both calls with
+    no way to tell they nest, so this walks with explicit ancestor tracking
+    instead and skips any candidate whose nearest enclosing candidate has
+    already been recorded.
+    """
+    candidates: list[ast.Call] = []
+
+    def visit(node: ast.AST, ancestor_is_candidate: bool) -> None:
+        is_candidate = isinstance(node, ast.Call) and _is_modal_child(node)
+        if is_candidate and not ancestor_is_candidate:
+            assert isinstance(node, ast.Call)
+            candidates.append(node)
+        for child in ast.iter_child_nodes(node):
+            visit(child, ancestor_is_candidate or is_candidate)
+
+    visit(cls, False)
+    return candidates
+
+
 def _walk_modal_class(
     cls: ast.ClassDef, source_path: str, int_constants: dict[str, int]
 ) -> Iterator[Finding]:
-    """Yield findings for every TextInput / Select inside this Modal class.
-
-    Counts components as ``TextInput(...)`` constructor calls that appear
-    inside the class body (either bare or assigned to ``self.<name>``).
+    """Yield findings for every top-level child / TextInput inside this
+    Modal class.
     """
-    text_inputs: list[tuple[ast.Call, int]] = []
+    text_inputs: list[tuple[ast.Call, int]] = [
+        (node, getattr(node, "lineno", 0))
+        for node in ast.walk(cls)
+        if isinstance(node, ast.Call) and _is_text_input(node)
+    ]
 
-    for node in ast.walk(cls):
-        if isinstance(node, ast.Call):
-            if _is_text_input(node):
-                text_inputs.append((node, getattr(node, "lineno", 0)))
-            elif _is_select(node):
-                yield Finding(
-                    file=source_path,
-                    line=getattr(node, "lineno", 0),
-                    rule="discord/no-select-in-modal",
-                    message=(
-                        f"{cls.name}: Discord modals cannot contain Select-style "
-                        f"components — only TextInput. Use a follow-up View instead."
-                    ),
-                )
-
-    # Component count
-    if len(text_inputs) > MAX_COMPONENTS_PER_MODAL:
+    # Component count — every top-level child, matching Modal.add_item.
+    children = _collect_modal_children(cls)
+    if len(children) > MAX_COMPONENTS_PER_MODAL:
         yield Finding(
             file=source_path,
             line=cls.lineno,
             rule="discord/too-many-components",
             message=(
-                f"{cls.name}: has {len(text_inputs)} TextInputs — Discord limit is "
+                f"{cls.name}: has {len(children)} components — Discord limit is "
                 f"{MAX_COMPONENTS_PER_MODAL}."
             ),
         )
@@ -278,7 +312,6 @@ def main(argv: list[str] | None = None) -> int:
     failing_rules = {
         "discord/label-too-long",
         "discord/too-many-components",
-        "discord/no-select-in-modal",
         "discord/missing-label",
         "discord/max-length-too-large",
         "discord/non-literal-max-length",

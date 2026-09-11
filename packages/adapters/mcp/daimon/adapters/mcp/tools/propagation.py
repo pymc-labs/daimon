@@ -214,7 +214,9 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         agent_name: str,
         channel_id: str | None = None,
     ) -> SetDefaultResult:
-        """Set the agent that responds by default in a channel or the whole workspace.
+        """Make an agent answer in a channel or become the whole server/workspace default.
+        For example, make churn-explorer answer in #growth. Changes the agent that answers;
+        use ``clear_agent_default`` to stop that routing.
 
         When ``channel_id`` is provided the default is scoped to that channel;
         omit it to set the workspace-wide default.  Any existing default at the
@@ -239,7 +241,9 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         channel_id: str | None = None,
     ) -> ClearDefaultResult:
-        """Remove the agent default from a channel or the whole workspace.
+        """Stop an agent answering in a channel by clearing its default routing.
+        For example, stop churn-explorer answering in #growth. Use
+        ``set_agent_default`` to choose a replacement instead.
 
         When ``channel_id`` is provided only that channel's default is cleared;
         omit it to clear the workspace-wide default.  If the scope had no
@@ -258,7 +262,8 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         channel_id: str,
     ) -> AgentResolutionExplanation:
-        """Report which agent answers in a channel, and which tier decided it.
+        """Who answers in this channel, for example #growth? Report who answers and
+        which routing tier decided it.
 
         Resolution is a cascade: the channel's own default wins, else the
         workspace default, else the deployment default. This reports the winner

@@ -30,6 +30,7 @@ from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.commands import agents as agents_cmd
 from daimon.adapters.cli.commands.agents import (
     agents_archive,
+    agents_bind_google,
     agents_create,
     agents_fork,
     agents_get,
@@ -40,9 +41,10 @@ from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import SpecError, StoreError
-from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores.agent_google_binding import get_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -218,6 +220,153 @@ async def test_agents_get_not_found_raises(
 
     with pytest.raises(StoreError, match="no agent named"):
         await agents_get(rt=rt, console=console, name="ghost-agent", as_json=False)
+
+
+@pytest.mark.asyncio
+async def test_agents_bind_google_writes_binding_readable_through_store(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """bind-google resolves the agent by name, derives its uuid tenant-scoped,
+    and writes the binding through the store.
+    """
+    async with db_session_factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+        tenant_id = tenant.id
+
+    agent_data = _agent_json(agent_id="ag_bindme", name="bindable-agent", tenant_id=tenant_id)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([agent_data]))
+
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = _build_rt(db_session_factory, router)
+
+    await agents_bind_google(
+        rt=rt,
+        console=console,
+        name="bindable-agent",
+        email="op@example.com",
+        scopes=["https://www.googleapis.com/auth/calendar"],
+        as_json=False,
+    )
+
+    out = cast(StringIO, console.file).getvalue()
+    assert "bindable-agent" in out, "confirmation names the agent"
+    assert "op@example.com" in out, "confirmation names the email"
+
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_bindme")
+    async with db_session_factory() as s:
+        binding = await get_agent_google_binding(s, agent_id=agent_id)
+    assert binding is not None, "binding is readable through the store afterward"
+    assert binding.email == "op@example.com"
+    assert binding.scopes == ("https://www.googleapis.com/auth/calendar",)
+
+
+@pytest.mark.asyncio
+async def test_agents_bind_google_twice_leaves_second_scope_set(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+        tenant_id = tenant.id
+
+    agent_data = _agent_json(agent_id="ag_rebind", name="rebindable-agent", tenant_id=tenant_id)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([agent_data]))
+
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = _build_rt(db_session_factory, router)
+
+    await agents_bind_google(
+        rt=rt,
+        console=console,
+        name="rebindable-agent",
+        email="first@example.com",
+        scopes=["scope-a"],
+        as_json=False,
+    )
+    await agents_bind_google(
+        rt=rt,
+        console=console,
+        name="rebindable-agent",
+        email="second@example.com",
+        scopes=["scope-b", "scope-c"],
+        as_json=False,
+    )
+
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_rebind")
+    async with db_session_factory() as s:
+        binding = await get_agent_google_binding(s, agent_id=agent_id)
+    assert binding is not None
+    assert binding.email == "second@example.com", "second bind replaces email"
+    assert binding.scopes == ("scope-b", "scope-c"), "second bind replaces scopes"
+
+
+@pytest.mark.asyncio
+async def test_agents_bind_google_unknown_agent_raises_and_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+        tenant_id = tenant.id
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([]))
+
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = _build_rt(db_session_factory, router)
+
+    with pytest.raises(StoreError, match="no agent named"):
+        await agents_bind_google(
+            rt=rt,
+            console=console,
+            name="ghost-agent",
+            email="op@example.com",
+            scopes=["scope-a"],
+            as_json=False,
+        )
+
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="does-not-exist")
+    async with db_session_factory() as s:
+        binding = await get_agent_google_binding(s, agent_id=agent_id)
+    assert binding is None, "an unresolvable agent writes no binding"
+
+
+@pytest.mark.asyncio
+async def test_agents_bind_google_missing_scopes_raises_and_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+        tenant_id = tenant.id
+
+    agent_data = _agent_json(agent_id="ag_noscopes", name="scopeless-agent", tenant_id=tenant_id)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([agent_data]))
+
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = _build_rt(db_session_factory, router)
+
+    with pytest.raises(StoreError, match="scopes"):
+        await agents_bind_google(
+            rt=rt,
+            console=console,
+            name="scopeless-agent",
+            email="op@example.com",
+            scopes=[],
+            as_json=False,
+        )
+
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_noscopes")
+    async with db_session_factory() as s:
+        binding = await get_agent_google_binding(s, agent_id=agent_id)
+    assert binding is None, "missing scopes writes no binding"
 
 
 @pytest.mark.asyncio

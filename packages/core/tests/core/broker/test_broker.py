@@ -127,7 +127,7 @@ async def test_github_passthrough_raises_no_binding_when_unbound(
 ) -> None:
     """Dispatch for service='github' with no credential row raises NoBindingError."""
     account_id = uuid.uuid4()
-    with pytest.raises(NoBindingError):
+    with pytest.raises(NoBindingError, match="operator.*account"):
         await dispatch_mint_token(
             service="github",
             account_id=account_id,
@@ -292,10 +292,10 @@ async def test_gcloud_raises_no_binding_when_no_agent_google_binding(
     gcloud_settings: Settings,
 ) -> None:
     """SA JSON configured but no agent_google_binding row → NoBindingError
-    with message naming the agent."""
+    naming the operator and the bind-google command."""
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
-    with pytest.raises(NoBindingError, match="Agent not bound"):
+    with pytest.raises(NoBindingError, match="bind-google"):
         await dispatch_mint_token(
             service="gcloud",
             account_id=account_id,

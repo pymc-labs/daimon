@@ -207,6 +207,11 @@ async def test_defaults_managed_target_member_refuses_with_shared_agent_message(
 
     assert refused is True, "a member must not bind a repo to a defaults-managed agent"
     assert _sent_message(interaction) == _SHARED_AGENT_MESSAGE
+    assert "working repo" in _sent_message(interaction)
+    assert "Manage Server" in _sent_message(interaction)
+    assert "`/agent-setup`" in _sent_message(interaction)
+    assert "keys" not in _sent_message(interaction)
+    assert "fork" not in _sent_message(interaction)
 
 
 async def test_reachable_non_managed_target_flips_with_the_scope_row(
@@ -385,12 +390,6 @@ async def test_acked_refusal_uses_followup_send(
     assert refused is True
     interaction.response.send_message.assert_not_called()
     interaction.followup.send.assert_called_once()
-
-
-async def test_shared_agent_message_matches_the_panel_gate_character_for_character() -> None:
-    assert _SHARED_AGENT_MESSAGE == panel_authz._SHARED_AGENT_MESSAGE, (
-        "the chat gate's shared-agent refusal copy must never drift from the panel's"
-    )
 
 
 @pytest.mark.parametrize(

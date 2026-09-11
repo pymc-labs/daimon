@@ -38,6 +38,7 @@ from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.errors import SpecError, StoreError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.specs import load_agent_spec, merge_default_agent_toolset
+from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.tenants import list_tenants_by_platform
@@ -161,6 +162,87 @@ async def agents_get(
         console,
         [agent],
         columns=("name", "id", "description", "created_at"),
+        as_json=as_json,
+    )
+
+
+class _GoogleBindingRow(BaseModel):
+    """Report row for bind-google output."""
+
+    agent_name: str
+    email: str
+    scopes: tuple[str, ...]
+
+
+@agents_app.command("bind-google")
+def agents_bind_google_command(
+    ctx: typer.Context,
+    name: str,
+    email: str,
+    scopes: Annotated[
+        list[str],
+        typer.Option("--scopes", help="Google OAuth scope. Repeat for multiple scopes."),
+    ],
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    settings = load_settings()
+    console = Console(highlight=False)
+    selector = ctx.obj
+
+    async def _with_defaults() -> None:
+        async with build_runtime(settings) as rt:
+            await agents_bind_google(
+                rt=rt,
+                console=console,
+                name=name,
+                email=email,
+                scopes=scopes,
+                as_json=as_json,
+                selector=selector,
+            )
+
+    run_cli(_with_defaults(), console=console)
+
+
+async def agents_bind_google(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    name: str,
+    email: str,
+    scopes: list[str],
+    as_json: bool,
+    selector: TenantSelector | None = None,
+) -> None:
+    if len(scopes) == 0:
+        raise StoreError("one or more --scopes is required to bind a Google identity.")
+
+    async with rt.sessionmaker() as session, session.begin():
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        await get_or_create_cli_principal(
+            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+        )
+    # Session closed. MA calls below.
+    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    if agent is None:
+        raise StoreError(f"no agent named {name!r} in your account or system defaults.")
+
+    # The agent_google_binding primary key is agent_id alone (no tenant_id
+    # column), so the uuid must be derived tenant-scoped rather than taken
+    # from the MA id directly — otherwise one tenant could bind a uuid that
+    # belongs to another tenant's agent.
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id))
+
+    async with rt.sessionmaker() as session, session.begin():
+        binding = await upsert_agent_google_binding(
+            session, agent_id=agent_id, email=email, scopes=scopes
+        )
+
+    emit_rows(
+        console,
+        [_GoogleBindingRow(agent_name=name, email=binding.email, scopes=binding.scopes)],
+        columns=("agent_name", "email", "scopes"),
         as_json=as_json,
     )
 

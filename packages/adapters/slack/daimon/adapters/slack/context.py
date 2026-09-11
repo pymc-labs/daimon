@@ -77,11 +77,21 @@ def _render_message(msg: dict[str, Any], *, proxy: ProxyUrlContext | None) -> li
     return lines
 
 
-def _user_query_open_tag(author_id: str) -> str:
-    """Opening <user_query> tag, with a quoted author_id attribute when present."""
+def _user_query_open_tag(author_id: str, is_admin: bool) -> str:
+    """Opening <user_query> tag, with quoted author_id/is_admin attributes when present.
+
+    ``is_admin`` is rendered as the lowercase literal ``"true"``/``"false"``
+    (``is_admin="true|false"``, matching Discord's rendering
+    byte-for-byte), never Python's ``True``/``False``. When ``author_id`` is
+    empty the tag stays bare (back-compat) and ``is_admin`` is not rendered —
+    there is no caller identity to attach it to.
+    """
     if not author_id:
         return "<user_query>"
-    return f"<user_query author_id={quoteattr(author_id)}>"
+    return (
+        f"<user_query author_id={quoteattr(author_id)}"
+        f" is_admin={quoteattr('true' if is_admin else 'false')}>"
+    )
 
 
 async def build_context_xml(
@@ -91,6 +101,7 @@ async def build_context_xml(
     thread_ts: str,
     user_query: str,
     author_id: str = "",
+    is_admin: bool = False,
     proxy: ProxyUrlContext | None = None,
 ) -> str:
     """Build XML context from thread history for the first turn.
@@ -123,7 +134,7 @@ async def build_context_xml(
     lines.append("</thread_history>")
     lines.append("</context>")
     lines.append("")
-    lines.append(f"{_user_query_open_tag(author_id)}{escape(user_query)}</user_query>")
+    lines.append(f"{_user_query_open_tag(author_id, is_admin)}{escape(user_query)}</user_query>")
 
     return "\n".join(lines)
 
@@ -136,6 +147,7 @@ async def build_delta_xml(
     watermark_ts: str,
     user_query: str,
     author_id: str = "",
+    is_admin: bool = False,
     proxy: ProxyUrlContext | None = None,
 ) -> str:
     """Build XML context for a continuation turn (delta since watermark).
@@ -168,6 +180,6 @@ async def build_delta_xml(
     lines.append("</thread_delta>")
     lines.append("</context>")
     lines.append("")
-    lines.append(f"{_user_query_open_tag(author_id)}{escape(user_query)}</user_query>")
+    lines.append(f"{_user_query_open_tag(author_id, is_admin)}{escape(user_query)}</user_query>")
 
     return "\n".join(lines)

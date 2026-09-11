@@ -130,7 +130,7 @@ async def _mark_button_consumed(interaction: discord.Interaction, *, kind: str) 
         )
 
 
-class EnvCredentialModal(discord.ui.Modal, title="Add secret"):
+class EnvCredentialModal(discord.ui.Modal, title="Add key"):
     """Add secrets modal: one value, atomic consume, existing agent_files write."""
 
     def __init__(self, *, runtime: DiscordRuntime, request_row: CredentialRequestRow) -> None:
@@ -138,7 +138,7 @@ class EnvCredentialModal(discord.ui.Modal, title="Add secret"):
         self._runtime = runtime
         self._row = request_row
         self.value_input: discord.ui.TextInput[EnvCredentialModal] = discord.ui.TextInput(
-            label="Secret value",
+            label="Key value",
             style=discord.TextStyle.paragraph,
             required=True,
             max_length=4000,
@@ -152,12 +152,12 @@ class EnvCredentialModal(discord.ui.Modal, title="Add secret"):
 
         if not raw_value.strip():
             await interaction.followup.send(
-                "Secret value cannot be empty — try again.", ephemeral=True
+                "Key value cannot be empty — try again.", ephemeral=True
             )
             return
         if len(raw_value.encode()) > _MAX_SECRET_VALUE_BYTES:
             await interaction.followup.send(
-                f"Secret value is too large. Max {_MAX_SECRET_VALUE_BYTES} bytes.",
+                f"Key value is too large. Max {_MAX_SECRET_VALUE_BYTES} bytes.",
                 ephemeral=True,
             )
             return
@@ -198,7 +198,7 @@ class EnvCredentialModal(discord.ui.Modal, title="Add secret"):
         )
 
 
-class McpCredentialModal(discord.ui.Modal, title="Add MCP credential"):
+class McpCredentialModal(discord.ui.Modal, title="Add MCP token"):
     """Add MCP credential modal: one token, atomic consume, existing vault write."""
 
     def __init__(self, *, runtime: DiscordRuntime, request_row: CredentialRequestRow) -> None:
@@ -206,7 +206,7 @@ class McpCredentialModal(discord.ui.Modal, title="Add MCP credential"):
         self._runtime = runtime
         self._row = request_row
         self.token_input: discord.ui.TextInput[McpCredentialModal] = discord.ui.TextInput(
-            label="Auth token",
+            label="MCP token",
             required=True,
             max_length=255,
             placeholder="usable by everyone who talks to this agent",
@@ -219,7 +219,7 @@ class McpCredentialModal(discord.ui.Modal, title="Add MCP credential"):
 
         if not token_value.strip():
             await interaction.followup.send(
-                "Auth token cannot be empty — try again.", ephemeral=True
+                "MCP token cannot be empty — try again.", ephemeral=True
             )
             return
 
@@ -227,8 +227,8 @@ class McpCredentialModal(discord.ui.Modal, title="Add MCP credential"):
         jwt_secret_setting = self._runtime.settings.mcp.jwt_secret
         if public_url_setting is None or jwt_secret_setting is None:
             await interaction.followup.send(
-                "daimon-mcp is not configured (public_url / jwt_secret missing) — "
-                "credential not written.",
+                "This deployment is not finished being set up. Ask the operator to finish setup, "
+                "then try again. Nothing was saved.",
                 ephemeral=True,
             )
             return
@@ -293,12 +293,11 @@ class McpCredentialModal(discord.ui.Modal, title="Add MCP credential"):
                 mcp_server_url=mcp_server_url,
                 err_type=type(err).__name__,
             )
-            # Surface only the exception class name — never the stringified
-            # exception, which for SDK/network errors can carry the request
-            # envelope (a token-leak surface). Full traceback goes to structlog.
+            # Keep exception details in the operator log; SDK failures can
+            # include the request envelope.
             await interaction.followup.send(
-                "Credential request consumed, but storing the auth token failed "
-                f"(`{type(err).__name__}`). Ask for a new request to retry.",
+                "This request was used, but saving the MCP token did not finish. "
+                "Some changes may have been saved. Ask for a new request to retry.",
                 ephemeral=True,
             )
             return
@@ -335,53 +334,36 @@ class McpCredentialModal(discord.ui.Modal, title="Add MCP credential"):
             )
         except Exception as err:
             # Partial state is real and must not be reported as success: the
-            # token is stored, the server is not attached. Exception class name
-            # only, for the same token-leak reason as the vault-write branch.
+            # token is stored, but the connection could not be completed.
+            # Exception details stay in the operator log.
             _log.exception(
                 "credential_modal.mcp_attach_failed",
                 mcp_server_url=mcp_server_url,
                 err_type=type(err).__name__,
             )
             await interaction.followup.send(
-                f"Auth token stored, but attaching `{mcp_server_url}` to the agent "
-                f"failed (`{type(err).__name__}`). The server is not connected yet — "
-                "ask the agent to attach it, or request a new credential to retry.",
+                f"MCP token saved, but connecting `{mcp_server_url}` to the agent "
+                "did not finish — "
+                "ask the agent to connect the MCP server again using a private token form.",
                 ephemeral=True,
             )
             return
 
         await interaction.followup.send(
-            f"MCP credential added for `{mcp_server_url}` and attached as "
+            f"MCP token saved for `{mcp_server_url}` and connected as "
             f"`{consumed_row.target}`. Anyone who talks to this agent can use it.",
             ephemeral=True,
         )
 
 
 class SkillRepoModal(discord.ui.Modal, title="Import skills"):
-    """Collect a GitHub token for a PRIVATE skill repo, then run the import.
+    """Collect a GitHub token, import skills, and attach them to the requested agent.
 
-    Deliberately NOT a `RepoBindModal` variant, even though both collect a
-    GitHub token into the same per-agent overlay. Two differences are the
-    whole point of the separate class:
-
-    1. No `set_binding`. Importing skills from a repo must not also tell the
-       agent to check that repo out. Sharing the store is intended; sharing
-       the binding write is the bug this exists to avoid.
-    2. The token is verified against the SKILL repo (`target`), not the
-       agent's clone repo — for a skill import those are routinely different
-       repos, and validating the wrong one both refuses good tokens and
-       accepts ones that cannot read what is about to be fetched.
-
-    Because the credential lands in the same overlay `get_pat(agent_id=…)`
-    resolves, a user who already pasted a token that can read this repo is
-    never asked twice — the agent should attempt `sync_skills` first and only
-    reach for this button on an actual no-credential failure.
-
-    No admin gate. This mirrors the env/mcp kinds rather than the repo kind:
-    the repo kind is admin-gated on a shared agent because a binding changes
-    what code the agent runs for every member, and that reasoning does not
-    reach an import into the shared skill library, which `sync_skills` itself
-    already gates with `_require_admin` at request time.
+    This requester-only enrollment verifies the token against the skill repo,
+    then stores the token and updates the working-repo binding. Later imports
+    use that binding to locate the saved token, so this flow also changes the
+    repository the agent checks out. It does not inherit the admin gate of
+    direct skill imports or shared working-repo edits.
     """
 
     def __init__(self, *, runtime: DiscordRuntime, request_row: CredentialRequestRow) -> None:
@@ -431,6 +413,7 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
             pat_masked=mask_tail(pat),
         )
 
+        is_token_saved = False
         try:
             async with httpx.AsyncClient(timeout=30.0) as http_client:
                 # Verify BEFORE storing: a token that cannot read this repo is
@@ -459,6 +442,7 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
                     pasted_pat=pat,
                     now=now,
                 )
+                is_token_saved = True
                 # Without this row the stored PAT is unreachable: the skill-sync
                 # resolver finds a per-agent token by walking this tenant's
                 # `agent_repo_binding` rows FOR THIS REPO, not by agent alone
@@ -486,12 +470,15 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
                     token=pat,
                 )
         except DaimonError as err:
-            # Written for the user by the raiser — surface verbatim. The
-            # credential is already stored and still good; only the import
-            # leg failed, so say which half survived.
+            # Validation can fail before storage; preserve only confirmed saves.
+            progress = (
+                "Token saved, but the skill import did not finish."
+                if is_token_saved
+                else "Could not finish saving the token and importing skills. "
+                "Some changes may have been saved."
+            )
             await interaction.followup.send(
-                f"Token stored, but the import failed: {err} The request was used up — "
-                "ask again to retry the import.",
+                f"{progress} {err} This request was used; ask again to retry the import.",
                 ephemeral=True,
             )
             return
@@ -501,11 +488,14 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
                 repo_url=url,
                 err_type=type(err).__name__,
             )
-            # Class name only — a stringified SDK/network error can carry the
-            # request envelope, which is a token-leak surface.
+            progress = (
+                "Token saved, but the skill import did not finish."
+                if is_token_saved
+                else "Could not finish saving the token and importing skills. "
+                "Some changes may have been saved."
+            )
             await interaction.followup.send(
-                f"Token stored, but the import failed (`{type(err).__name__}`). "
-                "Ask again to retry the import.",
+                f"{progress} Ask again to retry the import for `{normalize_owner_repo(url)}`.",
                 ephemeral=True,
             )
             return
@@ -576,7 +566,10 @@ class SkillRepoModal(discord.ui.Modal, title="Import skills"):
                 agent_id=str(agent_id),
                 err_type=type(err).__name__,
             )
-            return f"Imported, but attaching to `{agent.name}` failed ({type(err).__name__})."
+            return (
+                f"Skills imported, but attaching them to `{agent.name}` did not finish. "
+                "Ask again to retry."
+            )
         return f"Attached {len(skill_ids)} to `{agent.name}`."
 
 
@@ -683,12 +676,11 @@ class RepoBindModal(discord.ui.Modal, title="Bind repo"):
                 repo_url=consumed_row.target,
                 err_type=type(err).__name__,
             )
-            # Surface only the exception class name — never the stringified
-            # exception, which for SDK/network errors can carry the request
-            # envelope (a token-leak surface). Full traceback goes to structlog.
+            # Keep exception details in the operator log; SDK failures can
+            # include the request envelope.
             await interaction.followup.send(
-                "Credential request consumed, but binding the repo failed "
-                f"(`{type(err).__name__}`). Ask for a new request to retry.",
+                "This request was used, but connecting the working repo did not finish. "
+                "Some changes may have been saved. Ask for a new request to retry.",
                 ephemeral=True,
             )
             return

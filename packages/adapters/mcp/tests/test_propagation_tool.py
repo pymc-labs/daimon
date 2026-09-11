@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 pytestmark = pytest.mark.asyncio
 
-_D28_MESSAGE = "Changing my setup needs Manage Server — ask a server admin to use /agent-setup"
+_ADMIN_REQUIRED = "requires a workspace or server admin"
 
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
@@ -206,7 +206,7 @@ async def test_set_agent_default_raises_for_non_admin_and_performs_no_write(
     with pytest.raises(ToolError) as exc_info:
         await _set_agent_default_impl(_runtime(committing_sessionmaker), auth, "any-agent", None)
 
-    assert str(exc_info.value) == _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED in str(exc_info.value), (
         "non-admin caller must be refused with the expected message"
     )
 
@@ -223,7 +223,7 @@ async def test_clear_agent_default_raises_for_non_admin(
     with pytest.raises(ToolError) as exc_info:
         await _clear_agent_default_impl(_runtime(committing_sessionmaker), auth, None)
 
-    assert str(exc_info.value) == _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED in str(exc_info.value), (
         "non-admin caller must be refused with the expected message for clear as well"
     )
 

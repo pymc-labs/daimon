@@ -57,6 +57,8 @@ async def require_admin_for_reachable_agent(
     if reachable:
         raise ToolError(
             f"'{agent_name}' is currently the default agent for this workspace or a "
-            "channel, so changing its setup needs Manage Server — ask a server admin "
-            "to use /agent-setup. Creating or forking your own agent is not gated."
+            "channel, so an admin must change its setup. Tell the caller to ask a workspace "
+            f"or server admin to make the requested change to '{agent_name}'; carry the "
+            "specific action from the conversation into that handoff. Do not retry. "
+            "Creating or forking your own agent is not gated."
         )

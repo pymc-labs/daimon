@@ -364,8 +364,8 @@ async def run_wizard_submit_turn(
             hints: list[str] = []
             if "agent" in err.missing:
                 hints.append(
-                    "An admin can set the default agent in `/agent-setup` -> "
-                    "**Set as default...** -> [This channel] or [Whole server]."
+                    "An admin can choose who answers in this channel or the whole server "
+                    "by opening `/agent-setup`."
                 )
             if "environment" in err.missing:
                 hints.append(
@@ -387,8 +387,8 @@ async def run_wizard_submit_turn(
             )
             await channel.send(
                 "Your answers were recorded, but the configured agent or environment "
-                "no longer exists -- ask again in the thread. An admin can re-set the "
-                "agent in `/agent-setup` -> **Set as default...**; the environment is "
+                "no longer exists. An admin can choose an existing agent in `/agent-setup`; "
+                "then ask again in the thread. The environment is "
                 "operator-only via the CLI (`daimon config set environment_name=...`)."
             )
             return

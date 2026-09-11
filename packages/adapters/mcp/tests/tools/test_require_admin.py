@@ -36,7 +36,7 @@ from fastmcp.exceptions import ToolError
 
 pytestmark = pytest.mark.asyncio
 
-_D28_MESSAGE = "Changing my setup needs Manage Server — ask a server admin to use /agent-setup"
+_ADMIN_REQUIRED = "requires a workspace or server admin"
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +53,7 @@ def test_require_admin_raises_tool_error_when_not_admin() -> None:
     )
     with pytest.raises(ToolError) as exc_info:
         _require_admin(auth)
-    assert str(exc_info.value) == _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED in str(exc_info.value), (
         "non-admin chat caller must be refused with the admin-required message"
     )
 
@@ -228,7 +228,7 @@ async def test_sync_impl_raises_when_not_admin() -> None:
     )
     with pytest.raises(ToolError) as exc_info:
         await _sync_impl(runtime, auth, "https://github.com/x/y", "main", "")
-    assert str(exc_info.value) == _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED in str(exc_info.value), (
         "_sync_impl must refuse non-admin with admin-required message"
     )
 
@@ -303,7 +303,7 @@ async def test_create_environment_impl_does_not_refuse_non_admin() -> None:
     spec = EnvironmentSpec(name="e")
     with pytest.raises(Exception) as exc_info:  # noqa: B017, PT011
         await _create_environment_impl(_env_runtime(MagicMock(spec=AsyncAnthropic)), auth, spec)
-    assert str(exc_info.value) != _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED not in str(exc_info.value), (
         "create_environment must not refuse a non-admin -- gating it blocks the "
         "ordinary onboarding ask while buying no isolation"
     )
@@ -328,7 +328,7 @@ async def test_update_environment_impl_raises_when_not_admin() -> None:
             config=None,
             description="x",
         )
-    assert str(exc_info.value) == _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED in str(exc_info.value), (
         "_update_environment_impl must refuse non-admin with admin-required message"
     )
 
@@ -343,7 +343,7 @@ async def test_archive_environment_impl_raises_when_not_admin() -> None:
     )
     with pytest.raises(ToolError) as exc_info:
         await _archive_environment_impl(_env_runtime(MagicMock(spec=AsyncAnthropic)), auth, "e")
-    assert str(exc_info.value) == _D28_MESSAGE, (
+    assert _ADMIN_REQUIRED in str(exc_info.value), (
         "_archive_environment_impl must refuse non-admin with admin-required message"
     )
 

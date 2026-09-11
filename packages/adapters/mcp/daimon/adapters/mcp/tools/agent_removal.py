@@ -1,12 +1,12 @@
-"""Agent removal tools: detach_mcp_server, remove_skill, remove_env_credential,
-list_env_credential_keys.
+"""Agent removal tools: detach_mcp_server, remove_skill, remove_agent_key,
+list_agent_keys.
 
 ``register_agent_removal_tools(mcp, runtime)`` wires the ``@mcp.tool`` closures
 for this group; each closure delegates to a module-private ``_*_impl``
 coroutine that can be unit-tested without a FastMCP Context.
 
 A sibling of ``agents.py`` rather than more of it: these four tools close the
-last gap between what the ``/agent-setup`` panel can do to an agent and what
+last gap between what other setup surfaces can do to an agent and what
 chatting with the agent can do — detach an attached MCP server, detach an
 attached skill, remove an env variable, and enumerate the env variable key
 names currently set (never their values).
@@ -15,7 +15,7 @@ names currently set (never their values).
 from __future__ import annotations
 
 import uuid
-from typing import cast
+from typing import Annotated, cast
 
 import anthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
@@ -41,11 +41,11 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.agent_files import delete_agent_file, list_agent_files
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RemoveEnvCredentialResult(BaseModel):
-    """Result of ``remove_env_credential``. Never carries a value."""
+    """Result of ``remove_agent_key``. Never carries a value."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -167,7 +167,7 @@ async def _remove_skill_impl(
     return await _build_agent_info(runtime.client, updated, tenant_id=auth.tenant_id)
 
 
-async def _list_env_credential_keys_impl(
+async def _list_agent_keys_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
@@ -189,14 +189,14 @@ async def _list_env_credential_keys_impl(
     return [row.key for row in rows]
 
 
-async def _remove_env_credential_impl(
+async def _remove_agent_key_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
     agent_name: str,
     key: str,
 ) -> RemoveEnvCredentialResult:
-    # Same rationale as _list_env_credential_keys_impl above: env variables
+    # Same rationale as _list_agent_keys_impl above: env variables
     # are per-agent daimon rows outside the MA spec, so neither
     # _reject_system_agent nor require_admin_for_reachable_agent applies here
     # — and the existing chat credential button already writes these rows for
@@ -223,17 +223,16 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def detach_mcp_server(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
-        server_name: str,
+        server_name: Annotated[
+            str, Field(description="Name of the attached MCP server to disconnect.")
+        ],
     ) -> AgentInfo:
-        """Detach an attached MCP server from an agent.
+        """Disconnect an MCP server such as Linear from an agent. Detach the named
+        connection and its tools while preserving other servers and skills.
 
-        Removes the named entry from ``mcp_servers`` AND its matching
-        ``mcp_toolset`` entry from ``tools`` together — MA rejects an agent
-        whose ``mcp_servers`` entries aren't each referenced by a
-        ``mcp_toolset``, so both must go in the same update. Every other
-        attached server, skill, and tool is preserved. The reserved built-in
-        daimon server cannot be detached.
-        """
+        ``attach_mcp_server`` adds public endpoints; ``request_mcp_token`` enrolls
+        authenticated connections. The built-in daimon server cannot be removed.
+        Changing a channel or workspace default needs admin."""
         return await _detach_mcp_server_impl(
             runtime, await _auth(ctx), agent_name=agent_name, server_name=server_name
         )
@@ -244,50 +243,48 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         agent_name: str,
         skill_id: str,
     ) -> AgentInfo:
-        """Detach one attached skill from an agent.
+        """Stop an agent using an attached skill, such as eda. Remove that one
+        attachment while preserving other skills.
 
-        Accepts either the skill's raw ``skill_id`` or its resolved display
-        name. Every other attached skill and the agent's base tool set are
-        preserved.
-
-        This is a DIFFERENT operation from ``delete_skill`` /
-        ``skills_delete``, which destroy a skill for every agent in the
-        tenant. ``remove_skill`` only detaches this one agent's reference —
-        the skill resource itself, and any other agent that has it attached,
-        is untouched.
-        """
+        ``delete_skill`` destroys the shared workspace skill instead;
+        ``update_agent`` adds existing skills. Accept a skill name or raw ``skill_id``.
+        The resource and other agents stay intact. Changing a default agent needs admin."""
         return await _remove_skill_impl(
             runtime, await _auth(ctx), agent_name=agent_name, skill_id=skill_id
         )
 
     @mcp.tool
-    async def remove_env_credential(  # pyright: ignore[reportUnusedFunction]
+    async def remove_agent_key(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
-        key: str,
+        key: Annotated[
+            str,
+            Field(
+                description=(
+                    "Stored environment variable name, UPPER_SNAKE, e.g. TOGGL_TOKEN "
+                    "or OPENAI_API_KEY; never the secret value."
+                )
+            ),
+        ],
     ) -> RemoveEnvCredentialResult:
-        """Remove one environment variable from an agent.
+        """Remove an old API key or token, such as a Toggl key, from an agent's stored keys.
 
-        Idempotent: removing a key that is not currently set still succeeds
-        — the result's ``removed`` flag reports whether the key was actually
-        present. To ADD a variable, use ``request_env_credential`` instead;
-        entry always goes through the private modal flow, never through chat.
-        """
-        return await _remove_env_credential_impl(
+        Use ``request_agent_key`` to add a key privately and ``list_agent_keys`` to
+        inspect stored names. Removing a missing key also succeeds; ``removed`` says
+        whether it was present. This deletes the stored environment variable, never
+        returns its secret value, and does not prove an existing session refreshed."""
+        return await _remove_agent_key_impl(
             runtime, await _auth(ctx), agent_name=agent_name, key=key
         )
 
     @mcp.tool
-    async def list_env_credential_keys(  # pyright: ignore[reportUnusedFunction]
+    async def list_agent_keys(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
     ) -> list[str]:
-        """List the environment variable KEY NAMES currently set on an agent.
+        """What keys does an agent have? List its stored API key names, never values.
 
-        Returns names only, never a value — so the agent can see what is
-        configured without a value ever entering chat. To add a variable,
-        use ``request_env_credential``.
-        """
-        return await _list_env_credential_keys_impl(
-            runtime, await _auth(ctx), agent_name=agent_name
-        )
+        Use ``get_agent`` for skills and MCP access, ``request_agent_key`` to add
+        keys or ``remove_agent_key`` to remove them. Stored names on this target
+        are not proof that the answering agent can use those keys."""
+        return await _list_agent_keys_impl(runtime, await _auth(ctx), agent_name=agent_name)

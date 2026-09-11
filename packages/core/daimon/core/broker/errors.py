@@ -17,13 +17,15 @@ class BrokerError(DaimonError):
 class NoBindingError(BrokerError):
     """Raised when no credential / binding exists for the requesting agent.
 
-    Operator-actionable: the resolution is to bind credentials via the
-    agent-setup repo-auth panel (inline PAT), or install the GitHub App on the repo.
+    Resolution: bind a working-repo token for the agent — `request_repo_binding`
+    is the chat path that collects one — or install the GitHub App on the
+    repository.
     """
 
 
 class ProviderConfigError(BrokerError):
     """Raised when provider configuration (settings) is missing or invalid.
 
-    Operator-actionable: the resolution is to set the missing env var.
+    Operator-actionable: the resolution is to set the missing deployment
+    configuration value.
     """

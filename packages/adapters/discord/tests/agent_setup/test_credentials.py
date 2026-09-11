@@ -144,7 +144,7 @@ def test_container_header_and_subtext() -> None:
     # First TextDisplay is the header from layout.header()
     assert len(texts) >= 1, "at least one TextDisplay in container"
     header_text = texts[0]
-    assert header_text.startswith("## 🔑 Env vars — "), f"header mismatch: {header_text!r}"
+    assert header_text.startswith("## 🔑 Keys — "), f"header mismatch: {header_text!r}"
     assert "bot" in header_text, "agent name in header"
     assert "-# values are write-only; only key names are shown" in header_text, "subtext present"
 
@@ -180,7 +180,7 @@ def test_container_empty_state_shows_hint() -> None:
         child.content for child in container.children if isinstance(child, discord.ui.TextDisplay)
     ]
     # The hint line should be a dim -# line
-    hint_lines = [d for d in displays if "add your first env var" in d]
+    hint_lines = [d for d in displays if "add your first key" in d]
     assert len(hint_lines) == 1, "empty state has a hint line"
     assert hint_lines[0].startswith("-#"), "empty hint uses dim -# prefix"
 
@@ -198,10 +198,10 @@ def test_container_no_none_copy_in_empty_state() -> None:
 
 
 def test_format_paste_result_is_singular_for_one_key_and_plural_above_one() -> None:
-    assert format_paste_result(key_count=1) == "Saved ✓ — 1 env var set", (
-        "one key reads as a singular env var"
+    assert format_paste_result(key_count=1) == "Saved ✓ — 1 key set", (
+        "one key reads as a singular key"
     )
-    assert format_paste_result(key_count=3) == "Saved ✓ — 3 env vars set", (
+    assert format_paste_result(key_count=3) == "Saved ✓ — 3 keys set", (
         "more than one key pluralises"
     )
 
@@ -216,7 +216,7 @@ def test_container_appends_the_result_line_after_the_chips() -> None:
         child.content for child in container.children if isinstance(child, discord.ui.TextDisplay)
     ]
     chips_index = next(i for i, d in enumerate(displays) if "`A_KEY`" in d)
-    result_index = next(i for i, d in enumerate(displays) if d == "Saved ✓ — 2 env vars set")
+    result_index = next(i for i, d in enumerate(displays) if d == "Saved ✓ — 2 keys set")
     assert result_index > chips_index, "the result line renders after the chips, not before them"
 
 
@@ -248,13 +248,13 @@ def test_subview_renders_remove_select_add_and_back(account_id: uuid.UUID) -> No
         secret_names=["A", "B"],
     )
     select = _remove_select(view)
-    assert select.placeholder == "✕ Remove a var…", "single remove-select with house placeholder"
+    assert select.placeholder == "✕ Remove a key…", "single remove-select with house placeholder"
     assert [o.label for o in select.options] == ["✕ A", "✕ B"], "one option per secret"
     assert [o.value for o in select.options] == ["A", "B"], "option value is the key name"
     labels = [b.label for b in _find_buttons(view)]
-    assert "+ Add env vars" in labels, "add button present (plural label)"
+    assert "+ Add keys" in labels, "add button present (plural label)"
     assert "← Back" in labels, "back button present"
-    add_btn = _button_by_label(view, "+ Add env vars")
+    add_btn = _button_by_label(view, "+ Add keys")
     assert add_btn.disabled is False, "add enabled for a user agent under cap"
 
 
@@ -269,7 +269,7 @@ def test_subview_header_and_subtext(account_id: uuid.UUID) -> None:
         secret_names=["A"],
     )
     text = _container_all_text(view)
-    assert "## 🔑 Env vars — " in text, "container header present"
+    assert "## 🔑 Keys — " in text, "container header present"
     assert "my-bot" in text, "agent name in header"
     assert "-# values are write-only; only key names are shown" in text, "subtext present"
 
@@ -329,7 +329,7 @@ def test_subview_remove_select_option_carries_key_name_never_value(account_id: u
 
 
 def test_subview_system_agent_enables_mutations(account_id: uuid.UUID) -> None:
-    """Env vars are per-agent daimon state, never part of the agent spec, so a
+    """Keys are per-agent daimon state, never part of the agent spec, so a
     system agent's remove select and add button are enabled exactly like a
     user agent's — provenance does not gate this sub-view's rendering. The
     enabled state is deliberate: the refusal happens at click time and carries
@@ -346,7 +346,7 @@ def test_subview_system_agent_enables_mutations(account_id: uuid.UUID) -> None:
     assert _remove_select(view).disabled is False, (
         "a system agent's remove select must be enabled when it has variables"
     )
-    assert _button_by_label(view, "+ Add env vars").disabled is False, (
+    assert _button_by_label(view, "+ Add keys").disabled is False, (
         "a system agent's add button must be enabled below the cap"
     )
     assert _button_by_label(view, "← Back").disabled is False, "back stays enabled"
@@ -364,7 +364,7 @@ def test_subview_empty_state_disables_select(account_id: uuid.UUID) -> None:
     )
     select = _remove_select(view)
     assert select.disabled is True, "no-secrets select is disabled"
-    assert "no env vars" in (select.placeholder or "").lower(), "empty-state placeholder"
+    assert "no keys" in (select.placeholder or "").lower(), "empty-state placeholder"
 
 
 # --- PasteSecretModal: parse + validate + store (real DB) ------------------
@@ -416,7 +416,7 @@ async def test_paste_modal_stores_each_pair_and_never_logs_value(
     )
 
     toast = interaction.followup.send.call_args.args[0]
-    assert "Added 2 env vars" in toast, "multi-key success copy"
+    assert "Added 2 keys" in toast, "multi-key success copy"
     assert _SECRET_VALUE not in toast, "toast never echoes a value"
     # The re-render callback fires after a successful paste, carrying the COUNT
     # the collapsed render needs — never a key name and never a value.
@@ -452,7 +452,7 @@ async def test_paste_modal_rejects_invalid_key_and_writes_nothing(
     rows = await list_agent_files(db_session, tenant_id=tenant.id, agent_id=agent_id)
     assert rows == [], "fail-fast on an invalid key writes nothing"
     msg = interaction.followup.send.call_args.args[0]
-    assert "Secret name must match" in msg, "invalid-key toast shown"
+    assert "Key name must match" in msg, "invalid-key toast shown"
 
 
 # --- PasteSecretModal: click-time gate on a shared agent -------------------
@@ -486,7 +486,7 @@ async def test_paste_modal_refuses_write_on_reachable_agent_for_non_admin(
 
     async with db_session_factory() as session:
         rows = await list_agent_files(session, tenant_id=tenant.id, agent_id=agent_id)
-    assert rows == [], "a non-admin must write no env var onto a currently-reachable agent"
+    assert rows == [], "a non-admin must write no key onto a currently-reachable agent"
     interaction.response.defer.assert_not_called()
     interaction.response.send_message.assert_called_once()
     assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is True
@@ -497,7 +497,7 @@ async def test_paste_modal_refuses_write_on_system_agent_for_non_admin(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """The deployment's built-in agent is shared by everyone in the install
-    whether or not anything currently scopes to it, so its env vars are closed
+    whether or not anything currently scopes to it, so its keys are closed
     to non-admins on provenance alone."""
     guild_id = 920402
     async with db_session_factory() as session, session.begin():
@@ -519,7 +519,7 @@ async def test_paste_modal_refuses_write_on_system_agent_for_non_admin(
 
     async with db_session_factory() as session:
         rows = await list_agent_files(session, tenant_id=tenant.id, agent_id=agent_id)
-    assert rows == [], "a non-admin must write no env var onto the built-in agent"
+    assert rows == [], "a non-admin must write no key onto the built-in agent"
     interaction.response.defer.assert_not_called()
     interaction.response.send_message.assert_called_once()
     assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is True
@@ -557,7 +557,7 @@ async def test_paste_modal_still_writes_on_reachable_system_agent_for_admin(
             session, tenant_id=tenant.id, agent_id=agent_id, key="XERO_API_KEY"
         )
     assert stored is not None and stored.content == _SECRET_VALUE, (
-        "an admin must still set the built-in default agent's env vars"
+        "an admin must still set the built-in default agent's keys"
     )
 
 
@@ -638,7 +638,7 @@ async def test_paste_success_collapses_the_add_control_on_the_panel(
     submit_interaction.edit_original_response.assert_awaited_once()
     panel = submit_interaction.edit_original_response.call_args.kwargs["view"]
     labels = [b.label for b in _walk_buttons(panel)]
-    assert "+ Add env vars" not in labels, "the add control is swapped out, not left live"
+    assert "+ Add keys" not in labels, "the add control is swapped out, not left live"
     assert "← Back" in labels, "← Back stays live on the collapsed panel"
     select = _remove_select(panel)
     assert select.disabled is False, "the remove select stays live on the collapsed panel"
@@ -646,7 +646,7 @@ async def test_paste_success_collapses_the_add_control_on_the_panel(
         "the reload puts the freshly pasted keys into the remove select"
     )
     text = _container_all_text(panel)
-    assert "Saved ✓ — 2 env vars set" in text, "the result line names the count"
+    assert "Saved ✓ — 2 keys set" in text, "the result line names the count"
     assert "XERO_API_KEY" in text and "TOGGL_TOKEN" in text, "the chips list both pasted keys"
 
 
@@ -719,7 +719,7 @@ async def test_paste_failure_leaves_the_panel_uncollapsed(
     await modal.on_submit(submit_interaction)
 
     submit_interaction.edit_original_response.assert_not_awaited()
-    assert "Secret name must match" in submit_interaction.followup.send.call_args.args[0], (
+    assert "Key name must match" in submit_interaction.followup.send.call_args.args[0], (
         "the invalid-key toast is the only feedback on a failed paste"
     )
 
@@ -798,7 +798,7 @@ async def test_remove_after_a_paste_restores_the_add_control_and_drops_the_resul
 
     panel = remove_interaction.edit_original_response.call_args.kwargs["view"]
     labels = [b.label for b in _walk_buttons(panel)]
-    assert "+ Add env vars" in labels, "a removal renders the add control back"
+    assert "+ Add keys" in labels, "a removal renders the add control back"
     assert "Saved ✓" not in _container_all_text(panel), (
         "the paste result line must not stick around into the next render"
     )
@@ -1059,7 +1059,7 @@ async def test_editview_env_vars_button_opens_subview(
 
     await edit_view._on_env_vars(interaction)  # pyright: ignore[reportPrivateUsage]
 
-    interaction.response.edit_message.assert_awaited_once()  # env vars opens the sub-view in place
+    interaction.response.edit_message.assert_awaited_once()  # keys opens the sub-view in place
     kwargs = interaction.response.edit_message.call_args.kwargs
     assert isinstance(kwargs["view"], CredentialsSubView), "view is the CredentialsSubView"
     # The sub-view's container must not contain the secret value
@@ -1130,7 +1130,7 @@ async def test_subview_opens_and_lists_key_names_for_a_non_admin_on_a_shared_age
 
 
 def test_editview_env_vars_button_enabled_for_system_agent(account_id: uuid.UUID) -> None:
-    """Env vars are per-agent daimon state, never part of the agent spec, so
+    """Keys are per-agent daimon state, never part of the agent spec, so
     the button is enabled for the seeded/system agent exactly like any other.
     The enabled state is deliberate — opening the list stays open to every
     member, and the two writes inside refuse at click time."""
@@ -1154,8 +1154,8 @@ def test_editview_env_vars_button_enabled_for_system_agent(account_id: uuid.UUID
     )
     sys_view = EditView(_state(sys_entry, account_id), runtime=runtime, allowed_user_id=42)
     sys_buttons = {b.label: b for b in _walk_buttons(sys_view) if b.label is not None}
-    assert sys_buttons["Env vars"].disabled is False, (
-        "the seeded/system agent's Env vars button must be enabled — env vars "
+    assert sys_buttons["Keys"].disabled is False, (
+        "the seeded/system agent's Keys button must be enabled — keys "
         "are not part of the agent spec"
     )
 
@@ -1167,7 +1167,7 @@ def test_editview_env_vars_button_enabled_for_system_agent(account_id: uuid.UUID
     )
     user_view = EditView(_state(user_entry, account_id), runtime=runtime, allowed_user_id=42)
     user_buttons = {b.label: b for b in _walk_buttons(user_view) if b.label is not None}
-    assert user_buttons["Env vars"].disabled is False, "user agents can open Env vars"
+    assert user_buttons["Keys"].disabled is False, "user agents can open Keys"
 
 
 # ---------------------------------------------------------------------------
