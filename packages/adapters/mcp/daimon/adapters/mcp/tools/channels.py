@@ -208,7 +208,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
-            raise ToolError("rename_thread is Discord-only — Slack threads have no title")
+            raise _slack_unsupported("rename_thread")
         return await _rename_thread_impl(runtime, auth, thread_id=thread_id, name=name)
 
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
