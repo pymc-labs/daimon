@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from daimon.adapters.discord.gating import is_auto_respond_candidate, should_process_message
+from daimon.adapters.discord.gating import is_participation_candidate, should_process_message
+from daimon.core.thread_participation import ParticipationMode
 
 DAIMON_ID = "111"
 HUMAN_ID = "222"
@@ -133,31 +134,55 @@ def test_gate_rejects_qa_bot_in_dm() -> None:
 # --- organic thread participation candidates -------------------------------
 
 
-def test_auto_candidate_is_an_unmentioned_human_in_a_guild_thread() -> None:
-    assert is_auto_respond_candidate(
-        available=True, author_is_bot=False, bot_mentioned=False, in_thread=True, guild_id="g1"
+def test_participation_candidate_is_an_unmentioned_human_in_a_guild_thread() -> None:
+    assert is_participation_candidate(
+        deployment_mode=ParticipationMode.OFF,
+        author_is_bot=False,
+        bot_mentioned=False,
+        in_thread=True,
+        guild_id="g1",
     ), "an unmentioned human message in a guild thread is what the feature screens"
 
 
-def test_auto_candidate_requires_the_deployment_to_allow_it() -> None:
-    assert not is_auto_respond_candidate(
-        available=False, author_is_bot=False, bot_mentioned=False, in_thread=True, guild_id="g1"
+def test_participation_candidate_is_refused_by_a_disabled_deployment() -> None:
+    assert not is_participation_candidate(
+        deployment_mode=ParticipationMode.DISABLED,
+        author_is_bot=False,
+        bot_mentioned=False,
+        in_thread=True,
+        guild_id="g1",
     ), "a disabled deployment must keep today's mention-only behaviour"
 
 
-def test_auto_candidate_never_a_bot_and_never_a_mention() -> None:
-    assert not is_auto_respond_candidate(
-        available=True, author_is_bot=True, bot_mentioned=False, in_thread=True, guild_id="g1"
+def test_participation_candidate_never_a_bot_and_never_a_mention() -> None:
+    assert not is_participation_candidate(
+        deployment_mode=ParticipationMode.ON,
+        author_is_bot=True,
+        bot_mentioned=False,
+        in_thread=True,
+        guild_id="g1",
     ), "bots never trigger organic turns, QA allow-list included"
-    assert not is_auto_respond_candidate(
-        available=True, author_is_bot=False, bot_mentioned=True, in_thread=True, guild_id="g1"
+    assert not is_participation_candidate(
+        deployment_mode=ParticipationMode.ON,
+        author_is_bot=False,
+        bot_mentioned=True,
+        in_thread=True,
+        guild_id="g1",
     ), "a mention belongs to the mention path, not this one"
 
 
-def test_auto_candidate_only_in_guild_threads() -> None:
-    assert not is_auto_respond_candidate(
-        available=True, author_is_bot=False, bot_mentioned=False, in_thread=False, guild_id="g1"
+def test_participation_candidate_only_in_guild_threads() -> None:
+    assert not is_participation_candidate(
+        deployment_mode=ParticipationMode.ON,
+        author_is_bot=False,
+        bot_mentioned=False,
+        in_thread=False,
+        guild_id="g1",
     ), "top-level channel messages are never screened"
-    assert not is_auto_respond_candidate(
-        available=True, author_is_bot=False, bot_mentioned=False, in_thread=True, guild_id=None
+    assert not is_participation_candidate(
+        deployment_mode=ParticipationMode.ON,
+        author_is_bot=False,
+        bot_mentioned=False,
+        in_thread=True,
+        guild_id=None,
     ), "no guild means no tenant"

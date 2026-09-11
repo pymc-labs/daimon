@@ -15,7 +15,6 @@ import structlog
 import structlog.contextvars
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
-from daimon.adapters.discord.auto_respond import AutoResponder
 from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.context import (
     build_channel_context_xml,
@@ -24,10 +23,11 @@ from daimon.adapters.discord.context import (
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
-from daimon.adapters.discord.gating import is_auto_respond_candidate, should_process_message
+from daimon.adapters.discord.gating import is_participation_candidate, should_process_message
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.adapters.discord.thread_send import safe_thread_send
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.vision import (
@@ -192,7 +192,7 @@ def _pick_post_channel(guild: discord.Guild) -> discord.abc.Messageable | None:
 
 
 @dataclass
-class _AutoBatch:
+class _ParticipationBatch:
     """Unmentioned messages piling up in one followed thread, and the timer watching them.
 
     The timer restarts on every new message, so the batch is only judged once
@@ -209,8 +209,8 @@ class _AutoBatch:
 # same size), and stops restarting its timer once it has waited this many quiet
 # periods, so a thread that never goes quiet is still judged on a bounded delay
 # with a bounded prompt.
-_AUTO_BATCH_MAX_MESSAGES: Final[int] = 10
-_AUTO_BATCH_MAX_QUIET_PERIODS: Final[int] = 6
+_PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = 10
+_PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = 6
 
 
 class DaimonBot(commands.Bot):
@@ -231,7 +231,10 @@ class DaimonBot(commands.Bot):
         self._inflight: dict[uuid.UUID, int] = {}
         # Organic thread participation: per-thread quiet-period batches, keyed
         # by thread id. Populated only for threads that resolved to `on`.
-        self._auto_pending: dict[int, _AutoBatch] = {}
+        self._participation_pending: dict[int, _ParticipationBatch] = {}
+        # Built on first use, not here: it needs `self.user`, which the gateway
+        # only supplies once the bot is ready.
+        self._participant: ThreadParticipant | None = None
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
         # Track spawned background tasks so they aren't GC'd; discard on done.
@@ -264,8 +267,8 @@ class DaimonBot(commands.Bot):
         # Pending auto batches are unasked-for turns that have not started;
         # dropping them is free, whereas letting a timer fire mid-drain would
         # admit a new turn the drain is trying to stop.
-        for thread_id in list(self._auto_pending):
-            self._cancel_auto_batch(thread_id)
+        for thread_id in list(self._participation_pending):
+            self._cancel_participation_batch(thread_id)
         log.info("discord.draining", inflight_threads=len(self._processing))
         deadline = asyncio.get_running_loop().time() + _DRAIN_GRACE_S
         while self._processing and asyncio.get_running_loop().time() < deadline:
@@ -728,13 +731,27 @@ class DaimonBot(commands.Bot):
         if self._inflight[tenant_id] <= 0:
             self._inflight.pop(tenant_id, None)
 
-    def _cancel_auto_batch(self, thread_id: int) -> None:
+    def _cancel_participation_batch(self, thread_id: int) -> None:
         """Drop a thread's pending auto batch and its timer, if any."""
-        batch = self._auto_pending.pop(thread_id, None)
+        batch = self._participation_pending.pop(thread_id, None)
         if batch is not None and batch.timer is not None:
             batch.timer.cancel()
 
-    async def _maybe_auto_respond(self, message: discord.Message) -> None:
+    def _thread_participant(self, *, bot_user_id: int, bot_display_name: str) -> ThreadParticipant:
+        """The bot's one participant, built on first use and reused after that."""
+        if self._participant is None:
+            self._participant = ThreadParticipant(
+                settings=self.runtime.settings.thread_participation,
+                sessionmaker=self.runtime.sessionmaker,
+                anthropic=self.runtime.anthropic,
+                bot_user_id=bot_user_id,
+                bot_display_name=bot_display_name,
+                billing_config=self.runtime.billing_config,
+                markup=self.runtime.settings.billing.markup,
+            )
+        return self._participant
+
+    async def _maybe_participate(self, message: discord.Message) -> None:
         """Organic thread participation: an unmentioned human message in a guild thread.
 
         Reached only after the mention gate said no. Where the mention path
@@ -761,14 +778,8 @@ class DaimonBot(commands.Bot):
         discord_settings = self.runtime.settings.discord
         if discord_settings is None:
             return
-        responder = AutoResponder(
-            settings=self.runtime.settings.thread_participation,
-            sessionmaker=self.runtime.sessionmaker,
-            anthropic=self.runtime.anthropic,
-            bot_user_id=self.user.id,
-            bot_display_name=discord_settings.bot_display_name,
-            billing_config=self.runtime.billing_config,
-            markup=self.runtime.settings.billing.markup,
+        responder = self._thread_participant(
+            bot_user_id=self.user.id, bot_display_name=discord_settings.bot_display_name
         )
         try:
             # Cascade first: it says `off` for almost every message, so the
@@ -792,43 +803,47 @@ class DaimonBot(commands.Bot):
 
         now = asyncio.get_running_loop().time()
         quiet_seconds = self.runtime.settings.thread_participation.quiet_seconds
-        batch = self._auto_pending.setdefault(thread_id, _AutoBatch(messages=[], first_at=now))
+        batch = self._participation_pending.setdefault(
+            thread_id, _ParticipationBatch(messages=[], first_at=now)
+        )
         batch.messages.append(message)
-        del batch.messages[:-_AUTO_BATCH_MAX_MESSAGES]
+        del batch.messages[:-_PARTICIPATION_BATCH_MAX_MESSAGES]
         if batch.timer is not None:
-            if now - batch.first_at >= quiet_seconds * _AUTO_BATCH_MAX_QUIET_PERIODS:
+            if now - batch.first_at >= quiet_seconds * _PARTICIPATION_BATCH_MAX_QUIET_PERIODS:
                 return  # waited long enough: let the running timer fire as scheduled
             batch.timer.cancel()
         batch.timer = self._spawn(
-            self._auto_quiet_timer(
+            self._participation_quiet_timer(
                 quiet_seconds, thread, guild_id=guild_id, tenant_id=tenant_id, responder=responder
             )
         )
 
-    async def _auto_quiet_timer(
+    async def _participation_quiet_timer(
         self,
         quiet_seconds: float,
         thread: discord.Thread,
         *,
         guild_id: str,
         tenant_id: uuid.UUID,
-        responder: AutoResponder,
+        responder: ThreadParticipant,
     ) -> None:
         """Wait out the quiet period, then judge the batch. Cancelled = a newer message won."""
         await asyncio.sleep(quiet_seconds)
-        await self._auto_fire(thread, guild_id=guild_id, tenant_id=tenant_id, responder=responder)
+        await self._participation_fire(
+            thread, guild_id=guild_id, tenant_id=tenant_id, responder=responder
+        )
 
-    async def _auto_fire(
+    async def _participation_fire(
         self,
         thread: discord.Thread,
         *,
         guild_id: str,
         tenant_id: uuid.UUID,
-        responder: AutoResponder,
+        responder: ThreadParticipant,
     ) -> None:
         """The thread went quiet: judge the whole batch once, then run at most one turn."""
         thread_id = thread.id
-        batch = self._auto_pending.pop(thread_id, None)
+        batch = self._participation_pending.pop(thread_id, None)
         if batch is None or not batch.messages:
             return
         if self.draining or thread_id in self._processing:
@@ -847,11 +862,9 @@ class DaimonBot(commands.Bot):
             # is long enough for someone to turn the thread off mid-burst.
             resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
             if not await responder.should_respond(
-                thread, candidates, tenant_id=tenant_id, resolved=resolved
+                thread, candidates, trigger=trigger, tenant_id=tenant_id, resolved=resolved
             ):
                 return
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # noqa: BLE001 -- unasked-for turn: log, stay silent
             log.exception("thread_participation.decision_failed", thread_id=str(thread_id))
             sentry_sdk.capture_exception(exc)
@@ -913,15 +926,19 @@ class DaimonBot(commands.Bot):
         ):
             # Not a mention. The only other way a message starts a turn is
             # organic thread participation, which has its own gates.
-            if is_auto_respond_candidate(
-                available=discord_settings is not None
-                and self.runtime.settings.thread_participation.mode != "disabled",
+            if is_participation_candidate(
+                # No Discord settings block means no bot to follow anything.
+                deployment_mode=(
+                    self.runtime.settings.thread_participation.mode
+                    if discord_settings is not None
+                    else ParticipationMode.DISABLED
+                ),
                 author_is_bot=message.author.bot,
                 bot_mentioned=bot_mentioned,
                 in_thread=isinstance(message.channel, discord.Thread),
                 guild_id=str(message.guild.id) if message.guild else None,
             ):
-                await self._maybe_auto_respond(message)
+                await self._maybe_participate(message)
             return
         if self.draining:
             return  # stop admitting new mentions during drain
@@ -973,7 +990,7 @@ class DaimonBot(commands.Bot):
             # period in this thread: this turn's context carries those messages
             # anyway, so judging them separately would only duplicate the reply.
             if isinstance(message.channel, discord.Thread):
-                self._cancel_auto_batch(message.channel.id)
+                self._cancel_participation_batch(message.channel.id)
 
             # Per-thread mention queueing. Check before claiming an in-flight slot
             # so that queued mentions never consume a slot they won't use.
@@ -1399,14 +1416,19 @@ class DaimonBot(commands.Bot):
         async def _edit_message(msg: discord.Message, **kwargs: Any) -> None:
             await msg.edit(**kwargs)
 
+        async def _delete_message(msg: discord.Message) -> None:
+            await msg.delete()
+
         cancel = asyncio.Event()
         cancel_view = CancelView(allowed_user_id=message.author.id, cancel=cancel)
         lifecycle = DiscordTurnLifecycle(
             send=_send_embed,
             edit=_edit_message,
+            delete=_delete_message,
             agent_name=agent.name,
             model_id=agent.model.id,
             cancel_view=cancel_view,
+            unprompted=unprompted,
         )
         await lifecycle.post_initial()
 
@@ -1607,6 +1629,7 @@ class DaimonBot(commands.Bot):
             new_lifecycle = DiscordTurnLifecycle(
                 send=_send_embed,
                 edit=_edit_message,
+                delete=_delete_message,
                 agent_name=agent.name,
                 model_id=agent.model.id,
                 cancel_view=CancelView(allowed_user_id=message.author.id, cancel=cancel_event),
@@ -1614,6 +1637,7 @@ class DaimonBot(commands.Bot):
                 # embed is edited into this turn's answer rather than left
                 # standing next to a second, successful message.
                 adopt_message_ref=lifecycle.message_ref,
+                unprompted=unprompted,
             )
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Collection
 
+from daimon.core.thread_participation import ParticipationMode
+
 
 def should_process_message(
     *,
@@ -54,9 +56,9 @@ def _is_allowed_bot_author(
     return author_id in qa_bot_user_ids
 
 
-def is_auto_respond_candidate(
+def is_participation_candidate(
     *,
-    available: bool,
+    deployment_mode: ParticipationMode,
     author_is_bot: bool,
     bot_mentioned: bool,
     in_thread: bool,
@@ -65,10 +67,11 @@ def is_auto_respond_candidate(
     """Pre-DB gate for organic thread participation: may this unmentioned message be screened?
 
     Only human-authored, unmentioned messages inside a guild thread qualify,
-    and only while the deployment leaves the feature available (its mode is
-    not `disabled`). Bots never qualify, allow-listed QA bots included: the
-    mention path is the only automation entry point.
+    and only while the deployment does not say `disabled` -- the one mode no
+    narrower scope can override, so it is decidable here, before any read.
+    Bots never qualify, allow-listed QA bots included: the mention path is
+    the only automation entry point.
     """
-    if not available or author_is_bot or bot_mentioned:
+    if deployment_mode is ParticipationMode.DISABLED or author_is_bot or bot_mentioned:
         return False
     return in_thread and guild_id is not None

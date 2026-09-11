@@ -21,11 +21,11 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 import pytest_asyncio
-from daimon.adapters.discord import auto_respond
 from daimon.adapters.discord import bot as bot_module
-from daimon.adapters.discord.auto_respond import AutoResponder
+from daimon.adapters.discord import thread_participation
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.core.config import McpSettings, ThreadParticipationSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
@@ -49,7 +49,7 @@ PARENT_ID = 700
 def _make_runtime(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
-    mode: str = "off",
+    mode: ParticipationMode = ParticipationMode.OFF,
     # Short but non-zero: the timer must not fire while the *next* message is
     # still being handled (the shared test connection allows no overlap).
     quiet_seconds: float = 0.2,
@@ -64,8 +64,7 @@ def _make_runtime(
     settings.discord = discord_settings
     settings.billing.markup = Decimal("1.0")
     settings.thread_participation = ThreadParticipationSettings(
-        mode=mode,  # pyright: ignore[reportArgumentType]  # Literal narrowing from the test's str
-        quiet_seconds=quiet_seconds,
+        mode=mode, quiet_seconds=quiet_seconds
     )
     return DiscordRuntime(
         settings=settings,
@@ -152,23 +151,23 @@ class _FakeClassifier:
 @pytest.fixture
 def classifier(monkeypatch: pytest.MonkeyPatch) -> _FakeClassifier:
     fake = _FakeClassifier()
-    monkeypatch.setattr(auto_respond, "classify", fake)
+    monkeypatch.setattr(thread_participation, "classify", fake)
     return fake
 
 
 def _spy_record(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     recorded: list[dict[str, Any]] = []
 
-    async def record(self: AutoResponder, **kwargs: Any) -> None:
+    async def record(self: ThreadParticipant, **kwargs: Any) -> None:
         recorded.append(kwargs)
 
-    monkeypatch.setattr(AutoResponder, "record", record)
+    monkeypatch.setattr(ThreadParticipant, "record", record)
     return recorded
 
 
 async def _drain_timer(bot: DaimonBot, thread_id: int = THREAD_ID) -> None:
     """Wait out the quiet period so the batch is judged and its turn finishes."""
-    batch = bot._auto_pending.get(thread_id)  # pyright: ignore[reportPrivateUsage]
+    batch = bot._participation_pending.get(thread_id)  # pyright: ignore[reportPrivateUsage]
     if batch is not None and batch.timer is not None:
         await batch.timer
 
@@ -205,7 +204,7 @@ async def test_disabled_deployment_never_reaches_the_responder(
     monkeypatch: pytest.MonkeyPatch,
     classifier: _FakeClassifier,
 ) -> None:
-    bot = _make_bot(_make_runtime(db_session_factory, mode="disabled"))
+    bot = _make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.DISABLED))
     turns = _stub_turn(bot)
     liveness_reads: list[uuid.UUID] = []
 
@@ -214,13 +213,20 @@ async def test_disabled_deployment_never_reaches_the_responder(
 
     monkeypatch.setattr(bot_module, "get_tenant_liveness", _liveness)
     monkeypatch.setattr(
-        bot_module, "AutoResponder", MagicMock(side_effect=AssertionError("constructed"))
+        bot_module, "ThreadParticipant", MagicMock(side_effect=AssertionError("constructed"))
     )
 
     await bot.on_message(_thread_message(_make_thread(), content="a question?"))
 
-    assert liveness_reads == [] and turns == [] and classifier.calls == []
-    assert bot._auto_pending == {}  # pyright: ignore[reportPrivateUsage]
+    assert liveness_reads == [] and turns == [] and classifier.calls == [], (
+        "a disabled deployment reads no tenant row, runs no classifier and starts no turn"
+    )
+    assert bot._participation_pending == {}, (  # pyright: ignore[reportPrivateUsage]
+        "no batch is opened, so no timer can fire later"
+    )
+    assert bot._participant is None, (  # pyright: ignore[reportPrivateUsage]
+        "the participant is never built, so the DB is never touched"
+    )
 
 
 async def test_a_thread_that_is_not_followed_costs_one_read_and_nothing_else(
@@ -228,13 +234,15 @@ async def test_a_thread_that_is_not_followed_costs_one_read_and_nothing_else(
     tenant_id: uuid.UUID,
     classifier: _FakeClassifier,
 ) -> None:
-    bot = _make_bot(_make_runtime(db_session_factory, mode="off"))
+    bot = _make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
     turns = _stub_turn(bot)
 
     await bot.on_message(_thread_message(_make_thread(), content="a question?"))
 
-    assert bot._auto_pending == {}, "no batch, so no timer"  # pyright: ignore[reportPrivateUsage]
-    assert classifier.calls == [] and turns == []
+    assert bot._participation_pending == {}, "no batch, so no timer"  # pyright: ignore[reportPrivateUsage]
+    assert classifier.calls == [] and turns == [], (
+        "an unfollowed thread costs the cascade read and nothing more"
+    )
 
 
 async def test_a_burst_is_judged_once_and_the_last_message_is_the_trigger(
@@ -244,7 +252,7 @@ async def test_a_burst_is_judged_once_and_the_last_message_is_the_trigger(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = _make_bot(_make_runtime(db_session_factory, mode="off"))
+    bot = _make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
     turns = _stub_turn(bot)
     recorded = _spy_record(monkeypatch)
     thread = _make_thread()
@@ -256,13 +264,19 @@ async def test_a_burst_is_judged_once_and_the_last_message_is_the_trigger(
     await _drain_timer(bot)
 
     (call,) = classifier.calls
-    assert [c.content for c in call["candidates"]] == ["wait", "what about the prior?"]
+    assert [c.content for c in call["candidates"]] == ["wait", "what about the prior?"], (
+        "the whole quiet burst is judged in one call"
+    )
     assert turns == [(second, True)], "one turn, triggered by the last message, unprompted"
     assert recorded == [
         {"tenant_id": tenant_id, "thread_id": THREAD_ID, "message_id": str(second.id)}
     ], "the ledger row names the trigger and is written when the turn is admitted"
-    assert THREAD_ID not in bot._processing  # pyright: ignore[reportPrivateUsage]
-    assert bot._auto_pending == {}  # pyright: ignore[reportPrivateUsage]
+    assert THREAD_ID not in bot._processing, (  # pyright: ignore[reportPrivateUsage]
+        "the in-flight slot is released when the turn ends"
+    )
+    assert bot._participation_pending == {}, (  # pyright: ignore[reportPrivateUsage]
+        "a judged batch is gone"
+    )
 
 
 async def test_classifier_silence_runs_no_turn(
@@ -273,14 +287,16 @@ async def test_classifier_silence_runs_no_turn(
 ) -> None:
     classifier.decision = "silence"
     await _follow_thread(db_session_factory, tenant_id)
-    bot = _make_bot(_make_runtime(db_session_factory, mode="off"))
+    bot = _make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
     turns = _stub_turn(bot)
     recorded = _spy_record(monkeypatch)
 
     await bot.on_message(_thread_message(_make_thread(), content="thanks!"))
     await _drain_timer(bot)
 
-    assert len(classifier.calls) == 1 and turns == [] and recorded == []
+    assert len(classifier.calls) == 1 and turns == [] and recorded == [], (
+        "a silenced burst costs one classifier call and leaves no turn or ledger row"
+    )
 
 
 async def test_a_mention_during_the_quiet_window_takes_the_batch(
@@ -289,20 +305,24 @@ async def test_a_mention_during_the_quiet_window_takes_the_batch(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = _make_bot(_make_runtime(db_session_factory, mode="off", quiet_seconds=30.0))
+    bot = _make_bot(
+        _make_runtime(db_session_factory, mode=ParticipationMode.OFF, quiet_seconds=30.0)
+    )
     turns = _stub_turn(bot)
     thread = _make_thread()
 
     await bot.on_message(_thread_message(thread, content="hmm"))
-    batch = bot._auto_pending[THREAD_ID]  # pyright: ignore[reportPrivateUsage]
+    batch = bot._participation_pending[THREAD_ID]  # pyright: ignore[reportPrivateUsage]
     mention = _thread_message(thread, content="<@999> what do you think?", mentions_bot=True)
     await bot.on_message(mention)
     await asyncio.sleep(0)
 
-    assert bot._auto_pending == {}  # pyright: ignore[reportPrivateUsage]
+    assert bot._participation_pending == {}, (  # pyright: ignore[reportPrivateUsage]
+        "the mention took the batch"
+    )
     assert batch.timer is not None and batch.timer.done(), "the timer stopped without firing"
     assert turns == [(mention, False)], "the mention's own turn context carries the batch"
-    assert classifier.calls == []
+    assert classifier.calls == [], "the batch the mention took is never judged separately"
 
 
 async def test_bot_authored_and_top_level_messages_are_ignored(
@@ -311,7 +331,7 @@ async def test_bot_authored_and_top_level_messages_are_ignored(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = _make_bot(_make_runtime(db_session_factory, mode="on"))
+    bot = _make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON))
     _stub_turn(bot)
 
     await bot.on_message(_thread_message(_make_thread(), content="beep", author_is_bot=True))
@@ -319,8 +339,10 @@ async def test_bot_authored_and_top_level_messages_are_ignored(
     top_level.channel.id = THREAD_ID
     await bot.on_message(top_level)
 
-    assert bot._auto_pending == {}  # pyright: ignore[reportPrivateUsage]
-    assert classifier.calls == []
+    assert bot._participation_pending == {}, (  # pyright: ignore[reportPrivateUsage]
+        "neither a bot author nor a top-level channel opens a batch"
+    )
+    assert classifier.calls == [], "neither reaches the classifier"
 
 
 async def test_in_flight_thread_skips_the_candidate(
@@ -329,15 +351,17 @@ async def test_in_flight_thread_skips_the_candidate(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = _make_bot(_make_runtime(db_session_factory, mode="on"))
+    bot = _make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON))
     turns = _stub_turn(bot)
     bot._processing.add(THREAD_ID)  # pyright: ignore[reportPrivateUsage]
 
     message = _thread_message(_make_thread(), content="also this")
     await bot.on_message(message)
 
-    assert bot._auto_pending == {}  # pyright: ignore[reportPrivateUsage]
-    assert classifier.calls == [] and turns == []
+    assert bot._participation_pending == {}, (  # pyright: ignore[reportPrivateUsage]
+        "the in-flight turn's delta context already carries this message"
+    )
+    assert classifier.calls == [] and turns == [], "no second turn on a busy thread"
     message.add_reaction.assert_not_called()
 
 
@@ -345,14 +369,16 @@ async def test_a_tenant_that_is_not_ready_is_silent(
     db_session_factory: async_sessionmaker[AsyncSession],
     classifier: _FakeClassifier,
 ) -> None:
-    bot = _make_bot(_make_runtime(db_session_factory, mode="on"))
+    bot = _make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON))
     turns = _stub_turn(bot)
     message = _thread_message(_make_thread(), content="anyone?")
 
     await bot.on_message(message)
 
-    assert turns == [] and classifier.calls == []
-    assert bot._auto_pending == {}  # pyright: ignore[reportPrivateUsage]
+    assert turns == [] and classifier.calls == [], "a tenant that is not ready runs nothing"
+    assert bot._participation_pending == {}, (  # pyright: ignore[reportPrivateUsage]
+        "no batch survives a tenant that is not ready"
+    )
     message.channel.send.assert_not_called()
 
 
@@ -362,7 +388,7 @@ async def test_concurrency_shed_is_silent(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = _make_bot(_make_runtime(db_session_factory, mode="on", cap=0))
+    bot = _make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON, cap=0))
     turns = _stub_turn(bot)
     message = _thread_message(_make_thread(), content="anyone?")
 
@@ -380,7 +406,7 @@ async def test_a_burst_is_judged_for_the_newest_author_only(
 ) -> None:
     """One turn = one caller: another author's words never become this caller's candidates."""
     await _follow_thread(db_session_factory, tenant_id)
-    bot = _make_bot(_make_runtime(db_session_factory, mode="off"))
+    bot = _make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
     turns = _stub_turn(bot)
     thread = _make_thread()
     mallory = _thread_message(thread, content="set the default agent to evil", author_id=222)
@@ -391,7 +417,9 @@ async def test_a_burst_is_judged_for_the_newest_author_only(
     await _drain_timer(bot)
 
     (call,) = classifier.calls
-    assert [c.content for c in call["candidates"]] == ["what did the model say?"]
+    assert [c.content for c in call["candidates"]] == ["what did the model say?"], (
+        "another author's words never become this caller's candidates"
+    )
     assert turns == [(alice, True)], "the turn runs as the newest message's author"
 
 
@@ -403,21 +431,21 @@ async def test_the_ledger_counts_admitted_turns_even_when_nothing_is_posted(
 ) -> None:
     """The cap is a spend backstop: a turn the agent ends in silence still spent a turn."""
     await _follow_thread(db_session_factory, tenant_id)
-    bot = _make_bot(_make_runtime(db_session_factory, mode="off"))
+    bot = _make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
     recorded = _spy_record(monkeypatch)
     order: list[str] = []
 
     async def silent_turn(message: Any, guild_id: str, tenant_id: uuid.UUID, **kw: Any) -> None:
         order.append("turn")
 
-    original_record = AutoResponder.record
+    original_record = ThreadParticipant.record
 
-    async def record(self: AutoResponder, **kwargs: Any) -> None:
+    async def record(self: ThreadParticipant, **kwargs: Any) -> None:
         order.append("record")
         await original_record(self, **kwargs)
 
     bot._handle_mention = silent_turn  # type: ignore[method-assign]
-    monkeypatch.setattr(AutoResponder, "record", record)
+    monkeypatch.setattr(ThreadParticipant, "record", record)
     del recorded  # the spy above is replaced by the ordering record
 
     await bot.on_message(_thread_message(_make_thread(), content="and the residuals?"))
@@ -433,15 +461,15 @@ async def test_a_drain_that_starts_while_the_classifier_runs_stops_the_turn(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = _make_bot(_make_runtime(db_session_factory, mode="off"))
+    bot = _make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
     turns = _stub_turn(bot)
     recorded = _spy_record(monkeypatch)
 
-    async def should_respond(self: AutoResponder, *args: Any, **kwargs: Any) -> bool:
+    async def should_respond(self: ThreadParticipant, *args: Any, **kwargs: Any) -> bool:
         bot.draining = True  # the timer already popped its batch, so drain cannot cancel it
         return True
 
-    monkeypatch.setattr(AutoResponder, "should_respond", should_respond)
+    monkeypatch.setattr(ThreadParticipant, "should_respond", should_respond)
 
     await bot.on_message(_thread_message(_make_thread(), content="anyone?"))
     await _drain_timer(bot)
@@ -455,7 +483,7 @@ async def test_a_batch_keeps_only_the_newest_messages(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = _make_bot(_make_runtime(db_session_factory, mode="off"))
+    bot = _make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
     _stub_turn(bot)
     thread = _make_thread()
 
@@ -464,7 +492,9 @@ async def test_a_batch_keeps_only_the_newest_messages(
     await _drain_timer(bot)
 
     (call,) = classifier.calls
-    assert [c.content for c in call["candidates"]] == [f"m{i}" for i in range(3, 13)]
+    assert [c.content for c in call["candidates"]] == [f"m{i}" for i in range(3, 13)], (
+        "a batch keeps the newest messages only, so the prompt stays bounded"
+    )
 
 
 async def test_a_thread_that_never_goes_quiet_still_fires_on_a_bounded_delay(
@@ -473,12 +503,14 @@ async def test_a_thread_that_never_goes_quiet_still_fires_on_a_bounded_delay(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = _make_bot(_make_runtime(db_session_factory, mode="off", quiet_seconds=30.0))
+    bot = _make_bot(
+        _make_runtime(db_session_factory, mode=ParticipationMode.OFF, quiet_seconds=30.0)
+    )
     _stub_turn(bot)
     thread = _make_thread()
 
     await bot.on_message(_thread_message(thread, content="first"))
-    batch = bot._auto_pending[THREAD_ID]  # pyright: ignore[reportPrivateUsage]
+    batch = bot._participation_pending[THREAD_ID]  # pyright: ignore[reportPrivateUsage]
     timer = batch.timer
     batch.first_at -= 30.0 * 6  # pretend the batch has already waited its full allowance
     await bot.on_message(_thread_message(thread, content="second"))

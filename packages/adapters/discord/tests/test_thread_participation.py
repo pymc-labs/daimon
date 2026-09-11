@@ -1,4 +1,4 @@
-"""Tests for `AutoResponder` -- the Discord shell around the thread-participation decision.
+"""Tests for `ThreadParticipant` -- the Discord shell around the thread-participation decision.
 
 Real Postgres for the scope rows and the ledger; a fake `discord.Thread` for
 chat history; the classifier call is replaced by a recording fake so each test
@@ -18,8 +18,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
-from daimon.adapters.discord import auto_respond
-from daimon.adapters.discord.auto_respond import AutoResponder
+from daimon.adapters.discord import thread_participation
+from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores import thread_participation as store
@@ -91,12 +91,14 @@ class _FakeClassifier:
 @pytest.fixture
 def classifier(monkeypatch: pytest.MonkeyPatch) -> _FakeClassifier:
     fake = _FakeClassifier()
-    monkeypatch.setattr(auto_respond, "classify", fake)
+    monkeypatch.setattr(thread_participation, "classify", fake)
     return fake
 
 
-def _responder(sessionmaker: async_sessionmaker[AsyncSession], **overrides: Any) -> AutoResponder:
-    return AutoResponder(
+def _responder(
+    sessionmaker: async_sessionmaker[AsyncSession], **overrides: Any
+) -> ThreadParticipant:
+    return ThreadParticipant(
         settings=ThreadParticipationSettings(**overrides),
         sessionmaker=sessionmaker,
         anthropic=MagicMock(),
@@ -182,18 +184,19 @@ async def test_rate_limited_thread_skips_without_a_classifier_call(
             created_at=datetime.now(UTC) - timedelta(minutes=10 * (i + 1)),
         )
     await db_session.commit()
+    burst = _candidates("and again?")
 
     assert (
         await _responder(db_session_factory, mode="on", max_per_hour=2).should_respond(
-            _thread([]), _candidates("and again?"), tenant_id=tenant.id, resolved=ON_THREAD
+            _thread([]), burst, trigger=burst[-1], tenant_id=tenant.id, resolved=ON_THREAD
         )
         is False
-    )
+    ), "a thread at its hourly cap stays silent"
     assert classifier.calls == [], "a pre-classifier skip must not spend a model call"
 
     assert (
         await _responder(db_session_factory, mode="on", max_per_hour=3).should_respond(
-            _thread([]), _candidates("and again?"), tenant_id=tenant.id, resolved=ON_THREAD
+            _thread([]), burst, trigger=burst[-1], tenant_id=tenant.id, resolved=ON_THREAD
         )
         is True
     ), "rows older than the window aside, one slot left is enough"
@@ -215,10 +218,10 @@ async def test_a_burst_is_one_classifier_call_over_the_window_around_it(
 
     assert (
         await _responder(db_session_factory, mode="on").should_respond(
-            thread, candidates, tenant_id=tenant.id, resolved=ON_THREAD
+            thread, candidates, trigger=candidates[-1], tenant_id=tenant.id, resolved=ON_THREAD
         )
         is True
-    )
+    ), "an on thread with a fresh burst reaches the classifier"
     (call,) = classifier.calls
     assert call["recent"] == [
         ClassifierMessage("user-111", "fit this", is_bot=False),
@@ -227,8 +230,8 @@ async def test_a_burst_is_one_classifier_call_over_the_window_around_it(
     assert [c.content for c in call["candidates"]] == [
         "so what does the posterior look like?",
         "and the prior?",
-    ]
-    assert call["model"] == "claude-haiku-4-5"
+    ], "the whole burst is judged in one call, in order"
+    assert call["model"] == "claude-haiku-4-5", "the configured classifier model decides"
 
 
 async def test_classifier_silence_is_final(
@@ -239,14 +242,15 @@ async def test_classifier_silence_is_final(
     classifier.decision = "silence"
     tenant = await _funded_tenant(db_session)
     await db_session.commit()
+    burst = _candidates("thanks!")
 
     assert (
         await _responder(db_session_factory, mode="on").should_respond(
-            _thread([]), _candidates("thanks!"), tenant_id=tenant.id, resolved=ON_THREAD
+            _thread([]), burst, trigger=burst[-1], tenant_id=tenant.id, resolved=ON_THREAD
         )
         is False
-    )
-    assert len(classifier.calls) == 1
+    ), "a silence verdict is the end of it"
+    assert len(classifier.calls) == 1, "silence still costs exactly one classifier call"
 
 
 async def test_a_mode_that_is_not_on_never_reaches_the_classifier(
@@ -256,17 +260,19 @@ async def test_a_mode_that_is_not_on_never_reaches_the_classifier(
 ) -> None:
     tenant = await _funded_tenant(db_session)
     await db_session.commit()
+    burst = _candidates("hello?")
 
     assert (
         await _responder(db_session_factory, mode="on").should_respond(
             _thread([]),
-            _candidates("hello?"),
+            burst,
+            trigger=burst[-1],
             tenant_id=tenant.id,
             resolved=ResolvedParticipation(ParticipationMode.OFF, "deployment"),
         )
         is False
-    )
-    assert classifier.calls == []
+    ), "only an `on` cascade may reply unprompted"
+    assert classifier.calls == [], "a mode that is not on must not spend a model call"
 
 
 async def test_record_writes_one_ledger_row(
@@ -290,7 +296,7 @@ async def test_record_writes_one_ledger_row(
                 since=datetime.now(UTC) - timedelta(minutes=1),
             )
             == 1
-        )
+        ), "record appends exactly one ledger row for this thread"
 
 
 async def test_a_depleted_tenant_never_pays_for_the_classifier(
@@ -304,7 +310,11 @@ async def test_a_depleted_tenant_never_pays_for_the_classifier(
 
     assert (
         await _responder(db_session_factory, mode="on").should_respond(
-            _thread(candidates), candidates, tenant_id=tenant.id, resolved=ON_THREAD
+            _thread(candidates),
+            candidates,
+            trigger=candidates[-1],
+            tenant_id=tenant.id,
+            resolved=ON_THREAD,
         )
         is False
     ), "a tenant the mention path would refuse is refused here too"
@@ -321,7 +331,11 @@ async def test_the_classifier_call_is_metered_to_the_caller(
     candidates = _candidates("what about the prior?")
 
     await _responder(db_session_factory, mode="on").should_respond(
-        _thread(candidates), candidates, tenant_id=tenant.id, resolved=ON_THREAD
+        _thread(candidates),
+        candidates,
+        trigger=candidates[-1],
+        tenant_id=tenant.id,
+        resolved=ON_THREAD,
     )
 
     async with db_session_factory() as session:

@@ -29,9 +29,8 @@ from daimon.core.stores.thread_participation import (
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.thread_classifier import classify
 from daimon.core.thread_participation import (
-    AutoRespondSnapshot,
     ClassifierMessage,
-    ParticipationMode,
+    ParticipationSnapshot,
     ResolvedParticipation,
     Skip,
     decide_post_classifier,
@@ -49,7 +48,7 @@ PLATFORM = "discord"
 RATE_LIMIT_WINDOW = timedelta(hours=1)
 
 
-class AutoResponder:
+class ThreadParticipant:
     def __init__(
         self,
         *,
@@ -82,7 +81,7 @@ class AutoResponder:
                 thread_id=str(thread.id),
             )
         return resolve_participation(
-            deployment=ParticipationMode(self._settings.mode),
+            deployment=self._settings.mode,
             workspace=modes.workspace,
             channel=modes.channel,
             thread=modes.thread,
@@ -93,6 +92,7 @@ class AutoResponder:
         thread: discord.Thread,
         candidates: list[discord.Message],
         *,
+        trigger: discord.Message,
         tenant_id: uuid.UUID,
         resolved: ResolvedParticipation,
     ) -> bool:
@@ -102,8 +102,12 @@ class AutoResponder:
         caller the turn would run as: a tenant that could not be admitted
         must not pay for the question of whether to admit it. The call that
         does run is metered to the tenant like any other model spend.
+
+        `trigger` is the message the turn would run as -- passed in rather
+        than read off the end of `candidates`, which the caller filters by
+        author and could hand over empty.
         """
-        caller_id = str(candidates[-1].author.id)
+        caller_id = str(trigger.author.id)
         async with self._sessionmaker() as session:
             in_window = await count_auto_responses_since(
                 session,
@@ -113,7 +117,7 @@ class AutoResponder:
                 since=datetime.now(UTC) - RATE_LIMIT_WINDOW,
             )
         pre = decide_pre_classifier(
-            AutoRespondSnapshot(
+            ParticipationSnapshot(
                 mode=resolved.mode,
                 auto_responses_in_window=in_window,
                 max_per_window=self._settings.max_per_hour,
