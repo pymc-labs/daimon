@@ -657,3 +657,28 @@ def test_hub_settings_read_from_nested_env(monkeypatch: pytest.MonkeyPatch) -> N
     settings = load_settings(_env_file=None)
     assert settings.hub.slack_client_id == "slack-id", f"got {settings.hub.slack_client_id!r}"
     assert settings.hub.slack_configured is True, "env-provided id+secret must configure slack"
+
+
+def test_thread_naming_defaults_on_with_bounded_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_THREAD_NAMING__ENABLED", raising=False)
+    settings = load_settings(_env_file=None)
+    assert settings.thread_naming.enabled is True, "auto thread naming is on by default"
+    assert settings.thread_naming.max_input_chars == 2000, (
+        "the naming prompt is bounded to 2000 chars of the opening message by default"
+    )
+
+
+def test_thread_naming_parsed_from_top_level_nested_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_THREAD_NAMING__ENABLED", "false")
+    monkeypatch.setenv("DAIMON_THREAD_NAMING__MAX_INPUT_CHARS", "500")
+    settings = load_settings(_env_file=None)
+    assert settings.thread_naming.enabled is False, (
+        "DAIMON_THREAD_NAMING__ENABLED=false must turn the feature off"
+    )
+    assert settings.thread_naming.max_input_chars == 500, (
+        "DAIMON_THREAD_NAMING__MAX_INPUT_CHARS must override the input bound"
+    )
