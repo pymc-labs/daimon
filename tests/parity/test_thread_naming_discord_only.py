@@ -12,8 +12,10 @@ scenario test.
 from __future__ import annotations
 
 import importlib.util
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import daimon.adapters.slack
 import daimon.core.thread_naming
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.channels import register_channel_tools
@@ -27,6 +29,21 @@ def test_no_slack_thread_naming_module_exists() -> None:
     assert importlib.util.find_spec("daimon.adapters.slack.thread_naming") is None, (
         "a Slack thread-naming module has appeared -- Slack threads have no title, so "
         "if Slack ever grows one, replace this exemption record rather than deleting it"
+    )
+
+
+def test_slack_adapter_source_never_reaches_for_thread_naming() -> None:
+    """A Slack naming path would most likely be wired into app.py rather than
+    a new module, so the module check above is not enough on its own."""
+    slack_root = Path(daimon.adapters.slack.__file__).parent
+    offenders = sorted(
+        str(path.relative_to(slack_root))
+        for path in slack_root.rglob("*.py")
+        if "thread_naming" in path.read_text() or "rename_thread" in path.read_text()
+    )
+    assert offenders == [], (
+        f"Slack adapter files reference thread naming: {offenders} -- Slack threads have no "
+        "title; if that changed, replace this record rather than deleting it"
     )
 
 
