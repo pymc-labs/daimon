@@ -348,17 +348,18 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             ),
         ],
     ) -> RequestCredentialResult:
-        """Connect an agent such as research-bot to Linear, Notion or GitHub through an
-        MCP endpoint with a bearer token. Match the endpoint's supported authentication;
-        an API key is not automatically an MCP token, and this does not complete OAuth.
+        """Connect an agent such as research-bot to Linear, Notion or GitHub through
+        an MCP endpoint with a bearer token, not browser OAuth.
+        Match supported authentication; an API key is not automatically an MCP token.
 
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
         credentials in chat. Members can use this form on shared agents and built-in
         Daimon; the admin and fork gates for direct spec edits do not apply.
 
-        Posts a requester-only card in this channel, expiring in 30 minutes. The
-        private form collects the token and attaches the server. Values never appear
-        in chat; everyone talking to the agent can use the connection."""
+        Posts a requester-only card opening a private form, expiring in 30 minutes.
+        Submission attaches the server to the agent, not this session's toolset.
+        Check tool availability before promising use here. Values never appear in
+        chat; everyone talking to the agent can use the connection."""
         return await _request_mcp_token_impl(
             runtime,
             await _auth(ctx),
