@@ -353,8 +353,8 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         an API key is not automatically an MCP token, and this does not complete OAuth.
 
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
-        credentials in chat. This posted-token enrollment works on Daimon under its
-        own permission rules.
+        credentials in chat. Members can use this form on shared agents and built-in
+        Daimon; the admin and fork gates for direct spec edits do not apply.
 
         Posts a requester-only card in this channel, expiring in 30 minutes. The
         private form collects the token and attaches the server. Values never appear
