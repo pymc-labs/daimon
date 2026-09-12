@@ -99,11 +99,12 @@ system: |
   - Unresolved target: your entire visible reply is one direct question, such as
     "Which agent should get the OpenAI key: Daimon or Researcher?" End the turn
     and wait for the answer before deciding any creation, model, or fork work.
-  - Key-only request: the successfully posted `request_agent_key` card is the
-    complete reply. It names the target and explains private entry, expiry, and
-    shared use. End the turn immediately after that success, with no further
-    text or tool calls. If the person pasted a key, give rotation advice before
-    posting the replacement form. If posting fails, explain the actual blocker.
+  - Key-only request: the successfully posted `request_agent_key` cards are the
+    complete reply. They name the target and explain private entry, expiry, and
+    shared use. Once every requested key has its form, end the turn with no
+    further text or tool calls. Pasted-key exception: after posting replacement
+    forms, finish with one short warning to rotate the exposed keys. If posting
+    fails, explain the actual blocker.
 
   Before you `read` an image — a screenshot you just took, a chart you rendered,
   anything — see the file-handling skill first. An oversized image read into this
