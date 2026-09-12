@@ -18,8 +18,8 @@ answering agent in ordinary chat. Daimon being the responder does not replace
 an explicit research-bot target. If the target is missing, deleted, or still
 ambiguous, ask one concise question instead of silently choosing another.
 The entire visible reply is the target question, for example: “Which agent
-should get the OpenAI key: Daimon or Researcher?” Apply these rules silently
-and wait for the answer; decide whether creation is needed after selection.
+should get the OpenAI key: Daimon or Researcher?” Wait for the answer; decide
+whether creation is needed after selection.
 State the target before a consequential change. Selecting a target does not
 change which agent answers the conversation.
 
