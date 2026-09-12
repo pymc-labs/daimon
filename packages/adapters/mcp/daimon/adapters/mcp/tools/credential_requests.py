@@ -318,7 +318,8 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
 
         Posts a card in this channel. Only the requester can open its private form;
         it expires in 30 minutes. Values never appear in chat. Anyone who talks to
-        the agent can use added keys, including on Daimon itself without a fork."""
+        the agent can use added keys. Members can add keys to the selected agent,
+        including built-in Daimon."""
         return await _request_agent_key_impl(
             runtime,
             await _auth(ctx),
