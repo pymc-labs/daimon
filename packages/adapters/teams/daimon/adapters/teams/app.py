@@ -282,12 +282,24 @@ class DirectCoreTurnDispatcher:
                     )
                     await watermark_session.commit()
         except asyncio.CancelledError:
-            # drain() cancels stragglers at shutdown (http_service lifespan).
-            # The progress card stays frozen mid-render — that is the case the
-            # next boot's sweep exists for, so no terminal render is attempted
-            # here and the marker MUST survive for the sweep to find the row.
-            cancelled = True
-            log.info("teams.turn.cancelled", conversation_id=activity.conversation_id)
+            # Classify by WHO cancelled, not by the exception type. Only a
+            # cancel() request on THIS dispatcher task — drain() reaping
+            # stragglers at shutdown (http_service lifespan) — means the
+            # process is going away: the card stays frozen mid-render and
+            # the marker MUST survive so the next boot's sweep can edit it.
+            # A CancelledError that merely propagated out of a dependency
+            # (a timeout, an inner task, a library) while this task's
+            # cancellation count is zero is an ordinary failure in a
+            # still-running process — render the failure card and let the
+            # marker clear below; nothing else ever will.
+            task = asyncio.current_task()
+            if task is not None and task.cancelling() > 0:
+                cancelled = True
+                log.info("teams.turn.cancelled", conversation_id=activity.conversation_id)
+                raise
+            log.warning("teams.turn.failed", exc_info=True)
+            with contextlib.suppress(Exception):
+                await lifecycle.close_with_text(FAILURE_MESSAGE)
             raise
         except Exception:
             # Anything past post_initial must not leave the progress message
