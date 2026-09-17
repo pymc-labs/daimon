@@ -1,0 +1,35 @@
+[project]
+name = "daimon-adapter-teams"
+version = "0.1.0"
+description = "Daimon Microsoft Teams adapter"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "PyMC Labs" }]
+dependencies = [
+    "anthropic>=0.96",
+    "asyncpg>=0.29",
+    "daimon-core",
+    "fastapi>=0.115",
+    # Pinned below 2.1: 2.1.0 reworked the stream/activity surfaces this
+    # adapter is written against (`ActivitySender.create_stream` was removed).
+    # Relaxing the pin requires a verified port of the stream identity and
+    # close() semantics this package depends on.
+    "microsoft-teams-apps>=2.0.16,<2.1",
+    "sentry-sdk>=2.61",
+    "sqlalchemy[asyncio]>=2",
+    "structlog>=24",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+daimon-teams = "daimon.adapters.teams.__main__:run"
+
+[project.urls]
+Repository = "https://github.com/pymc-labs/daimon"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["daimon"]
