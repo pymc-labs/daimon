@@ -138,3 +138,48 @@ async def test_failed_turn_clears_the_marker(
     assert any(FAILURE_MESSAGE in card.model_dump_json() for card in ctx.stream.emitted), (
         "the failure render must have replaced the progress card"
     )
+
+
+@pytest.mark.asyncio
+async def test_internal_cancelled_error_does_not_strand_the_marker(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A CancelledError raised INSIDE a dependency — a timeout, an inner
+    task, a library — is not drain() cancellation: nobody called
+    ``task.cancel()`` on the dispatcher task, the process keeps running,
+    and the boot sweep is startup-only. The marker must clear exactly the
+    way an ordinary failure's does."""
+    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    dispatcher, ctx, activity = make_dispatch_target(db_session_factory)
+
+    marked_ids: list[uuid.UUID] = []
+    runner_entered = asyncio.Event()
+
+    async def _self_cancelling_run_prepared(*args: Any, **kwargs: Any) -> Any:
+        runner_entered.set()
+        raise asyncio.CancelledError  # dependency-originated, not task.cancel()
+
+    with (
+        patched_turn_pipeline(marked_ids),
+        patch(
+            "daimon.adapters.teams.app.run_prepared_turn", new_callable=AsyncMock
+        ) as mock_run_prepared,
+    ):
+        mock_run_prepared.side_effect = _self_cancelling_run_prepared
+        await dispatcher.dispatch(ctx, activity)
+        await asyncio.wait_for(runner_entered.wait(), timeout=10)
+        assert marked_ids, "the turn must have passed mark_turn_active"
+        # drain() is never asked to cancel anything — the task has already
+        # ended on the dependency's own CancelledError.
+        await dispatcher.drain(timeout=30)
+
+    async with db_session_factory() as session:
+        assert await list_orphaned_turns(session, platform="teams") == [], (
+            "a self-raised CancelledError must not masquerade as drain "
+            "cancellation and leave a frozen marker until some future "
+            "process restart"
+        )
+    assert any(FAILURE_MESSAGE in card.model_dump_json() for card in ctx.stream.emitted), (
+        "a dependency-originated CancelledError is an ordinary failure — "
+        "the failure card must have replaced the progress card"
+    )
