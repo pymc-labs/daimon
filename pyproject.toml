@@ -12,6 +12,7 @@ dependencies = [
     "daimon-adapter-discord",
     "daimon-adapter-scheduler",
     "daimon-adapter-slack",
+    "daimon-adapter-teams",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +33,7 @@ daimon-adapter-mcp = { workspace = true }
 daimon-adapter-discord = { workspace = true }
 daimon-adapter-scheduler = { workspace = true }
 daimon-adapter-slack = { workspace = true }
+daimon-adapter-teams = { workspace = true }
 daimon-testing = { workspace = true }
 daimon-mux = { workspace = true }
 
