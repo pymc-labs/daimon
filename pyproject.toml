@@ -55,7 +55,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "PGH", "ANN401", "RUF100"]
 "**/tests/**" = ["E501", "ANN401"]
 
 [tool.pyright]
-include = ["packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host"]
+include = ["packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host"]
 stubPath = "typings"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
@@ -79,7 +79,7 @@ forbidden_modules = ["daimon.adapters"]
 [[tool.importlinter.contracts]]
 name = "Adapters must not import each other"
 type = "independence"
-modules = ["daimon.adapters.cli", "daimon.adapters.mcp", "daimon.adapters.discord", "daimon.adapters.scheduler", "daimon.adapters.slack"]
+modules = ["daimon.adapters.cli", "daimon.adapters.mcp", "daimon.adapters.discord", "daimon.adapters.scheduler", "daimon.adapters.slack", "daimon.adapters.teams"]
 
 [[tool.importlinter.contracts]]
 name = "ORM module is private to stores and defaults"
@@ -221,7 +221,7 @@ forbidden_modules = ["daimon"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-testpaths = ["packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/testing/tests", "packages/mux/tests", "tests/integration", "tests/parity", "apps/notebook-host/tests", "apps/report-host/tests"]
+testpaths = ["packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/testing/tests", "packages/mux/tests", "tests/integration", "tests/parity", "apps/notebook-host/tests", "apps/report-host/tests"]
 addopts = "--import-mode=importlib -m 'not contract and not slow'"
 markers = [
     "contract: live MA API tests -- opt-in only, never gate CI",
