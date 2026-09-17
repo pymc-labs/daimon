@@ -12,9 +12,13 @@ look for in a pull request.
 - `packages/adapters/{mcp,discord,slack,scheduler}/` — platform adapters. Each
   owns one platform's I/O, rendering, and auth; adapters never import from
   each other.
+- `packages/mux/` — provider-agnostic managed-agent interface.
 - `packages/testing/` — shared test fixtures/harness.
 - `apps/notebook-host/` — standalone marimo notebook host service.
+- `apps/report-host/` — standalone report host service.
+- `plugin/` — Claude Code plugin (commands and skills).
 - `defaults/` — YAML sources for seeded agents, environments, and skills.
+- `docs/` — operator documentation.
 
 Dependency rule (enforced by `import-linter` in CI):
 
