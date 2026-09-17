@@ -21,6 +21,7 @@ members = [
     "daimon-adapter-mcp",
     "daimon-adapter-scheduler",
     "daimon-adapter-slack",
+    "daimon-adapter-teams",
     "daimon-core",
     "daimon-mux",
     "daimon-testing",
@@ -773,6 +774,7 @@ dependencies = [
     { name = "daimon-adapter-mcp" },
     { name = "daimon-adapter-scheduler" },
     { name = "daimon-adapter-slack" },
+    { name = "daimon-adapter-teams" },
     { name = "daimon-core" },
 ]
 
@@ -805,6 +807,7 @@ requires-dist = [
     { name = "daimon-adapter-mcp", extras = ["billing"], marker = "extra == 'billing'", editable = "packages/adapters/mcp" },
     { name = "daimon-adapter-scheduler", editable = "packages/adapters/scheduler" },
     { name = "daimon-adapter-slack", editable = "packages/adapters/slack" },
+    { name = "daimon-adapter-teams", editable = "packages/adapters/teams" },
     { name = "daimon-core", editable = "packages/core" },
 ]
 provides-extras = ["billing"]
@@ -1004,6 +1007,35 @@ requires-dist = [
 ]
 
 [[package]]
+name = "daimon-adapter-teams"
+version = "0.1.0"
+source = { editable = "packages/adapters/teams" }
+dependencies = [
+    { name = "anthropic" },
+    { name = "asyncpg" },
+    { name = "daimon-core" },
+    { name = "fastapi" },
+    { name = "microsoft-teams-apps" },
+    { name = "sentry-sdk" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "structlog" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = ">=0.96" },
+    { name = "asyncpg", specifier = ">=0.29" },
+    { name = "daimon-core", editable = "packages/core" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "microsoft-teams-apps", specifier = ">=2.0.16,<2.1" },
+    { name = "sentry-sdk", specifier = ">=2.61" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2" },
+    { name = "structlog", specifier = ">=24" },
+    { name = "uvicorn", specifier = ">=0.30" },
+]
+
+[[package]]
 name = "daimon-core"
 version = "0.2.0"
 source = { editable = "packages/core" }
@@ -1088,6 +1120,24 @@ requires-dist = [
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "starlette", specifier = ">=0.40" },
+]
+
+[[package]]
+name = "dependency-injector"
+version = "4.49.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d1/84/5e05c2997a196155b86446d48b9e5b2a055087c574746389fdc3c530f5b5/dependency_injector-4.49.1.tar.gz", hash = "sha256:b4614fa3731ffec00a381aebc1d17317b0a3a407aa679f164a3ea03c347de691", size = 1171204, upload-time = "2026-06-18T17:51:48.221Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/1e/9f3abdf0ac42cac1c319b210aa060669ea9d29f06caf00c27fe72fa5335c/dependency_injector-4.49.1-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:b1b71d6f500c001230a53e5bee01ea01c6d3bb2089f64ecc841b42672924a19a", size = 1771519, upload-time = "2026-06-18T17:50:58.476Z" },
+    { url = "https://files.pythonhosted.org/packages/68/20/fc1812f20ec75af2d4b5e391e93f15621af3102da46142e26177eb506b32/dependency_injector-4.49.1-cp310-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:10e481880b307a6a438c1cc7b0a1fa8754247239ef5a2e8fe82bd8a1e76e7682", size = 1854593, upload-time = "2026-06-18T17:51:02.069Z" },
+    { url = "https://files.pythonhosted.org/packages/32/ab/b1e1826aacc37d07ba0101230de7b5cbbb5ac6364b78ca3957f0a90d6a51/dependency_injector-4.49.1-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e05da5bc73a3e026f962a223672002934c0f415064b6e2c3db0b255e46c7b521", size = 1767354, upload-time = "2026-06-18T17:51:03.715Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/ab/1d873876e9adb612f8fba1e801820bf5a69cd7d864e01dca81651edd40f6/dependency_injector-4.49.1-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:5760390d295af0b605aacd02bb8ac2e9fe206f9c4fbe7770d0843a6cbfb9c2cd", size = 1748758, upload-time = "2026-06-18T17:51:05.287Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/ef/d715f4cd2e947fddc4c8763be1c4099793caf38aa1a099b6d621ecfeb768/dependency_injector-4.49.1-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:ba7e94e4323219c93dac35aabba7efa4e91c9afeac044b1d50bdc66a00a07238", size = 1845636, upload-time = "2026-06-18T17:51:07.023Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/32/03d1e5e0c6b79eaabf2ed4155302df05832e54789cc9f670cc62af20897b/dependency_injector-4.49.1-cp310-abi3-win32.whl", hash = "sha256:5a6e3a0df8cff636da3d7212473e30dff897c5bdbca2dd3049b5363012a495fa", size = 1548655, upload-time = "2026-06-18T17:51:08.721Z" },
+    { url = "https://files.pythonhosted.org/packages/93/51/ce3ca96314f93f44358523cb8cdf81c8c1e002b4e097141e460bc598c87f/dependency_injector-4.49.1-cp310-abi3-win_amd64.whl", hash = "sha256:153f6b8d1db35d1fc9b001e41564a47ab2a7708038fecefadf3afada8ec7f814", size = 1676934, upload-time = "2026-06-18T17:51:10.465Z" },
 ]
 
 [[package]]
@@ -2382,6 +2432,64 @@ wheels = [
 ]
 
 [[package]]
+name = "microsoft-teams-api"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "microsoft-teams-cards" },
+    { name = "microsoft-teams-common" },
+    { name = "opentelemetry-api" },
+    { name = "pydantic" },
+    { name = "pyjwt", extra = ["crypto"] },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1a/a2/2a6068b4d7acf05fc041dedaef4a98c4a6573952b81fcdaf2f495419ce83/microsoft_teams_api-2.1.0.tar.gz", hash = "sha256:eb5b36d36c18b29f82ac37687d1d3330d176595c6a354dd41a605475c895c064", size = 64496, upload-time = "2026-09-16T17:05:47.375Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/55/5c/b15a7e235a0a3528dc9e3cc19891dfbc39c7d919b7a5c00c18c0e36d894b/microsoft_teams_api-2.1.0-py3-none-any.whl", hash = "sha256:8293a228839c8a99ec2ac49cca4c34d34366d86d12b8f5dec4fa33fe123e41d2", size = 174473, upload-time = "2026-09-16T17:05:55.162Z" },
+]
+
+[[package]]
+name = "microsoft-teams-apps"
+version = "2.0.16"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "dependency-injector" },
+    { name = "fastapi" },
+    { name = "microsoft-teams-api" },
+    { name = "microsoft-teams-common" },
+    { name = "msal" },
+    { name = "pydantic-settings" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "python-dotenv" },
+    { name = "uvicorn" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e7/95/d493e90506c0c884af335380b156e8e0c8e2b3c1279362cb5824b9de4567/microsoft_teams_apps-2.0.16.tar.gz", hash = "sha256:b6c0f1fab12699ce4bc3deab31e1382f0d71fa3e369f786178922032cac07064", size = 111315, upload-time = "2026-08-19T20:51:17.444Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/03/45ad7318ac57bace48b2f13184e42ae63472dc9e77bebb2d9df183f75e6c/microsoft_teams_apps-2.0.16-py3-none-any.whl", hash = "sha256:832028da00f8e4e3c498644bfa0ff21b89cde5ff443c736852841586062a9a30", size = 80849, upload-time = "2026-08-19T20:51:23.268Z" },
+]
+
+[[package]]
+name = "microsoft-teams-cards"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/06/43/424e5cea49a22ea22b378116ca9cb305ea52f14ded4c6c4b462cf0f28c4a/microsoft_teams_cards-2.1.0.tar.gz", hash = "sha256:f4857cc82836744ce1fb12d057aa9be55511aa6a7044658e5b7174af18bae760", size = 27851, upload-time = "2026-09-16T17:05:50.693Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/98/87/2ed9e5d532b1cbf8fb287fbbf59cfa9a3d4a874eeee2184dcdf8ae5323d6/microsoft_teams_cards-2.1.0-py3-none-any.whl", hash = "sha256:c984882fa8f922ace29f6f4981054f2ac5761ce4135ca79053e3189d6d963650", size = 29521, upload-time = "2026-09-16T17:05:58.577Z" },
+]
+
+[[package]]
+name = "microsoft-teams-common"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0c/4a/2287dd7e4530129b1f35940cde2e4050606164d83823bb47ca719b9cec1b/microsoft_teams_common-2.1.0.tar.gz", hash = "sha256:b9babe4ac3d433a19d1f3f5f528849d8e6def0b65f664a4d2509e9bc345baa4a", size = 12071, upload-time = "2026-09-16T17:05:51.885Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a1/3d/45c94e518b2a96a878958bacb76d5402db3406e2105419b31c4f7c2406bc/microsoft_teams_common-2.1.0-py3-none-any.whl", hash = "sha256:37e4fe660df933a07c1b480e9e1d4cb1361a6a2e716638e98fb1ab674fd6d7a6", size = 17733, upload-time = "2026-09-16T17:05:59.485Z" },
+]
+
+[[package]]
 name = "minikanren"
 version = "1.0.5"
 source = { registry = "https://pypi.org/simple" }
@@ -2405,6 +2513,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/f7/139d22fef48ac78127d18e01d80cf1be40236ae489769d17f35c3d425293/more_itertools-11.0.2.tar.gz", hash = "sha256:392a9e1e362cbc106a2457d37cabf9b36e5e12efd4ebff1654630e76597df804", size = 144659, upload-time = "2026-04-09T15:01:33.297Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/98/6af411189d9413534c3eb691182bff1f5c6d44ed2f93f2edfe52a1bbceb8/more_itertools-11.0.2-py3-none-any.whl", hash = "sha256:6e35b35f818b01f691643c6c611bc0902f2e92b46c18fffa77ae1e7c46e912e4", size = 71939, upload-time = "2026-04-09T15:01:32.21Z" },
+]
+
+[[package]]
+name = "msal"
+version = "1.39.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bb/85/747d28986a44b715cc51cf57aa021c8fd94e9614064261ceec77320e8b0b/msal-1.39.0.tar.gz", hash = "sha256:6ab7de335e6d7f5717e2c7e1dbf86e4dda2f6acf3c56773b78dc53ebc6395b5f", size = 205360, upload-time = "2026-09-17T16:07:45.1Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a4/32/178457385925ce301c7b3232bd85665d4df57da39568b62dcfc74031873f/msal-1.39.0-py3-none-any.whl", hash = "sha256:2d2577886906cd7293850dffa2da29119966c213bfc6ec0cecf8bf7621e1ca77", size = 131629, upload-time = "2026-09-17T16:07:46.722Z" },
 ]
 
 [[package]]
@@ -3816,8 +3938,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography" },
-    { name = "jeepney" },
+    { name = "cryptography", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "jeepney", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
