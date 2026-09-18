@@ -15,7 +15,9 @@ back into the thread.
 [![Checked with pyright](https://microsoft.github.io/pyright/img/pyright_badge.svg)](https://microsoft.github.io/pyright/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[Hosted version](https://daimon.decision.ai/) ·
+**[Add it to your server in one click →](https://daimon.decision.ai/)**
+or self-host it from this repo.
+
 [Self-hosting guide](docs/self-hosting.md) ·
 [Slack setup](docs/slack.md) ·
 [Claude Code plugin](plugin/README.md) ·
@@ -93,8 +95,9 @@ silent, check `docker compose logs discord`.
 
 The [self-hosting guide](docs/self-hosting.md) covers Discord permissions in
 detail, running without Docker, Slack, the Claude Code login mounts, chart
-storage and connecting MCP servers. The hosted version at
-[daimon.decision.ai](https://daimon.decision.ai/) needs no setup.
+storage and connecting MCP servers. Prefer to skip all of that? The hosted
+version at [daimon.decision.ai](https://daimon.decision.ai/) installs in one
+click, no API key or server required.
 
 ## How it works
 
@@ -129,9 +132,6 @@ goes idle.
 - One Discord guild or Slack workspace is one tenant. Isolation is enforced
   at the database `tenant_id` layer, so one Anthropic key can safely serve
   every install.
-
-Naming: `daimon` is the project. `Daimon` is the built-in default agent that
-each tenant starts with.
 
 ## Repository layout
 
@@ -172,7 +172,6 @@ Report vulnerabilities privately as described in
 ## About
 
 daimon is built by [PyMC Labs](https://www.pymc-labs.com), the team behind
-the PyMC project. If you want help deploying it or building on it, get in
-touch through [pymc-labs.com](https://www.pymc-labs.com).
+the PyMC project.
 
 Licensed under the [MIT License](LICENSE).
