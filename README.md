@@ -1,62 +1,57 @@
 <div align="center">
-  <img src="assets/daimon-data-scientist.jpg" alt="daimon, a small blue clay creature in a lab coat, presenting charts at a whiteboard" width="440">
+  <img src="assets/daimon-sticker.png" alt="daimon, a small blue creature in a white robe, cheering with both arms up" width="300">
 
 # daimon
 
-**Your team just hired a data scientist.**
+**The open source data science agent for Discord and Slack.**
 
-daimon is a collaborative data science agent in your team's Discord or Slack.
-It writes and runs code, fits Bayesian models with PyMC, and delivers charts
-and runnable notebooks in the thread.
+daimon joins your team's chat, writes and runs code, fits Bayesian models
+with [PyMC](https://www.pymc.io), and posts charts and runnable notebooks
+back into the thread.
 
 [![CI](https://github.com/pymc-labs/daimon/actions/workflows/ci.yml/badge.svg)](https://github.com/pymc-labs/daimon/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](pyproject.toml)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Checked with pyright](https://microsoft.github.io/pyright/img/pyright_badge.svg)](https://microsoft.github.io/pyright/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **[Add it to your server in one click →](https://daimon.decision.ai/)**
 or self-host it from this repo.
 
+[Self-hosting guide](docs/self-hosting.md) ·
+[Slack setup](docs/slack.md) ·
+[Claude Code plugin](plugin/README.md) ·
+[Changelog](CHANGELOG.md)
+
 </div>
 
-## It's yours. And it's open.
+## What it does
 
-Most chat bots are one agent shared across a workspace. daimon is
-many-to-many: you deploy it once, on your own Anthropic API key, and any
-number of Discord servers and Slack workspaces install it from that single
-deployment. Every install is isolated: one tenant, its own data, scoped to
-that server or workspace. Adding one takes about two minutes: invite the bot,
-`@mention` it, and it sets itself up. From there, everyone there can just ask
-it for things.
+- **Answers in the thread.** `@mention` the bot in a channel and it opens a
+  thread, runs the analysis, and replies with a fitted model, a chart, a
+  plain-English read on the uncertainty, and a [marimo](https://marimo.io)
+  notebook that reproduces the result.
+- **Works with the whole team.** Anyone in the server can follow up in the
+  same thread. Sessions keep their context across turns.
+- **Runs on a schedule.** Routines run recurring analyses headlessly and post
+  the results where you ask.
+- **Connects to your tools.** Ask it to connect Notion, Linear, GitHub or any
+  other MCP server. Token-based servers are shared per agent; OAuth servers
+  are connected per person.
+- **Reachable from Claude Code.** The bundled [plugin](plugin/README.md)
+  logs in through Slack or Discord OAuth and exposes every daimon you belong
+  to as an MCP server.
+- **One deployment, many communities.** Deploy once on your own Anthropic
+  API key. Any number of Discord servers and Slack workspaces can install
+  it, each as an isolated tenant with its own agent, memory and data.
 
-Built on [Anthropic Managed Agents](https://platform.claude.com/docs/en/managed-agents/quickstart)
-by [PyMC Labs](https://www.pymc-labs.com), the team behind the PyMC project.
+Everything is done in conversation. Slash commands (`/agent-setup`,
+`/routines`, `/billing`, `/privacy`, `/help`) exist for people who prefer
+them.
 
-> **Status:** early. Self-hosting works and is documented below — expect
-> rough edges and breaking changes while things settle. The hosted version at
-> [daimon.decision.ai](https://daimon.decision.ai/) is the zero-setup path.
+## Example prompts
 
-## It doesn't chat. It does the work.
-
-ChatGPT analyzes your data for you, alone, in a tab. daimon does it with your
-whole team, in the thread — and hands back a notebook anyone can run.
-
-- `@daimon` in a channel starts (or continues) a threaded conversation with
-  session continuity
-- Everything happens in conversation — setup, scheduling, billing: `@mention`
-  the bot and ask. Slash commands (`/agent-setup`, `/routines`, `/billing`,
-  `/privacy`, `/help`) still exist if you prefer them; setup and routines
-  require Discord's `Manage Server` permission
-- Scheduled routines: recurring agent runs dispatched headlessly
-- Slack adapter (early, not yet as battle-tested as Discord) with
-  per-workspace OAuth install and opt-in per-user access
-  ([`docs/slack.md`](docs/slack.md))
-- CLI and MCP adapters sharing the same core turn pipeline
-- Tenant isolation enforced at the database `tenant_id` layer, so one shared
-  Anthropic key can safely power every guild
-
-## What you can ask it
-
-> "Here's last quarter's sales export — we changed pricing in week 6. Did it
+> "Here's last quarter's sales export. We changed pricing in week 6. Did it
 > actually help?"
 
 > "Is variant B actually better than A, or is that just noise?"
@@ -65,27 +60,46 @@ whole team, in the thread — and hands back a notebook anyone can run.
 
 > "Every Monday at 9am, pull the weekend's numbers and post a summary here."
 
-Answers come back in the thread: a fitted model, a chart, a plain-English
-read on the uncertainty, and a runnable [marimo](https://marimo.io) notebook
-that reproduces the analysis.
+## Quickstart
+
+You need [Docker](https://docs.docker.com/get-docker/) and an Anthropic API
+key in a workspace dedicated to this deployment.
+
+1. Configure the environment.
+
+   ```bash
+   git clone https://github.com/pymc-labs/daimon.git && cd daimon
+   cp .env.example .env
+   ```
+
+   In `.env`, set `DAIMON_ANTHROPIC__API_KEY`, `DAIMON_MCP__JWT_SECRET` (any
+   random string), `DAIMON_MCP__PUBLIC_URL` (`http://localhost:8765/mcp` for
+   local use) and `POSTGRES_PASSWORD`.
+
+2. Create a Discord bot in the
+   [Developer Portal](https://discord.com/developers/applications), enable
+   the **Message Content Intent**, put its token in `.env` as
+   `DAIMON_DISCORD__BOT_TOKEN`, and invite it to a server you control.
+
+3. Start the stack.
+
+   ```bash
+   docker compose up --build -d
+   ```
+
+   This brings up Postgres, runs migrations, seeds the default agents and
+   skills, and starts the MCP, Discord and scheduler services.
+
+`@mention` the bot in a channel. It replies in a new thread. If it stays
+silent, check `docker compose logs discord`.
+
+The [self-hosting guide](docs/self-hosting.md) covers Discord permissions in
+detail, running without Docker, Slack, the Claude Code login mounts, chart
+storage and connecting MCP servers. Prefer to skip all of that? The hosted
+version at [daimon.decision.ai](https://daimon.decision.ai/) installs in one
+click, no API key or server required.
 
 ## How it works
-
-```mermaid
-flowchart LR
-    a["your Discord server"] --> d
-    b["another Discord server"] --> d
-    c["a Slack workspace"] --> d
-    d["daimon<br>one deployment, your Anthropic key"] --> e["Claude<br>(Anthropic Managed Agents)"]
-```
-
-You run one copy of daimon. Every community that installs it gets its own
-agent with its own memory, and none of them can see each other's data. When
-someone `@mention`s the bot, daimon hands the conversation to Claude and
-posts the replies back into the thread.
-
-<details>
-<summary>Technical architecture</summary>
 
 ```mermaid
 flowchart LR
@@ -98,208 +112,66 @@ flowchart LR
         Scheduler
     end
     adapters --> core["daimon core<br>turn pipeline"]
-    core <--> ma["Anthropic Managed Agents<br>agents &middot; sessions &middot; skills"]
-    core --> pg[("Postgres<br>tenants &middot; thread&harr;session map")]
+    core <--> ma["Anthropic Managed Agents<br>agents · sessions · skills"]
+    core --> pg[("Postgres<br>tenants · thread↔session map")]
 ```
 
-A turn: the adapter derives the tenant from platform identity, core opens or
-resumes a Managed Agents session, streams its events, and the adapter renders
-deltas into the thread until the session goes idle.
+daimon is built on
+[Anthropic Managed Agents](https://platform.claude.com/docs/en/managed-agents/quickstart).
+A turn works like this: the adapter derives the tenant from platform
+identity, core opens or resumes a Managed Agents session, streams its
+events, and the adapter renders the deltas into the thread until the session
+goes idle.
 
-- `daimon.core` owns schema, stores, and the turn pipeline, and imports no
+- `daimon.core` owns the schema, stores and turn pipeline and imports no
   adapters. Each adapter owns one platform's I/O and auth, and adapters never
   import each other. `import-linter` enforces both rules in CI.
-- Managed Agents holds the agents, environments, sessions, and skills
-  themselves. Postgres holds only metadata about them: tenant identity,
-  thread-to-session mappings, config, credentials, and billing.
-- One Discord guild (or Slack workspace) is one tenant. Isolation lives at
-  the database `tenant_id` layer, not the API-key boundary.
+- Managed Agents holds the agents, environments, sessions and skills.
+  Postgres holds only metadata: tenant identity, thread-to-session mappings,
+  config, credentials and billing.
+- One Discord guild or Slack workspace is one tenant. Isolation is enforced
+  at the database `tenant_id` layer, so one Anthropic key can safely serve
+  every install.
 
-</details>
+## Repository layout
 
-## Run it yourself
+| Path | What it is |
+| --- | --- |
+| `packages/core/` | `daimon-core`: Managed Agents client, stores, turn pipeline |
+| `packages/adapters/discord/` | Discord bot adapter |
+| `packages/adapters/slack/` | Slack adapter (optional, early) |
+| `packages/adapters/mcp/` | MCP server adapter and agent tools |
+| `packages/adapters/scheduler/` | Routines scheduler |
+| `packages/adapters/cli/` | `daimon` admin CLI |
+| `packages/mux/` | Provider-agnostic managed-agent interface |
+| `packages/testing/` | Shared test fixtures |
+| `apps/notebook-host/` | Standalone marimo notebook host |
+| `apps/report-host/` | Standalone report host |
+| `plugin/` | Claude Code plugin |
+| `defaults/` | YAML defaults seeded into Managed Agents and the database |
+| `docs/` | Operator documentation |
+| `tests/` | Cross-package integration and platform-parity tests |
 
-You need an Anthropic API key **in a workspace dedicated to this deployment**
-(daimon manages the workspace's Managed Agents resources as its own, so
-sharing the workspace with anything else causes collisions) and
-[Docker](https://docs.docker.com/get-docker/).
+## Status
 
-### 1. Configure environment
-
-```bash
-cp .env.example .env
-```
-
-Open `.env`, then uncomment and fill in:
-
-- `DAIMON_ANTHROPIC__API_KEY`: your Anthropic API key
-- `DAIMON_MCP__JWT_SECRET`: any random string (e.g. `openssl rand -hex 32`)
-- `DAIMON_MCP__PUBLIC_URL`: `http://localhost:8765/mcp` is fine for local use
-- `POSTGRES_PASSWORD`: a strong, URL-safe value (avoid `@ : / % #`)
-
-All four must be set before your first `docker compose` command:
-`docker-compose.yml` interpolates them for every service with fail-fast
-`${VAR:?...}` guards. You'll add the Discord bot token in step 2. `.env` is
-gitignored, so secrets never get committed.
-
-Hosted MCP clients receive bounded chart images directly from the Anthropic
-Files API; this embed-only path is enabled by default and needs no bucket.
-Clients that orchestrate `start_turn`, `get_my_session`, and `list_events`
-themselves can call `deliver_turn_charts(handle)` after `get_my_session`
-reports `idle` or `terminated` to receive the same chart payload. Calls made
-while a turn is running or rescheduling are refused. When URL delivery is
-configured, this call writes the chart to the private artifact store.
-Optionally configure `DAIMON_ARTIFACTS__ENDPOINT_URL`,
-`DAIMON_ARTIFACTS__BUCKET`, `DAIMON_ARTIFACTS__ACCESS_KEY_ID`, and
-`DAIMON_ARTIFACTS__SECRET_ACCESS_KEY` to add short-lived presigned chart links.
-The storage boundary uses the vendor-neutral S3 API with SigV4 and
-virtual-hosted-style addressing; confirm that contract with your provider.
-Path-style-only endpoints, including default MinIO setups, are not supported.
-Objects remain private;
-daimon never applies a public-read ACL. Presigned URL expiry does not delete
-stored objects, so configure a bucket lifecycle rule for the retention period
-your deployment requires. See `.env.example` for the optional region, URL
-lifetime, and image-embedding controls.
-
-Coding-agent clients such as Claude Code connect through the plugin in
-[`plugin/`](plugin/) instead of a per-agent token: it logs in via Slack or
-Discord OAuth and reaches every daimon install the logged-in person belongs
-to.
-
-#### Hub login mounts
-
-Each platform's mount needs its own OAuth app, plus `DAIMON_HUB__*`,
-`DAIMON_CRYPTO__KEYS` (the login state is encrypted at rest) and
-`DAIMON_MCP__PUBLIC_URL` (the mounts derive their public base URL from it) on
-the server. Register these redirect URIs on the OAuth apps, where the origin
-is `DAIMON_MCP__PUBLIC_URL` without the trailing `/mcp`:
-
-- Slack: `{origin}/slack/auth/callback`
-- Discord: `{origin}/discord/auth/callback`
-
-The Discord app requests the `identify` and `guilds` scopes, enough to learn
-who logged in and which servers they are in. The Slack app requests user
-scopes (`users:read`, `channels:history`, `groups:history`, `channels:read`,
-`groups:read`, `im:history`, `mpim:history`, `im:read`, `mpim:read`,
-`search:read`) so a daimon reads Slack as the person asking and never sees a
-channel they cannot.
-
-A login reaches only workspaces where daimon is installed and ready, checked
-on every call. Membership itself is re-read when the login token is issued or
-refreshed: a Slack token stops working the moment its user leaves the
-workspace, while someone removed from a Discord server keeps that server's
-daimons until their Discord token expires. `DAIMON_HUB__ALLOWED_CLIENT_REDIRECT_URIS`
-limits which clients may complete a login; the default covers coding agents
-on loopback and claude.ai.
-
-### 2. Create the Discord application
-
-1. Create an application in the
-   [Discord Developer Portal](https://discord.com/developers/applications).
-2. Under **Bot**, create a bot user and copy its token into `.env` as
-   `DAIMON_DISCORD__BOT_TOKEN`.
-3. Still under **Bot**, enable the **Message Content Intent**. It's a
-   privileged intent, and without the portal toggle the bot can't read
-   mentions.
-4. Under **OAuth2 → URL Generator**, select the `bot` and
-   `applications.commands` scopes, then under **Bot Permissions** select at
-   least `Send Messages`, `Send Messages in Threads`,
-   `Create Public Threads`, `Manage Threads`, and `Read Message History`.
-5. Open the generated URL in a browser and invite the bot to a test server
-   you control.
-
-### 3. Start the stack
-
-```bash
-docker compose up --build -d
-```
-
-One command brings up Postgres, runs migrations and seeds the default
-agents, environments, and skills (the `init` service does both
-automatically), then starts the `mcp`, `discord`, and `scheduler` services.
-
-Once it settles, send a message that `@mention`s the bot. It replies in a
-new thread, and that's a working deployment. If the bot stays silent, check
-`docker compose logs discord` — an unset `DAIMON_DISCORD__BOT_TOKEN` is the
-usual cause.
-
-<details>
-<summary>Prefer to run the processes by hand?</summary>
-
-Requires [`uv`](https://docs.astral.sh/uv/):
-
-```bash
-uv sync --all-extras --all-packages
-docker compose up -d postgres
-export DAIMON_DATABASE_URL=postgresql+asyncpg://daimon:<your-POSTGRES_PASSWORD>@localhost:5432/daimon
-uv run alembic upgrade head
-uv run daimon defaults apply
-uv run python -m daimon.adapters.discord
-```
-
-The `export` is required because the `alembic` CLI reads the shell
-environment and does not auto-load `.env`.
-
-</details>
-
-## Run it on Slack too (optional)
-
-Slack needs a publicly reachable `DAIMON_MCP__PUBLIC_URL` — the bot token is
-issued by an OAuth install callback served by the `mcp` process, not read from
-an env var, and Slack won't redirect to `localhost`.
-
-1. Create the Slack app from
-   [`docs/slack-app-manifest.yaml`](docs/slack-app-manifest.yaml) and follow the
-   steps in its header comment. It fills in the scopes, slash commands, events,
-   and Socket Mode toggles for you.
-2. Put the resulting `DAIMON_SLACK__SIGNING_SECRET`, `DAIMON_SLACK__APP_TOKEN`,
-   `DAIMON_SLACK__CLIENT_ID`, and `DAIMON_SLACK__CLIENT_SECRET` in `.env`, plus
-   `DAIMON_CRYPTO__KEYS` (a Fernet key — the adapter refuses to start without
-   one, since it stores workspace tokens encrypted).
-3. `docker compose --profile slack up --build -d`
-4. Open `https://<your-host>/oauth/slack/install` and install to a workspace.
-
-[`docs/slack.md`](docs/slack.md) covers the trust model for per-user Slack
-access, which operators should read before enabling it.
-
-## Connect Notion, Linear and other MCP servers
-
-Ask the agent to connect a server and it posts a card only you can open.
-A server that takes a bearer token (Linear, GitHub) gets a private token
-form; the token is checked against the server before it is stored and is
-shared by everyone who talks to that agent. A server that signs people in
-through a browser (Notion, Slack, Atlassian) gets a sign-in link instead:
-daimon registers itself as an OAuth client, you approve in the browser, and
-the grant lands in your own vault, refreshed by Anthropic. Each person
-connects their own account. The sign-in routes live at
-`<DAIMON_MCP__PUBLIC_URL without /mcp>/oauth/mcp/start` and
-`.../oauth/mcp/callback`, so the public URL must be reachable from a browser
-and `DAIMON_CRYPTO__KEYS` must be set. If one connection fails, the agent
-still answers and names the server it could not use under the reply; ask it
-to disconnect the server or connect it again.
-
-## Layout
-
-- `packages/core/` — `daimon-core` library (MA client, stores, turn pipeline)
-- `packages/adapters/cli/` — the `daimon` admin CLI
-- `packages/adapters/discord/` — the Discord bot adapter
-- `packages/adapters/mcp/` — the MCP server adapter
-- `packages/adapters/slack/` — the Slack adapter (optional)
-- `packages/adapters/scheduler/` — the routines scheduler adapter
-- `packages/testing/` — shared test fixtures/harness
-- `apps/notebook-host/` — standalone marimo notebook host service
-- `defaults/` — YAML defaults seeded into Managed Agents + local DB
-- `tests/` — cross-package integration tests
+Early. Self-hosting works and is documented. Expect rough edges and breaking
+changes while things settle; see the [changelog](CHANGELOG.md) for what
+moved.
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for dev environment setup and the
-quality gates every PR must keep green.
+Bug reports and pull requests are welcome. Start with
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev setup and the quality gates
+every PR keeps green, and look for issues labelled
+[`good first issue`](https://github.com/pymc-labs/daimon/labels/good%20first%20issue).
 
-## Security
+Report vulnerabilities privately as described in
+[`SECURITY.md`](SECURITY.md). What a deployment stores about its users is in
+[`PRIVACY.md`](PRIVACY.md).
 
-See [`SECURITY.md`](SECURITY.md) for how to report a vulnerability.
+## About
 
-## License
+daimon is built by [PyMC Labs](https://www.pymc-labs.com), the team behind
+the PyMC project.
 
-[MIT](LICENSE)
+Licensed under the [MIT License](LICENSE).
