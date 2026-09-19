@@ -9,7 +9,7 @@ look for in a pull request.
 - `packages/core/` — `daimon-core` library. Owns schema (Alembic migrations),
   stores, Managed Agents helpers, and the turn pipeline. No adapter imports.
 - `packages/adapters/cli/` — `daimon` binary (Typer CLI).
-- `packages/adapters/{mcp,discord,slack,scheduler}/` — platform adapters. Each
+- `packages/adapters/{mcp,discord,slack,teams,scheduler}/` — platform adapters. Each
   owns one platform's I/O, rendering, and auth; adapters never import from
   each other.
 - `packages/mux/` — provider-agnostic managed-agent interface.
