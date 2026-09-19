@@ -1,0 +1,59 @@
+# Teams app registration for a daimon deployment.
+#
+# Teams has no manifest-paste equivalent of Slack's app creator that also
+# provisions the Entra side, so registration is two artifacts: an Entra app
+# registration (what the adapter authenticates as) and a Teams app package
+# (a zip with manifest.json + icons, installed by a user or admin).
+#
+# 1. Entra portal → App registrations → New registration:
+#      - Accounts in this organizational directory only (single tenant).
+#      - Certificates & secrets → New client secret → DAIMON_TEAMS__CLIENT_SECRET.
+#      - Application (client) ID → DAIMON_TEAMS__CLIENT_ID.
+#      - Directory (tenant) ID → DAIMON_TEAMS__TENANT_ID.
+#    No API permissions are required — the bot calls the Bot Framework REST
+#    API, which authorizes on the app registration itself.
+# 2. Azure portal → Create a resource → Azure Bot:
+#      - Type of App: Single Tenant; point it at the registration above.
+#      - Configuration → Messaging endpoint:
+#          https://DAIMON_HOST/api/messages
+#        DAIMON_HOST must be a public HTTPS host that reaches the adapter's
+#        listener (DAIMON_TEAMS__PORT, default 3978) — a tunnel or reverse
+#        proxy in front of the `teams` compose service.
+#      - Channels → add Microsoft Teams.
+# 3. Build the Teams app package from the manifest below (manifest.json +
+#    two icons zipped), then sideload it or publish to the org catalog.
+# 4. Provision the daimon tenant row by hand — there is no install flow.
+#    See "Identity" in docs/teams.md.
+#
+# The manifest fields mirror what the adapter assumes: a personal-scope bot
+# whose only surface is 1:1 chat. Adding team/channel scopes here changes
+# nothing in code — non-personal conversations are still refused.
+
+manifest_version: "1.16"
+id: "${DAIMON_TEAMS__CLIENT_ID}"        # must equal the Entra app id
+version: "0.1.0"
+developer:
+  name: daimon
+  websiteUrl: https://DAIMON_HOST
+  privacyUrl: https://DAIMON_HOST/privacy
+  termsOfUseUrl: https://DAIMON_HOST/terms
+name:
+  short: daimon
+description:
+  short: Data-science agent that writes and runs code, fits models, and answers in chat.
+  full: Data-science agent that writes and runs code, fits models, and delivers answers in a personal chat.
+icons:
+  outline: outline.png
+  color: color.png
+accentColor: "#0b110e"
+bots:
+  - botId: "${DAIMON_TEAMS__CLIENT_ID}"
+    scopes:
+      - personal                        # 1:1 chat only — no team/channel scope
+    supportsFiles: false
+    isNotificationOnly: false
+permissions:
+  - identity
+  - messageTeamMembers
+validDomains:
+  - DAIMON_HOST                         # token.botframework.com is implicit
