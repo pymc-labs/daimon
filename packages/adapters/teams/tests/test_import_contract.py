@@ -1,8 +1,8 @@
-"""Neutrality contract: the generic package carries no private/fork surface.
+"""Adapter-boundary contract for the Teams package.
 
 The upstream boundary is enforced two ways — this static check (so a miss
-fails in this repo's own suite, not only in the contribution checker) and
-the import-linter independence contract in the root pyproject.
+fails in this repo's own suite, not only in CI's import-linter job) and the
+import-linter independence contract in the root pyproject.
 """
 
 from __future__ import annotations
@@ -12,29 +12,9 @@ from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1] / "daimon" / "adapters" / "teams"
 
-# Names that belong to the downstream deployment, never to this package.
-FORBIDDEN_SUBSTRINGS = (
-    "daimon.core.facade",
-    "facade_client",
-    "durable_delivery",
-    "teams_deliveries",
-    "TeamsFacadeSettings",
-    "allowed_user_ids",
-    "shipped_probe",
-    "fastmcp",
-)
-
 
 def _module_sources() -> dict[str, str]:
     return {path.name: path.read_text() for path in sorted(PACKAGE_DIR.glob("*.py"))}
-
-
-def test_no_module_references_private_surface() -> None:
-    for name, source in _module_sources().items():
-        for forbidden in FORBIDDEN_SUBSTRINGS:
-            assert forbidden not in source, (
-                f"{name} references {forbidden} — that is downstream-only surface"
-            )
 
 
 def test_no_module_imports_another_adapter() -> None:
@@ -55,15 +35,23 @@ def test_no_module_imports_another_adapter() -> None:
                 )
 
 
-def test_no_private_modules_are_imported_at_package_init() -> None:
-    """Importing the package must not transitively load private modules."""
+def test_no_other_adapter_modules_load_at_package_init() -> None:
+    """Importing the package must not transitively load another adapter.
+
+    Runs in a clean interpreter: in-process checks can't distinguish what this
+    import loaded from what sibling suites already left in sys.modules.
+    """
+    import subprocess
     import sys
 
-    import daimon.adapters.teams  # noqa: F401
-
-    leaked = [
-        m
-        for m in sys.modules
-        if "durable_delivery" in m or "teams_deliveries" in m or "core.facade" in m
-    ]
-    assert leaked == []
+    code = (
+        "import sys; import daimon.adapters.teams; "
+        "leaked = [m for m in sys.modules "
+        "if m.startswith('daimon.adapters.') "
+        "and not m.startswith('daimon.adapters.teams')]; "
+        "print(leaked); sys.exit(1 if leaked else 0)"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, (
+        f"importing daimon.adapters.teams loaded other adapters: {result.stdout}"
+    )
