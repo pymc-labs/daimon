@@ -38,6 +38,13 @@ Before you build anything, gather:
 
 ## 3. Build the archive
 
+**The report file must be named exactly `report.pdf` at the archive root —
+not the original filename, not a subdirectory.** The host looks for that one
+name and rejects the whole upload if it is missing, and the upload URL is
+single-use: a rejected upload burns it, and getting the archive right costs
+you a fresh call to the publish tool to mint another one. Rename the file
+before archiving it if it came from anywhere else.
+
 Everything the reading room serves comes from ONE gzip archive. The report
 PDF sits at its root. The analysis directories sit beside it, at the same
 level. Every path inside the archive must be relative — no leading slash, no
@@ -94,7 +101,12 @@ the tables or the manifest.
 1. Call the publish tool with the slug, title, recipients, cap and agent
    choice from step 2. It returns a one-time upload URL and one link per
    recipient.
-2. PUT the archive to the upload URL with a single curl command:
+2. Before you PUT, confirm the archive's root holds a file named exactly
+   `report.pdf` — check with `tar tzf bundle.tar.gz | head`. The upload URL
+   is single-use, so a wrong filename does not just fail the upload; it
+   burns the URL, and recovering means calling the publish tool again for a
+   new one.
+3. PUT the archive to the upload URL with a single curl command:
    ```bash
    curl -sS -X PUT --data-binary @bundle.tar.gz "<upload_url>"
    ```
@@ -102,7 +114,7 @@ the tables or the manifest.
    truncates large content, and a multi-megabyte archive will not survive the
    round trip. The upload URL is what carries the bytes; the tool call only
    ever carries small values.
-3. Relay each person their own link. The links are per-recipient and must
+4. Relay each person their own link. The links are per-recipient and must
    not be swapped or shared — sending Ada's link to Ben means Ben reads Ada's
    report under Ada's name, and sending one link to everyone collapses the
    isolation the reading room is built around entirely.
@@ -126,3 +138,7 @@ new link.
   reader questions can spend.
 - Do not paste the archive into a tool argument. Mint the upload URL, then
   curl the file to it.
+- Do not upload an archive whose report file is named anything other than
+  `report.pdf` at the root. The upload URL is single-use and a rejected
+  upload still burns it — you would need to call the publish tool again for
+  a new one.
