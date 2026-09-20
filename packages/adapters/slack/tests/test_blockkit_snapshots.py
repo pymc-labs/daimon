@@ -13,7 +13,7 @@ then review the diff in `__snapshots__/` before committing.
 from __future__ import annotations
 
 import pytest
-from daimon.adapters.slack.agent_setup.views import build_error_view
+from daimon.adapters.slack.agent_setup.panel_views import build_error_view
 from daimon.adapters.slack.blockkit import State, TrailEntry, TurnPhase, to_blocks
 from syrupy.assertion import SnapshotAssertion
 

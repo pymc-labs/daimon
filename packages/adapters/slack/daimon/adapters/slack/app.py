@@ -31,20 +31,8 @@ from daimon.adapters.slack.agent_setup.actions import (
 )
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_private_metadata
 from daimon.adapters.slack.agent_setup.submit import (
-    evaluate_add_mcp_submission,
-    evaluate_add_skill_submission,
-    evaluate_edit_agent_submission,
-    evaluate_edit_repo_submission,
-    evaluate_fork_agent_submission,
     evaluate_new_agent_submission,
-    evaluate_paste_secrets_submission,
-    run_add_mcp_submission,
-    run_add_skill_submission,
-    run_edit_agent_submission,
-    run_edit_repo_submission,
-    run_fork_agent_submission,
     run_new_agent_submission,
-    run_paste_secrets_submission,
 )
 from daimon.adapters.slack.attachments import (
     ProxyUrlContext,
@@ -477,30 +465,9 @@ class SlackApp:
                     )
 
                 self._spawn(_run_routines_delete_submission())
-            elif cb_id in {
-                "agent_setup__new_agent",
-                "agent_setup__fork_agent",
-                "agent_setup__edit_agent",
-                "agent_setup__edit_repo",
-                "agent_setup__add_skill",
-                "agent_setup__add_mcp",
-                "agent_setup__paste_secrets",
-            }:
+            elif cb_id == "agent_setup__new_agent":
                 # Pure evaluate (no I/O) — must run before the single ack.
-                if cb_id == "agent_setup__new_agent":
-                    _as_decision = evaluate_new_agent_submission(payload)
-                elif cb_id == "agent_setup__fork_agent":
-                    _as_decision = evaluate_fork_agent_submission(payload)
-                elif cb_id == "agent_setup__edit_agent":
-                    _as_decision = evaluate_edit_agent_submission(payload)
-                elif cb_id == "agent_setup__edit_repo":
-                    _as_decision = evaluate_edit_repo_submission(payload)
-                elif cb_id == "agent_setup__add_skill":
-                    _as_decision = evaluate_add_skill_submission(payload)
-                elif cb_id == "agent_setup__add_mcp":
-                    _as_decision = evaluate_add_mcp_submission(payload)
-                else:  # agent_setup__paste_secrets
-                    _as_decision = evaluate_paste_secrets_submission(payload)
+                _as_decision = evaluate_new_agent_submission(payload)
                 await (
                     client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
                         SocketModeResponse(
@@ -509,7 +476,7 @@ class SlackApp:
                         )
                     )
                 )
-                if _as_decision.proceed:
+                if _as_decision.proceed and _as_decision.panel_meta is not None:
                     _as_team_info: dict[str, Any] = payload.get("team") or {}
                     _as_team_id: str = str(_as_team_info.get("id") or "")
                     _as_user_info: dict[str, Any] = payload.get("user") or {}
@@ -517,25 +484,12 @@ class SlackApp:
                     _as_view_info: dict[str, Any] = payload.get("view") or {}
                     _as_view_id: str = str(_as_view_info.get("id") or "")
                     # view_submission payloads carry no top-level "channel" — the
-                    # invoking channel lives in the view's private_metadata (encoded
-                    # by the L1/L3 builders). Source it from there so success/refuse
-                    # ephemerals reach a real channel instead of "" (channel_not_found).
-                    _as_meta = decode_private_metadata(
-                        str(_as_view_info.get("private_metadata") or "")
-                    )
-                    # The panel's own forms carry typed metadata; the legacy
-                    # editors carry the dict above. Either way the invoking
-                    # channel comes from the view, not the payload.
+                    # invoking channel lives in the view's metadata, so success
+                    # and refusal ephemerals reach a real channel rather than ""
+                    # (channel_not_found).
                     _as_panel_meta = _as_decision.panel_meta
-                    _as_channel_id: str = str(
-                        (_as_panel_meta.channel_id if _as_panel_meta is not None else "")
-                        or _as_meta.get("channel_id")
-                        or ""
-                    )
-                    _as_agent_name: str = _as_decision.agent_name or ""
-                    _as_parent_section: str = _as_decision.parent_section or ""
+                    _as_channel_id: str = _as_panel_meta.channel_id
                     _as_extra: dict[str, Any] = _as_decision.extra
-                    _as_cb_id: str = cb_id
 
                     async def _run_agent_setup_submission(
                         *,
@@ -543,100 +497,24 @@ class SlackApp:
                         _u: str = _as_user_id,
                         _c: str = _as_channel_id,
                         _v: str = _as_view_id,
-                        _a: str = _as_agent_name,
-                        _s: str = _as_parent_section,
                         _e: dict[str, Any] = _as_extra,
-                        _cb: str = _as_cb_id,
-                        _pm: PanelMetadata | None = _as_panel_meta,
+                        _pm: PanelMetadata = _as_panel_meta,
                     ) -> None:
                         wc = await resolve_web_client(self.runtime, team_id=_t)
                         if wc is None:
                             return
-                        if _cb == "agent_setup__new_agent":
-                            if _pm is None:
-                                return
-                            await run_new_agent_submission(
-                                self.runtime,
-                                wc,
-                                team_id=_t,
-                                user_id=_u,
-                                channel_id=_c,
-                                view_id=_v,
-                                meta=_pm,
-                                name=str(_e.get("name") or ""),
-                                purpose=str(_e["purpose"]) if _e.get("purpose") else None,
-                                model=str(_e.get("model") or ""),
-                            )
-                        elif _cb == "agent_setup__fork_agent":
-                            await run_fork_agent_submission(
-                                self.runtime,
-                                wc,
-                                team_id=_t,
-                                user_id=_u,
-                                channel_id=_c,
-                                view_id=_v,
-                                extra=_e,
-                            )
-                        elif _cb == "agent_setup__edit_agent":
-                            await run_edit_agent_submission(
-                                self.runtime,
-                                wc,
-                                team_id=_t,
-                                user_id=_u,
-                                channel_id=_c,
-                                view_id=_v,
-                                agent_name=_a,
-                                parent_section=_s,
-                                extra=_e,
-                            )
-                        elif _cb == "agent_setup__edit_repo":
-                            await run_edit_repo_submission(
-                                self.runtime,
-                                wc,
-                                team_id=_t,
-                                user_id=_u,
-                                channel_id=_c,
-                                view_id=_v,
-                                agent_name=_a,
-                                parent_section=_s,
-                                extra=_e,
-                            )
-                        elif _cb == "agent_setup__add_skill":
-                            await run_add_skill_submission(
-                                self.runtime,
-                                wc,
-                                team_id=_t,
-                                user_id=_u,
-                                channel_id=_c,
-                                view_id=_v,
-                                agent_name=_a,
-                                parent_section=_s,
-                                extra=_e,
-                            )
-                        elif _cb == "agent_setup__add_mcp":
-                            await run_add_mcp_submission(
-                                self.runtime,
-                                wc,
-                                team_id=_t,
-                                user_id=_u,
-                                channel_id=_c,
-                                view_id=_v,
-                                agent_name=_a,
-                                parent_section=_s,
-                                extra=_e,
-                            )
-                        else:  # agent_setup__paste_secrets
-                            await run_paste_secrets_submission(
-                                self.runtime,
-                                wc,
-                                team_id=_t,
-                                user_id=_u,
-                                channel_id=_c,
-                                view_id=_v,
-                                agent_name=_a,
-                                parent_section=_s,
-                                extra=_e,
-                            )
+                        await run_new_agent_submission(
+                            self.runtime,
+                            wc,
+                            team_id=_t,
+                            user_id=_u,
+                            channel_id=_c,
+                            view_id=_v,
+                            meta=_pm,
+                            name=str(_e.get("name") or ""),
+                            purpose=str(_e["purpose"]) if _e.get("purpose") else None,
+                            model=str(_e.get("model") or ""),
+                        )
 
                     self._spawn(_run_agent_setup_submission())
             elif cb_id.startswith("credential_request__"):

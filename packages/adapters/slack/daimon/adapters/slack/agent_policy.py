@@ -5,9 +5,9 @@ of one agent, open to any member; blast radius of the whole install, admin
 only — and the order in which the facts are consulted. This module is its
 shell half on Slack: it resolves the caller's live admin status, fetches the
 target agent, reads reachability only when the decision actually turns on it,
-and renders the refusal. The panel gates (`agent_setup.gate`) and the
-chat-initiated credential path (`credential_submissions`) both route through
-here so a refusal reads the same wherever the click came from.
+and renders the refusal. The chat-initiated credential path
+(`credential_submissions`) routes through here so a refusal reads the same
+wherever the request came from.
 
 Two entry points, differing only in how the target is named:
 
@@ -17,7 +17,7 @@ Two entry points, differing only in how the target is named:
   agent that has since been archived, and writing anywhere else would be
   wrong.
 - `refuse_unless_allowed_for_agent_name` takes the tenant-scoped name, which
-  is what the panel carries. A name that resolves to no live agent is NOT a
+  is what a caller naming an agent carries. A name that resolves to no live agent is NOT a
   refusal here: the panel's own stale handling re-renders, and a name can
   still own a config row, so the decision continues with
   `is_daimon_managed=False` and the reachability read.

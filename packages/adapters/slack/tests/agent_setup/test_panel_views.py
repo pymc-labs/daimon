@@ -32,7 +32,6 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     build_routing_view,
 )
 from daimon.adapters.slack.agent_setup.state import PANEL_PAGE_SIZE, PanelMetadata
-from daimon.adapters.slack.agent_setup.views import build_l3_new_agent_form
 from daimon.adapters.slack.modal_limits import (
     MAX_BLOCKS_PER_VIEW,
     MAX_PRIVATE_METADATA_CHARS,
@@ -957,29 +956,21 @@ def test_creating_view_names_the_agent_being_created() -> None:
     )
 
 
-def test_new_agent_form_keeps_legacy_block_and_action_ids() -> None:
-    choices = list_model_choices(default="claude-sonnet-4-6")
-    legacy = build_l3_new_agent_form(
-        team_id=_TEAM_ID,
-        channel_id=_CHANNEL_ID,
-        model_options=[
-            {"text": {"type": "plain_text", "text": choice.label}, "value": choice.id}
-            for choice in choices
-        ],
-        initial_model_option={
-            "text": {"type": "plain_text", "text": choices[0].label},
-            "value": choices[0].id,
-        },
+def test_new_agent_form_uses_the_ids_the_submission_evaluator_reads() -> None:
+    """The evaluator reads inputs by block_id and action_id; those must not move."""
+    current = build_new_agent_form(
+        meta=_meta(), model_choices=list_model_choices(default="claude-sonnet-4-6")
     )
-    current = build_new_agent_form(meta=_meta(), model_choices=choices)
-    assert current["callback_id"] == CALLBACK_NEW_AGENT == legacy["callback_id"], (
-        "the submission still arrives on the same callback id"
+    assert current["callback_id"] == CALLBACK_NEW_AGENT, (
+        "the submission arrives on the callback id app.py dispatches on"
     )
     assert [block["block_id"] for block in _blocks(current)] == [
-        block["block_id"] for block in _blocks(legacy)
-    ], "the evaluator reads inputs by block_id; those must not move"
-    assert _action_ids(current) == _action_ids(legacy), (
-        "the evaluator reads inputs by action_id; those must not move either"
+        "new_agent__name",
+        "new_agent__prompt",
+        "new_agent__model",
+    ], "evaluate_new_agent_submission reads these block_ids, in this order"
+    assert _action_ids(current) == ["new_agent__name", "new_agent__prompt", "new_agent__model"], (
+        "evaluate_new_agent_submission reads these action_ids"
     )
     assert current["submit"]["text"] == "Create", "the form still submits as Create"
 

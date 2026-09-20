@@ -3,7 +3,7 @@
 Three call sites (`daimon.adapters.mcp.tools.reachability`,
 `daimon.adapters.discord.agent_setup.authz` /
 `daimon.adapters.discord.credential_repo_bind`, and
-`daimon.adapters.slack.agent_setup.gate`) each re-implement the same
+`daimon.adapters.slack.agent_policy`) each re-implement the same
 underlying rule — blast radius of one agent -> open to any member; blast
 radius of the whole tenant (a channel or workspace default) -> admin only —
 with a load-bearing difference in what gets checked first. This module is

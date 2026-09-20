@@ -70,6 +70,7 @@ __all__ = [
     "build_agents_view",
     "build_creating_view",
     "build_details_view",
+    "build_error_view",
     "build_new_agent_form",
     "build_routing_view",
 ]
@@ -639,6 +640,34 @@ def _routing_request_line(
         agent_name=escape_mrkdwn(agent_name or "an agent"), channel_label=f"<#{channel_id}>"
     )
     return f"{PRECEDENCE_LINE} {lead}{request}"
+
+
+# ---------------------------------------------------------------------------
+# Failure
+# ---------------------------------------------------------------------------
+
+
+def build_error_view(*, request_id: str) -> dict[str, Any]:
+    """Error modal shown when background content fetch fails (Loading-modal pattern).
+
+    Replaces the "Loading…" placeholder via ``views.update`` so the modal is
+    never left in a permanent spinner state.
+
+    Args:
+        request_id: Opaque request identifier for support cross-referencing.
+
+    Returns:
+        A modal view dict safe to pass to ``views.update(view=...)``.
+    """
+    text = f":x: *Couldn’t load agent setup.* Please try again. (ref: {escape_mrkdwn(request_id)})"
+    return {
+        "type": "modal",
+        "callback_id": CALLBACK_AGENTS,
+        "title": {"type": "plain_text", "text": "Agent Setup"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------

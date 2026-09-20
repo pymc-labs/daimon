@@ -1,7 +1,8 @@
-"""Wave 0 state tests for agent_setup/state.py.
+"""Tests for agent_setup/state.py.
 
-Tests the private_metadata round-trip (L1/L2/L3), the < 3000-char budget,
-and the rename-forbidden reducer shape.
+Both metadata shapes: the flat dict the routines panel still writes, and the
+typed `PanelMetadata` every agent-setup view carries. Round-trips, the
+< 3000-char budget, and the total-function decoders.
 
 No I/O, no DB, no mocks — pure unit assertions.
 """
@@ -11,7 +12,6 @@ import json
 import pytest
 from daimon.adapters.slack.agent_setup.state import (
     PanelMetadata,
-    apply_agent_modal,
     decode_panel_metadata,
     decode_private_metadata,
     encode_panel_metadata,
@@ -147,48 +147,6 @@ def test_decode_private_metadata_malformed_json_returns_empty_dict() -> None:
 def test_decode_private_metadata_partial_json_returns_empty_dict() -> None:
     result = decode_private_metadata('{"team_id": "T123"')  # missing closing brace
     assert result == {}, "decode of truncated JSON should return {} without raising"
-
-
-# ---------------------------------------------------------------------------
-# apply_agent_modal — rename-forbidden shape
-# ---------------------------------------------------------------------------
-
-
-def test_apply_agent_modal_returns_model_and_system_fields() -> None:
-    result = apply_agent_modal(
-        model_id="claude-3-5-sonnet-20241022", system_prompt="You are helpful."
-    )
-    assert result.get("model") == "claude-3-5-sonnet-20241022", (
-        "apply_agent_modal should include model in the returned dict"
-    )
-    assert result.get("system") == "You are helpful.", (
-        "apply_agent_modal should include system in the returned dict"
-    )
-
-
-def test_apply_agent_modal_has_no_name_path() -> None:
-    """Rename-forbidden: the function must not accept or expose a name/agent_name field."""
-    import inspect
-
-    sig = inspect.signature(apply_agent_modal)
-    param_names = set(sig.parameters)
-    assert "name" not in param_names, (
-        "apply_agent_modal must not accept a 'name' parameter (rename is forbidden)"
-    )
-    assert "agent_name" not in param_names, (
-        "apply_agent_modal must not accept an 'agent_name' parameter (rename is forbidden)"
-    )
-
-
-def test_apply_agent_modal_omits_none_fields() -> None:
-    result = apply_agent_modal(model_id=None, system_prompt=None)
-    assert result == {}, "apply_agent_modal with all-None args should return an empty dict"
-
-
-def test_apply_agent_modal_returns_only_provided_fields() -> None:
-    result = apply_agent_modal(model_id="claude-3-5-haiku-20241022", system_prompt=None)
-    assert "model" in result, "apply_agent_modal should include model when provided"
-    assert "system" not in result, "apply_agent_modal should omit system when system_prompt is None"
 
 
 # ---------------------------------------------------------------------------
