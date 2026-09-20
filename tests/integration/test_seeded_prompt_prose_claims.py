@@ -143,9 +143,6 @@ def test_routing_facts_module_is_imported_by_both_delivery_surfaces() -> None:
     mcp_source = (
         REPO_ROOT / "packages/adapters/mcp/daimon/adapters/mcp/tools/propagation.py"
     ).read_text()
-    discord_source = (
-        REPO_ROOT / "packages/adapters/discord/daimon/adapters/discord/agent_setup/set_default.py"
-    ).read_text()
     discord_routing_view_source = (
         REPO_ROOT / "packages/adapters/discord/daimon/adapters/discord/agent_setup/routing_view.py"
     ).read_text()
@@ -154,9 +151,6 @@ def test_routing_facts_module_is_imported_by_both_delivery_surfaces() -> None:
     ).read_text()
     assert "daimon.core.routing_facts" in mcp_source, (
         "mcp/tools/propagation.py must import daimon.core.routing_facts"
-    )
-    assert "daimon.core.routing_facts" in discord_source, (
-        "discord/agent_setup/set_default.py must import daimon.core.routing_facts"
     )
     assert "daimon.core.routing_facts" in discord_routing_view_source, (
         "discord/agent_setup/routing_view.py must import daimon.core.routing_facts"

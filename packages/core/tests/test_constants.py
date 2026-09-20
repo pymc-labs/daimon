@@ -6,8 +6,9 @@ import inspect
 from pathlib import Path
 
 import yaml
-from daimon.adapters.discord.agent_setup import edit_view, modals, panel
+from daimon.adapters.discord.agent_setup import new_agent as discord_new_agent
 from daimon.adapters.mcp.tools import agents as mcp_agents_tool
+from daimon.adapters.mcp.tools import skills as mcp_skills_tool
 from daimon.adapters.slack.agent_setup import submit as slack_submit
 from daimon.core.constants import (
     AGENT_MCP_CAP,
@@ -38,7 +39,7 @@ def test_adapter_modules_declare_no_private_cap_literal_of_their_own() -> None:
     `_SKILL_CAP =` / `_MCP_CAP =` assignment catches the reintroduction at the
     moment it happens, not only when it later disagrees.
     """
-    for module in (edit_view, mcp_agents_tool):
+    for module in (mcp_skills_tool, mcp_agents_tool):
         source = inspect.getsource(module)
         assert "_SKILL_CAP =" not in source, (
             f"{module.__name__} must not declare a private _SKILL_CAP literal"
@@ -88,7 +89,7 @@ def test_agent_surfaces_declare_no_private_model_literal_of_their_own() -> None:
     reintroduced a hardcoded "claude-..." default that happens to match, and would
     only fail later once the two drifted — which is exactly how this bug shipped.
     """
-    for module in (panel, modals, slack_submit):
+    for module in (discord_new_agent, slack_submit):
         source = inspect.getsource(module)
         assert '"claude-' not in source, (
             f"{module.__name__} must read DEFAULT_AGENT_MODEL, not hardcode a model id"

@@ -7,7 +7,6 @@ import uuid
 from typing import Any
 from unittest.mock import MagicMock
 
-import discord
 import httpx
 import pytest
 import structlog
@@ -35,7 +34,7 @@ from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from daimon.core.stores.agent_repo_binding import get_binding, set_binding
 from daimon.core.stores.github_credentials import delete_credential_for_principal
 from daimon.testing import ma_agent
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_stub_anthropic
 from pydantic import HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1208,100 +1207,6 @@ async def test_kick_off_skill_sync_uses_runtime_credentials(
     assert isinstance(captured["fernet"], MultiFernet), (
         "kick_off_skill_sync must build a MultiFernet from settings.crypto.keys"
     )
-
-
-@pytest.mark.asyncio
-async def test_apply_repo_modal_persists_binding(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-) -> None:
-    """LD-04-01: RepoAuthModal must persist via agent_repo_binding.set_binding."""
-    from unittest.mock import AsyncMock
-
-    from daimon.adapters.discord.agent_setup import modals as modals_mod
-    from daimon.adapters.discord.agent_setup.modals import RepoAuthModal
-    from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.stores import agent_repo_binding as binding_store
-
-    tenant = await make_tenant(db_session, platform="discord", workspace_id="test-guild-write")
-    # The bind writes a proof carrying account_id, whose column is a real FK
-    # to accounts.id — the submitting account must exist.
-    await make_account(db_session, tenant=tenant, id=account_id)
-
-    ma_agent_id = "agent_017abc"  # MA returns prefixed strings, not UUIDs (BUG-25-01)
-    expected_agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_agent_id)
-
-    async def fake_find(*args: Any, **kwargs: Any) -> Any:
-        mock_agent = MagicMock()
-        mock_agent.id = ma_agent_id
-        return mock_agent
-
-    async def fake_reconcile(runtime: Any, state: PanelState, *, tenant_id: uuid.UUID) -> Any:
-        return MagicMock()
-
-    monkeypatch.setattr(modals_mod, "find_agent_by_daimon_tag", fake_find)
-    monkeypatch.setattr(modals_mod, "call_reconcile_for_panel", fake_reconcile)
-    # Resolve the per-interaction tenant to the seeded tenant (overrides the
-    # conftest autouse stub, which returns a different fixture tenant_id).
-    monkeypatch.setattr(modals_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant.id))
-    # The no-PAT path verifies repo visibility before writing an anon: binding;
-    # stub it True so the success path runs without a live api.github.com call.
-    monkeypatch.setattr(modals_mod, "is_public_repo", AsyncMock(return_value=True))
-
-    selected = RosterEntry(
-        name="bot",
-        model="claude-sonnet-4-6",
-        spec=AgentSpec(name="bot", model="claude-sonnet-4-6"),
-    )
-    state = PanelState(roster=[selected], selected=selected, account_id=account_id)
-
-    settings = MagicMock()
-    settings.crypto.keys = ()
-    settings.github.oauth_scopes = ("repo",)
-    # The bind path no longer reads App credentials at all; set to None so a
-    # stray MagicMock read elsewhere doesn't look truthy by accident.
-    settings.github.app_id = None
-    settings.github.app_private_key = None
-    settings.mcp.public_url = None
-    runtime = DiscordRuntime(
-        settings=settings,
-        anthropic=build_stub_anthropic(),
-        sessionmaker=db_session_factory,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
-    )
-
-    modal = RepoAuthModal(state, runtime=runtime, allowed_user_id=42)
-    modal.url_in._value = "https://github.com/me/repo"  # pyright: ignore[reportPrivateUsage]
-    modal.branch_in._value = "develop"  # pyright: ignore[reportPrivateUsage]
-    modal.pat_in._value = ""  # pyright: ignore[reportPrivateUsage]  # no inline PAT — OAuth path
-
-    interaction = MagicMock()
-    # A live guild admin, so the bind path's attachment gate short-circuits
-    # without a DB read — this test is about where the binding persists, not
-    # about who may write it.
-    interaction.user = MagicMock(spec=discord.Member)
-    interaction.user.id = 42
-    interaction.user.guild_permissions.administrator = True
-    interaction.response.defer = AsyncMock()
-    interaction.edit_original_response = AsyncMock()
-    interaction.followup.send = AsyncMock()
-
-    await modal.on_submit(interaction)
-
-    row = await binding_store.get_binding(
-        db_session, tenant_id=tenant.id, agent_id=expected_agent_uuid
-    )
-    assert row is not None, "RepoAuthModal must persist a row via agent_repo_binding.set_binding"
-    assert row.repo_url == "me/repo", "set_binding normalizes repo_url to canonical owner/repo"
-    assert row.default_branch == "develop", "binding default_branch must round-trip"
-    assert row.ma_secret_ref, "binding ma_secret_ref must be non-empty (LD-04-01)"
 
 
 async def test_load_tenant_roster_hydrates_mcp_servers_skills_and_tools(
