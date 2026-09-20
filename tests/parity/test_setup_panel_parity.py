@@ -12,8 +12,8 @@ What the two platforms agree on, and this module pins: which agents the roster
 lists and in what order, that a member and an admin see the same controls, the
 routing sentence under an unrouted agent, the empty-roster copy, that creating
 an agent lands on its Details and says it answers nowhere yet, that a page
-number survives a trip into Details and back, and the full key list behind
-Show all.
+number survives a trip into Details and back, and each long Details list
+behind Show more.
 
 What they deliberately do not agree on, and this module pins per platform
 instead of hiding, is recorded in `_DIVERGENCES` below — each one is a place
@@ -24,17 +24,13 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Final, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.adapters.discord.agent_setup.budget import (
-    KEYS_COLLAPSED_COUNT as DISCORD_KEYS_COLLAPSED,
-)
 from daimon.adapters.discord.agent_setup.budget import ROSTER_PAGE_SIZE
-from daimon.adapters.slack.agent_setup.panel_views import (
-    KEYS_COLLAPSED_COUNT as SLACK_KEYS_COLLAPSED,
-)
 from daimon.adapters.slack.agent_setup.state import PANEL_PAGE_SIZE
+from daimon.core.agent_detail_lists import DETAIL_LIST_COLLAPSED_COUNT
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routing_facts import (
@@ -44,14 +40,10 @@ from daimon.core.routing_facts import (
     build_unrouted_note,
 )
 from daimon.core.scope import ChannelScopeRef, TenantScopeRef
-from daimon.core.setup_conversations import (
-    CODING_TOOLS_HINT,
-    EMPTY_ROSTER_COPY,
-    SETUP_ACTION_LABEL,
-    shared_keys_sentence,
-)
+from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, shared_keys_sentence
 from daimon.core.stores.agent_files import put_agent_file
-from daimon.core.stores.domain import Platform
+from daimon.core.stores.agent_repo_binding import set_binding
+from daimon.core.stores.domain import Platform, RepoAccessProof
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing import ma_agent, tenant_metadata
 from daimon.testing.factories import make_tenant
@@ -66,19 +58,10 @@ from .drivers.views import CapturedView, captured_titles
 #: a change to either one fails a test rather than passing quietly.
 _DIVERGENCES: Final[Mapping[str, str]] = {
     "roster title": "Discord titles the card by the channel; Slack titles the modal 'Agents'.",
-    "roster subhead": "Discord separates the answering agent with a heading; Slack does not.",
-    "roster facts": (
-        "Discord names the tier that routes an agent; Slack says whether it answers elsewhere."
-    ),
-    "details empty states": "Discord puts an empty section's copy in subtext; Slack in the body.",
     "back": "Discord draws a Back button; Slack pops its own view stack.",
     "page size": (
         f"Discord fits {ROSTER_PAGE_SIZE} rows on a page against the component budget; "
         f"Slack fits {PANEL_PAGE_SIZE} against the block budget."
-    ),
-    "keys collapse": (
-        f"Discord collapses the key list past {DISCORD_KEYS_COLLAPSED} names, "
-        f"Slack past {SLACK_KEYS_COLLAPSED}."
     ),
 }
 
@@ -97,20 +80,28 @@ _BUILT_IN = "daimon"
 _UNROUTED = "unrouted-agent"
 
 _PAGE_SIZES: Final[Mapping[str, int]] = {"discord": ROSTER_PAGE_SIZE, "slack": PANEL_PAGE_SIZE}
-_COLLAPSED_KEYS: Final[Mapping[str, int]] = {
-    "discord": DISCORD_KEYS_COLLAPSED,
-    "slack": SLACK_KEYS_COLLAPSED,
-}
-
 _KEY_NAMES: Final[tuple[str, ...]] = tuple(f"KEY_{index:02d}" for index in range(1, 13))
+_SKILL_NAMES: Final[tuple[str, ...]] = tuple(f"skill-{index:02d}" for index in range(1, 13))
+_CONNECTION_NAMES: Final[tuple[str, ...]] = tuple(
+    f"connection-{index:02d}" for index in range(1, 13)
+)
+_UNROUTED_ROSTER_STATUS: Final[Mapping[str, str]] = {
+    "discord": "not assigned",
+    "slack": "Not assigned",
+}
+_ANSWERING_ROSTER_STATUS: Final[Mapping[str, str]] = {
+    "discord": "answers here",
+    "slack": "Answers in #here",
+}
 
 #: The Details sections, in the order both panels draw them.
 _DETAILS_SECTIONS: Final[tuple[str, ...]] = (
     "Model",
-    "Working repo",
-    "Keys",
+    "Repository",
+    "Branch",
     "Skills",
-    "MCP servers",
+    "Connections",
+    "Keys",
 )
 
 
@@ -127,6 +118,14 @@ def _section_headings(details: CapturedView) -> tuple[str, ...]:
         for heading in _DETAILS_SECTIONS
         if text.startswith(heading)
     )
+
+
+def _list_value(details: CapturedView, heading: str) -> str | None:
+    """Read a list body while ignoring a platform's label punctuation."""
+    labelled = details.labelled(heading)
+    if labelled is None:
+        return None
+    return labelled.removeprefix(heading).removeprefix(":").strip()
 
 
 def _unrouted_note(agent_name: str, *, is_admin: bool) -> str:
@@ -279,23 +278,27 @@ async def test_roster_lists_the_same_agents_in_the_same_order_on_both_platforms(
         driver, db_session, db_session_factory, is_admin=True
     )
 
-    assert view.rows == (f"{_ANSWERING} answers here", _BUILT_IN, _UNROUTED), (
-        f"{driver.param_id}: the agent answering here leads the roster, then name order, "
-        "and only the answering row says so"
+    assert tuple(row.split()[0] for row in view.rows) == (_ANSWERING, _BUILT_IN, _UNROUTED), (
+        f"{driver.param_id}: the agent answering here leads the roster, then name order"
     )
+    for status in (
+        _ANSWERING_ROSTER_STATUS[driver.param_id],
+        _UNROUTED_ROSTER_STATUS[driver.param_id],
+    ):
+        assert status in view.body, f"{driver.param_id}: the compact roster keeps status {status!r}"
     assert view.action_labels == (
         "Details",
         "Details",
         "Details",
-        SETUP_ACTION_LABEL.removeprefix("💬 "),
+        f"Set up {_ANSWERING}",
         "New agent",
         "Who answers where",
         "Done",
     ), (
         f"{driver.param_id}: every roster row carries its own Details, and the screen's actions agree"
     )
-    assert UNROUTED_LINE in view.notes, (
-        f"{driver.param_id}: the agent no tier routes to carries the unrouted line verbatim"
+    assert "built in" not in view.body.lower(), (
+        f"{driver.param_id}: the roster has no built-in metadata subline"
     )
     assert view.page is None, f"{driver.param_id}: three agents need no pager"
 
@@ -362,7 +365,7 @@ async def test_empty_roster_shows_the_setup_copy_and_keeps_the_setup_action(
     assert view.rows == (EMPTY_ROSTER_COPY,), (
         f"{driver.param_id}: an empty roster says what to do next, and lists nothing else"
     )
-    assert SETUP_ACTION_LABEL.removeprefix("💬 ") in view.action_labels, (
+    assert "Set up an agent" in view.action_labels, (
         f"{driver.param_id}: setup stays available with no agent answering here"
     )
     assert view.page is None, f"{driver.param_id}: an empty roster needs no pager"
@@ -404,8 +407,8 @@ async def test_details_of_an_unrouted_agent_states_the_routing_request(
     assert details.body.count(UNROUTED_LINE) == 1, (
         f"{driver.param_id}: the agent's routing state is stated once, not echoed in a header"
     )
-    assert _section_headings(details) == _DETAILS_SECTIONS, (
-        f"{driver.param_id}: Details names the sections the roster promised"
+    assert _section_headings(details) == ("Model",), (
+        f"{driver.param_id}: absent optional configuration is omitted rather than advertised"
     )
 
 
@@ -441,13 +444,52 @@ async def test_details_reads_the_same_sections_in_the_same_order_on_both_platfor
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Both panels read model, repo, keys, skills, servers, top to bottom."""
-    (
-        _roster,
-        router,
-        tenant_id,
-        (workspace_id, channel_id, user_id),
-    ) = await _open_three_agent_roster(driver, db_session, db_session_factory, is_admin=True)
+    """Both panels show only present configuration, in one shared order."""
+    workspace_id, channel_id, user_id = _ids(driver)
+    tenant_id = await _seed_tenant(driver, db_session, workspace_id=workspace_id)
+    agent = ma_agent(
+        id=f"ag_{_UNROUTED}",
+        name=_UNROUTED,
+        metadata=tenant_metadata(tenant_id, _UNROUTED),
+        skills=[{"type": "custom", "skill_id": name, "version": "1"} for name in _SKILL_NAMES[:2]],
+        mcp_servers=[
+            {
+                "type": "url",
+                "name": name,
+                "url": f"https://{name}.example.com/mcp",
+            }
+            for name in _CONNECTION_NAMES[:2]
+        ],
+    )
+    router = _read_only_router([agent])
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
+    async with db_session_factory() as session, session.begin():
+        await set_binding(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
+            repo_url="https://github.com/example/research",
+            default_branch="main",
+            ma_secret_ref="secret-ref",
+            proof=RepoAccessProof(kind="public", at=datetime.now(UTC), account_id=None),
+        )
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
+            key=_KEY_NAMES[0],
+            content="unread",
+            set_by_account_id=None,
+        )
+    await driver.open_setup_panel(
+        sessionmaker=db_session_factory,
+        router=router,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        channel_id=channel_id,
+        user_id=user_id,
+        is_admin=True,
+    )
     details = await driver.click_panel_action(
         sessionmaker=db_session_factory,
         router=router,
@@ -463,14 +505,11 @@ async def test_details_reads_the_same_sections_in_the_same_order_on_both_platfor
         f"{driver.param_id}: Details carries one section per thing the agent is wired to, "
         "in one shared order"
     )
-    assert len(details.fields) == len(_DETAILS_SECTIONS), (
-        f"{driver.param_id}: and no labelled section beyond them"
+    assert details.action_labels[0] == "Set up with Daimon", (
+        f"{driver.param_id}: setup is the primary action before configuration details"
     )
-    assert details.says("no keys yet"), f"{driver.param_id}: an agent with no keys says so"
-    assert details.says("no working repo yet"), f"{driver.param_id}: and with no repo, so"
-    assert CODING_TOOLS_HINT in details.notes, (
-        f"{driver.param_id}: the coding-tools hint is the core's one sentence, "
-        "whatever markup the platform wraps it in"
+    assert "claude mcp add" not in details.body, (
+        f"{driver.param_id}: Details does not expose coding-tool commands before the action is used"
     )
 
 
@@ -579,7 +618,9 @@ async def test_page_two_of_a_long_roster_carries_that_platforms_own_page_size(
 
     size = _PAGE_SIZES[driver.param_id]
     assert second.page == 2, f"{driver.param_id}: Next lands the reader on the second page"
-    assert second.rows == tuple(f"agent-{index:02d}" for index in range(size, size * 2)), (
+    assert tuple(row.split()[0] for row in second.rows) == tuple(
+        f"agent-{index:02d}" for index in range(size, size * 2)
+    ), (
         f"{driver.param_id}: the second page holds the rows after the first, "
         f"{size} of them ({_DIVERGENCES['page size']})"
     )
@@ -603,7 +644,7 @@ async def test_back_from_details_restores_the_page_the_reader_was_on(
         user_id=user_id,
         action="next_page",
     )
-    opened_from = second.rows[0]
+    opened_from = second.rows[0].split()[0]
     await driver.click_panel_action(
         sessionmaker=db_session_factory,
         router=router,
@@ -629,9 +670,9 @@ async def test_back_from_details_restores_the_page_the_reader_was_on(
         f"{driver.param_id}: coming back from Details returns the reader to the page they left "
         f"({_DIVERGENCES['back']})"
     )
-    assert restored.rows == tuple(f"agent-{index:02d}" for index in range(size, size * 2)), (
-        f"{driver.param_id}: and to the same rows, not to the top of the roster"
-    )
+    assert tuple(row.split()[0] for row in restored.rows) == tuple(
+        f"agent-{index:02d}" for index in range(size, size * 2)
+    ), f"{driver.param_id}: and to the same rows, not to the top of the roster"
     assert captured_titles(driver.captured_views())[-3:] == [
         second.title,
         opened_from,
@@ -644,16 +685,29 @@ async def test_back_from_details_restores_the_page_the_reader_was_on(
 # ---------------------------------------------------------------------------
 
 
-async def test_expanding_the_key_list_shows_every_key_name_on_both_platforms(
+async def test_details_expands_one_long_list_at_a_time_and_can_collapse_it(
     driver: PlatformDriver,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     workspace_id, channel_id, user_id = _ids(driver)
     tenant_id = await _seed_tenant(driver, db_session, workspace_id=workspace_id)
-    agents = _agents(tenant_id, [(_UNROUTED, {})])
-    router = _read_only_router(agents)
-    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agents[0].id)
+    agent = ma_agent(
+        id=f"ag_{_UNROUTED}",
+        name=_UNROUTED,
+        metadata=tenant_metadata(tenant_id, _UNROUTED),
+        skills=[{"type": "custom", "skill_id": name, "version": "1"} for name in _SKILL_NAMES],
+        mcp_servers=[
+            {
+                "type": "url",
+                "name": name,
+                "url": f"https://{name}.example.com/mcp",
+            }
+            for name in _CONNECTION_NAMES
+        ],
+    )
+    router = _read_only_router([agent])
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
     async with db_session_factory() as session, session.begin():
         for key in _KEY_NAMES:
             await put_agent_file(
@@ -684,11 +738,15 @@ async def test_expanding_the_key_list_shows_every_key_name_on_both_platforms(
         action="details",
         agent_name=_UNROUTED,
     )
-    shown = _COLLAPSED_KEYS[driver.param_id]
-    assert collapsed.labelled("Keys") == "Keys " + " ".join(_KEY_NAMES[:shown]), (
-        f"{driver.param_id}: a long key list is collapsed to what fits that platform "
-        f"({_DIVERGENCES['keys collapse']})"
-    )
+    for heading, names in (
+        ("Skills", _SKILL_NAMES),
+        ("Connections", _CONNECTION_NAMES),
+        ("Keys", _KEY_NAMES),
+    ):
+        assert _list_value(collapsed, heading) == (
+            " ".join(names[:DETAIL_LIST_COLLAPSED_COUNT])
+            + f" +{len(names) - DETAIL_LIST_COLLAPSED_COUNT} more"
+        ), f"{driver.param_id}: {heading} initially shows six complete entries and the remainder"
 
     expanded = await driver.click_panel_action(
         sessionmaker=db_session_factory,
@@ -700,11 +758,56 @@ async def test_expanding_the_key_list_shows_every_key_name_on_both_platforms(
         action="expand_keys",
     )
 
-    assert expanded.labelled("Keys") == "Keys " + " ".join(_KEY_NAMES), (
-        f"{driver.param_id}: Show all shows every key name, and only names"
+    assert _list_value(expanded, "Keys") == " ".join(_KEY_NAMES), (
+        f"{driver.param_id}: Show more reveals every key name, and only names"
+    )
+    assert "+6 more" in (_list_value(expanded, "Skills") or ""), (
+        f"{driver.param_id}: expanding keys leaves skills collapsed"
     )
     assert shared_keys_sentence(_UNROUTED) in expanded.notes, (
         f"{driver.param_id}: the list is followed by who a stored key actually reaches"
+    )
+
+    switched = await driver.click_panel_action(
+        sessionmaker=db_session_factory,
+        router=router,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        channel_id=channel_id,
+        user_id=user_id,
+        action="expand_skills",
+    )
+    assert _list_value(switched, "Skills") == " ".join(_SKILL_NAMES), (
+        f"{driver.param_id}: opening skills reveals all skill names"
+    )
+    assert "+6 more" in (_list_value(switched, "Keys") or ""), (
+        f"{driver.param_id}: opening skills resets keys to its collapsed state"
+    )
+
+    collapsed_again = await driver.click_panel_action(
+        sessionmaker=db_session_factory,
+        router=router,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        channel_id=channel_id,
+        user_id=user_id,
+        action="expand_skills",
+    )
+    assert "+6 more" in (_list_value(collapsed_again, "Skills") or ""), (
+        f"{driver.param_id}: Show fewer returns the active list to six entries"
+    )
+
+    connections = await driver.click_panel_action(
+        sessionmaker=db_session_factory,
+        router=router,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        channel_id=channel_id,
+        user_id=user_id,
+        action="expand_connections",
+    )
+    assert _list_value(connections, "Connections") == " ".join(_CONNECTION_NAMES), (
+        f"{driver.param_id}: connection expansion uses the same shared limit and state"
     )
 
 
@@ -741,6 +844,6 @@ async def test_who_answers_where_states_the_precedence_and_the_routing_request(
     assert routing.says(f"{PRECEDENCE_LINE} Tell Daimon: {request}"), (
         f"{driver.param_id}: the map states the rule, then the request that acts on it"
     )
-    assert routing.says(f"#here {_ANSWERING}"), (
+    assert routing.says("#here") and routing.says(_ANSWERING), (
         f"{driver.param_id}: the channel the panel was opened in names its own responder"
     )

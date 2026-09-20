@@ -33,30 +33,18 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.adapters.discord.theme import COLOR_GREEN
 from daimon.core.errors import DaimonError
 from daimon.core.roster import Page, RosterAgent, paginate
-from daimon.core.routing_facts import UNROUTED_LINE
 from daimon.core.scope import ChannelConfigRow, ConfigTier, DeploymentDefault, TenantConfigRow
 from daimon.core.scope import answering_places as core_answering_places
-from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, SETUP_ACTION_LABEL
+from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, setup_target_label
 
 import discord
 
 log = structlog.get_logger()
 
-RosterStatus = Literal["answers_here", "built_in", "server_default", "unrouted", "routed_elsewhere"]
-"""Where one agent stands, in the one fact that most changes what to do next.
-
-Priority when several are true: `answers_here` first, because it is the
-question the screen opened with; then `server_default`, because the widest
-routing fact is the one a reader acts on; then `built_in`, then the narrower
-routing statuses. Being built in never disappears — when it is not the row's
-status it is carried as a subline, so "this came with the product" and "this
-answers server-wide" can both be true and both be said.
-"""
-
-_OTHER_AGENTS_HEADING: Final = "-# Other agents on this server"
+RosterStatus = Literal["answers_here", "server_default", "unrouted", "routed_elsewhere"]
+"""The one routing fact the compact roster shows for an agent."""
 
 _TIER_HINTS: Final[Mapping[ConfigTier, str]] = {
     "thread": "this thread",
@@ -65,18 +53,15 @@ _TIER_HINTS: Final[Mapping[ConfigTier, str]] = {
     "deployment": "deployment default",
 }
 
-_BUILT_IN_SUBLINE: Final = "-# built in"
-
 _STATUS_LABELS: Final[Mapping[RosterStatus, str]] = {
-    "built_in": "built in",
     "routed_elsewhere": "answers in other channels",
-    "unrouted": UNROUTED_LINE,
+    "unrouted": "not assigned",
 }
 
 
 @dataclasses.dataclass(frozen=True)
 class RosterRow:
-    """One rendered roster line: the agent, what to say about it, and by whom."""
+    """One agent and the routing status rendered directly below its name."""
 
     agent: RosterAgent
     status: RosterStatus
@@ -106,8 +91,6 @@ def _classify(
     for place in places:
         if place.tier == "tenant" or place.tier == "deployment":
             return "server_default", place.tier
-    if agent.is_built_in:
-        return "built_in", None
     if places:
         return "routed_elsewhere", None
     return "unrouted", None
@@ -159,34 +142,22 @@ def _thread_line(state: PanelState) -> str | None:
         return f"-# In this thread **{responder}** answers (handed off)"
     if context.target_name is None:
         return f"-# In this thread **{responder}** answers"
-    return f"-# In this thread **{responder}** answers · setting up **{context.target_name}**"
+    return f"-# In this thread **{responder}** answers while setting up **{context.target_name}**"
 
 
-def _title_line(row: RosterRow) -> str:
-    """The row's bold name plus the one fact that most changes what to do next."""
-    name = f"**{row.agent.name}**"
+def _status_line(row: RosterRow) -> str:
+    """The routing fact that most changes what the reader should do next."""
     if row.status == "answers_here":
-        return f"{name} answers here"
+        return "answers here"
     if row.status == "server_default":
         tier = row.default_tier or "tenant"
-        return f"🌐 {name} · {_TIER_HINTS[tier]}"
-    return f"{name} · {_STATUS_LABELS[row.status]}"
+        return _TIER_HINTS[tier]
+    return _STATUS_LABELS[row.status]
 
 
 def _row_text(row: RosterRow) -> str:
-    lines = [_title_line(row)]
-    if row.agent.is_built_in and row.status != "built_in":
-        # Being built in is never the whole story for an agent that also
-        # answers somewhere, but it is still what tells a reader they did not
-        # make this one — so it survives as a subline.
-        lines.append(_BUILT_IN_SUBLINE)
-    if row.attribution is not None:
-        lines.append(f"-# made by {row.attribution}")
-    if row.status == "answers_here" and row.agent.answering_tier is not None:
-        hint = _TIER_HINTS.get(row.agent.answering_tier)
-        if hint is not None:
-            lines.append(f"-# {hint}")
-    return "\n".join(lines)
+    """The full name and one routing status on predictable separate lines."""
+    return f"**{row.agent.name}**\n-# {_status_line(row)}"
 
 
 def build_roster_container(
@@ -197,12 +168,8 @@ def build_roster_container(
     Every row is a `Section` carrying its own Details button, so the accessory
     the reader clicks is the one attached to the line they read.
     """
-    container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
-        accent_colour=COLOR_GREEN if state.answering is not None else None
-    )
-    container.add_item(
-        header(f"Who answers in {_channel_title(state)}", subtext=_page_subtext(page))
-    )
+    container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
+    container.add_item(header(f"Agents in {_channel_title(state)}", subtext=_page_subtext(page)))
     thread_line = _thread_line(state)
     if thread_line is not None:
         container.add_item(discord.ui.TextDisplay(thread_line))
@@ -210,13 +177,9 @@ def build_roster_container(
     if not page.items:
         container.add_item(discord.ui.TextDisplay(EMPTY_ROSTER_COPY))
         return container
-    heading_written = False
     for row in page.items:
-        if row.status != "answers_here" and not heading_written:
-            container.add_item(discord.ui.TextDisplay(_OTHER_AGENTS_HEADING))
-            heading_written = True
         details: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-            label="Details", style=discord.ButtonStyle.secondary
+            label="🔍 Details", style=discord.ButtonStyle.secondary
         )
         container.add_item(
             discord.ui.Section(discord.ui.TextDisplay(_row_text(row)), accessory=details)
@@ -245,11 +208,11 @@ class RosterView(PanelViewBase):
         state.roster_page = page.page
         container = build_roster_container(state, page)
         self._attach_details_callbacks(container, page)
-        self.add_item(container)
 
         actions: discord.ui.ActionRow[RosterView] = discord.ui.ActionRow()
         setup_button: discord.ui.Button[RosterView] = discord.ui.Button(
-            label=SETUP_ACTION_LABEL, style=discord.ButtonStyle.primary
+            label=setup_target_label(state.answering.name if state.answering is not None else None),
+            style=discord.ButtonStyle.primary,
         )
         setup_button.callback = self._on_setup  # type: ignore[method-assign]  # per-instance callback
         new_button: discord.ui.Button[RosterView] = discord.ui.Button(
@@ -258,7 +221,7 @@ class RosterView(PanelViewBase):
         new_button.callback = self._on_new  # type: ignore[method-assign]  # per-instance callback
         actions.add_item(setup_button)
         actions.add_item(new_button)
-        self.add_item(actions)
+        container.add_item(actions)  # pyright: ignore[reportArgumentType]  # ActionRow[Self] is the same runtime item
 
         navigation: discord.ui.ActionRow[RosterView] = discord.ui.ActionRow()
         routing_button: discord.ui.Button[RosterView] = discord.ui.Button(
@@ -267,11 +230,13 @@ class RosterView(PanelViewBase):
         routing_button.callback = self._on_routing  # type: ignore[method-assign]  # per-instance callback
         navigation.add_item(routing_button)
         navigation.add_item(self.done_button())
-        self.add_item(navigation)
+        container.add_item(navigation)  # pyright: ignore[reportArgumentType]  # ActionRow[Self] is the same runtime item
 
         pager = self.page_row(page, on_previous=self._on_previous, on_next=self._on_next)
         if pager is not None:
-            self.add_item(pager)
+            container.add_item(pager)  # pyright: ignore[reportArgumentType]  # ActionRow[Self] is the same runtime item
+
+        self.add_item(container)
 
     def _attach_details_callbacks(
         self, container: discord.ui.Container[discord.ui.LayoutView], page: Page[RosterRow]

@@ -19,20 +19,19 @@ import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.agent_setup import mcp_access as mcp_access_mod
 from daimon.adapters.discord.agent_setup.budget import (
-    KEYS_COLLAPSED_COUNT,
     LAYOUT_COMPONENT_BUDGET,
     LAYOUT_TEXT_BUDGET,
 )
 from daimon.adapters.discord.agent_setup.details_view import (
-    CODING_TOOLS_SUBTEXT,
-    SHOW_ALL_LABEL,
     SHOW_FEWER_LABEL,
+    SHOW_MORE_LABEL,
     DetailsView,
     build_details_container,
     coding_tools_refusal,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_detail_lists import DETAIL_LIST_COLLAPSED_COUNT, DetailListName
 from daimon.core.agent_details import (
     AgentDetails,
     KeyEntry,
@@ -46,11 +45,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import AnsweringPlace, DeploymentDefault
-from daimon.core.setup_conversations import (
-    CODING_TOOLS_HINT,
-    SETUP_ACTION_LABEL,
-    shared_keys_sentence,
-)
+from daimon.core.setup_conversations import SETUP_ACTION_LABEL, shared_keys_sentence
 from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.testing import ma_agent
@@ -108,7 +103,7 @@ def _state(
     *,
     account_id: uuid.UUID,
     is_admin: bool = True,
-    keys_expanded: bool = False,
+    expanded_detail: DetailListName | None = None,
     roster_page: int = 0,
     roster_size: int = 1,
 ) -> PanelState:
@@ -130,7 +125,7 @@ def _state(
         answering=agent,
         selected_agent=agent,
         roster_page=roster_page,
-        keys_expanded=keys_expanded,
+        expanded_detail=expanded_detail,
         details=details,
     )
 
@@ -227,15 +222,15 @@ def test_details_shows_the_model_display_name_and_every_section_when_populated(
     container = build_details_container(
         _state(details, account_id=account_id),
         details,
-        keys_expanded=False,
+        expanded_detail=None,
         is_admin=True,
         attribution="<@77>",
     )
     text = _container_text(container)
 
-    assert "## 🤖 research-bot" in text, "the header must name the agent"
-    assert "-# digs through the warehouse" in text, "the purpose goes under the header"
-    assert "**Model** Opus 4.8" in text, "the model must show its display name, not its id"
+    assert "## research-bot" in text, "the plain header must name the agent"
+    assert "digs through the warehouse" in text, "the purpose goes under the header"
+    assert "**Model:** Opus 4.8" in text, "the model must show its display name, not its id"
     assert "<#900>" in text, "a channel it answers in renders as a channel mention"
     assert "[acme/warehouse](https://github.com/acme/warehouse)" in text, (
         "the working repo must be a link to the repo"
@@ -244,33 +239,14 @@ def test_details_shows_the_model_display_name_and_every_section_when_populated(
     assert "SNOWFLAKE_TOKEN" in text, "key names are shown"
     assert "Warehouse SQL" in text, "a resolved skill title is preferred over the skill id"
     assert "linear" in text, "an attached MCP server is listed by name"
-    assert "-# made by <@77>" in text, "a resolved creator is attributed"
-    assert (
-        text.index("**Model**") < text.index("📦 **Working repo**") < text.index("🔑 **Keys**")
-    ), "the card reads model, then repo, then keys"
-    assert (
-        text.index("🔑 **Keys**") < text.index("🧩 **Skills**") < text.index("🔌 **MCP servers**")
-    ), "keys, then skills, then MCP servers"
-
-
-def test_coding_tools_hint_is_the_shared_sentence_in_discord_markup(
-    account_id: uuid.UUID,
-) -> None:
-    """Both panels say one sentence; only the markup around it is Discord's."""
-    details = _details()
-    container = build_details_container(
-        _state(details, account_id=account_id),
-        details,
-        keys_expanded=False,
-        is_admin=True,
-        attribution=None,
+    assert "Made by" not in text, "creator metadata is omitted from the compact card"
+    assert text.index("**Model:**") < text.index("**Repository:**") < text.index("**Skills**"), (
+        "the card reads model, then repository, then lists"
     )
-
-    assert CODING_TOOLS_SUBTEXT in _container_text(container), "the card carries the hint"
-    assert CODING_TOOLS_SUBTEXT.removeprefix("-# ").replace("`", "") == CODING_TOOLS_HINT, (
-        "Discord adds subtext and code markup to the core sentence and changes no word of it"
+    assert text.index("**Skills**") < text.index("**Connections**") < text.index("**Keys**"), (
+        "lists render skills, connections, then keys"
     )
-    assert "`claude mcp add`" in CODING_TOOLS_SUBTEXT, "the command reads as a command"
+    assert "[linear](https://linear.example/mcp)" in text, "connection names link to their endpoint"
 
 
 def test_details_shows_concrete_empty_states_when_nothing_is_attached(
@@ -280,17 +256,17 @@ def test_details_shows_concrete_empty_states_when_nothing_is_attached(
     container = build_details_container(
         _state(details, account_id=account_id),
         details,
-        keys_expanded=False,
+        expanded_detail=None,
         is_admin=True,
         attribution=None,
     )
     text = _container_text(container)
 
-    assert "-# no working repo yet" in text, "an unbound agent says so rather than showing nothing"
-    assert "-# no keys yet" in text, "an agent with no keys says so"
-    assert "-# no skills yet" in text, "an agent with no skills says so"
-    assert "-# no servers yet" in text, "an agent with no MCP servers says so"
-    assert "made by" not in text, "no attribution line without a resolved creator"
+    assert "**Repository:**" not in text, "an absent repo is omitted"
+    assert "**Keys**" not in text, "an empty key list is omitted"
+    assert "**Skills**" not in text, "an empty skill list is omitted"
+    assert "**Connections**" not in text, "an empty connection list is omitted"
+    assert "Made by" not in text, "no attribution line appears without a resolved creator"
 
 
 @pytest.mark.parametrize("is_admin", [True, False])
@@ -319,7 +295,7 @@ def test_details_shows_the_unrouted_note_verbatim_in_the_readers_voice(
     container = build_details_container(
         _state(details, account_id=account_id, is_admin=is_admin),
         details,
-        keys_expanded=False,
+        expanded_detail=None,
         is_admin=is_admin,
         attribution=None,
     )
@@ -345,15 +321,15 @@ def _github_facts() -> Any:
     [
         (
             RepoAccess(kind="connected", credential="per_agent_token", checked_at=_FIXED_CHECK),
-            "via token · last checked",
+            "via token\n-# Last checked",
         ),
         (
             RepoAccess(kind="connected", credential="deployment_public", checked_at=_FIXED_CHECK),
-            "public repo · last checked",
+            "public repo\n-# Last checked",
         ),
         (
             RepoAccess(kind="checked", credential="github_app", checked_at=_FIXED_CHECK),
-            "via GitHub App · last checked",
+            "via GitHub App\n-# Last checked",
         ),
         (RepoAccess(kind="not_checked", credential="per_agent_token"), "not checked yet"),
         (
@@ -376,7 +352,7 @@ def test_repo_line_renders_the_recorded_access_state(
     container = build_details_container(
         _state(details, account_id=account_id),
         details,
-        keys_expanded=False,
+        expanded_detail=None,
         is_admin=True,
         attribution=None,
     )
@@ -389,67 +365,77 @@ def test_repo_line_renders_the_recorded_access_state(
         assert "connected" not in text, "only a working credential may read as connected"
 
 
-def test_keys_collapse_past_the_threshold_and_the_toggle_expands_them(
-    account_id: uuid.UUID,
-) -> None:
-    keys = tuple(
-        KeyEntry(name=f"KEY_{index}", updated_at=_FIXED_CHECK)
-        for index in range(KEYS_COLLAPSED_COUNT + 4)
-    )
-    details = _details(keys=keys)
+def _details_with_list(name: DetailListName, count: int) -> AgentDetails:
+    values = {
+        "keys": {
+            "keys": tuple(
+                KeyEntry(name=f"KEY_{index:02d}", updated_at=_FIXED_CHECK) for index in range(count)
+            )
+        },
+        "skills": {
+            "skills": tuple(
+                SkillEntry(
+                    type="custom",
+                    skill_id=f"skill-{index:02d}",
+                    title=None,
+                    version="1",
+                )
+                for index in range(count)
+            )
+        },
+        "connections": {
+            "mcp_servers": tuple(
+                McpServerEntry(name=f"connection-{index:02d}", url=f"https://example.test/{index}")
+                for index in range(count)
+            )
+        },
+    }
+    return _details(**values[name])  # pyright: ignore[reportArgumentType]  # test matrix selects one valid tuple field
 
+
+@pytest.mark.parametrize("name", ["keys", "skills", "connections"])
+@pytest.mark.parametrize("count", [0, 1, 5, 6, 7, 61])
+def test_each_detail_list_collapses_and_expands_at_the_shared_limits(
+    account_id: uuid.UUID, name: DetailListName, count: int
+) -> None:
+    details = _details_with_list(name, count)
     collapsed = build_details_container(
         _state(details, account_id=account_id),
         details,
-        keys_expanded=False,
+        expanded_detail=None,
         is_admin=True,
         attribution=None,
     )
     collapsed_text = _container_text(collapsed)
-    assert f"KEY_{KEYS_COLLAPSED_COUNT - 1}" in collapsed_text, (
-        "the collapsed list shows the first KEYS_COLLAPSED_COUNT names"
+    heading = {"keys": "Keys", "skills": "Skills", "connections": "Connections"}[name]
+    assert (f"**{heading}**" in collapsed_text) is (count > 0), (
+        "empty optional lists are omitted and populated lists retain their heading"
     )
-    assert f"KEY_{KEYS_COLLAPSED_COUNT}" not in collapsed_text, (
-        "the collapsed list must hide everything past the threshold"
+    labels = [item.label for item in _walk(collapsed) if isinstance(item, discord.ui.Button)]
+    assert (SHOW_MORE_LABEL in labels) is (count > DETAIL_LIST_COLLAPSED_COUNT), (
+        "only a list with hidden rows offers expansion"
     )
-    assert any(
-        isinstance(item, discord.ui.Button) and item.label == SHOW_ALL_LABEL
-        for item in _walk(collapsed)
-    ), "a long key list must carry a Show all accessory"
-
-    expanded = build_details_container(
-        _state(details, account_id=account_id, keys_expanded=True),
-        details,
-        keys_expanded=True,
-        is_admin=True,
-        attribution=None,
-    )
-    expanded_text = _container_text(expanded)
-    for key in keys:
-        assert key.name in expanded_text, f"{key.name} must appear once expanded"
-    assert any(
-        isinstance(item, discord.ui.Button) and item.label == SHOW_FEWER_LABEL
-        for item in _walk(expanded)
-    ), "an expanded key list offers Show fewer"
-
-
-def test_short_key_list_carries_no_toggle(account_id: uuid.UUID) -> None:
-    details = _details(
-        keys=tuple(
-            KeyEntry(name=f"KEY_{index}", updated_at=_FIXED_CHECK)
-            for index in range(KEYS_COLLAPSED_COUNT)
+    if count > DETAIL_LIST_COLLAPSED_COUNT:
+        assert f"+{count - DETAIL_LIST_COLLAPSED_COUNT} more" in collapsed_text, (
+            "the collapsed list reports every omitted row"
         )
-    )
-    container = build_details_container(
-        _state(details, account_id=account_id),
-        details,
-        keys_expanded=False,
-        is_admin=True,
-        attribution=None,
-    )
-    assert not any(isinstance(item, discord.ui.Section) for item in _walk(container)), (
-        "a list that already fits needs no Show all section"
-    )
+
+        expanded = build_details_container(
+            _state(details, account_id=account_id, expanded_detail=name),
+            details,
+            expanded_detail=name,
+            is_admin=True,
+            attribution=None,
+        )
+        expanded_text = _container_text(expanded)
+        expanded_labels = [
+            item.label for item in _walk(expanded) if isinstance(item, discord.ui.Button)
+        ]
+        assert SHOW_FEWER_LABEL in expanded_labels, "the expanded list can be collapsed"
+        if count > 60:
+            assert f"+{count - 60} more" in expanded_text, (
+                "the expanded view reports rows beyond its hard cap"
+            )
 
 
 def test_details_renders_key_names_and_never_a_value(account_id: uuid.UUID) -> None:
@@ -471,7 +457,7 @@ def test_details_renders_key_names_and_never_a_value(account_id: uuid.UUID) -> N
     container = build_details_container(
         _state(details, account_id=account_id),
         details,
-        keys_expanded=False,
+        expanded_detail=None,
         is_admin=True,
         attribution=None,
     )
@@ -491,15 +477,125 @@ def test_truncated_skill_listing_says_so(account_id: uuid.UUID) -> None:
     container = build_details_container(
         _state(details, account_id=account_id),
         details,
-        keys_expanded=False,
+        expanded_detail=None,
         is_admin=True,
         attribution=None,
     )
     text = _container_text(container)
     assert "sk_1" in text, "a skill with no resolved title falls back to its id"
-    assert "-# some skill names may be missing" in text, (
+    assert "-# Some skill names may be missing." in text, (
         "a truncated listing must admit it is incomplete"
     )
+
+
+def test_empty_truncated_skill_listing_keeps_its_warning(account_id: uuid.UUID) -> None:
+    details = _details(skills=(), skills_listing_truncated=True)
+    container = build_details_container(
+        _state(details, account_id=account_id),
+        details,
+        expanded_detail=None,
+        is_admin=True,
+        attribution=None,
+    )
+
+    text = _container_text(container)
+    assert "**Skills**" not in text, "the empty optional list remains omitted"
+    assert "-# Some skill names may be missing." in text, (
+        "upstream truncation remains visible even when no accessible prefix was returned"
+    )
+
+
+def test_connection_link_escapes_name_and_url_markup(account_id: uuid.UUID) -> None:
+    details = _details(
+        mcp_servers=(McpServerEntry(name="search [private]", url="https://example.test/a_(b)"),)
+    )
+    container = build_details_container(
+        _state(details, account_id=account_id),
+        details,
+        expanded_detail=None,
+        is_admin=True,
+        attribution=None,
+    )
+
+    assert "[search \\[private\\]](https://example.test/a_%28b%29)" in _container_text(container), (
+        "connection links must not let names or URLs break Discord markdown"
+    )
+
+
+def test_many_routing_places_render_one_per_line_with_an_omission_count(
+    account_id: uuid.UUID,
+) -> None:
+    details = _details(
+        answers_in=tuple(
+            AnsweringPlace(tier="channel", channel_id=str(10**17 + index)) for index in range(100)
+        )
+    )
+    container = build_details_container(
+        _state(details, account_id=account_id),
+        details,
+        expanded_detail=None,
+        is_admin=True,
+        attribution=None,
+    )
+    text = _container_text(container)
+
+    assert "**Answers in:**\n<#100000000000000000>\n<#100000000000000001>" in text, (
+        "multiple routing places use one complete place per line"
+    )
+    assert " more" in text, "bounded routing text reports how many complete places were omitted"
+
+
+def test_long_fixed_fields_leave_room_for_lists_and_security_notes(
+    account_id: uuid.UUID,
+) -> None:
+    details = _details(
+        purpose="p" * 2000,
+        repo=RepoBinding(
+            repo_url=f"owner/{'r' * 300}",
+            default_branch="b" * 300,
+            access=RepoAccess(
+                kind="needs_attention",
+                credential="none",
+                corrective="c" * 1000,
+            ),
+        ),
+        keys=tuple(
+            KeyEntry(name=f"KEY_{index:02d}_{'x' * 30}", updated_at=_FIXED_CHECK)
+            for index in range(61)
+        ),
+    )
+    view = DetailsView(
+        _state(details, account_id=account_id, expanded_detail="keys"),
+        runtime=_make_runtime(),
+        allowed_user_id=42,
+    )
+    text = _container_text(
+        next(item for item in view.children if isinstance(item, discord.ui.Container))
+    )
+
+    assert "…" in text, "overlong optional purpose text marks its truncation"
+    assert "c" * 1000 in text, "the full corrective access text is preserved"
+    assert shared_keys_sentence(details.name) in text, "the shared-key security note is preserved"
+    assert view.content_length() <= LAYOUT_TEXT_BUDGET, "all visible text stays in Discord's budget"
+
+
+async def test_expanding_a_detail_list_replaces_the_previous_expansion(
+    account_id: uuid.UUID,
+) -> None:
+    details = _details_with_list("keys", 7).model_copy(
+        update={
+            "skills": _details_with_list("skills", 7).skills,
+            "mcp_servers": _details_with_list("connections", 7).mcp_servers,
+        }
+    )
+    state = _state(details, account_id=account_id, expanded_detail="keys")
+    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
+
+    await view._on_toggle_detail(  # pyright: ignore[reportPrivateUsage]  # callback under test
+        _admin_interaction(), name="skills"
+    )
+
+    assert state.expanded_detail == "skills", "opening Skills closes the previously-open Keys list"
 
 
 def test_full_details_stays_within_the_component_budget(account_id: uuid.UUID) -> None:
@@ -511,18 +607,29 @@ def test_full_details_stays_within_the_component_budget(account_id: uuid.UUID) -
                 kind="connected", credential="per_agent_token", checked_at=_FIXED_CHECK
             ),
         ),
-        keys=tuple(KeyEntry(name=f"KEY_{index}", updated_at=_FIXED_CHECK) for index in range(30)),
+        keys=tuple(
+            KeyEntry(name=f"KEY_{index:02d}_{'x' * 30}", updated_at=_FIXED_CHECK)
+            for index in range(75)
+        ),
         skills=tuple(
-            SkillEntry(type="custom", skill_id=f"sk_{index}", title=f"Skill {index}", version="1")
-            for index in range(10)
+            SkillEntry(
+                type="custom",
+                skill_id=f"sk_{index}",
+                title=f"Skill {index:02d} {'x' * 50}",
+                version="1",
+            )
+            for index in range(75)
         ),
         mcp_servers=tuple(
-            McpServerEntry(name=f"server-{index}", url=f"https://example.test/{index}")
-            for index in range(5)
+            McpServerEntry(
+                name=f"server-{index:02d}-{'x' * 30}",
+                url=f"https://example.test/{index}/{'y' * 30}",
+            )
+            for index in range(75)
         ),
     )
     view = DetailsView(
-        _state(details, account_id=account_id, keys_expanded=True),
+        _state(details, account_id=account_id, expanded_detail="connections"),
         runtime=_make_runtime(),
         allowed_user_id=42,
     )

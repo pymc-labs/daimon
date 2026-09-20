@@ -517,6 +517,7 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_PAGE_PREV,
         panel_views.ACTION_EXPAND_KEYS,
         panel_views.ACTION_EXPAND_SKILLS,
+        panel_views.ACTION_EXPAND_CONNECTIONS,
         panel_views.ACTION_NEW,
         panel_views.ACTION_CODING_TOOLS,
         panel_views.ACTION_REVOKE_TOKEN,
@@ -809,6 +810,7 @@ async def _dispatch_panel_action(
     """
     view_info: dict[str, Any] = payload.get("view") or {}
     view_id: str = str(view_info.get("id") or "")
+    view_hash: str = str(view_info.get("hash") or "")
     trigger_id: str = str(payload.get("trigger_id") or "")
     is_admin = await resolve_is_admin(client, user_id=user_id)
 
@@ -859,13 +861,16 @@ async def _dispatch_panel_action(
         )
         return
 
-    if action_id in {panel_views.ACTION_EXPAND_KEYS, panel_views.ACTION_EXPAND_SKILLS}:
+    expansion_actions: dict[str, PanelExpansion] = {
+        panel_views.ACTION_EXPAND_KEYS: "keys",
+        panel_views.ACTION_EXPAND_SKILLS: "skills",
+        panel_views.ACTION_EXPAND_CONNECTIONS: "connections",
+    }
+    if action_id in expansion_actions:
         agent_name = meta.agent_name or ""
         if not agent_name:
             return
-        expansion: PanelExpansion = (
-            "keys" if action_id == panel_views.ACTION_EXPAND_KEYS else "skills"
-        )
+        expansion = expansion_actions[action_id]
         details_view = await _load_details_view(
             runtime,
             tenant_id=tenant_id,
@@ -880,15 +885,22 @@ async def _dispatch_panel_action(
                 meta=meta.with_view("agents"),
                 is_admin=is_admin,
             )
+            details_view = _with_stale_notice(stale_view, agent_name=agent_name)
+        try:
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,
-                view=_with_stale_notice(stale_view, agent_name=agent_name),
+                hash=view_hash,
+                view=details_view,
             )
-            return
-        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-            view_id=view_id,
-            view=details_view,
-        )
+        except SlackApiError as exc:
+            if _is_hash_conflict(exc):
+                log.info(
+                    "slack.agent_setup.expansion.hash_conflict",
+                    agent_name=agent_name,
+                    expansion=expansion,
+                )
+                return
+            raise
         return
 
     if action_id == panel_views.ACTION_NEW:

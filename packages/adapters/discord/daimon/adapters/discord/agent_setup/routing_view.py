@@ -35,7 +35,7 @@ import discord
 log = structlog.get_logger()
 
 BACK_LABEL = "◀ Back"
-SERVER_DEFAULT_LABEL = "🌐 Server default"
+SERVER_DEFAULT_LABEL = "Server default"
 DEPLOYMENT_NOT_IN_EFFECT = "not in effect while a server default is set"
 MAX_SETUP_CONVERSATION_LINKS = 5
 
@@ -56,7 +56,7 @@ class RoutingLine:
 async def _resolve_audit(
     session: AsyncSession, *, account_id: uuid.UUID | None, set_at: datetime | None
 ) -> str | None:
-    """Build 'set by {handle} · {date}' from whichever halves were recorded."""
+    """Build the audit sentence from whichever halves were recorded."""
     handle = (
         await resolve_account_display(session, account_id=account_id)
         if account_id is not None
@@ -64,11 +64,11 @@ async def _resolve_audit(
     )
     stamp = f"<t:{int(set_at.timestamp())}:d>" if set_at is not None else None
     if handle is not None and stamp is not None:
-        return f"set by {handle} · {stamp}"
+        return f"set by {handle} on {stamp}"
     if handle is not None:
         return f"set by {handle}"
     if stamp is not None:
-        return f"set · {stamp}"
+        return f"set on {stamp}"
     return None
 
 

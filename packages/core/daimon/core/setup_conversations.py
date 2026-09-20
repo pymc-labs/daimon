@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable
 from typing import Final
 
 from anthropic import APIStatusError, AsyncAnthropic
@@ -15,7 +14,6 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_TENANT,
 )
 from daimon.core.errors import DaimonError
-from daimon.core.mcp_vault import same_server_url
 
 # Copy for the surfaces that open or describe a setup conversation. It lives
 # here so the Discord panel, the Slack panel and the MCP outcome cannot drift:
@@ -23,13 +21,6 @@ from daimon.core.mcp_vault import same_server_url
 # read identically.
 SETUP_ACTION_LABEL: Final = "💬 Set up with Daimon"
 EMPTY_ROSTER_COPY: Final = "No agent answers here yet. Ask Daimon to help set one up."
-
-# What Details says about driving the agent from an editor. One sentence, one
-# home: each panel wraps it in its own markup, and neither rewrites it.
-CODING_TOOLS_HINT: Final = (
-    "Use from your coding tools: get a token with the button below, then run the "
-    "claude mcp add command it gives you."
-)
 
 # Discord rejects a thread name longer than 100 characters outright, so the
 # name is truncated rather than left to fail at thread creation.
@@ -44,18 +35,10 @@ def setup_thread_name(target_name: str | None) -> str:
     return f"Set up {target_name or 'an agent'} with Daimon"[:_MAX_SETUP_THREAD_NAME_CHARS]
 
 
-def has_external_mcp_connection(server_urls: Iterable[str], *, public_mcp_url: str | None) -> bool:
-    """Whether the agent connects to an MCP server other than this deployment's.
-
-    Matched on URL, not on server name: the built-in server's name is part of
-    the agent spec and anyone editing the spec can change it, while the
-    deployment's own endpoint is a fact both platforms already hold. With no
-    public URL configured there is no built-in server to discount, so every
-    attached server counts as external.
-    """
-    return any(
-        public_mcp_url is None or not same_server_url(url, public_mcp_url) for url in server_urls
-    )
+def setup_target_label(agent_name: str | None) -> str:
+    """Name the roster action's target within both platforms' button width."""
+    label = f"💬 Set up {agent_name or 'an agent'}"
+    return label if len(label) <= 30 else f"{label[:29]}…"
 
 
 def shared_keys_sentence(agent_name: str) -> str:
@@ -136,27 +119,11 @@ async def resolve_setup_agents(
 def build_setup_opener(
     *,
     target_name: str | None,
-    opener_mention: str,
     bot_mention: str,
-    has_repo: bool,
-    has_external_connection: bool,
-    can_customize: bool,
 ) -> str:
-    if target_name is None:
-        return (
-            f"Setup opened by {opener_mention}. I'm Daimon. Which agent would you like to set up?\n"
-            f"Mention {bot_mention} when replying here."
-        )
-    examples: list[str] = []
-    if not has_repo:
-        examples.append("set a working repo")
-    if not has_external_connection:
-        examples.append("connect an external service")
-    if can_customize:
-        examples.append("change its instructions or model")
-    example_text = f" You can ask me to {', '.join(examples)}." if examples else ""
-    return (
-        f"Set up {target_name} · opened by {opener_mention}\n"
-        f"I'm Daimon. What would you like to change about {target_name}?{example_text}\n"
-        f"Mention {bot_mention} when replying here. Use private forms for keys and tokens."
+    question = (
+        f"What would you like to change about {target_name}?"
+        if target_name is not None
+        else "Which agent would you like to set up?"
     )
+    return f"{question}\nMention {bot_mention} to reply."

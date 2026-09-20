@@ -23,7 +23,6 @@ from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
     DatabaseSettings,
-    McpSettings,
     Settings,
 )
 from daimon.core.errors import DaimonError
@@ -32,10 +31,9 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.setup_conversations import build_setup_opener, setup_thread_name
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_fake_anthropic, list_response
-from pydantic import HttpUrl, PostgresDsn, SecretStr
+from pydantic import PostgresDsn, SecretStr
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -337,11 +335,7 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
             assert posts[1]["thread_ts"] == "123.456", "welcome belongs inside the setup thread"
             assert posts[1]["text"] == build_setup_opener(
                 target_name="specialist",
-                opener_mention="<@U_OPENER>",
                 bot_mention="<@U_BOT>",
-                has_repo=False,
-                has_external_connection=False,
-                can_customize=is_admin,
             ), "the opener is posted as core renders it, with no Slack-only preamble"
             assert "specialist" in posts[1]["text"] and "<@U_BOT>" in posts[1]["text"], (
                 "thread opener should name target and actual bot mention"
@@ -350,7 +344,7 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
                 "the launcher heading has one home in core, not a Slack spelling of its own"
             )
             assert "opened by" not in updates[0]["text"], (
-                "the opener already credits the opener; the launcher must not repeat it"
+                "the launcher should not add redundant opener attribution"
             )
         assert all(request.method == "GET" for request in requests), (
             "opening setup must not create a session or billed turn"
@@ -399,113 +393,3 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
             assert (binding.archived, binding.deleted) == (archived, deleted), (
                 "lifecycle should track channel and root events"
             )
-
-
-@pytest.mark.parametrize(
-    ("server_url", "offers_connection"),
-    [
-        ("https://mcp.example.com/mcp", True),
-        ("https://mcp.example.com/mcp/", True),
-        ("https://mcp.linear.app/mcp", False),
-    ],
-)
-async def test_opener_offers_an_external_connection_until_one_exists(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    server_url: str,
-    offers_connection: bool,
-) -> None:
-    """The built-in server is registered as `daimon-mcp`, so a name comparison
-    counts it as an external service and the offer never appears. Only the URL
-    separates the deployment's own endpoint from a service someone connected."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_SETUP")
-    fernet_key = Fernet.generate_key()
-    await upsert_slack_bot_token(
-        db_session, team_id="T_SETUP", encrypted_token=Fernet(fernet_key).encrypt(b"xoxb-test")
-    )
-    await db_session.commit()
-    responder = ma_agent(
-        id="agent_daimon",
-        name="daimon",
-        tenant_id=tenant.id,
-        metadata={"daimon_managed": "true"},
-    )
-    target = ma_agent(
-        id="agent_specialist",
-        name="specialist",
-        tenant_id=tenant.id,
-        mcp_servers=[{"type": "url", "name": "daimon-mcp", "url": server_url}],
-    )
-
-    def ma_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/agents":
-            return list_response([responder.model_dump(mode="json")])
-        return httpx.Response(200, json=target.model_dump(mode="json"))
-
-    anthropic = build_fake_anthropic(ma_handler)
-    settings = Settings(
-        _env_file=None,  # pyright: ignore[reportCallIssue]  # BaseSettings runtime option
-        database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test:test@localhost/test")),
-        anthropic=AnthropicSettings(api_key=SecretStr("test")),
-        crypto=CryptoSettings(keys=(SecretStr(fernet_key.decode()),)),
-        mcp=McpSettings(public_url=HttpUrl("https://mcp.example.com/mcp")),
-    )
-    cache = new_resolver_cache()
-    default = DeploymentDefault()
-    async with httpx.AsyncClient() as http_client:
-        runtime = SlackRuntime(
-            settings=settings,
-            anthropic=anthropic,
-            sessionmaker=db_session_factory,
-            billing_config=None,
-            http_client=http_client,
-            resolver_cache=cache,
-            deployment_default=default,
-            turn_deps=build_turn_deps(
-                settings,
-                anthropic,
-                db_session_factory,
-                deployment_default=default,
-                resolver_cache=cache,
-                billing_config=None,
-            ),
-        )
-        with aioresponses() as slack:
-            slack.post(
-                "https://slack.com/api/auth.test",
-                payload={"ok": True, "user_id": "U_BOT"},
-                repeat=True,
-            )
-            slack.get(
-                re.compile(r"https://slack.com/api/users.info.*"),
-                payload={"ok": True, "user": {"is_admin": False}},
-            )
-            slack.post(
-                "https://slack.com/api/chat.postMessage",
-                payload={"ok": True, "ts": "123.456"},
-                repeat=True,
-            )
-            slack.get(
-                re.compile(r"https://slack.com/api/chat.getPermalink.*"),
-                payload={"ok": True, "permalink": "https://workspace.slack.com/archives/x"},
-            )
-            slack.post("https://slack.com/api/chat.update", payload={"ok": True})
-            await create_setup_conversation(
-                runtime,
-                AsyncWebClient(token="xoxb-test"),
-                team_id="T_SETUP",
-                channel_id="C_PARENT",
-                user_id="U_OPENER",
-                target_ma_agent_id="agent_specialist",
-            )
-            opener = [
-                call.kwargs["json"]
-                for (method, url), calls in slack.requests.items()
-                if method == "POST" and url.path.endswith("chat.postMessage")
-                for call in calls
-            ][1]["text"]
-
-    assert ("connect an external service" in opener) is offers_connection, (
-        "the offer belongs in the opener until the agent reaches a server that is "
-        f"not this deployment's own; opener was {opener!r}"
-    )

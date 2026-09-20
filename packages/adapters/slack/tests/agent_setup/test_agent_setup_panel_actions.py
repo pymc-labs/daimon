@@ -21,6 +21,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
+import pytest
 import yarl
 from aioresponses import aioresponses as AioResponsesMock
 from cryptography.fernet import Fernet
@@ -31,6 +32,7 @@ from daimon.adapters.slack.agent_setup.actions import (
 from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_CODING_TOOLS,
     ACTION_DETAILS,
+    ACTION_EXPAND_CONNECTIONS,
     ACTION_EXPAND_KEYS,
     ACTION_NEW,
     ACTION_PAGE_NEXT,
@@ -44,7 +46,6 @@ from daimon.adapters.slack.agent_setup.state import (
 )
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_credentials import build_multifernet, encrypt_token
-from daimon.core.routing_facts import UNROUTED_LINE
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
@@ -195,14 +196,12 @@ def _action_payload(
     }
 
 
-def _facts_under(blocks: list[dict[str, Any]], agent_name: str) -> str:
-    """The context line the Agents view renders under `agent_name`'s row."""
-    for index, block in enumerate(blocks):
+def _roster_row(blocks: list[dict[str, Any]], agent_name: str) -> str:
+    """The single roster row carrying `agent_name` and its routing status."""
+    for block in blocks:
         text = str((block.get("text") or {}).get("text", ""))
         if block.get("type") == "section" and f"*{agent_name}*" in text:
-            following = blocks[index + 1]
-            assert following.get("type") == "context", f"no facts line under {agent_name}"
-            return " ".join(str(element.get("text", "")) for element in following["elements"])
+            return text
     raise AssertionError(f"no roster row for {agent_name}")
 
 
@@ -344,13 +343,13 @@ async def test_command_marks_only_the_agent_no_tier_routes_to_as_unrouted(
     )
 
     blocks = _sent(fake_slack_web_client.mock, _VIEWS_UPDATE_KEY)[0]["view"]["blocks"]
-    assert _facts_under(blocks, _OTHER_AGENT) == UNROUTED_LINE, (
-        "the agent no tier routes to carries the unrouted line, verbatim"
+    assert "Not assigned" in _roster_row(blocks, _OTHER_AGENT), (
+        "the agent no tier routes to carries one clear routing status"
     )
-    assert "answers in other channels" in _facts_under(blocks, _ROUTED_ELSEWHERE_AGENT), (
+    assert "Answers in another channel" in _roster_row(blocks, _ROUTED_ELSEWHERE_AGENT), (
         "an agent routed in another channel is reachable, and says so instead"
     )
-    assert UNROUTED_LINE not in _facts_under(blocks, _ROUTED_ELSEWHERE_AGENT), (
+    assert "Not assigned" not in _roster_row(blocks, _ROUTED_ELSEWHERE_AGENT), (
         "a routed agent must never be described as answering nowhere"
     )
 
@@ -579,10 +578,104 @@ async def test_expand_keys_updates_details_in_place(
     updates = _sent(mock, _VIEWS_UPDATE_KEY)
     assert len(updates) == 1, "the Details view is re-rendered once"
     assert updates[0]["view_id"] == "V_DETAILS", "the expansion lands on the Details view"
+    assert updates[0]["hash"] == _VIEW_HASH, "the expansion protects its in-place update"
     updated_meta = decode_panel_metadata(updates[0]["view"]["private_metadata"])
-    assert updated_meta is not None and "keys" in updated_meta.expanded, (
+    assert updated_meta is not None and updated_meta.expanded == "keys", (
         "the re-render records that keys are expanded, so the toggle can close again"
     )
+
+
+async def test_expanding_connections_updates_details_without_growing_the_stack(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(
+        fernet_key,
+        db_session_factory,
+        handler=_ma_handler(
+            [_agent_payload(tenant_id=tenant_id, name=_OTHER_AGENT, agent_id="agent_other")]
+        ),
+    )
+
+    await handle_agent_setup_action(
+        runtime,
+        _action_payload(
+            ACTION_EXPAND_CONNECTIONS,
+            meta=_meta(view="details", agent_name=_OTHER_AGENT, expanded="keys"),
+            view_id="V_DETAILS",
+        ),
+    )
+
+    mock = fake_slack_web_client.mock
+    assert _VIEWS_PUSH_KEY not in mock.requests, "list expansion never adds modal depth"
+    updates = _sent(mock, _VIEWS_UPDATE_KEY)
+    assert len(updates) == 1, "the current Details view updates once"
+    assert updates[0]["hash"] == _VIEW_HASH, "every expansion sends the current view hash"
+    updated_meta = decode_panel_metadata(updates[0]["view"]["private_metadata"])
+    assert updated_meta is not None and updated_meta.expanded == "connections", (
+        "opening Connections closes the previously expanded Keys list"
+    )
+
+
+@pytest.mark.parametrize("action_id", [ACTION_EXPAND_KEYS, ACTION_EXPAND_CONNECTIONS])
+async def test_expansion_hash_conflict_is_dropped(
+    action_id: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(
+        fernet_key,
+        db_session_factory,
+        handler=_ma_handler(
+            [_agent_payload(tenant_id=tenant_id, name=_OTHER_AGENT, agent_id="agent_other")]
+        ),
+    )
+    _override(fake_slack_web_client.mock, "views.update", {"ok": False, "error": "hash_conflict"})
+
+    await handle_agent_setup_action(
+        runtime,
+        _action_payload(
+            action_id,
+            meta=_meta(view="details", agent_name=_OTHER_AGENT),
+            view_id="V_DETAILS",
+            view_hash="H_DETAILS_STALE",
+        ),
+    )
+
+    updates = _sent(fake_slack_web_client.mock, _VIEWS_UPDATE_KEY)
+    assert len(updates) == 1, "the conflicting expansion is attempted once and then dropped"
+    assert updates[0]["hash"] == "H_DETAILS_STALE"
+
+
+async def test_stale_expansion_fallback_uses_current_view_hash(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    _tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
+
+    await handle_agent_setup_action(
+        runtime,
+        _action_payload(
+            ACTION_EXPAND_CONNECTIONS,
+            meta=_meta(view="details", agent_name=_OTHER_AGENT),
+            view_id="V_DETAILS",
+            view_hash="H_DETAILS_CURRENT",
+        ),
+    )
+
+    updates = _sent(fake_slack_web_client.mock, _VIEWS_UPDATE_KEY)
+    assert len(updates) == 1, "the missing target falls back to one in-place roster update"
+    assert updates[0]["hash"] == "H_DETAILS_CURRENT"
+    assert "no longer available" in json.dumps(updates[0]["view"])
 
 
 async def test_coding_tools_action_when_unconfigured_posts_a_note_and_mints_nothing(

@@ -8,21 +8,15 @@ import anthropic
 import structlog
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
-from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
-from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.roster import RosterAgent
 from daimon.core.setup_conversations import (
     build_setup_opener,
-    has_external_mcp_connection,
     resolve_setup_agents,
     setup_thread_name,
 )
-from daimon.core.stores.agent_repo_binding import get_binding
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -89,49 +83,9 @@ async def open_setup_conversation(
             target_ma_agent_id=selected.ma_agent_id if selected else None,
         )
         target_name = selected.name if ma_target is not None and selected is not None else None
-        has_repo = False
-        is_reachable = False
-        if ma_target is not None and target_name is not None:
-            async with runtime.sessionmaker() as session:
-                has_repo = (
-                    await get_binding(
-                        session,
-                        tenant_id=tenant_id,
-                        agent_id=derive_agent_uuid(
-                            tenant_id=tenant_id, ma_agent_id=str(ma_target.id)
-                        ),
-                    )
-                    is not None
-                )
-                # Read reachability live rather than off the panel's snapshot:
-                # the opener offers to change the agent's instructions, and a
-                # default set in another channel since the panel opened changes
-                # who is allowed to accept that offer.
-                is_reachable = await is_agent_reachable_in_tenant(
-                    session,
-                    tenant_id=tenant_id,
-                    agent_name=target_name,
-                    default=runtime.deployment_default,
-                )
-        caller_is_admin = isinstance(interaction.user, discord.Member) and is_member_guild_admin(
-            interaction.user,
-            guild_owner_id=interaction.guild.owner_id if interaction.guild else None,
-        )
         opener = build_setup_opener(
             target_name=target_name,
-            opener_mention=interaction.user.mention,
             bot_mention=interaction.client.user.mention,
-            has_repo=has_repo,
-            has_external_connection=ma_target is not None
-            and has_external_mcp_connection(
-                (server.url for server in ma_target.mcp_servers),
-                public_mcp_url=state.default_mcp_url,
-            ),
-            can_customize=bool(
-                ma_target
-                and ma_target.metadata.get(MA_METADATA_KEY_MANAGED) != "true"
-                and (caller_is_admin or not is_reachable)
-            ),
         )
         thread = await channel.create_thread(
             name=setup_thread_name(target_name),

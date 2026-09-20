@@ -38,13 +38,13 @@ PANEL_PAGE_SIZE: Final = 20
 PanelViewName = Literal["agents", "details", "routing", "new_agent", "creating"]
 """Which of the panel's screens a view is showing."""
 
-PanelExpansion = Literal["keys", "skills"]
+PanelExpansion = Literal["keys", "skills", "connections"]
 """A list the reader has asked to see in full rather than collapsed."""
 
 _PANEL_VIEW_NAMES: Final[frozenset[str]] = frozenset(
     {"agents", "details", "routing", "new_agent", "creating"}
 )
-_PANEL_EXPANSIONS: Final[tuple[PanelExpansion, ...]] = ("keys", "skills")
+_PANEL_EXPANSIONS: Final[tuple[PanelExpansion, ...]] = ("keys", "skills", "connections")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -66,9 +66,7 @@ class PanelMetadata:
     page: int = 0
     agent_name: str | None = None
     root_view_id: str | None = None
-    expanded: frozenset[PanelExpansion] = dataclasses.field(
-        default_factory=frozenset[PanelExpansion]
-    )
+    expanded: PanelExpansion | None = None
 
     def with_page(self, page: int) -> PanelMetadata:
         """Same view, a different page. Negative pages clamp to the first."""
@@ -96,16 +94,12 @@ class PanelMetadata:
             page=self.page if page is None else max(page, 0),
             agent_name=agent_name,
             root_view_id=root_view_id,
+            expanded=self.expanded if agent_name == self.agent_name else None,
         )
 
     def toggled(self, expansion: PanelExpansion) -> PanelMetadata:
         """Flip one collapsed list open, or an open one closed."""
-        values: set[PanelExpansion] = set(self.expanded)
-        if expansion in values:
-            values.discard(expansion)
-        else:
-            values.add(expansion)
-        return dataclasses.replace(self, expanded=frozenset(values))
+        return dataclasses.replace(self, expanded=None if self.expanded == expansion else expansion)
 
 
 def encode_panel_metadata(meta: PanelMetadata) -> str:
@@ -122,8 +116,8 @@ def encode_panel_metadata(meta: PanelMetadata) -> str:
         payload["a"] = meta.agent_name
     if meta.root_view_id is not None:
         payload["r"] = meta.root_view_id
-    if meta.expanded:
-        payload["x"] = sorted(meta.expanded)
+    if meta.expanded is not None:
+        payload["x"] = meta.expanded
     encoded = json.dumps(payload, separators=(",", ":"))
     if len(encoded) > MAX_PRIVATE_METADATA_CHARS:
         raise ValueError(
@@ -166,12 +160,16 @@ def decode_panel_metadata(raw: str) -> PanelMetadata | None:
         return None
     if root_view_id is not None and not isinstance(root_view_id, str):
         return None
-    raw_expanded = payload.get("x", [])
-    if not isinstance(raw_expanded, list):
+    raw_expanded = payload.get("x")
+    expanded: PanelExpansion | None = None
+    if isinstance(raw_expanded, str) and raw_expanded in _PANEL_EXPANSIONS:
+        expanded = raw_expanded
+    elif isinstance(raw_expanded, list):
+        # Older views carried a list and could have more than one open. Pick
+        # the first known value so a click from an already-open modal remains usable.
+        expanded = next((name for name in _PANEL_EXPANSIONS if name in raw_expanded), None)
+    elif raw_expanded is not None:
         return None
-    expanded: frozenset[PanelExpansion] = frozenset(
-        name for name in _PANEL_EXPANSIONS if name in raw_expanded
-    )
     return PanelMetadata(
         team_id=team_id,
         channel_id=channel_id,

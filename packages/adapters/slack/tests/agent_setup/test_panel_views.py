@@ -17,7 +17,9 @@ from typing import Any
 import pytest
 from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_CODING_TOOLS,
+    ACTION_EXPAND_CONNECTIONS,
     ACTION_EXPAND_KEYS,
+    ACTION_EXPAND_SKILLS,
     ACTION_NEW,
     ACTION_PAGE_NEXT,
     ACTION_ROUTING,
@@ -291,12 +293,14 @@ def test_agents_view_when_agent_answers_here_lists_it_first_then_stable_name_ord
         channel_id=_CHANNEL_ID,
     )
     headings = [text for text in _texts(view) if text.startswith("*")]
-    assert headings[0] == "*zebra-bot* answers here", (
+    assert headings[0] == f"*Agents in <#{_CHANNEL_ID}>*", "the roster names its channel"
+    assert headings[1] == f"*zebra-bot*\nAnswers in <#{_CHANNEL_ID}>", (
         "the agent answering where the reader stands comes first and says so"
     )
-    assert headings[1:] == ["*alpha-bot*", "*beta-bot*"], (
-        "the remaining agents keep the roster's own order"
-    )
+    assert headings[2:] == [
+        "*alpha-bot*\nRouting unavailable",
+        "*beta-bot*\nRouting unavailable",
+    ], "the remaining agents keep the roster's own order"
     details_values = [
         block["accessory"]["value"]
         for block in _blocks(view)
@@ -386,7 +390,7 @@ def test_agents_view_never_renders_made_by_for_workspace_stamp() -> None:
     assert "made by" not in rendered, (
         "an account with no resolved person behind it — the workspace stamp — gets no attribution"
     )
-    assert "built in" in rendered, "the seeded agent still says it is built in"
+    assert "built in" not in rendered, "provenance does not compete with routing status"
 
 
 def test_agents_view_when_routed_names_given_distinguishes_unrouted_from_elsewhere() -> None:
@@ -407,8 +411,8 @@ def test_agents_view_when_routed_names_given_distinguishes_unrouted_from_elsewhe
         routed_agent_names={"growth-bot"},
     )
     rendered = _joined(view)
-    assert UNROUTED_LINE in rendered, "an agent nothing routes to says so"
-    assert "answers in other channels" in rendered, (
+    assert "Not assigned" in rendered, "an agent nothing routes to says so"
+    assert "Answers in another channel" in rendered, (
         "an agent routed somewhere else says that instead"
     )
 
@@ -474,10 +478,16 @@ def test_details_view_when_unrouted_shows_note(is_admin: bool) -> None:
     )
 
 
-def test_details_view_orders_sections_model_repo_keys_skills_then_mcp() -> None:
+def test_details_view_orders_identity_then_configuration_and_collections() -> None:
     """Details reads top to bottom the way it does on the other platform."""
     view = build_details_view(
-        _details(files=[_agent_file("TOGGL_TOKEN")], binding=_binding()),
+        _details(
+            purpose="Finds evidence and analyzes data.",
+            files=[_agent_file("TOGGL_TOKEN")],
+            binding=_binding(),
+            skills=[{"type": "custom", "skill_id": "explore", "version": "1"}],
+            mcp_servers=[{"type": "url", "name": "example", "url": "https://example.com/mcp"}],
+        ),
         meta=_meta(),
         is_admin=True,
         coding_tools_available=True,
@@ -485,7 +495,16 @@ def test_details_view_orders_sections_model_repo_keys_skills_then_mcp() -> None:
         attribution=None,
     )
     rendered = _joined(view)
-    headings = ["*Model*", "*Working repo*", "*Keys*", "*Skills*", "*MCP servers*"]
+    headings = [
+        "Finds evidence and analyzes data.",
+        "*Answers in:*",
+        "*Model:*",
+        "*Repository:*",
+        "*Branch:*",
+        "*Skills*",
+        "*Connections*",
+        "*Keys*",
+    ]
     positions = [rendered.index(heading) for heading in headings]
     assert positions == sorted(positions), (
         f"Details must read {' → '.join(headings)}, not {rendered}"
@@ -510,6 +529,53 @@ def test_details_view_never_renders_key_values() -> None:
     )
 
 
+def test_details_view_renders_multiple_answering_places_one_per_line() -> None:
+    view = build_details_view(
+        _details(
+            channels=[
+                ChannelConfigRow(
+                    tenant_id=_TENANT_ID, channel_id=_CHANNEL_ID, agent_name="research-bot"
+                ),
+                ChannelConfigRow(
+                    tenant_id=_TENANT_ID,
+                    channel_id=_OTHER_CHANNEL_ID,
+                    agent_name="research-bot",
+                ),
+            ]
+        ),
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+    )
+    assert f"*Answers in*\n<#{_CHANNEL_ID}>\n<#{_OTHER_CHANNEL_ID}>" in _joined(view), (
+        "multiple routing values remain a stable vertical list"
+    )
+
+
+def test_details_view_sanitizes_connection_names_inside_slack_links() -> None:
+    view = build_details_view(
+        _details(
+            mcp_servers=[
+                {
+                    "type": "url",
+                    "name": "Example|service\nspoofed",
+                    "url": "https://example.com/mcp",
+                }
+            ]
+        ),
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+    )
+    assert "<https://example.com/mcp|Example¦service spoofed>" in _joined(view), (
+        "a service name cannot terminate its link label or inject another row"
+    )
+
+
 def test_details_view_when_many_keys_collapses_and_offers_expand() -> None:
     files = [_agent_file(f"KEY_{index:02d}") for index in range(12)]
     collapsed = build_details_view(
@@ -521,14 +587,14 @@ def test_details_view_when_many_keys_collapses_and_offers_expand() -> None:
         attribution=None,
     )
     rendered = _joined(collapsed)
-    assert "KEY_07" in rendered, "the first eight key names are shown"
-    assert "KEY_08" not in rendered, "the ninth and beyond collapse behind the expander"
-    assert ACTION_EXPAND_KEYS in _action_ids(collapsed), "a long key list offers Show all"
-    assert "Show all" in _button_labels(collapsed), "the expander says what it does"
+    assert "KEY_05" in rendered, "the first six key names are shown"
+    assert "KEY_06" not in rendered, "the seventh and beyond collapse behind the expander"
+    assert ACTION_EXPAND_KEYS in _action_ids(collapsed), "a long key list offers expansion"
+    assert "Show more" in _button_labels(collapsed), "the expander says what it does"
 
     expanded = build_details_view(
         _details(files=files),
-        meta=_meta(expanded=frozenset({"keys"})),
+        meta=_meta(expanded="keys"),
         is_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
@@ -536,6 +602,68 @@ def test_details_view_when_many_keys_collapses_and_offers_expand() -> None:
     )
     assert "KEY_11" in _joined(expanded), "an expanded list shows the rest"
     assert "Show fewer" in _button_labels(expanded), "an expanded list offers to collapse again"
+
+
+@pytest.mark.parametrize("count", [0, 1, 5, 6, 7, 61])
+@pytest.mark.parametrize(
+    ("kind", "heading", "action_id"),
+    [
+        ("skills", "*Skills*", ACTION_EXPAND_SKILLS),
+        ("connections", "*Connections*", ACTION_EXPAND_CONNECTIONS),
+        ("keys", "*Keys*", ACTION_EXPAND_KEYS),
+    ],
+)
+def test_details_view_bounds_each_collection_consistently(
+    count: int, kind: str, heading: str, action_id: str
+) -> None:
+    names = [f"ITEM_{index:02d}" for index in range(count)]
+    details = _details(
+        files=[_agent_file(name) for name in names] if kind == "keys" else None,
+        skills=(
+            [{"type": "custom", "skill_id": name, "version": "1"} for name in names]
+            if kind == "skills"
+            else None
+        ),
+        mcp_servers=(
+            [{"type": "url", "name": name, "url": f"https://example.com/{name}"} for name in names]
+            if kind == "connections"
+            else None
+        ),
+    )
+    collapsed = build_details_view(
+        details,
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+    )
+    collapsed_text = _joined(collapsed)
+    assert (heading in collapsed_text) is (count > 0), "empty optional lists are omitted"
+    assert (action_id in _action_ids(collapsed)) is (count > 6), (
+        "only a list with hidden entries needs Show more"
+    )
+    if count > 6:
+        assert "ITEM_05" in collapsed_text, "the sixth complete item remains visible"
+        assert "ITEM_06" not in collapsed_text, "the seventh item stays behind Show more"
+        assert f"+{count - 6} more" in collapsed_text, "the hidden count is exact"
+
+        expanded = build_details_view(
+            details,
+            meta=_meta(expanded=kind),
+            is_admin=True,
+            coding_tools_available=True,
+            channel_id=_CHANNEL_ID,
+            attribution=None,
+        )
+        expanded_text = _joined(expanded)
+        assert "Show fewer" in _button_labels(expanded), "expanded lists can collapse"
+        visible_count = min(count, 60)
+        assert f"ITEM_{visible_count - 1:02d}" in expanded_text, (
+            "expansion keeps complete ordered items up to the cap"
+        )
+        if count > 60:
+            assert f"+{count - 60} more" in expanded_text, "the expanded cap reports its remainder"
 
 
 def test_details_view_when_coding_tools_unconfigured_renders_note_not_button() -> None:
@@ -550,7 +678,7 @@ def test_details_view_when_coding_tools_unconfigured_renders_note_not_button() -
     assert ACTION_CODING_TOOLS in _action_ids(available), (
         "a configured deployment offers the token button"
     )
-    assert "claude mcp add" in _joined(available), "the note says what to do with the token"
+    assert "claude mcp add" not in _joined(available), "CLI instructions wait for the click"
 
     unavailable = build_details_view(
         _details(),
@@ -581,7 +709,7 @@ def test_details_view_when_coding_tools_unconfigured_renders_note_not_button() -
             _binding(proof_at=None, proof_account_id=None, proof_kind=None),
             GitHubDeploymentFacts(has_fallback_pat=True, app_configured=True),
             "not_checked",
-            "not checked yet",
+            "Not checked yet",
         ),
         (
             _binding(ma_secret_ref="none", proof_kind="public"),
@@ -628,13 +756,13 @@ def test_details_view_renders_each_repo_access_kind(
     )
     assert expected_phrase in rendered, f"{expected_kind} must read as {expected_phrase!r}"
     if expected_kind in {"connected", "checked"} and binding.proof_at is not None:
-        assert "last checked" in rendered, "a recorded check is dated"
+        assert "Last checked" in rendered, "a recorded check is dated"
     assert "connected" not in rendered, (
         "the panel describes what was recorded; it never claims a live connection"
     )
 
 
-def test_details_view_when_no_repo_says_so_without_inventing_state() -> None:
+def test_details_view_when_no_repo_omits_the_optional_section() -> None:
     view = build_details_view(
         _details(binding=None),
         meta=_meta(),
@@ -643,7 +771,7 @@ def test_details_view_when_no_repo_says_so_without_inventing_state() -> None:
         channel_id=_CHANNEL_ID,
         attribution=None,
     )
-    assert "_no working repo yet_" in _joined(view), "an unbound repo has a concrete empty state"
+    assert "*Repository:*" not in _joined(view), "an unbound repo adds no empty-state noise"
 
 
 def test_details_view_when_skills_truncated_says_names_may_be_missing() -> None:
@@ -658,8 +786,23 @@ def test_details_view_when_skills_truncated_says_names_may_be_missing() -> None:
         channel_id=_CHANNEL_ID,
         attribution=None,
     )
-    assert "_some skill names may be missing_" in _joined(view), (
+    assert "Some skill names may be missing." in _joined(view), (
         "a truncated skills listing says it is incomplete rather than reading as the whole set"
+    )
+
+
+def test_details_view_when_skill_source_truncated_but_empty_keeps_the_warning() -> None:
+    view = build_details_view(
+        _details(skills=[], skills_truncated=True),
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+    )
+    assert "*Skills*" not in _joined(view), "an empty list does not grow an empty section"
+    assert "Some skill names may be missing." in _joined(view), (
+        "source truncation remains visible even when no skill name was resolved"
     )
 
 
@@ -693,11 +836,11 @@ def test_routing_view_renders_channel_mentions_not_raw_ids_and_names_deployment_
         unrouted_agent_name=None,
     )
     rendered = _joined(view)
-    assert f"<#{_CHANNEL_ID}> → *research-bot*" in rendered, (
+    assert f"*Channel:* <#{_CHANNEL_ID}>\n*Agent:* research-bot" in rendered, (
         "a channel row reads as a live mention, not a raw id"
     )
     assert "set by <@U1>" in rendered, "a recorded actor is named"
-    assert "🌐 Workspace default: *daimon*" in rendered, "the workspace default is named"
+    assert "*Workspace default:* daimon" in rendered, "the workspace default is named"
     assert "Deployment default: *daimon*" in rendered, "the deployment default is named too"
     assert "_not in effect while a workspace default is set_" in rendered, (
         "a workspace default consumes the deployment fall-through, and the view says so"
@@ -775,7 +918,7 @@ def test_routing_view_lists_setup_conversations_separately() -> None:
     assert "*Setup conversations*" in rendered, "open setup threads get their own heading"
     assert links[9] in rendered, "the first ten links are listed"
     assert links[10] not in rendered, "the list is bounded at ten"
-    assert f"<#{_OTHER_CHANNEL_ID}> → *research-bot*" in rendered, (
+    assert f"*Channel:* <#{_OTHER_CHANNEL_ID}>\n*Agent:* research-bot" in rendered, (
         "setup threads are listed apart from the channel routing they sit beside"
     )
 
@@ -793,7 +936,7 @@ def test_routing_view_when_nothing_is_set_says_so() -> None:
         unrouted_agent_name=None,
     )
     rendered = _joined(view)
-    assert "_no workspace default_" in rendered, "an unset workspace default is stated"
+    assert "*Workspace default:* Not assigned" in rendered, "an unset workspace default is stated"
     assert "_no deployment default_" in rendered, "an unset deployment default is stated"
     assert "_none open_" in rendered, "no open setup conversation is stated"
 
@@ -872,7 +1015,7 @@ def test_new_agent_form_when_validation_failed_restores_inputs_and_shows_the_err
 
 def test_every_panel_view_private_metadata_under_limit_and_without_tenant_id() -> None:
     long_name = "n" * 64
-    meta = _meta(expanded=frozenset({"keys", "skills"}), root_view_id="V0123456789")
+    meta = _meta(expanded="connections", root_view_id="V0123456789")
     answering = _roster_agent(long_name, created_by_account_id=_MAKER)
     roster = _roster(answering, answering=answering)
     answering_map = _answering_map(

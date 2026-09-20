@@ -204,7 +204,7 @@ def test_panel_metadata_round_trips_every_field() -> None:
         page=3,
         agent_name="research-bot",
         root_view_id="V0123456789",
-        expanded=frozenset({"keys", "skills"}),
+        expanded="connections",
     )
     decoded = decode_panel_metadata(encode_panel_metadata(meta))
     assert decoded == meta, "a fully populated panel metadata must survive the round trip"
@@ -241,7 +241,7 @@ def test_panel_metadata_stays_well_inside_slacks_metadata_budget() -> None:
             page=99,
             agent_name="n" * 64,
             root_view_id="V" * 32,
-            expanded=frozenset({"keys", "skills"}),
+            expanded="connections",
         )
     )
     assert len(encoded) < MAX_PRIVATE_METADATA_CHARS, (
@@ -263,7 +263,7 @@ def test_panel_metadata_stays_well_inside_slacks_metadata_budget() -> None:
         '{"t":"T1","c":"C1","v":"agents","p":"two"}',
         '{"t":"T1","c":"C1","v":"agents","a":7}',
         '{"t":1,"c":"C1","v":"agents"}',
-        '{"t":"T1","c":"C1","v":"agents","x":"keys"}',
+        '{"t":"T1","c":"C1","v":"agents","x":7}',
     ],
 )
 def test_decode_panel_metadata_when_malformed_returns_none(raw: str) -> None:
@@ -275,7 +275,7 @@ def test_decode_panel_metadata_when_malformed_returns_none(raw: str) -> None:
 def test_decode_panel_metadata_drops_unrecognised_expansions() -> None:
     decoded = decode_panel_metadata('{"t":"T1","c":"C1","v":"details","x":["keys","mystery"]}')
     assert decoded is not None, "a recognisable payload with one odd expansion still decodes"
-    assert decoded.expanded == frozenset({"keys"}), (
+    assert decoded.expanded == "keys", (
         "an expansion this build does not know about is ignored, not carried through"
     )
 
@@ -307,11 +307,27 @@ def test_with_view_when_page_given_starts_the_new_screen_there() -> None:
     assert meta.with_view("routing", page=-2).page == 0, "a page before the first clamps"
 
 
+def test_with_view_resets_expansion_when_the_agent_changes() -> None:
+    meta = PanelMetadata(
+        team_id="T1",
+        channel_id="C1",
+        view="details",
+        agent_name="researcher",
+        expanded="keys",
+    )
+    assert meta.with_view("details", agent_name="researcher").expanded == "keys", (
+        "an in-place rerender keeps the selected agent's open list"
+    )
+    assert meta.with_view("details", agent_name="forecaster").expanded is None, (
+        "opening another agent starts with every list collapsed"
+    )
+
+
 def test_toggled_opens_a_collapsed_list_and_closes_an_open_one() -> None:
     meta = PanelMetadata(team_id="T1", channel_id="C1", view="details")
     opened = meta.toggled("keys")
-    assert opened.expanded == frozenset({"keys"}), "toggling a collapsed list opens it"
-    assert opened.toggled("keys").expanded == frozenset(), "toggling it again closes it"
-    both = opened.toggled("skills")
-    assert both.expanded == frozenset({"keys", "skills"}), "expansions are independent"
-    assert meta.expanded == frozenset(), "toggled returns a new metadata rather than mutating"
+    assert opened.expanded == "keys", "toggling a collapsed list opens it"
+    assert opened.toggled("keys").expanded is None, "toggling it again closes it"
+    skills = opened.toggled("skills")
+    assert skills.expanded == "skills", "opening one list closes the previous list"
+    assert meta.expanded is None, "toggled returns a new metadata rather than mutating"

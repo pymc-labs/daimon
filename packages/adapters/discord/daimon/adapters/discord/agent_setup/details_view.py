@@ -7,26 +7,33 @@ to Daimon about it, or drive it from a coding tool.
 
 ``build_details_container`` is pure: it folds an `AgentDetails` into a
 container and never reads a clock, a session or a credential. ``DetailsView``
-is the shell that attaches the callbacks. The key list is names only — the
-model it renders has no field for a value, and must never grow one.
+is the shell that attaches the callbacks. Configuration lists expose metadata
+only; key values are never part of the rendered model.
 """
 
 from __future__ import annotations
 
+import functools
+from urllib.parse import quote
+
 import structlog
-from daimon.adapters.discord.agent_setup.budget import KEYS_COLLAPSED_COUNT, KEYS_EXPANDED_CAP
+from daimon.adapters.discord.agent_setup.budget import LAYOUT_TEXT_BUDGET
 from daimon.adapters.discord.agent_setup.conversations import open_setup_conversation
 from daimon.adapters.discord.agent_setup.mcp_access import send_coding_tools_access
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import is_guild_admin
-from daimon.adapters.discord.layout import hairline, header
+from daimon.adapters.discord.layout import hairline
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_detail_lists import (
+    DETAIL_LIST_COLLAPSED_COUNT,
+    DetailListName,
+    format_detail_lists,
+)
 from daimon.core.agent_details import AgentDetails, RepoBinding
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import (
-    CODING_TOOLS_HINT,
     SETUP_ACTION_LABEL,
     shared_keys_sentence,
 )
@@ -37,12 +44,12 @@ log = structlog.get_logger()
 
 CODING_TOOLS_LABEL = "🧰 Use from your coding tools"
 BACK_LABEL = "◀ Back"
-SHOW_ALL_LABEL = "Show all"
+SHOW_MORE_LABEL = "Show more"
 SHOW_FEWER_LABEL = "Show fewer"
-
-#: The core sentence as Discord subtext, with the command in code style: the
-#: wording has one home in core, and only the markup is this adapter's.
-CODING_TOOLS_SUBTEXT = "-# " + CODING_TOOLS_HINT.replace("claude mcp add", "`claude mcp add`")
+_LIST_TEXT_RESERVE = 256
+_PURPOSE_MAX_CHARS = 800
+_ROUTING_MAX_CHARS = 1000
+_DETAIL_LIST_NAMES: tuple[DetailListName, ...] = ("keys", "skills", "connections")
 
 
 def coding_tools_refusal(agent_name: str) -> str:
@@ -54,7 +61,7 @@ def coding_tools_refusal(agent_name: str) -> str:
 
 
 def _answers_line(places: tuple[AnsweringPlace, ...]) -> str:
-    """Where mentions reach this agent, as channel mentions plus named tiers."""
+    """Where mentions reach this agent, one place per line when there are several."""
     parts: list[str] = []
     for place in places:
         if place.tier == "channel" and place.channel_id is not None:
@@ -63,12 +70,32 @@ def _answers_line(places: tuple[AnsweringPlace, ...]) -> str:
             parts.append("the server default")
         else:
             parts.append("the deployment default")
-    return f"-# answers in {' · '.join(parts)}"
+    shown: list[str] = []
+    for part in parts:
+        candidate = "\n".join((*shown, part))
+        omitted = len(parts) - len(shown) - 1
+        suffix = f"\n+{omitted} more" if omitted > 0 else ""
+        if len(candidate) + len(suffix) > _ROUTING_MAX_CHARS:
+            break
+        shown.append(part)
+    omitted = len(parts) - len(shown)
+    if omitted > 0:
+        shown.append(f"+{omitted} more")
+    body = "\n".join(shown)
+    separator = " " if len(shown) == 1 else "\n"
+    return f"**Answers in:**{separator}{body}"
+
+
+def _purpose_text(purpose: str) -> str:
+    """Bound optional prose while making its omission visible."""
+    if len(purpose) <= _PURPOSE_MAX_CHARS:
+        return purpose
+    return f"{purpose[: _PURPOSE_MAX_CHARS - 1]}…"
 
 
 def _last_checked(access: RepoAccess) -> str:
     return (
-        f" · last checked <t:{int(access.checked_at.timestamp())}:R>"
+        f"\n-# Last checked <t:{int(access.checked_at.timestamp())}:R>"
         if access.checked_at is not None
         else ""
     )
@@ -89,69 +116,75 @@ def _repo_access_line(access: RepoAccess) -> str:
     return f"access recorded{_last_checked(access)}"
 
 
-def _repo_text(repo: RepoBinding | None) -> str:
+def _repo_texts(repo: RepoBinding | None) -> tuple[str, ...]:
     if repo is None:
-        return "📦 **Working repo**\n-# no working repo yet"
+        return ()
     slug = normalize_owner_repo(repo.repo_url)
     return (
-        f"📦 **Working repo** [{slug}](https://github.com/{slug}) `{repo.default_branch}`\n"
-        f"-# {_repo_access_line(repo.access)}"
+        f"**Repository:** [{slug}](https://github.com/{slug})",
+        f"**Branch:** `{repo.default_branch}`",
+        f"**Access:** {_repo_access_line(repo.access)}",
     )
 
 
-def _keys_text(details: AgentDetails, *, keys_expanded: bool) -> str:
-    """Key names, never values, plus the sentence saying who they reach."""
-    if not details.keys:
-        return "🔑 **Keys**\n-# no keys yet"
-    shown = (
-        details.keys[:KEYS_EXPANDED_CAP] if keys_expanded else details.keys[:KEYS_COLLAPSED_COUNT]
-    )
-    body = "\n".join(entry.name for entry in shown)
-    remainder = len(details.keys) - len(shown)
-    if keys_expanded and remainder > 0:
-        body = f"{body}\n-# +{remainder} more"
-    return f"🔑 **Keys**\n{body}\n-# {shared_keys_sentence(details.name)}"
+def _detail_items(details: AgentDetails) -> dict[DetailListName, tuple[str, ...]]:
+    items: dict[DetailListName, tuple[str, ...]] = {}
+    if details.skills:
+        items["skills"] = tuple(skill.title or skill.skill_id for skill in details.skills)
+    if details.mcp_servers:
+        items["connections"] = tuple(
+            f"[{_escape_link_label(server.name)}]({quote(server.url, safe=':/?&=#%+-._~')})"
+            for server in details.mcp_servers
+        )
+    if details.keys:
+        items["keys"] = tuple(f"`{entry.name}`" for entry in details.keys)
+    return items
 
 
-def _keys_item(
-    details: AgentDetails, *, keys_expanded: bool
+def _escape_link_label(text: str) -> str:
+    """Keep an external connection name inside its Markdown link label."""
+    return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def _list_heading(name: DetailListName) -> str:
+    return {"skills": "Skills", "connections": "Connections", "keys": "Keys"}[name]
+
+
+def _list_note(details: AgentDetails, name: DetailListName) -> str | None:
+    if name == "skills" and details.skills_listing_truncated:
+        return "-# Some skill names may be missing."
+    if name == "keys":
+        return f"-# {shared_keys_sentence(details.name)}"
+    return None
+
+
+def _list_item(
+    *,
+    name: DetailListName,
+    body: str,
+    count: int,
+    expanded: DetailListName | None,
+    note: str | None,
 ) -> discord.ui.Item[discord.ui.LayoutView]:
-    """The key list, wearing a toggle only when there is something hidden behind it."""
-    text: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
-        _keys_text(details, keys_expanded=keys_expanded)
-    )
-    if len(details.keys) <= KEYS_COLLAPSED_COUNT:
+    text_content = f"**{_list_heading(name)}**\n{body}"
+    if note is not None:
+        text_content = f"{text_content}\n{note}"
+    text: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(text_content)
+    if count <= DETAIL_LIST_COLLAPSED_COUNT:
         return text
+    action = SHOW_FEWER_LABEL if expanded == name else SHOW_MORE_LABEL
     toggle: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-        label=SHOW_FEWER_LABEL if keys_expanded else SHOW_ALL_LABEL,
+        label=action,
         style=discord.ButtonStyle.secondary,
     )
-    section: discord.ui.Section[discord.ui.LayoutView] = discord.ui.Section(text, accessory=toggle)
-    return section
-
-
-def _skills_text(details: AgentDetails) -> str:
-    if not details.skills:
-        return "🧩 **Skills**\n-# no skills yet"
-    body = "\n".join(skill.title or skill.skill_id for skill in details.skills)
-    text = f"🧩 **Skills**\n{body}"
-    if details.skills_listing_truncated:
-        text = f"{text}\n-# some skill names may be missing"
-    return text
-
-
-def _mcp_text(details: AgentDetails) -> str:
-    if not details.mcp_servers:
-        return "🔌 **MCP servers**\n-# no servers yet"
-    body = "\n".join(f"{server.name} — {server.url}" for server in details.mcp_servers)
-    return f"🔌 **MCP servers**\n{body}"
+    return discord.ui.Section(text, accessory=toggle)
 
 
 def build_details_container(
     state: PanelState,
     details: AgentDetails,
     *,
-    keys_expanded: bool,
+    expanded_detail: DetailListName | None,
     is_admin: bool,
     attribution: str | None,
 ) -> discord.ui.Container[discord.ui.LayoutView]:
@@ -163,43 +196,90 @@ def build_details_container(
     """
     del state, is_admin
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
-    container.add_item(header(f"🤖 {details.name}", subtext=details.purpose))
+    fixed_texts = [f"## {details.name}"]
+    if details.purpose:
+        fixed_texts[0] = f"{fixed_texts[0]}\n{_purpose_text(details.purpose)}"
     if details.answers_in:
-        container.add_item(discord.ui.TextDisplay(_answers_line(details.answers_in)))
+        routing_text = _answers_line(details.answers_in)
     elif details.unrouted_note is not None:
-        container.add_item(discord.ui.TextDisplay(details.unrouted_note))
+        routing_text = details.unrouted_note
+    else:
+        routing_text = ""
+    if routing_text:
+        fixed_texts.append(routing_text)
+    fixed_texts.append(f"**Model:** {details.model_display_name}")
+    fixed_texts.extend(_repo_texts(details.repo))
+    if details.skills_listing_truncated and not details.skills:
+        fixed_texts.append("-# Some skill names may be missing.")
+    del attribution
+
+    items = _detail_items(details)
+    list_notes: dict[DetailListName, str | None] = {
+        name: _list_note(details, name) for name in items
+    }
+    reserved = sum(map(len, fixed_texts)) + sum(
+        len(f"**{_list_heading(name)}**\n") + len(note or "") + 1
+        for name, note in list_notes.items()
+    )
+    list_bodies = format_detail_lists(
+        items,
+        expanded=expanded_detail,
+        max_chars=LAYOUT_TEXT_BUDGET - reserved - _LIST_TEXT_RESERVE,
+    )
+
+    container.add_item(discord.ui.TextDisplay(fixed_texts[0]))
+    if routing_text:
+        container.add_item(discord.ui.TextDisplay(routing_text))
+    setup_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+    setup_row.add_item(
+        discord.ui.Button(label=SETUP_ACTION_LABEL, style=discord.ButtonStyle.primary)
+    )
+    container.add_item(setup_row)
     container.add_item(hairline())
-    container.add_item(discord.ui.TextDisplay(f"**Model** {details.model_display_name}"))
-    container.add_item(discord.ui.TextDisplay(_repo_text(details.repo)))
-    container.add_item(_keys_item(details, keys_expanded=keys_expanded))
-    container.add_item(discord.ui.TextDisplay(_skills_text(details)))
-    container.add_item(discord.ui.TextDisplay(_mcp_text(details)))
+    for text in fixed_texts[1 + bool(routing_text) :]:
+        container.add_item(discord.ui.TextDisplay(text))
+    for name, body in list_bodies.items():
+        container.add_item(
+            _list_item(
+                name=name,
+                body=body,
+                count=len(items[name]),
+                expanded=expanded_detail,
+                note=list_notes[name],
+            )
+        )
     container.add_item(hairline())
-    container.add_item(discord.ui.TextDisplay(CODING_TOOLS_SUBTEXT))
-    if attribution is not None:
-        container.add_item(discord.ui.TextDisplay(f"-# made by {attribution}"))
     return container
 
 
-def _keys_toggle_button(
+def _toggle_buttons(
     container: discord.ui.Container[discord.ui.LayoutView],
-) -> discord.ui.Button[discord.ui.LayoutView] | None:
-    """Find the Show all / Show fewer accessory the builder left unwired."""
+) -> dict[DetailListName, discord.ui.Button[discord.ui.LayoutView]]:
+    """Find the list accessories the pure builder left unwired."""
+    found: dict[DetailListName, discord.ui.Button[discord.ui.LayoutView]] = {}
     for child in container.children:
         if isinstance(child, discord.ui.Section):
             accessory = child.accessory
-            if isinstance(accessory, discord.ui.Button) and accessory.label in (
-                SHOW_ALL_LABEL,
-                SHOW_FEWER_LABEL,
-            ):
-                return accessory
-    return None
+            if not isinstance(accessory, discord.ui.Button) or accessory.label is None:
+                continue
+            text = next(
+                (
+                    item.content
+                    for item in child.children
+                    if isinstance(item, discord.ui.TextDisplay)
+                ),
+                "",
+            )
+            for name in _DETAIL_LIST_NAMES:
+                if text.startswith(f"**{_list_heading(name)}**"):
+                    found[name] = accessory
+    return found
 
 
 class DetailsView(PanelViewBase):
     """The Details screen: one agent, two actions, and the way back.
 
-    Rebuilt from ``state`` on every render, so expanding the key list or coming
+    Rebuilt from ``state`` on every render, so expanding a configuration list or coming
     back from a setup conversation costs no refetch.
     """
 
@@ -214,31 +294,30 @@ class DetailsView(PanelViewBase):
         details = state.details
         assert details is not None, "DetailsView needs a loaded AgentDetails on the panel state"
         self.details = details
-        # Only a creator who resolves to a live Discord principal is named; the
-        # panel resolved that once, at open, for every agent on the roster.
-        self.attribution = state.attributions.get(details.ma_agent_id)
-
         container = build_details_container(
             state,
             details,
-            keys_expanded=state.keys_expanded,
+            expanded_detail=state.expanded_detail,
             is_admin=state.is_admin,
-            attribution=self.attribution,
+            attribution=None,
         )
-        toggle = _keys_toggle_button(container)
-        if toggle is not None:
-            toggle.callback = self._on_toggle_keys  # type: ignore[method-assign]  # per-instance callback
+        for name, toggle in _toggle_buttons(container).items():
+            toggle.callback = functools.partial(  # type: ignore[method-assign]  # per-instance callback
+                self._on_toggle_detail, name=name
+            )
 
-        action_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
-        setup_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-            label=SETUP_ACTION_LABEL, style=discord.ButtonStyle.primary
+        setup_button = next(
+            child
+            for child in container.walk_children()
+            if isinstance(child, discord.ui.Button) and child.label == SETUP_ACTION_LABEL
         )
         setup_button.callback = self._on_setup  # type: ignore[method-assign]  # per-instance callback
+
+        action_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
         coding_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
             label=CODING_TOOLS_LABEL, style=discord.ButtonStyle.secondary
         )
         coding_button.callback = self._on_coding_tools  # type: ignore[method-assign]  # per-instance callback
-        action_row.add_item(setup_button)
         action_row.add_item(coding_button)
         container.add_item(action_row)
 
@@ -284,9 +363,11 @@ class DetailsView(PanelViewBase):
             allowed_user_id=self.allowed_user_id,
         )
 
-    async def _on_toggle_keys(self, interaction: discord.Interaction) -> None:
-        """Flip the key list between the collapsed count and the full list."""
-        self.state.keys_expanded = not self.state.keys_expanded
+    async def _on_toggle_detail(
+        self, interaction: discord.Interaction, *, name: DetailListName
+    ) -> None:
+        """Expand one detail list at a time, or collapse the open list."""
+        self.state.expanded_detail = None if self.state.expanded_detail == name else name
         await self.swap_to(
             interaction,
             DetailsView(self.state, runtime=self.runtime, allowed_user_id=self.allowed_user_id),

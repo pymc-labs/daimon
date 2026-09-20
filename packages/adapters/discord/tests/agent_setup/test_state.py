@@ -137,7 +137,12 @@ def test_select_agent_keeps_legacy_selection_in_sync() -> None:
         )
         for name in ("first", "specialist")
     ]
-    state = PanelState(roster=entries, selected=entries[0], account_id=uuid.uuid4())
+    state = PanelState(
+        roster=entries,
+        selected=entries[0],
+        account_id=uuid.uuid4(),
+        expanded_detail="keys",
+    )
     chosen = RosterAgent(
         name="specialist",
         ma_agent_id="ag_specialist",
@@ -149,6 +154,7 @@ def test_select_agent_keeps_legacy_selection_in_sync() -> None:
 
     assert state.selected_agent is chosen, "the new panel points at the chosen agent"
     assert state.selected is entries[1], "and the editor panel's selection follows it by name"
+    assert state.expanded_detail is None, "switching agents collapses the previous detail list"
 
 
 def test_select_agent_without_a_legacy_entry_leaves_the_editor_selection_alone() -> None:

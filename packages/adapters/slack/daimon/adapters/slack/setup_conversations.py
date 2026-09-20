@@ -6,22 +6,17 @@ import contextlib
 from typing import Any
 
 import aiohttp
-from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.agent_setup.read import public_mcp_url
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
-from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.setup_conversations import (
     build_setup_opener,
-    has_external_mcp_connection,
     resolve_setup_agents,
     setup_thread_name,
 )
-from daimon.core.stores.agent_repo_binding import get_binding as get_repo_binding
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.thread_agent_bindings import (
     create_binding,
     update_channel_lifecycle,
@@ -84,42 +79,14 @@ async def create_setup_conversation(
     bot_user_id = str(auth.get("user_id") or "")
     if not bot_user_id:
         raise DaimonError("Slack did not identify the bot. Retry opening setup.")
-    is_admin = await resolve_is_admin(client, user_id=user_id)
     target_name = str(target.metadata.get(MA_METADATA_KEY_NAME) or target.name) if target else None
-    has_repo = False
-    can_customize = is_admin
     async with runtime.sessionmaker.begin() as session:
         principal = await get_or_create_platform_principal(
             session, tenant_id=tenant_id, platform="slack", external_id=user_id
         )
-        if target is not None:
-            can_customize = is_admin or not await is_agent_reachable_in_tenant(
-                session,
-                tenant_id=tenant_id,
-                agent_name=target_name or target.name,
-                default=runtime.deployment_default,
-            )
-            has_repo = (
-                await get_repo_binding(
-                    session,
-                    tenant_id=tenant_id,
-                    agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(target.id)),
-                )
-                is not None
-            )
     opener = build_setup_opener(
         target_name=escape_mrkdwn(target_name) if target_name else None,
-        opener_mention=f"<@{user_id}>",
         bot_mention=f"<@{bot_user_id}>",
-        has_repo=has_repo,
-        has_external_connection=target is not None
-        and has_external_mcp_connection(
-            (server.url for server in target.mcp_servers),
-            public_mcp_url=public_mcp_url(runtime),
-        ),
-        can_customize=can_customize
-        and target is not None
-        and target.metadata.get(MA_METADATA_KEY_MANAGED) != "true",
     )
     posted = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
         channel=channel_id, text="Opening setup with Daimon…"

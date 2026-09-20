@@ -53,6 +53,8 @@ PanelAction = Literal[
     "new_agent",
     "back",
     "expand_keys",
+    "expand_skills",
+    "expand_connections",
 ]
 """One control on the read-only setup panel, named the same on both platforms.
 

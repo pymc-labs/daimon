@@ -9,6 +9,7 @@ from typing import Any, Literal
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
+from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.roster import Page, RosterAgent, paginate
@@ -118,7 +119,7 @@ class PanelState:
     attributions: dict[str, str] = dataclasses.field(default_factory=dict[str, str])
     roster_page: int = 0
     routing_page: int = 0
-    keys_expanded: bool = False
+    expanded_detail: DetailListName | None = None
     details: AgentDetails | None = None
     answering_map: AnsweringMap | None = None
     thread_context: ThreadContext | None = None
@@ -270,6 +271,7 @@ class PanelState:
         or the two disagree about what setup would target.
         """
         self.selected_agent = agent
+        self.expanded_detail = None
         for entry in self.roster:
             if entry.name == agent.name:
                 self.selected = entry
