@@ -1,11 +1,14 @@
-"""AgentSetupState — identifiers-only private_metadata and pure reducers for /agent-setup.
+"""Identifiers-only ``private_metadata`` for the /agent-setup panel.
 
-Pure logic only: frozen dataclasses, encode/decode helpers, and reducer functions.
-No I/O, no clock, no DB, no slack_sdk. Identifiers only — workspace id is re-derived
-server-side per event, never serialized here.
+Pure logic only: one frozen dataclass and the encode/decode helpers around it.
+No I/O, no clock, no DB, no slack_sdk. Identifiers only — the tenant id is
+re-derived server-side per event and is never serialized here, so a payload
+replayed from another workspace cannot name a resource it has no claim to.
 
-Port of the BEHAVIOR from discord/agent_setup/state.py (apply_agent_modal rename-forbidden
-invariant) collapsed to stateless identifiers-only functions (no fat PanelState self).
+``PanelMetadata`` is what every panel view carries. The untyped
+``encode_private_metadata`` / ``decode_private_metadata`` pair below is the
+older, flat-dict form, kept because the routines panel still writes and reads
+it.
 """
 
 from __future__ import annotations
@@ -18,16 +21,13 @@ from daimon.adapters.slack.modal_limits import MAX_PRIVATE_METADATA_CHARS
 
 __all__ = [
     "PANEL_PAGE_SIZE",
-    "AgentSetupState",
     "PanelExpansion",
     "PanelMetadata",
     "PanelViewName",
-    "RosterEntry",
     "decode_panel_metadata",
     "decode_private_metadata",
     "encode_panel_metadata",
     "encode_private_metadata",
-    "apply_agent_modal",
 ]
 
 #: Rows the panel shows on one page. Sized for Slack's 100-block view: a roster
@@ -181,23 +181,6 @@ def decode_panel_metadata(raw: str) -> PanelMetadata | None:
     )
 
 
-@dataclasses.dataclass(frozen=True)
-class RosterEntry:
-    """Decorated view-model for one roster row — identifiers only, no fat state."""
-
-    agent_name: str
-    model_id: str
-    ma_agent_id: str | None = None
-
-
-@dataclasses.dataclass(frozen=True)
-class AgentSetupState:
-    """State for the /agent-setup panel — identifiers only, no fat in-memory objects."""
-
-    rows: list[RosterEntry]
-    over_cap_count: int
-
-
 def encode_private_metadata(
     *,
     team_id: str,
@@ -243,24 +226,3 @@ def decode_private_metadata(raw: str) -> dict[str, Any]:
         return json.loads(raw) if raw else {}  # type: ignore[no-any-return]
     except (json.JSONDecodeError, ValueError):
         return {}
-
-
-def apply_agent_modal(
-    *,
-    model_id: str | None,
-    system_prompt: str | None,
-) -> dict[str, Any]:
-    """Return the field-update dict for an agent-modal edit.
-
-    RENAME-FORBIDDEN: this function intentionally accepts NO name/agent_name
-    parameter. Rename = Fork + Delete (Structural Guarantee #6, 83-UI-SPEC.md;
-    mirrors Discord apply_agent_modal's invariant — Pitfall 4).
-
-    The returned dict is applied by the write layer (write.py) to the MA agent spec.
-    """
-    result: dict[str, Any] = {}
-    if model_id is not None:
-        result["model"] = model_id
-    if system_prompt is not None:
-        result["system"] = system_prompt
-    return result
