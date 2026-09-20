@@ -95,6 +95,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.roster import Roster, paginate
+from daimon.core.setup_conversations import setup_thread_name
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -374,7 +375,7 @@ async def _load_routing_view(
         )
     setup_links = [
         f"<{setup_link(meta.team_id, ref.parent_channel_id, ref.thread_id)}|"
-        f"Set up {escape_mrkdwn(ref.target_name or 'an agent')}>"
+        f"{setup_thread_name(escape_mrkdwn(ref.target_name) if ref.target_name else None)}>"
         for ref in answering_map.setup_threads
     ]
     # The routing request names one agent nobody can reach yet; the built-in

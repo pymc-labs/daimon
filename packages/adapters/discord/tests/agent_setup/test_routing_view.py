@@ -221,7 +221,7 @@ def test_deployment_default_is_plain_when_no_server_default_shadows_it() -> None
 
 def test_setup_conversations_are_listed_separately_and_bounded() -> None:
     links = [
-        f"[Set up bot-{index}](https://discord.com/channels/2001/{index})" for index in range(8)
+        f"[Managing bot-{index}](https://discord.com/channels/2001/{index})" for index in range(8)
     ]
     container = build_routing_container(
         paginate(
@@ -272,8 +272,8 @@ def test_setup_conversation_links_are_jump_links_into_the_guild() -> None:
     )
     links = setup_conversation_links(answering_map, guild_id=2001)
     assert links == [
-        "[Set up churn-explorer](https://discord.com/channels/2001/55)",
-        "[Set up an agent](https://discord.com/channels/2001/56)",
+        "[Managing churn-explorer](https://discord.com/channels/2001/55)",
+        "[Managing agents](https://discord.com/channels/2001/56)",
     ], "each live setup thread gets a jump link, named by its target when it has one"
 
 
@@ -397,7 +397,7 @@ def test_routing_offers_no_setup_button(account_id: uuid.UUID) -> None:
         state, runtime=_make_runtime(), allowed_user_id=42, lines=[], server_default=None
     )
     labels = {node.label for node in _walk(view) if isinstance(node, discord.ui.Button)}
-    assert not any(label is not None and "Set up" in label for label in labels), (
+    assert not any(label is not None and "Manage" in label for label in labels), (
         "Who answers where carries no setup button"
     )
 

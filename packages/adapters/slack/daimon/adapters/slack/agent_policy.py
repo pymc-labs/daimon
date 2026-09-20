@@ -33,7 +33,7 @@ from typing import Final
 
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
@@ -64,15 +64,13 @@ log = structlog.get_logger()
 #: admins included: a panel edit never stamps the reconciler's spec hash, so
 #: the drift would survive every later reconcile with no way back.
 MANAGED_AGENT_MESSAGE: Final[str] = (
-    ":lock: This is the workspace's built-in agent, so its setup cannot be changed "
-    "from here — not even by an admin. Fork it to get an editable copy you own."
+    "This is a starting agent and can't be changed directly. Ask me to fork it and change the fork."
 )
 
 #: A spec edit by a member against an agent the workspace currently depends on.
 NEEDS_ADMIN_SPEC_MESSAGE: Final[str] = (
-    ":lock: This agent is currently the default for this workspace or a "
-    "channel, so changing its setup needs workspace-admin permission. "
-    "Creating or forking your own agent is not restricted."
+    f"This agent answers for other people here, so this change needs {ADMIN_NOUN}. "
+    "Ask me and I'll write the request for them. Making your own agent is not restricted."
 )
 
 #: An attachment write (repo binding, keys, MCP server) by a member against a
@@ -80,10 +78,9 @@ NEEDS_ADMIN_SPEC_MESSAGE: Final[str] = (
 #: purpose: which limb fired says nothing the caller can act on, and the fix
 #: is the same either way.
 SHARED_AGENT_MESSAGE: Final[str] = (
-    ":lock: This agent is shared — it is either the workspace's built-in agent or the "
-    "current default for this workspace or a channel — so changing its repo or its "
-    "keys needs workspace-admin permission. Fork it to get an "
-    "editable copy you own; the fork starts with no keys of its own."
+    "This agent answers for other people here, so changing its repo or its keys "
+    f"needs {ADMIN_NOUN}. Ask me and I'll write the request for them, or ask me "
+    "to fork it; the fork starts with no keys of its own."
 )
 
 AGENT_GONE_MESSAGE: Final[str] = (

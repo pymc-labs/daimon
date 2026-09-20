@@ -760,7 +760,7 @@ async def test_conversation_action_from_details_targets_that_agent(
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """Set up with Daimon, clicked in Details, configures the agent shown there.
+    """Manage, clicked in Details, configures the agent shown there.
 
     The button carries the MA id of the agent beside it, so the setup thread
     is created against that agent rather than the channel's responder.

@@ -149,7 +149,7 @@ it. Give a reachable handoff carrying the target and action, for example:
 “Ask an admin to say in this conversation: ‘Make research-bot answer in this
 channel.’” If no agent answers in the current channel, name the existing
 `/agent-setup` entry rather than telling the person to talk to an unreachable
-agent. Both members and admins can use **💬 Set up with Daimon** in `/agent-setup`,
+agent. Both members and admins can use **⚙️ Manage agents** in `/agent-setup`,
 including from a selected agent's Details. A `set_setup_target` refusal means
 this thread is not a setup conversation; it
 never means the agent cannot be configured.

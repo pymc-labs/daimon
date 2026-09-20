@@ -34,7 +34,7 @@ from daimon.core.agent_details import AgentDetails, RepoBinding
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import (
-    SETUP_ACTION_LABEL,
+    setup_target_label,
     shared_keys_sentence,
 )
 
@@ -232,7 +232,7 @@ def build_details_container(
         container.add_item(discord.ui.TextDisplay(routing_text))
     setup_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
     setup_row.add_item(
-        discord.ui.Button(label=SETUP_ACTION_LABEL, style=discord.ButtonStyle.primary)
+        discord.ui.Button(label=setup_target_label(details.name), style=discord.ButtonStyle.primary)
     )
     container.add_item(setup_row)
     container.add_item(hairline())
@@ -309,7 +309,8 @@ class DetailsView(PanelViewBase):
         setup_button = next(
             child
             for child in container.walk_children()
-            if isinstance(child, discord.ui.Button) and child.label == SETUP_ACTION_LABEL
+            if isinstance(child, discord.ui.Button)
+            and child.label == setup_target_label(details.name)
         )
         setup_button.callback = self._on_setup  # type: ignore[method-assign]  # per-instance callback
 

@@ -28,7 +28,7 @@ BotInteraction = Interaction[commands.Bot]
 def _body(bot_display_name: str) -> str:
     return f"""\
 **Agent management**
--# /agent-setup — See who answers here and set agents up with Daimon
+-# /agent-setup — See your agents, who answers where, and make changes
 
 **Routines**
 -# /routines — Show scheduled routines for this guild

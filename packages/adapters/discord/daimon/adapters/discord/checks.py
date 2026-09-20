@@ -28,6 +28,10 @@ P = ParamSpec("P")
 
 _ADMIN_ONLY_MESSAGE = "That action needs Manage Server — ask a server admin to do it."
 
+#: Discord's own name for the person a member is sent to when a change needs
+#: elevated permission. Copy never says "admin" in the abstract.
+ADMIN_NOUN = "someone with Manage Server"
+
 
 def is_member_guild_admin(member: discord.Member, *, guild_owner_id: int | None) -> bool:
     """Return True if the member is a guild admin by Discord-native permissions.

@@ -336,7 +336,7 @@ def test_agents_view_when_roster_empty_shows_empty_state_and_setup_action() -> N
         attributions={},
         channel_id=_CHANNEL_ID,
     )
-    assert "No agent answers here yet. Ask Daimon to help set one up." in _joined(view), (
+    assert "No agent answers here yet. Use Manage agents to add one." in _joined(view), (
         "an empty roster states the empty case in the shared copy"
     )
     assert "agent_setup__conversation" in _action_ids(view), (

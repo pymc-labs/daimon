@@ -29,7 +29,7 @@ features:
       description: List commands and the @mention entrypoint
       should_escape: false
     - command: /agent-setup
-      description: See who answers here and set up with Daimon
+      description: See your agents, who answers where, and make changes
       should_escape: false
     - command: /routines
       description: Show scheduled routines for this workspace

@@ -51,7 +51,7 @@ class AgentSetupCog(commands.Cog):
 
     @app_commands.command(
         name="agent-setup",
-        description="See who answers here and set agents up with Daimon",
+        description="See your agents, who answers where, and make changes",
     )
     @require_registered_guild
     async def agent_setup(self, interaction: BotInteraction) -> None:
