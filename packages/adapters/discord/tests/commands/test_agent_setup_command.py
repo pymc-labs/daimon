@@ -21,7 +21,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
-from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, SETUP_ACTION_LABEL
+from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, setup_target_label
 from daimon.core.stores.tenants import set_provision_status
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -212,7 +212,7 @@ async def test_ready_status_names_the_channel_and_offers_setup(
         child.content for child in view.walk_children() if isinstance(child, discord.ui.TextDisplay)
     )
     labels = [child.label for child in view.walk_children() if isinstance(child, discord.ui.Button)]
-    assert "Who answers in #general" in text, "the header names the channel the panel is about"
+    assert "Agents in #general" in text, "the header names the channel the panel is about"
     assert EMPTY_ROSTER_COPY in text, "a seeded-but-empty roster says what to do next"
-    assert SETUP_ACTION_LABEL in labels, "setup is the primary action in every state"
+    assert setup_target_label(None) in labels, "setup honestly reports that no target is selected"
     assert "Done" in labels, "and the panel can always be dismissed"

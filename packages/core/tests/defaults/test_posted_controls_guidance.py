@@ -214,10 +214,10 @@ def test_guidance_drops_editor_era_and_duplicate_routing_phrases() -> None:
 
 
 def test_daimon_system_skips_orientation_after_the_setup_opener() -> None:
-    """The setup thread's opener already gives identity and next steps; the
+    """The setup thread's opener already asks what to configure; the
     general unconfigured-workspace orientation must not repeat it."""
     system = _daimon_system()
-    assert "setup opener already introduced you" in system, (
+    assert "setup opener already asked what to configure" in system, (
         "daimon.yaml must tell the model to skip the general orientation when "
         "the setup conversation opener already covered it"
     )

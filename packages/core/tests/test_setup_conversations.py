@@ -9,10 +9,10 @@ import httpx
 import pytest
 from daimon.core.errors import DaimonError
 from daimon.core.setup_conversations import (
-    CODING_TOOLS_HINT,
+    build_setup_opener,
     get_setup_responder,
-    has_external_mcp_connection,
     resolve_setup_agents,
+    setup_target_label,
     setup_thread_name,
     shared_keys_sentence,
 )
@@ -97,47 +97,27 @@ def test_setup_thread_name_truncates_a_name_discord_would_reject() -> None:
     assert len(name) == 100, "Discord rejects a thread name over 100 characters outright"
 
 
-def test_external_connection_ignores_the_deployments_own_server_whatever_its_name() -> None:
-    """The built-in server is registered under a spec-owned name, so only its
-    URL can tell it apart from a service the person actually connected."""
-    assert not has_external_mcp_connection(
-        ["https://mcp.example.com/mcp"], public_mcp_url="https://mcp.example.com/mcp"
-    ), "an agent carrying only the deployment's own server is connected to nothing external"
-
-
-def test_external_connection_ignores_a_trailing_slash_difference() -> None:
-    assert not has_external_mcp_connection(
-        ["https://mcp.example.com/mcp/"], public_mcp_url="https://mcp.example.com/mcp"
-    ), "one server reached with and without a trailing slash is one server"
-
-
-def test_external_connection_sees_a_server_at_another_url() -> None:
-    assert has_external_mcp_connection(
-        ["https://mcp.example.com/mcp", "https://mcp.linear.app/mcp"],
-        public_mcp_url="https://mcp.example.com/mcp",
-    ), "a server at another URL is an external connection"
-
-
-def test_external_connection_counts_every_server_without_a_public_url() -> None:
-    assert has_external_mcp_connection(["https://mcp.linear.app/mcp"], public_mcp_url=None), (
-        "with no endpoint of its own the deployment has no built-in server to discount"
-    )
-    assert not has_external_mcp_connection([], public_mcp_url=None), (
-        "an agent with no servers is connected to nothing"
-    )
-
-
 def test_shared_keys_sentence_names_the_agent_whose_keys_are_shared() -> None:
     assert shared_keys_sentence("writer") == "Anyone who talks to writer can use these.", (
         "the sentence must say the keys follow the agent, not the person who added them"
     )
 
 
-def test_coding_tools_hint_names_the_command_a_reader_has_to_run() -> None:
-    """Both panels render this sentence, so its wording lives here and only here."""
-    assert "claude mcp add" in CODING_TOOLS_HINT, (
-        "the hint must name the command, not just promise a token"
-    )
-    assert CODING_TOOLS_HINT.startswith("Use from your coding tools:"), (
-        "the hint leads with the label the panels put above the button"
-    )
+@pytest.mark.parametrize(
+    ("target", "question"),
+    [
+        (None, "Which agent would you like to set up?"),
+        ("Researcher", "What would you like to change about Researcher?"),
+    ],
+)
+def test_opener_names_its_target_and_only_explains_how_to_reply(target, question) -> None:
+    assert build_setup_opener(target_name=target, bot_mention="<@bot>") == (
+        question + "\nMention <@bot> to reply."
+    ), "the opener asks one question and retains the actual bot mention"
+
+
+def test_roster_setup_label_names_the_target_without_changing_its_identity() -> None:
+    assert setup_target_label("Researcher") == "💬 Set up Researcher", "name the action's target"
+    assert setup_target_label(None) == "💬 Set up an agent", "no target opens the chooser"
+    label = setup_target_label("x" * 64)
+    assert len(label) == 30 and label.endswith("…"), "long names fit the button with an ellipsis"

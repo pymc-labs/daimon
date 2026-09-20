@@ -26,12 +26,12 @@ LAYOUT_TEXT_BUDGET: Final = 4000
 ROSTER_ROW_COST: Final = 3
 """One roster row: a Section (itself + its required Details accessory) + one TextDisplay."""
 
-ROSTER_CHROME_COST: Final = 14
+ROSTER_CHROME_COST: Final = 13
 """Everything in the roster view that is not a row, at its widest.
 
 Container 1 + header TextDisplay 1 + thread-context line 1 + hairline 1 +
-"Other agents" heading 1 + three ActionRows at 1 + 2 buttons each 9 = 14.
-``ROSTER_PAGE_SIZE`` rows cost 24, so the widest roster renders 38 of the 40
+three ActionRows at 1 + 2 buttons each 9 = 13.
+``ROSTER_PAGE_SIZE`` rows cost 24, so the widest roster renders 37 of the 40
 available components.
 """
 
@@ -40,9 +40,3 @@ ROSTER_PAGE_SIZE: Final = 8
 
 ROUTING_PAGE_SIZE: Final = 20
 """Channel lines per page on Who answers where; those are text, not components."""
-
-KEYS_COLLAPSED_COUNT: Final = 6
-"""Key names Details shows before collapsing the rest behind Show all."""
-
-KEYS_EXPANDED_CAP: Final = 60
-"""Key names Details shows expanded, past which the text budget is at risk."""

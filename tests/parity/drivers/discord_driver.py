@@ -128,7 +128,9 @@ _PANEL_BUTTON_LABELS: dict[str, frozenset[str]] = {
     "prev_page": frozenset({"Previous"}),
     "new_agent": frozenset({"New agent"}),
     "back": frozenset({"Back"}),
-    "expand_keys": frozenset({"Show all", "Show fewer"}),
+    "expand_keys": frozenset({"Show more", "Show fewer"}),
+    "expand_skills": frozenset({"Show more", "Show fewer"}),
+    "expand_connections": frozenset({"Show more", "Show fewer"}),
 }
 
 
@@ -951,6 +953,33 @@ class DiscordDriver:
 
     def _labelled_button(self, action: PanelAction) -> discord.ui.Button[Any]:
         wanted = _PANEL_BUTTON_LABELS[action]
+        detail_heading = {
+            "expand_keys": "Keys",
+            "expand_skills": "Skills",
+            "expand_connections": "Connections",
+        }.get(action)
+        if detail_heading is not None:
+            view = self._panel_view
+            if view is None:
+                raise AssertionError("open_setup_panel must run before a click")
+            for child in view.walk_children():
+                if not isinstance(child, discord.ui.Section):
+                    continue
+                accessory = child.accessory
+                text = normalize_line(
+                    "\n".join(
+                        item.content
+                        for item in child.children
+                        if isinstance(item, discord.ui.TextDisplay)
+                    ),
+                    aliases={},
+                )
+                if (
+                    text.startswith(detail_heading)
+                    and isinstance(accessory, discord.ui.Button)
+                    and normalize_line(accessory.label or "", aliases={}) in wanted
+                ):
+                    return accessory
         for button in self._panel_buttons():
             if normalize_line(button.label or "", aliases={}) in wanted:
                 return button

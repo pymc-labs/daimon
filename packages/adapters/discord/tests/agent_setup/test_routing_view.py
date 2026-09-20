@@ -161,7 +161,7 @@ def test_routing_orders_channels_then_server_default_then_deployment_default() -
             page_size=ROUTING_PAGE_SIZE,
         ),
         server_default=RoutingLine(
-            channel_label="🌐 Server default", agent_name="daimon", audit_line="set by <@77>"
+            channel_label="Server default", agent_name="daimon", audit_line="set by <@77>"
         ),
         deployment_default="fallback-bot",
         deployment_in_effect=False,
@@ -171,10 +171,10 @@ def test_routing_orders_channels_then_server_default_then_deployment_default() -
     text = _text(container)
 
     assert "#data → **research-bot**" in text, "a channel override reads channel → agent"
-    assert text.index("#data") < text.index("#growth") < text.index("🌐 Server default"), (
+    assert text.index("#data") < text.index("#growth") < text.index("Server default"), (
         "channels come before the server default"
     )
-    assert text.index("🌐 Server default") < text.index("Deployment default"), (
+    assert text.index("Server default") < text.index("Deployment default"), (
         "the server default comes before the deployment fall-through"
     )
     assert "-# set by <@77>" in text, "the server default carries its audit line"
@@ -187,7 +187,7 @@ def test_deployment_default_is_marked_not_in_effect_when_the_tenant_consumes_the
     container = build_routing_container(
         paginate([], page=0, page_size=ROUTING_PAGE_SIZE),
         server_default=RoutingLine(
-            channel_label="🌐 Server default", agent_name="daimon", audit_line=None
+            channel_label="Server default", agent_name="daimon", audit_line=None
         ),
         deployment_default="fallback-bot",
         deployment_in_effect=False,
@@ -440,7 +440,7 @@ async def test_load_routing_lines_names_channels_and_resolves_who_set_them(
     assert [line.channel_label for line in lines] == ["#data", "#901"], (
         "a cached channel is named; a cache miss falls back to its id"
     )
-    assert lines[0].audit_line == f"set by <@7788> · <t:{int(_SET_AT.timestamp())}:d>", (
+    assert lines[0].audit_line == f"set by <@7788> on <t:{int(_SET_AT.timestamp())}:d>", (
         "the audit line names the Discord principal and the date it was set"
     )
     assert lines[1].audit_line is None, (
@@ -448,6 +448,6 @@ async def test_load_routing_lines_names_channels_and_resolves_who_set_them(
     )
     assert server_default is not None, "a workspace default must come back as its own line"
     assert server_default.agent_name == "daimon"
-    assert server_default.audit_line == f"set · <t:{int(_SET_AT.timestamp())}:d>", (
+    assert server_default.audit_line == f"set on <t:{int(_SET_AT.timestamp())}:d>", (
         "a timestamp with no recorded actor still says when"
     )

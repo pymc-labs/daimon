@@ -29,7 +29,7 @@ from daimon.core.scope import (
     DeploymentDefault,
     TenantConfigRow,
 )
-from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, SETUP_ACTION_LABEL
+from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, setup_target_label
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.testing import ma_agent
@@ -209,7 +209,7 @@ def test_roster_rows_report_a_server_default_and_a_channel_elsewhere() -> None:
     )
 
 
-def test_a_built_in_agent_that_is_the_server_default_says_both() -> None:
+def test_a_built_in_agent_that_is_the_server_default_shows_its_routing_status() -> None:
     tenant_id = uuid.uuid4()
     built_in_default = _agent("daimon", built_in=True)
     view = RosterView(
@@ -222,12 +222,10 @@ def test_a_built_in_agent_that_is_the_server_default_says_both() -> None:
     )
 
     text = _text(view)
-    assert "🌐 **daimon** · server default" in text, (
+    assert "**daimon**\n-# server default" in text, (
         "the widest routing fact is what the reader acts on, so it leads the row"
     )
-    assert "-# built in" in text, (
-        "being built in does not stop being true when the agent is also the default"
-    )
+    assert "built in" not in text, "the compact roster omits provenance metadata"
 
 
 def test_the_deployment_default_is_named_for_its_own_tier() -> None:
@@ -240,21 +238,19 @@ def test_the_deployment_default_is_named_for_its_own_tier() -> None:
         allowed_user_id=42,
     )
 
-    assert "🌐 **specialist** · deployment default" in _text(view), (
+    assert "**specialist**\n-# deployment default" in _text(view), (
         "a deployment default is changed somewhere else than a server default, and must say so"
     )
 
 
-def test_a_built_in_agent_that_is_no_default_reads_only_built_in() -> None:
+def test_a_built_in_agent_that_is_no_default_reads_as_unrouted() -> None:
     view = RosterView(
         _state(agents=(_agent("daimon", built_in=True),)), runtime=MagicMock(), allowed_user_id=42
     )
 
     text = _text(view)
-    assert "**daimon** · built in" in text, "with no routing to report, built in is the whole row"
-    assert "-# built in" not in text, "and it is never said twice"
-    assert "Not answering in any channel yet" not in text, (
-        "the built-in agent always answers setup conversations; calling it unrouted misleads"
+    assert "**daimon**\n-# not assigned" in text, (
+        "the row reports actual routing rather than built-in provenance"
     )
 
 
@@ -270,7 +266,26 @@ def test_empty_roster_shows_the_setup_copy_and_keeps_the_setup_action() -> None:
     assert not any(isinstance(c, discord.ui.Section) for c in view.walk_children()), (
         "an empty roster renders no agent rows"
     )
-    assert SETUP_ACTION_LABEL in _labels(view), "setup stays available with no agent answering here"
+    assert setup_target_label(None) in _labels(view), (
+        "setup stays available with no agent answering here"
+    )
+
+
+def test_roster_preserves_long_names_but_bounds_the_targeted_setup_label() -> None:
+    answering = _agent("a" * 64, tier="channel")
+    view = RosterView(
+        _state(agents=(answering,), answering=answering),
+        runtime=MagicMock(),
+        allowed_user_id=42,
+    )
+
+    assert f"**{answering.name}**\n-# answers here" in _text(view), (
+        "the readable row keeps the full agent identity and its status"
+    )
+    setup_label = next(label for label in _labels(view) if label.startswith("💬 Set up"))
+    assert len(setup_label) <= 30 and setup_label.endswith("…"), (
+        "the targeted action stays within its product copy limit and marks truncation"
+    )
 
 
 def test_a_full_page_with_a_thread_line_stays_within_the_component_budget() -> None:
@@ -350,10 +365,10 @@ def test_a_bound_setup_thread_names_its_responder_and_its_target() -> None:
     )
 
     text = _text(view)
-    assert "In this thread **Daimon** answers · setting up **specialist**" in text, (
+    assert "In this thread **Daimon** answers while setting up **specialist**" in text, (
         "a setup thread says who answers in it and what is being set up"
     )
-    assert "Who answers in #general" in text, "the header still names the parent channel"
+    assert "Agents in #general" in text, "the header still names the parent channel"
 
 
 def test_a_handoff_thread_says_so_without_inventing_a_setup_target() -> None:

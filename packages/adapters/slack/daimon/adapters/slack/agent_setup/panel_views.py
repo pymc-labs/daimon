@@ -33,6 +33,7 @@ from daimon.adapters.slack.modal_limits import (
 )
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn, escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.setup_conversations import setup_button
+from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap, ChannelAnswer
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
@@ -40,13 +41,12 @@ from daimon.core.models_catalog import ModelChoice
 from daimon.core.roster import Page, Roster, RosterAgent
 from daimon.core.routing_facts import (
     PRECEDENCE_LINE,
-    UNROUTED_LINE,
     build_routing_request,
 )
-from daimon.core.scope import AnsweringPlace, ConfigTier
+from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import (
-    CODING_TOOLS_HINT,
     EMPTY_ROSTER_COPY,
+    setup_target_label,
     shared_keys_sentence,
 )
 
@@ -55,6 +55,7 @@ __all__ = [
     "ACTION_DETAILS",
     "ACTION_EXPAND_KEYS",
     "ACTION_EXPAND_SKILLS",
+    "ACTION_EXPAND_CONNECTIONS",
     "ACTION_NEW",
     "ACTION_PAGE_NEXT",
     "ACTION_PAGE_PREV",
@@ -85,6 +86,7 @@ ACTION_PAGE_NEXT: Final = "agent_setup__page:next"
 ACTION_PAGE_PREV: Final = "agent_setup__page:prev"
 ACTION_EXPAND_KEYS: Final = "agent_setup__expand:keys"
 ACTION_EXPAND_SKILLS: Final = "agent_setup__expand:skills"
+ACTION_EXPAND_CONNECTIONS: Final = "agent_setup__expand:connections"
 ACTION_NEW: Final = "agent_setup__new"
 ACTION_CODING_TOOLS: Final = "agent_setup__coding_tools"
 """Mint a coding-tool token for the agent named in the button's `value`."""
@@ -140,12 +142,6 @@ correct.
 # Copy and sizing
 # ---------------------------------------------------------------------------
 
-KEYS_COLLAPSED_COUNT: Final = 8
-"""Key names shown before the list collapses behind Show all."""
-
-KEYS_EXPANDED_CAP: Final = 60
-"""Key names shown once expanded, before a `+N more` tail."""
-
 MAX_SETUP_LINKS: Final = 10
 
 DETAILS_BUTTON_LABEL: Final = "🔍 Details"
@@ -155,12 +151,7 @@ CODING_TOOLS_LABEL: Final = "🧰 Use from your coding tools"
 
 CODING_TOOLS_UNAVAILABLE_NOTE: Final = "Coding-tool access is not configured for this deployment."
 
-_TIER_PHRASES: Final[dict[ConfigTier, str]] = {
-    "thread": "this thread",
-    "channel": "channel setting",
-    "tenant": "workspace default",
-    "deployment": "deployment default",
-}
+_DETAIL_LIST_MAX_CHARS: Final = 8_000
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +195,12 @@ def _button(
     return element
 
 
-def _setup_elements(target_ma_agent_id: str | None) -> list[dict[str, Any]]:
+def _setup_elements(
+    target_ma_agent_id: str | None,
+    *,
+    target_name: str | None,
+    target_explicit: bool,
+) -> list[dict[str, Any]]:
     """The Set-up-with-Daimon button, styled as the view's primary action.
 
     Taken from `setup_conversations.setup_button` so the label, action id and
@@ -214,6 +210,8 @@ def _setup_elements(target_ma_agent_id: str | None) -> list[dict[str, Any]]:
     elements: list[dict[str, Any]] = list(setup_button(target_ma_agent_id)["elements"])
     for element in elements:
         element["style"] = "primary"
+        if target_explicit:
+            element["text"]["text"] = setup_target_label(target_name)
     return elements
 
 
@@ -277,18 +275,20 @@ def build_agents_view(
     channel" from "answers nowhere", and the panel must not guess: without it
     a row carries no routing claim at all.
     """
-    _ = is_admin
-    blocks: list[dict[str, Any]] = []
+    del is_admin, attributions
+    blocks: list[dict[str, Any]] = [_section(f"*Agents in <#{escape_mrkdwn(channel_id)}>*")]
     answering = roster.answering
     if not roster.rows:
         blocks.append(_section(EMPTY_ROSTER_COPY))
     for agent in page.items:
         is_answering = answering is not None and agent.name == answering.name
-        heading = (
-            f"*{escape_mrkdwn(agent.name)}* answers here"
-            if is_answering
-            else f"*{escape_mrkdwn(agent.name)}*"
+        status = _roster_status(
+            agent,
+            is_answering=is_answering,
+            channel_id=channel_id,
+            routed_agent_names=routed_agent_names,
         )
+        heading = f"*{escape_mrkdwn(agent.name)}*\n{status}"
         blocks.append(
             _section(
                 heading,
@@ -297,16 +297,12 @@ def build_agents_view(
                 ),
             )
         )
-        facts = _roster_row_facts(
-            agent,
-            is_answering=is_answering,
-            attributions=attributions,
-            routed_agent_names=routed_agent_names,
-        )
-        if facts:
-            blocks.append(_context(" · ".join(facts)))
     blocks.append({"type": "divider"})
-    elements = _setup_elements(answering.ma_agent_id if answering is not None else None)
+    elements = _setup_elements(
+        answering.ma_agent_id if answering is not None else None,
+        target_name=answering.name if answering is not None else None,
+        target_explicit=True,
+    )
     elements.append(_button(action_id=ACTION_NEW, label=NEW_AGENT_LABEL))
     elements.append(_button(action_id=ACTION_ROUTING, label=ROUTING_LABEL))
     blocks.append({"type": "actions", "elements": elements})
@@ -327,33 +323,21 @@ def build_agents_view(
     )
 
 
-def _roster_row_facts(
+def _roster_status(
     agent: RosterAgent,
     *,
     is_answering: bool,
-    attributions: Mapping[uuid.UUID, str],
+    channel_id: str,
     routed_agent_names: Collection[str] | None,
-) -> list[str]:
-    """The context line under one roster row — only facts we actually hold."""
-    facts: list[str] = []
-    if agent.is_built_in:
-        facts.append("built in")
-    mention = (
-        attributions.get(agent.created_by_account_id)
-        if agent.created_by_account_id is not None
-        else None
-    )
-    if mention is not None:
-        facts.append(f"made by {mention}")
+) -> str:
+    """The one routing fact the roster can prove for an agent."""
     if is_answering:
-        tier = agent.answering_tier
-        if tier is not None:
-            facts.append(_TIER_PHRASES[tier])
-    elif routed_agent_names is not None:
-        facts.append(
-            "answers in other channels" if agent.name in routed_agent_names else UNROUTED_LINE
-        )
-    return facts
+        return f"Answers in <#{channel_id}>"
+    if routed_agent_names is None:
+        return "Routing unavailable"
+    if agent.name in routed_agent_names:
+        return "Answers in another channel"
+    return "Not assigned"
 
 
 # ---------------------------------------------------------------------------
@@ -377,43 +361,42 @@ def build_details_view(
     hidden by role. Key values are not a parameter and cannot be: the model
     carries names and attribution only.
     """
-    _ = is_admin
+    del is_admin, attribution
     title = fit_title(details.name)
     blocks: list[dict[str, Any]] = []
     if title != details.name:
         blocks.append(_section(f"*{escape_mrkdwn(details.name)}*"))
-    header = _details_header(details, attribution=attribution)
-    if header:
-        blocks.append(_context(*header))
     if details.purpose:
         blocks.append(_section(escape_mrkdwn(details.purpose)))
+    blocks.append(_section(_answers_text(details)))
     blocks.append(
         {
-            "type": "section",
-            "fields": [
-                {
-                    "type": "mrkdwn",
-                    "text": _clip(f"*Model*\n{escape_mrkdwn(details.model_display_name)}"),
-                },
-            ],
+            "type": "actions",
+            "elements": _setup_elements(
+                details.ma_agent_id,
+                target_name=details.name,
+                target_explicit=False,
+            ),
         }
     )
+    blocks.append(_section(f"*Model:* {escape_mrkdwn(details.model_display_name)}"))
     blocks.extend(_repo_blocks(details))
-    blocks.extend(_keys_blocks(details, meta=meta))
-    blocks.append(_section(_skills_text(details)))
-    blocks.append(_section(_mcp_servers_text(details)))
-    if details.unrouted_note is not None:
-        blocks.append(_section(escape_mrkdwn_preserving_mentions(details.unrouted_note)))
-    blocks.append(
-        _context(CODING_TOOLS_HINT if coding_tools_available else CODING_TOOLS_UNAVAILABLE_NOTE)
-    )
-    blocks.append({"type": "divider"})
-    elements = _setup_elements(details.ma_agent_id)
+    blocks.extend(_detail_list_blocks(details, meta=meta))
     if coding_tools_available:
-        elements.append(
-            _button(action_id=ACTION_CODING_TOOLS, label=CODING_TOOLS_LABEL, value=details.name)
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    _button(
+                        action_id=ACTION_CODING_TOOLS,
+                        label=CODING_TOOLS_LABEL,
+                        value=details.name,
+                    )
+                ],
+            }
         )
-    blocks.append({"type": "actions", "elements": elements})
+    else:
+        blocks.append(_context(CODING_TOOLS_UNAVAILABLE_NOTE))
     return finish_modal(
         title=title,
         blocks=blocks,
@@ -431,75 +414,91 @@ def build_details_view(
     )
 
 
-def _details_header(details: AgentDetails, *, attribution: str | None) -> list[str]:
-    """Attribution, and where the agent answers when it answers anywhere.
-
-    An unrouted agent says nothing here: `details.unrouted_note` states that in
-    the body, and a header line would make the reader read it twice.
-    """
-    parts: list[str] = []
-    if attribution is not None:
-        parts.append(f"made by {attribution}")
+def _answers_text(details: AgentDetails) -> str:
     labels = _place_labels(details.answers_in)
+    if len(labels) == 1:
+        return f"*Answers in:* {labels[0]}"
     if labels:
-        parts.append(f"answers in {', '.join(labels)}")
-    return parts
+        listing = "\n".join(labels)
+        return f"*Answers in*\n{listing}"
+    return escape_mrkdwn_preserving_mentions(details.unrouted_note or "Not assigned yet.")
 
 
-def _skills_text(details: AgentDetails) -> str:
-    if not details.skills:
-        return "🧩 *Skills*\n_no skills yet_"
-    names = "\n".join(escape_mrkdwn(skill.title or skill.skill_id) for skill in details.skills)
-    if details.skills_listing_truncated:
-        names = f"{names}\n_some skill names may be missing_"
-    return f"🧩 *Skills*\n{names}"
+def _link_label(text: str) -> str:
+    """Keep an external-service name inside one Slack link label."""
+    return escape_mrkdwn(text).replace("|", "¦").replace("\r", " ").replace("\n", " ")
 
 
-def _keys_blocks(details: AgentDetails, *, meta: PanelMetadata) -> list[dict[str, Any]]:
-    """Key names, collapsed past `KEYS_COLLAPSED_COUNT`, never key values."""
-    if not details.keys:
-        return [_section("🔑 *Keys*\n_no keys yet_")]
-    names = [escape_mrkdwn(key.name) for key in details.keys]
-    expanded = "keys" in meta.expanded
-    accessory: dict[str, Any] | None = None
-    if expanded:
-        shown = names[:KEYS_EXPANDED_CAP]
-        remainder = len(names) - len(shown)
-        if remainder > 0:
-            shown = [*shown, f"+{remainder} more"]
-        if len(names) > KEYS_COLLAPSED_COUNT:
-            accessory = _button(action_id=ACTION_EXPAND_KEYS, label="Show fewer")
-    else:
-        shown = names[:KEYS_COLLAPSED_COUNT]
-        if len(names) > KEYS_COLLAPSED_COUNT:
-            accessory = _button(action_id=ACTION_EXPAND_KEYS, label="Show all")
-    listing = "\n".join(shown)
-    return [
-        _section(f"🔑 *Keys*\n{listing}", accessory=accessory),
-        _context(shared_keys_sentence(escape_mrkdwn(details.name))),
-    ]
+def _link_url(url: str) -> str:
+    """Encode characters that could terminate or split Slack's link markup."""
+    return escape_mrkdwn(url.replace("|", "%7C").replace("\r", "%0D").replace("\n", "%0A"))
+
+
+def _detail_list_blocks(details: AgentDetails, *, meta: PanelMetadata) -> list[dict[str, Any]]:
+    items: Mapping[DetailListName, Sequence[str]] = {
+        "skills": [escape_mrkdwn(skill.title or skill.skill_id) for skill in details.skills],
+        "connections": [
+            f"<{_link_url(server.url)}|{_link_label(server.name)}>"
+            for server in details.mcp_servers
+        ],
+        "keys": [escape_mrkdwn(key.name) for key in details.keys],
+    }
+    formatted = format_detail_lists(
+        items,
+        expanded=meta.expanded,
+        max_chars=_DETAIL_LIST_MAX_CHARS,
+        max_list_chars=MAX_SECTION_TEXT_CHARS - 32,
+    )
+    labels: tuple[tuple[DetailListName, str, str], ...] = (
+        ("skills", "Skills", ACTION_EXPAND_SKILLS),
+        ("connections", "Connections", ACTION_EXPAND_CONNECTIONS),
+        ("keys", "Keys", ACTION_EXPAND_KEYS),
+    )
+    blocks: list[dict[str, Any]] = []
+    for kind, heading, action_id in labels:
+        values = items[kind]
+        if not values:
+            if kind == "skills" and details.skills_listing_truncated:
+                blocks.append(_context("Some skill names may be missing."))
+            continue
+        accessory = (
+            _button(
+                action_id=action_id,
+                label="Show fewer" if meta.expanded == kind else "Show more",
+            )
+            if len(values) > 6
+            else None
+        )
+        blocks.append(_section(f"*{heading}*\n{formatted[kind]}", accessory=accessory))
+        if kind == "skills" and details.skills_listing_truncated:
+            blocks.append(_context("Some skill names may be missing."))
+        if kind == "keys":
+            blocks.append(_context(shared_keys_sentence(escape_mrkdwn(details.name))))
+    return blocks
 
 
 def _repo_blocks(details: AgentDetails) -> list[dict[str, Any]]:
     repo = details.repo
     if repo is None:
-        return [_section("📦 *Working repo*\n_no working repo yet_")]
+        return []
     owner_repo = normalize_owner_repo(repo.repo_url)
     link = f"<https://github.com/{owner_repo}|{escape_mrkdwn(owner_repo)}>"
-    branch = f" `{escape_mrkdwn(repo.default_branch)}`" if repo.default_branch else ""
-    return [
-        _section(f"📦 *Working repo*\n{link}{branch}"),
-        _context(_repo_access_line(repo.access)),
-    ]
+    blocks = [_section(f"*Repository:* {link}")]
+    if repo.default_branch:
+        blocks.append(_section(f"*Branch:* `{escape_mrkdwn(repo.default_branch)}`"))
+    access_lines = _repo_access_lines(repo.access)
+    if access_lines:
+        blocks.append(_context(*access_lines))
+    return blocks
 
 
-def _repo_access_line(access: RepoAccess) -> str:
+def _repo_access_lines(access: RepoAccess) -> list[str]:
     """Say exactly what was recorded about this repo, and nothing more."""
     if access.kind == "needs_attention":
         corrective = access.corrective or "nothing would authorize a clone right now."
-        return f"⚠️ needs attention: {escape_mrkdwn(corrective)}"
+        return [f"⚠️ needs attention: {escape_mrkdwn(corrective)}"]
     if access.kind == "not_checked":
-        return "not checked yet"
+        return ["Not checked yet"]
     if access.credential == "per_agent_token":
         lead = "via token"
     elif access.credential == "deployment_public":
@@ -507,18 +506,8 @@ def _repo_access_line(access: RepoAccess) -> str:
     else:
         lead = "via the GitHub App"
     if access.checked_at is None:
-        return lead
-    return f"{lead} · last checked {_slack_date(access.checked_at)}"
-
-
-def _mcp_servers_text(details: AgentDetails) -> str:
-    if not details.mcp_servers:
-        return "🔌 *MCP servers*\n_no servers yet_"
-    listing = "\n".join(
-        f"{escape_mrkdwn(server.name)} · {escape_mrkdwn(server.url)}"
-        for server in details.mcp_servers
-    )
-    return f"🔌 *MCP servers*\n{listing}"
+        return [lead]
+    return [lead, f"Last checked {_slack_date(access.checked_at)}"]
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +535,10 @@ def build_routing_view(
     if page.items:
         for answer in page.items:
             blocks.append(
-                _section(f"<#{answer.channel_id}> → *{escape_mrkdwn(answer.agent_name)}*")
+                _section(
+                    f"*Channel:* <#{answer.channel_id}>\n"
+                    f"*Agent:* {escape_mrkdwn(answer.agent_name)}"
+                )
             )
             audit = _audit_parts(
                 account_id=answer.set_by_account_id,
@@ -554,23 +546,21 @@ def build_routing_view(
                 attributions=attributions,
             )
             if audit:
-                blocks.append(_context(" · ".join(audit)))
+                blocks.append(_context(*audit))
     else:
         blocks.append(_section("_no channel has its own setting_"))
     tenant_default = answering_map.tenant_default
     if tenant_default is not None:
-        blocks.append(
-            _section(f"🌐 Workspace default: *{escape_mrkdwn(tenant_default.agent_name)}*")
-        )
+        blocks.append(_section(f"*Workspace default:* {escape_mrkdwn(tenant_default.agent_name)}"))
         audit = _audit_parts(
             account_id=tenant_default.set_by_account_id,
             moment=tenant_default.set_at,
             attributions=attributions,
         )
         if audit:
-            blocks.append(_context(" · ".join(audit)))
+            blocks.append(_context(*audit))
     else:
-        blocks.append(_section("🌐 _no workspace default_"))
+        blocks.append(_section("*Workspace default:* Not assigned"))
     if answering_map.deployment_default is not None:
         line = f"Deployment default: *{escape_mrkdwn(answering_map.deployment_default)}*"
         if answering_map.tenant_consumes_fallthrough:

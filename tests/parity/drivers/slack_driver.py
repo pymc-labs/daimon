@@ -53,7 +53,9 @@ from daimon.adapters.slack.agent_setup.actions import (
 )
 from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_DETAILS,
+    ACTION_EXPAND_CONNECTIONS,
     ACTION_EXPAND_KEYS,
+    ACTION_EXPAND_SKILLS,
     ACTION_NEW,
     ACTION_PAGE_NEXT,
     ACTION_PAGE_PREV,
@@ -224,6 +226,8 @@ _PANEL_ACTION_IDS: dict[str, str] = {
     "prev_page": ACTION_PAGE_PREV,
     "new_agent": ACTION_NEW,
     "expand_keys": ACTION_EXPAND_KEYS,
+    "expand_skills": ACTION_EXPAND_SKILLS,
+    "expand_connections": ACTION_EXPAND_CONNECTIONS,
 }
 
 
