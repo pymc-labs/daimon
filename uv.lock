@@ -765,7 +765,7 @@ wheels = [
 
 [[package]]
 name = "daimon"
-version = "0.1.0"
+version = "0.2.0"
 source = { virtual = "." }
 dependencies = [
     { name = "daimon-adapter-cli" },
@@ -827,7 +827,7 @@ dev = [
 
 [[package]]
 name = "daimon-adapter-cli"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/adapters/cli" }
 dependencies = [
     { name = "anthropic" },
@@ -860,7 +860,7 @@ requires-dist = [
 
 [[package]]
 name = "daimon-adapter-discord"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/adapters/discord" }
 dependencies = [
     { name = "anthropic" },
@@ -891,7 +891,7 @@ requires-dist = [
 
 [[package]]
 name = "daimon-adapter-mcp"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/adapters/mcp" }
 dependencies = [
     { name = "aiohttp" },
@@ -943,7 +943,7 @@ provides-extras = ["billing"]
 
 [[package]]
 name = "daimon-adapter-scheduler"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/adapters/scheduler" }
 dependencies = [
     { name = "anthropic" },
@@ -970,7 +970,7 @@ requires-dist = [
 
 [[package]]
 name = "daimon-adapter-slack"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/adapters/slack" }
 dependencies = [
     { name = "aiohttp" },
@@ -1005,7 +1005,7 @@ requires-dist = [
 
 [[package]]
 name = "daimon-core"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "alembic" },
@@ -1050,7 +1050,7 @@ requires-dist = [
 
 [[package]]
 name = "daimon-mux"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/mux" }
 dependencies = [
     { name = "httpx" },
@@ -1065,7 +1065,7 @@ requires-dist = [
 
 [[package]]
 name = "daimon-testing"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/testing" }
 dependencies = [
     { name = "anthropic" },
@@ -2575,7 +2575,7 @@ wheels = [
 
 [[package]]
 name = "notebook-host"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "apps/notebook-host" }
 dependencies = [
     { name = "fastapi" },
@@ -3538,7 +3538,7 @@ wheels = [
 
 [[package]]
 name = "report-host"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "apps/report-host" }
 dependencies = [
     { name = "fastapi" },

@@ -1,6 +1,6 @@
 [project]
 name = "daimon-adapter-slack"
-version = "0.1.0"
+version = "0.2.0"
 description = "Daimon Slack adapter"
 requires-python = ">=3.12"
 license = "MIT"
