@@ -18,10 +18,19 @@ from daimon.core.mcp_auth import mint_agent_mcp_token, mint_internal_mcp_token, 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+def _fresh_now() -> dt.datetime:
+    """A wall-clock `now` so minted tokens are valid when pyjwt verifies `exp`.
+
+    Pinned dates expire: the 2026-06-23 pins turned every `pyjwt.decode` here
+    into ExpiredSignatureError on 2026-09-21 once their 90-day TTL elapsed.
+    """
+    return dt.datetime.now(dt.UTC).replace(microsecond=0)
+
+
 def test_mint_jwt_shape() -> None:
     account_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 4, 24, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = mint_jwt(account_id=account_id, secret=secret, now=now)
 
@@ -36,7 +45,7 @@ def test_mint_jwt_omits_agent_id_claim_when_not_passed() -> None:
     """Backward compat — no agent_id kwarg → no agent_id claim."""
     account_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 4, 24, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = mint_jwt(account_id=account_id, secret=secret, now=now)
 
@@ -49,7 +58,7 @@ def test_mint_jwt_includes_agent_id_claim_when_passed() -> None:
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 4, 24, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = mint_jwt(account_id=account_id, secret=secret, now=now, agent_id=agent_id)
 
@@ -68,7 +77,7 @@ def test_mint_jwt_never_emits_platform_or_guild_id_claims() -> None:
     """Minted tokens must carry no platform or guild_id wire claims."""
     account_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 4, 24, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = mint_jwt(account_id=account_id, secret=secret, now=now)
 
@@ -82,7 +91,7 @@ def test_mint_jwt_agent_id_does_not_introduce_platform_or_guild_id_claims() -> N
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 4, 24, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = mint_jwt(
         account_id=account_id,
@@ -104,7 +113,7 @@ def test_mint_jwt_emits_is_admin_claim_when_true() -> None:
     """mint_jwt should emit is_admin claim when admin."""
     account_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 5, 29, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = mint_jwt(account_id=account_id, secret=secret, now=now, is_admin=True)
 
@@ -116,7 +125,7 @@ def test_mint_jwt_omits_is_admin_claim_when_false() -> None:
     """mint_jwt should omit is_admin claim for non-admin to keep token minimal."""
     account_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 5, 29, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token_explicit = mint_jwt(account_id=account_id, secret=secret, now=now, is_admin=False)
     token_default = mint_jwt(account_id=account_id, secret=secret, now=now)
@@ -135,7 +144,7 @@ def test_mint_internal_mcp_token_emits_is_admin_true() -> None:
     """headless/routine token is admin per D-50b."""
     account_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 5, 29, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = mint_internal_mcp_token(
         account_id=account_id,
@@ -154,7 +163,7 @@ def test_mint_jwt_default_omits_exp() -> None:
     """Default mint_jwt produces no exp claim (long-lived, no expiry)."""
     account_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 5, 29, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = mint_jwt(account_id=account_id, secret=secret, now=now)
 
@@ -176,7 +185,7 @@ def test_mint_internal_mcp_token_has_no_exp() -> None:
     """
     account_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 5, 29, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = mint_internal_mcp_token(account_id=account_id, secret=secret, now=now)
 
@@ -197,7 +206,7 @@ def test_mint_internal_mcp_token_emits_internal_claim() -> None:
     """
     account_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 5, 29, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = mint_internal_mcp_token(account_id=account_id, secret=secret, now=now)
 
@@ -217,7 +226,7 @@ def test_mint_jwt_never_emits_internal_claim() -> None:
     """
     account_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 5, 29, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token_default = mint_jwt(account_id=account_id, secret=secret, now=now)
     token_is_admin = mint_jwt(account_id=account_id, secret=secret, now=now, is_admin=True)
@@ -260,7 +269,7 @@ async def test_mint_agent_mcp_token_claim_set_is_exactly_sub_agent_id_jti_exp(
     tenant_id, account_id = await _seed_tenant_and_account(db_session)
     agent_id = uuid.uuid4()
     secret = b"a" * 32
-    now = dt.datetime(2026, 6, 23, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = await mint_agent_mcp_token(
         db_session,
@@ -289,7 +298,7 @@ async def test_mint_agent_mcp_token_sub_and_agent_id_claims_match_inputs(
     tenant_id, account_id = await _seed_tenant_and_account(db_session)
     agent_id = uuid.uuid4()
     secret = b"b" * 32
-    now = dt.datetime(2026, 6, 23, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = await mint_agent_mcp_token(
         db_session,
@@ -316,7 +325,7 @@ async def test_mint_agent_mcp_token_exp_is_ttl_days_from_now(
     """exp = int((now + ttl_days).timestamp()); default ttl_days=90."""
     tenant_id, account_id = await _seed_tenant_and_account(db_session)
     secret = b"c" * 32
-    now = dt.datetime(2026, 6, 23, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
     expected_exp = int((now + dt.timedelta(days=90)).timestamp())
 
     token = await mint_agent_mcp_token(
@@ -344,7 +353,7 @@ async def test_mint_agent_mcp_token_writes_row_readable_by_get_mcp_token(
     tenant_id, account_id = await _seed_tenant_and_account(db_session)
     agent_id = uuid.uuid4()
     secret = b"d" * 32
-    now = dt.datetime(2026, 6, 23, 12, 0, 0, tzinfo=dt.UTC)
+    now = _fresh_now()
 
     token = await mint_agent_mcp_token(
         db_session,
