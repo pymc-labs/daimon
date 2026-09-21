@@ -57,7 +57,7 @@ uv run pre-commit install
 
 ## Quality gates
 
-Every PR must keep all four green:
+Every PR must keep these four green:
 
 ```bash
 uv run pytest                              # tests (needs Postgres, see above)
@@ -68,6 +68,26 @@ uv run lint-imports                        # package boundary contracts
 
 Pyright runs in strict mode project-wide — new code should carry precise
 types rather than `Any`.
+
+CI's `lint` job runs more than those four. It also runs the repo's own
+linters — `scripts/lint_discord_modals.py` for Discord modal conventions,
+`scripts/lint_anti_patterns.sh` for test anti-patterns, plus the migration
+marker and leakage linters described below — and checks that the generated documentation still matches the code:
+
+```bash
+uv run python scripts/generate_env_example.py --check      # .env.example
+uv run python scripts/generate_config_reference.py --check # docs/configuration.md
+uv run python scripts/generate_mcp_tool_catalogue.py --check # docs/mcp-tools.md
+```
+
+Those three pages are written by generators, so a change to a settings field's
+`Field(description=...)` or to an MCP tool's docstring is a change to their
+source: re-run the generator without `--check` and commit the result, rather
+than editing the page. `CLAUDE.md` has the table of which change means which
+generator, and which pages are maintained by hand.
+
+`uv run pre-commit install` wires all of it into `git commit`, so the gates
+run on the files you touch before CI sees them.
 
 ### Migration downgrade-safety markers
 
@@ -107,5 +127,4 @@ Describe the behaviour instead.
   in the same PR.
 - Describe what changed and why in the PR description. Link any related
   issue.
-- Make sure the four quality gates above pass locally before requesting
-  review.
+- Make sure the quality gates above pass locally before requesting review.
