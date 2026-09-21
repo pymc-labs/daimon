@@ -29,7 +29,7 @@
 # whose only surface is 1:1 chat. Adding team/channel scopes here changes
 # nothing in code — non-personal conversations are still refused.
 
-manifest_version: "1.16"
+manifestVersion: "1.16"
 id: "${DAIMON_TEAMS__CLIENT_ID}"        # must equal the Entra app id
 version: "0.1.0"
 developer:
@@ -39,6 +39,7 @@ developer:
   termsOfUseUrl: https://DAIMON_HOST/terms
 name:
   short: daimon
+  full: daimon
 description:
   short: Data-science agent that writes and runs code, fits models, and answers in chat.
   full: Data-science agent that writes and runs code, fits models, and delivers answers in a personal chat.
