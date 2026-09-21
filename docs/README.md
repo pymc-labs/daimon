@@ -1,5 +1,11 @@
 # Documentation
 
+daimon is an open source data science agent that joins a team's Discord or
+Slack, runs the analysis in the thread, and posts back charts, models and a
+reproducible notebook. Start with [self-hosting.md](self-hosting.md) to get a
+deployment running, or [architecture.md](architecture.md) to see how the
+pieces fit together.
+
 - [architecture.md](architecture.md) — what the packages are and why the
   boundaries hold, how a message becomes a turn, tenancy and sessions.
 - [self-hosting.md](self-hosting.md) — run the stack: Compose, Discord and
