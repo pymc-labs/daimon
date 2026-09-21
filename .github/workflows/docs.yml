@@ -1,0 +1,65 @@
+name: Docs
+
+# Builds the documentation site on every change to it and publishes it from
+# main. The build runs on pull requests too: mkdocs is configured strict, so a
+# link that stops resolving fails here rather than on the published site.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  # Repeated rather than shared: GitHub Actions does not support YAML anchors.
+  pull_request:
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      # Deliberately not a dependency group: the site needs none of the
+      # project's own packages, and keeping it out of the lockfile means a
+      # docs-theme bump never touches what the application resolves. mkdocs
+      # itself is pinned below 2.0, which drops the plugin and theming systems
+      # this build depends on.
+      - name: build
+        run: uv run --no-project --with "mkdocs-material>=9,<10" --with "mkdocs<2" mkdocs build --strict
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name == 'push'
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    # A fork has no Pages site to deploy to, and pull requests must not
+    # publish; this runs only for main on the repository itself.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
