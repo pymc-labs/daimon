@@ -89,8 +89,8 @@ async def test_contradictory_group_flag_fails_closed(
 @pytest.mark.parametrize(
     "payload_kwargs",
     [
-        {"tenant_id": "99999999-9999-9999-9999-99999999999a"},
-        {"channel_tenant_id": "99999999-9999-9999-9999-99999999999a"},
+        {"tenant_id": str(uuid.UUID(int=3))},
+        {"channel_tenant_id": str(uuid.UUID(int=3))},
         {"aad_object_id": None},
         {"aad_object_id": "not-a-uuid"},
         {"channel_id": "webchat"},

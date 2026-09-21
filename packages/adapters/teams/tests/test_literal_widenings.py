@@ -39,7 +39,7 @@ def test_teams_platform_round_trips_through_platform_principal_row() -> None:
             "id": uuid.uuid4(),
             "tenant_id": uuid.uuid4(),
             "platform": "teams",
-            "external_id": "66666666-7777-8888-9999-00000000000a",
+            "external_id": str(uuid.UUID(int=2)),
             "account_id": uuid.uuid4(),
             "created_at": datetime.now(UTC),
         }

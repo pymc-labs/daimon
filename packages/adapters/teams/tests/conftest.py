@@ -44,13 +44,14 @@ from microsoft_teams.common.http.client import (  # pyright: ignore[reportMissin
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-# A fixed Entra tenant GUID the seeded daimon tenant folds to via
+# Synthetic UUIDs; no real directory or user identifiers are used.
+# The seeded daimon tenant folds to this fixture via
 # derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID).
-ENTRA_TENANT_ID = "11111111-2222-3333-4444-55555555555a"
+ENTRA_TENANT_ID = str(uuid.UUID(int=1))
 BOT_CLIENT_ID = "bot-client-id"
 SERVICE_URL = "https://smba.trafficmanager.net/test"
 CONVERSATION_ID = "a:conversation-1"
-AAD_OBJECT_ID = "66666666-7777-8888-9999-00000000000a"
+AAD_OBJECT_ID = str(uuid.UUID(int=2))
 
 
 def make_message_activity(
