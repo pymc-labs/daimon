@@ -60,6 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a thread daimon opened may rename it, other threads need Manage Threads.
   Slack threads have no title, so both are Discord-only.
 
+- **Released images on the GitHub Container Registry.** Tagging a release
+  publishes the runtime image to `ghcr.io/pymc-labs/daimon` for linux/amd64
+  and linux/arm64, so a self-hoster can pull `0.2.0`, `0.2` or `latest`
+  instead of building from source on first boot. Prerelease tags publish
+  their exact version and never move `latest`. The workflow also runs on
+  demand in a dry-run mode that builds both platforms and publishes nothing,
+  which is how a Dockerfile change gets its arm64 coverage before a tag
+  exists.
+
 ### Fixed
 
 - **A forked agent no longer warns everyone about a server it copied but
