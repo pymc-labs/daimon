@@ -237,5 +237,6 @@ Initial public release.
   default.
 - Docker Compose deployment with a single-revision schema bootstrap.
 
+[Unreleased]: https://github.com/pymc-labs/daimon/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/pymc-labs/daimon/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/pymc-labs/daimon/releases/tag/v0.1.0
