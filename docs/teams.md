@@ -66,12 +66,19 @@ other adapters.
 
 ### Restart behavior
 
-A redeploy freezes the in-flight progress message in place; `drain()` cancels
-the turn task, which deliberately keeps its active-turn marker. On next boot
-the sweep finds the orphaned row by that marker, edits the frozen message to
-an interrupted state, and compare-and-clears the marker. Delivery does not
-resume — no queued or retried sends — and the sweep clears only the three
-marker columns, leaving the session row's status untouched.
+The progress is posted before `bind_session`; the active-turn marker is
+written only after binding returns a session mapping and the progress send
+has supplied a usable message id. Binding can take minutes. Cancellation or
+process death in between leaves an unswept progress message: no marker was
+committed for the next boot to find. A send without a usable message id also
+leaves the turn unmarked.
+
+After the marker commits, a redeploy freezes the in-flight progress message
+in place; `drain()` cancels the turn task, which deliberately keeps that marker.
+On next boot the sweep finds the orphaned row, edits the frozen message to an
+interrupted state, and compare-and-clears the marker. Delivery does not resume
+— no queued or retried sends — and the sweep clears only the three marker
+columns, leaving the session row's status untouched.
 
 ### Files
 
