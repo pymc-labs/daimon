@@ -13,6 +13,7 @@ they import this module by its bare name.
 
 from __future__ import annotations
 
+import types
 import typing
 from dataclasses import dataclass
 
@@ -92,7 +93,15 @@ class SettingsBlock:
     field_name: str
     env_prefix: str
     model: type[BaseModel]
+    field: FieldInfo
     leaves: tuple[SettingsLeaf, ...]
+
+    @property
+    def is_absent_by_default(self) -> bool:
+        """True for a `X | None = None` block: the whole block stays unset
+        until at least one of its variables is, and the code that reads it
+        has to handle None."""
+        return types.NoneType in typing.get_args(self.field.annotation)
 
 
 def unwrap_nested_model(annotation: object) -> type[BaseModel] | None:
@@ -156,6 +165,7 @@ def split_top_level(
                 field_name=field_name,
                 env_prefix=env_name + "__",
                 model=nested,
+                field=field,
                 leaves=tuple(collect_leaves(nested, env_name + "__")),
             )
         )
