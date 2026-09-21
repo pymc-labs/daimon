@@ -69,10 +69,11 @@ uv run lint-imports                        # package boundary contracts
 Pyright runs in strict mode project-wide — new code should carry precise
 types rather than `Any`.
 
-CI's `lint` job runs more than those four. It also runs the repo's own
+CI runs those four across its jobs. Its `lint` job also runs the repo's own
 linters — `scripts/lint_discord_modals.py` for Discord modal conventions,
 `scripts/lint_anti_patterns.sh` for test anti-patterns, plus the migration
-marker and leakage linters described below — and checks that the generated documentation still matches the code:
+marker and leakage linters described below — and checks that the generated
+documentation still matches the code:
 
 ```bash
 uv run python scripts/generate_env_example.py --check      # .env.example
@@ -86,8 +87,8 @@ source: re-run the generator without `--check` and commit the result, rather
 than editing the page. `CLAUDE.md` has the table of which change means which
 generator, and which pages are maintained by hand.
 
-`uv run pre-commit install` wires all of it into `git commit`, so the gates
-run on the files you touch before CI sees them.
+The pre-commit hooks from the setup above run the linters and the generator
+checks on `git commit`; `pytest` stays a manual step.
 
 ### Migration downgrade-safety markers
 
