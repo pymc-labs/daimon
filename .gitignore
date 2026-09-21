@@ -23,6 +23,7 @@ node_modules/
 .learning/
 .claude
 graphify-out/
+site/
 
 # Local symlinks into the private companion repo. CLAUDE.md is tracked: it
 # carries the repo-wide conventions every contributor and coding agent needs.

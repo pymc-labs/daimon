@@ -22,7 +22,7 @@ hand does nothing — change the source and re-run the generator.
 | --- | --- | --- |
 | add or change a setting | `docs/configuration.md`, `.env.example` | generated: `uv run python scripts/generate_config_reference.py` and `scripts/generate_env_example.py`. Write the prose in the field's `description=`. |
 | add or change an MCP tool | `docs/mcp-tools.md` | generated: `uv run python scripts/generate_mcp_tool_catalogue.py`. Write the prose in the tool's docstring. |
-| add an adapter panel or change a user-facing flow | `docs/architecture.md` | planned, not yet written — until it exists, say so in the PR instead of skipping the thought |
+| add an adapter panel or change a user-facing flow | `docs/architecture.md` | by hand — keep the turn path, the package table and the entry-point list true |
 | change compose, deployment or the env a service needs | `docs/self-hosting.md` | by hand |
 | add a default skill, agent or environment | `defaults/README.md` | by hand |
 | change anything a user can notice | `CHANGELOG.md` under `[Unreleased]` | by hand |

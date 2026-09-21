@@ -1,0 +1,61 @@
+site_name: daimon
+site_description: The open source data science agent for Discord and Slack
+site_url: https://pymc-labs.github.io/daimon/
+repo_url: https://github.com/pymc-labs/daimon
+repo_name: pymc-labs/daimon
+edit_uri: edit/main/docs/
+
+# The pages are plain GitHub-readable markdown first: every one of them has to
+# make sense in the repository, because that is where a contributor finds them.
+# This file only arranges them.
+docs_dir: docs
+strict: true
+
+nav:
+  - Home: README.md
+  - Architecture: architecture.md
+  - Self-hosting: self-hosting.md
+  - Configuration: configuration.md
+  - MCP tools: mcp-tools.md
+  - Routines: routines.md
+  - Billing: billing.md
+  - Defaults: defaults.md
+  - Slack: slack.md
+  - Claude Code plugin: plugin.md
+  - mux: mux.md
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.superfences:
+      custom_fences:
+        # The architecture guide draws its diagrams in mermaid; without this
+        # fence they render as an unstyled code block.
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format

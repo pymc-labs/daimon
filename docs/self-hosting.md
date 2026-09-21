@@ -98,7 +98,7 @@ Read it before enabling that feature.
 ## Claude Code login mounts
 
 Coding-agent clients such as Claude Code connect through the plugin in
-[`plugin/`](../plugin/README.md) instead of a per-agent token. It logs in via
+[`plugin/`](https://github.com/pymc-labs/daimon/blob/main/plugin/README.md) instead of a per-agent token. It logs in via
 Slack or Discord OAuth and reaches every daimon install the logged-in person
 belongs to.
 
