@@ -8,9 +8,31 @@ import-linter independence contract in the root pyproject.
 from __future__ import annotations
 
 import ast
+import tomllib
 from pathlib import Path
 
+import yaml
+
 PACKAGE_DIR = Path(__file__).resolve().parents[1] / "daimon" / "adapters" / "teams"
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+def test_teams_is_in_adapter_independence_contract() -> None:
+    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    contracts = config["tool"]["importlinter"]["contracts"]
+    matches = [c for c in contracts if c["name"] == "Adapters must not import each other"]
+    assert len(matches) == 1, "the adapter independence contract must exist exactly once"
+    assert matches[0]["type"] == "independence"
+    assert "daimon.adapters.teams" in matches[0]["modules"]
+
+
+def test_ci_runs_teams_tests() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    assert "pytest-teams" in workflow["jobs"], "CI must run the Teams adapter tests"
+    steps = workflow["jobs"]["pytest-teams"]["steps"]
+    assert any(
+        step.get("run") == "uv run pytest packages/adapters/teams -n auto" for step in steps
+    ), "the Teams job must execute the adapter suite"
 
 
 def _module_sources() -> dict[str, str]:
