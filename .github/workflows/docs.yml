@@ -21,9 +21,12 @@ on:
 permissions:
   contents: read
 
+# One group for main, so Pages deploys never overlap; one group per pull
+# request, so a PR's build is not queued behind main's deploy and a new push
+# to the PR cancels its own stale build.
 concurrency:
-  group: docs-pages
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'push' && 'docs-pages' || format('docs-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   build:
