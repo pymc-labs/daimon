@@ -96,4 +96,18 @@ repos:
         entry: uv run python scripts/generate_env_example.py --check
         language: system
         pass_filenames: false
-        files: ^(packages/core/daimon/core/config\.py|packages/adapters/scheduler/daimon/adapters/scheduler/settings\.py|packages/core/daimon/core/billing\.py|\.env\.example|scripts/generate_env_example\.py)$
+        files: ^(packages/core/daimon/core/config\.py|packages/adapters/scheduler/daimon/adapters/scheduler/settings\.py|packages/core/daimon/core/billing\.py|\.env\.example|scripts/generate_env_example\.py|scripts/_settings_walk\.py)$
+
+      - id: config-reference-check
+        name: config reference up to date
+        entry: uv run python scripts/generate_config_reference.py --check
+        language: system
+        pass_filenames: false
+        files: ^(packages/core/daimon/core/config\.py|packages/adapters/scheduler/daimon/adapters/scheduler/settings\.py|packages/core/daimon/core/billing\.py|apps/notebook-host/src/notebook_host/config\.py|apps/report-host/src/report_host/config\.py|docker-compose\.yml|docs/configuration\.md|scripts/generate_config_reference\.py|scripts/_settings_walk\.py)$
+
+      - id: mcp-tool-catalogue-check
+        name: mcp tool catalogue up to date
+        entry: uv run python scripts/generate_mcp_tool_catalogue.py --check
+        language: system
+        pass_filenames: false
+        files: ^(packages/adapters/mcp/daimon/adapters/mcp/(tools/.*\.py|server\.py|hub/app\.py)|docs/mcp-tools\.md|scripts/generate_mcp_tool_catalogue\.py)$

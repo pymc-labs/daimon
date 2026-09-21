@@ -53,6 +53,12 @@ jobs:
       - name: env example check
         run: uv run python scripts/generate_env_example.py --check
 
+      - name: config reference check
+        run: uv run python scripts/generate_config_reference.py --check
+
+      - name: mcp tool catalogue check
+        run: uv run python scripts/generate_mcp_tool_catalogue.py --check
+
   pytest-core:
     runs-on: ubuntu-latest
     timeout-minutes: 15
