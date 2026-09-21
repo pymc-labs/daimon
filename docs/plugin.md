@@ -2,7 +2,7 @@
 
 `plugin/` is a Claude Code plugin that lets you ask the daimons in your Slack
 workspaces and Discord servers a question from inside Claude Code.
-[`plugin/README.md`](../plugin/README.md) is the user-facing doc: what the
+[`plugin/README.md`](https://github.com/pymc-labs/daimon/blob/main/plugin/README.md) is the user-facing doc: what the
 plugin ships, how to install it, and how to log in. This page is the part you
 want before you install — what has to be true on the server side for any of
 it to work.
@@ -69,7 +69,7 @@ no mount for that platform.
   a metered debit when it completes. See [billing.md](billing.md).
 - **Installing from a marketplace is not available yet.** Until the plugin is
   published, the working path is `claude --plugin-dir ./plugin` from a
-  checkout, as [`plugin/README.md`](../plugin/README.md) describes.
+  checkout, as [`plugin/README.md`](https://github.com/pymc-labs/daimon/blob/main/plugin/README.md) describes.
 
 One operational note for self-hosters: the hub keeps short-lived login state
 in a table that is pruned by a sweep on the scheduler's tick
