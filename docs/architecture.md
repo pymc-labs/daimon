@@ -76,9 +76,9 @@ The first two make the platform surfaces replaceable: a change to how Slack
 renders a table cannot reach Discord, and core can be exercised without any
 chat client. The ORM contract is the one contributors trip over most — the
 schema lives in `packages/core/daimon/core/_models.py` behind a leading
-underscore, and everything outside `stores/` and `defaults/` sees Pydantic
-models from `packages/core/daimon/core/stores/domain.py` instead of SQLAlchemy
-rows. `packages/core/tests/test_orm_import_contract.py` fails when the
+underscore, and everything outside `daimon.core.stores` and
+`daimon.core.defaults` sees Pydantic models from
+`packages/core/daimon/core/stores/domain.py` instead of SQLAlchemy rows. `packages/core/tests/test_orm_import_contract.py` fails when the
 contract's enumerated module list drifts from the directory, because
 import-linter cannot express "every sibling except `_models`".
 
