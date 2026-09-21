@@ -11,6 +11,13 @@ name: Publish image
 on:
   push:
     tags: ["v*"]
+  # The arm64 half is built nowhere else: ci.yml's docker-build job is amd64
+  # only, so a change to the image would first fail at release time.
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "docker/**"
+      - ".github/workflows/publish-image.yml"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -42,7 +49,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to ghcr.io
-        if: inputs.dry_run != true
+        if: github.event_name != 'pull_request' && inputs.dry_run != true
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -69,7 +76,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ inputs.dry_run != true }}
+          push: ${{ github.event_name != 'pull_request' && inputs.dry_run != true }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
