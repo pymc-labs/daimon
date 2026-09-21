@@ -7,165 +7,219 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-21
+
+Everything since the first release. Slack catches up with Discord across
+setup, credentials, feedback and file delivery; conversations survive a
+restart and can hand work to a fresh session; charts and published reports
+get a delivery path of their own; and self-hosting is documented end to end.
+140 pull requests, 23 schema migrations, two new workspace packages.
+
+### Breaking
+
+- **`POSTGRES_PASSWORD` has no default.** Compose refuses to start without
+  it. Set it in `.env` before upgrading.
+- **Postgres and the notebook host publish on `127.0.0.1` only.** Anything
+  that reached either from another host now needs a tunnel or its own
+  published port.
+- **The scheduler starts through the `daimon-scheduler` console script**,
+  not `python -m daimon.adapters.scheduler`. Compose is updated; custom
+  process definitions are not.
+- **MCP tools `generate_image` and `generate_audio` are removed.** The
+  `pydub` dependency went with them.
+- **MCP tools `create_blog_upload_url`, `delete_blog` and `list_blogs` are
+  removed.** Notebooks are one tool plus `list_notebooks` and
+  `delete_notebook`; published documents use `publish_report` and
+  `delete_report`.
+- **The duplicate `skills_*` aliases are removed.** Use `sync_skills`,
+  `list_skills`, `get_skill` and `delete_skill`. No compatibility aliases
+  are kept.
+- **`DAIMON_SLACK__DEV_ALLOW_ALL_ADMIN` is removed.** It made the admin
+  check return true before `users.info` was called, opening every Slack
+  admin gate for every member of every install on the deployment. Unknown
+  keys are ignored, so a deployment still setting it boots and starts
+  enforcing; promote a real workspace admin for any account that relied on
+  it.
+- **The seeded skill `marimo_blog` is gone**, replaced by
+  `marimo_notebooks` and the report skills.
+- **The root `compose.notebook.yml` and `compose.worker.yml` are deleted.**
+  `docker-compose.yml` is the supported stack.
+- **Changed defaults:** agent model `claude-sonnet-4-6` → `claude-sonnet-5`;
+  `DAIMON_BILLING__SIGNUP_CREDIT` 5.00 → 10.00;
+  `DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S` 600 → 3000, an outer process guard
+  that now sits above the core's ~45 minute turn ceiling rather than below
+  it; `DAIMON_PRIVACY_POLICY_URL` points at this repository's `PRIVACY.md`.
+- **Minimum `anthropic` SDK is 0.117** (was 0.96), and the root
+  distribution is named `daimon` (was `daimon-cma-open-source`).
+- Upgrading runs **23 migrations**. Every one declares `downgrade: safe`,
+  and none drops a table or column.
+
 ### Added
 
-- **Connect Notion and other OAuth-only MCP servers with your own account.**
-  Ask the agent to connect a server that signs people in through a browser
-  and the new `request_mcp_oauth` tool posts a card whose button hands the
-  requester a private sign-in link. daimon registers itself with the server,
-  runs the PKCE authorization-code flow on `/oauth/mcp/start` and
-  `/oauth/mcp/callback`, stores the grant as an `mcp_oauth` credential in
-  that person's per-agent vault (Anthropic refreshes it) and attaches the
-  server to the agent. Grants are per person: each member connects their
-  own account and nobody inherits another's. Needs `DAIMON_MCP__PUBLIC_URL`
-  and `DAIMON_CRYPTO__KEYS`. Migration `0020_mcp_oauth_flows`.
+#### Agent and sessions
 
-- **daimon can change its own name and picture on Discord.** Ask it to
-  rename itself or use an attached image as its profile picture and the new
-  `set_display_identity` MCP tool edits the bot's nickname and per-server
-  avatar. Both apply to the whole server, since Discord has no per-channel
-  identity, and the tool says so in its result. A server admin must ask;
-  the image must be a Discord attachment (png, jpeg, gif or webp). Slack
-  bots cannot rename themselves, so the tool is Discord-only.
-- Slack supports `post_github_app_install_link` and the configurable
-  `DAIMON_SLACK__BOT_DISPLAY_NAME`. An unconfigured GitHub App link names the
-  operator setting needed; posting a link does not prove installation or repo access.
-- `daimon agents bind-google` lets operators bind an agent's Google identity
-  and scopes without writing SQL.
+- Session continuity: a thread's work survives the session behind it being
+  replaced, through snapshots, replacement lineage and continuations queued
+  and dispatched back into the thread.
+- `start_fresh_task` and `hand_off_task` — start clean, or move the current
+  task to a new session with its context.
+- `cancel_turn` stops a running turn; `get_turn_cost` reports what one cost.
+- `explain_agent_resolution` answers which agent replies in a channel and
+  why.
+- Per-agent memory stores, with a `daimon memory` CLI group.
+- Opus 5 in the pricing table; the agent model allowlist is scoped to
+  Anthropic models.
 
-- **Organic thread participation (Discord, opt-in).** Ask the agent to follow
-  a thread and it keeps replying there unprompted. `DAIMON_THREAD_PARTICIPATION__MODE`
-  sets the deployment default (`off` by default, `on`, or `disabled`, which also
-  refuses requests to turn it on); the `set_thread_participation` tool writes
-  workspace, channel and thread scopes below it (thread by any member, wider
-  scopes by Manage Server), narrowest wins, `disabled` cannot be overridden
-  from below. In an `on` thread a burst of messages is judged once after a
-  quiet period by a metered Haiku classifier, gated by balance, cap and an
-  hourly per-thread ledger, then answered as an ordinary turn flagged
-  `unprompted="true"` so the agent stays brief. An unprompted turn is silent
-  until it has something to say: no "thinking" embed goes up front, a turn that
-  ends with nothing to add leaves no trace in the thread, and the messages it
-  does post suppress the push notification. Turns that fail admission stay
-  silent too. Existing deployments are unaffected; migration
-  `0014_thread_participation` adds two empty tables.
-- **Discord threads get a real title.** A thread daimon opens for a mention is
-  titled from the opening message by a short Haiku call before it is created,
-  so it never opens with a "renamed the thread" notice; the channel shows
-  typing meanwhile. The static "Chat with <agent>" title remains only when
-  naming is off, the message has no text, the model answers blank, or the
-  call fails or outlasts `DAIMON_THREAD_NAMING__TIMEOUT_SECONDS` (default 5).
-  The call is metered to the tenant like any other model call and can be
-  turned off with `DAIMON_THREAD_NAMING__ENABLED=false`. A new `rename_thread`
-  MCP tool lets the agent retitle a thread on request: anyone who can post in
-  a thread daimon opened may rename it, other threads need Manage Threads.
-  Slack threads have no title, so both are Discord-only.
+#### Discord
 
-- **Released images on the GitHub Container Registry.** Tagging a release
-  publishes the runtime image to `ghcr.io/pymc-labs/daimon` for linux/amd64
-  and linux/arm64, so a self-hoster can pull `0.2.0`, `0.2` or `latest`
-  instead of building from source on first boot. Prerelease tags publish
-  their exact version and never move `latest`. The workflow also runs on
-  demand in a dry-run mode that builds both platforms and publishes nothing,
-  which is how a Dockerfile change gets its arm64 coverage before a tag
-  exists.
+- Structured mid-turn forms with typed answers (`post_wizard`).
+- Reaction feedback votes with a private free-text follow-up.
+- Opt-in organic thread participation, off by default
+  (`DAIMON_THREAD_PARTICIPATION__*`).
+- Automatic thread titles and `rename_thread`
+  (`DAIMON_THREAD_NAMING__*`).
+- `set_display_identity`: the agent can change its own nickname and
+  per-server avatar when an admin asks.
+- Human-support escalation, metered per user (`DAIMON_SUPPORT__*`).
+- Nominated QA bots may start turns by mention
+  (`DAIMON_DISCORD__QA_BOT_USER_IDS`).
+- A read-only setup panel listing the agent roster, details and routing.
+
+#### Slack
+
+Most of this release's parity work: Slack now matches Discord on the
+surfaces below.
+
+- Feedback votes on the final answer, chat-initiated credential buttons and
+  single-use private modals.
+- Output file delivery (requires the `files:write` scope).
+- `send_message` posts to channels as well as threads, and `parse_link`
+  resolves permalinks.
+- Tools that only apply to the other platform are hidden from callers.
+- Cross-process turn liveness, a boot sweep and recovery-card adoption, so a
+  restart no longer strands a thread.
+- A read-only setup panel and targeted setup conversations.
+- Self-hosted Slack setup documented, with an app manifest and a compose
+  profile.
+
+#### Setup, credentials and repositories
+
+- Posted control cards on both platforms: private forms, card states that
+  tell the truth, `.env` import, agent model chosen at creation, and the
+  provenance of a request recorded when it is minted.
+- `set_setup_target` aims setup at a specific conversation.
+- GitHub App install-link cards on both platforms
+  (`DAIMON_GITHUB__APP_SLUG`).
+- Repository binding from chat (`bind_public_repo`, `request_repo_binding`),
+  with proof of access taken at bind time and enforced on every write.
+- Skill-repo tokens are stored apart from the working-repo binding, so
+  enrolling a skill repository no longer re-points the clone target.
+- A per-person connect flow for OAuth-only MCP servers
+  (`request_mcp_oauth`), and `detach_mcp_server` to undo it.
+
+#### MCP surface
+
+- `/slack/mcp` and `/discord/mcp` OAuth hub mounts, plus a Claude Code
+  plugin in `plugin/` that reaches every daimon a person can see
+  (`DAIMON_HUB__*`).
+- `create_file_upload_url` takes a file by URL instead of base64 tool
+  arguments, and `PUT /bundles` streams bundle uploads under an hourly
+  per-token limit (`DAIMON_MCP__BUNDLE_*`).
+- 33 net-new tools in total; `.env.example` and the tool list are the
+  reference.
+
+#### Reports, notebooks and charts
+
+- New app `apps/report-host`: a per-recipient report reader with chat, admin
+  publish, delete and revoke routes, reader-variant agents, and sweeps for
+  restart-resume, deadline-cancel, idle-archive and recipient-prune
+  (`DAIMON_REPORT_HOST__*`, and the app's own `DAIMON_REPORT__*`).
+- `publish_report` and `delete_report`, with `report-publish` and
+  `report-reader` seeded skills.
+- Charts produced during a turn are delivered from S3-compatible storage
+  (`deliver_turn_charts`, `DAIMON_ARTIFACTS__*`).
+- Notebooks are one tool plus `list_notebooks` and `delete_notebook`, each
+  notebook isolated in its own filesystem jail on the host.
+
+#### Skills
+
+- Newly seeded: `workspace-setup`, `file-handling`, `pymc-artifact-style`,
+  `report-publish`, `report-reader`, and a data-analysis set
+  (`data-ingestion`, `data-cleaning`, `data-validation`,
+  `exploratory-data-analysis`, `eda-storytelling`).
+- `sync_skills` can attach to an agent and refuses unmetered models; chat
+  can collect a token for a private skill repository; `remove_skill`.
+
+#### CLI
+
+- New commands: `daimon memory`, `daimon repo-bindings`, `daimon smoke`,
+  `daimon defaults verify`, `daimon mcp mint-agent-token`, `daimon agents
+  bind-google`.
+- `--tenant` / `--guild` overrides on `agents`, `skills` and `config`, and
+  `config --scope` accepts Slack scopes.
+
+#### Self-hosting
+
+- `docs/self-hosting.md` covers prerequisites, environment, the Discord app,
+  the stack, Slack, Claude Code login mounts, chart delivery and connecting
+  external MCP servers. The readme is rewritten around a three-step
+  quickstart, and `PRIVACY.md` is new.
+- Tagged releases publish a multi-architecture image to
+  `ghcr.io/pymc-labs/daimon`, so the first run is a pull rather than a
+  build.
+- New settings blocks a self-hoster may need: `DAIMON_HUB__*` (its
+  `JWT_SIGNING_KEY` must be 32 bytes once any mount is configured),
+  `DAIMON_ARTIFACTS__*`, `DAIMON_REPORT_HOST__*`, `DAIMON_SUPPORT__*`,
+  `DAIMON_THREAD_PARTICIPATION__*`, `DAIMON_THREAD_NAMING__*`,
+  `DAIMON_MCP__BUNDLE_*` and `DAIMON_GITHUB__APP_SLUG`. All are optional
+  unless the feature is wanted, and `.env.example` lists every one with its
+  default.
+
+### Changed
+
+- One admission, session-bind and prepared-turn path now drives Discord,
+  Slack and MCP, so behaviour that used to differ by adapter no longer does.
+- Agents seeded from `defaults/` cannot be deleted on either platform. Both
+  adapters refuse server-side; the Discord panel's disabled button was
+  client-side only and the Slack panel offered deletion outright.
+- Reading a routine's last run output needs the same authority as pausing or
+  deleting it: workspace admin, or the routine's creator.
+- `create_environment` is no longer gated.
 
 ### Fixed
 
-- **A forked agent no longer warns everyone about a server it copied but
-  nobody can open.** Forking copies the source's MCP servers, but not what
-  authenticates them: an OAuth grant lives in the vault of (person, source
-  agent) and cannot follow, and an agent-wide token stored for the source was
-  simply left behind. On the fork, Managed Agents opened the copied server on
-  every turn, failed it, and every reply carried the "was unavailable this
-  turn" notice — for the person who signed in on the source as much as for
-  anyone else. Agent-wide tokens now travel with the fork. A server anyone in
-  the workspace has signed in to is treated as a sign-in server on every agent
-  that carries its URL, and stays off a session until its caller has signed
-  in on that agent; before, only sign-ins on the very same agent counted, so
-  a fork looked like a server nobody needed to sign in to. Migration
-  `0023_mcp_oauth_flows_url_ix`.
-
-- **One member's OAuth sign-in no longer warns everyone else on every
-  message.** An OAuth grant is stored in the vault of whoever signed in, but
-  the server it unlocks is attached to the agent the whole workspace shares,
-  so Managed Agents opened it on every other member's turn, failed it for
-  want of a credential, and hung the "was unavailable this turn: it rejected
-  the connection's credentials" notice under every reply — including turns
-  with nothing to do with that server. A session now mounts only the servers
-  its caller can authenticate: one nobody but another member has signed in to
-  is left off that session's MCP server and toolset lists, while the members
-  who did connect it keep it, and a server whose token is stored on the agent
-  stays visible to everyone as before. Declining a sign-in link no longer
-  counts as connecting, either. The notice is back to meaning what it says:
-  your own connection needs attention. Migrations
-  `0021_mcp_oauth_flows_agent_ix` and `0022_mcp_oauth_flows_completed`.
-
-- **Connecting an OAuth MCP server no longer breaks every later turn.** After
-  someone signed in to Notion, each turn failed with "could not get the agent
-  ready": the per-turn vault mirror only knew static tokens, so it tried to
-  create the agent's old shared token next to the person's `mcp_oauth` grant
-  and Managed Agents refused (one credential per URL). Every vault writer now
-  treats a URL held by a grant as taken: the mirror, the daimon-mcp bootstrap
-  and the Copilot mount leave it alone, a pasted token replaces it, and a 409
-  from a concurrent create is tolerated. Detaching a server also finds a
-  token row stored with a trailing slash, and the sign-in card refuses the
-  click when the deployment has no crypto keys instead of handing out a dead
-  link. Asking to connect the deployment's own `daimon-mcp` name or URL is
-  refused, as attaching it already was.
-
-- **One failing MCP server no longer discards the reply.** When Managed
-  Agents cannot reach or authenticate one of an agent's MCP servers it keeps
-  the session running without it; daimon treated that error as fatal and
-  threw away the answer that followed, so a rejected Notion token turned
-  every turn into a blank failure (#79). The turn now succeeds with a line
-  under the reply naming the unavailable server, and only a turn that
-  produced nothing fails, naming the server in its error. The MCP token form
-  probes the server first and refuses a token it rejects, pointing at the
-  OAuth path; `detach_mcp_server` lets an admin disconnect a server from
-  built-in Daimon and forgets the shared token stored for it.
-
-### Removed
-
-- **Breaking MCP tool changes:** `request_env_credential`,
-  `list_env_credential_keys`, `remove_env_credential`, `request_mcp_credential`,
-  and `request_skill_repo_credential` are now `request_agent_key`,
-  `list_agent_keys`, `remove_agent_key`, `request_mcp_token`, and
-  `request_skill_repo_token`, respectively. The duplicate `skills_sync`,
-  `skills_list`, `skills_get`, and `skills_delete` aliases are removed; use
-  `sync_skills`, `list_skills`, `get_skill`, and `delete_skill`. Update external
-  callers; compatibility aliases are not retained.
-
-- **`DAIMON_SLACK__DEV_ALLOW_ALL_ADMIN`** — the Slack testing-only admin bypass.
-  It made the admin check return true before `users.info` was ever called,
-  opening every Slack admin gate for every member of every install on the
-  deployment. Settings ignores unknown keys, so a deployment still setting it
-  boots normally: the variable is dropped and the gates begin enforcing. Remove
-  it from your environment, and promote a real workspace admin for any account
-  that relied on it.
+- Threads no longer freeze. Dead sessions are recovered, a dropped
+  mid-stream connection reconnects, turns orphaned by a restart are retired,
+  and liveness is tracked across processes rather than per worker.
+- One failing or unauthenticated MCP server no longer discards the whole
+  reply: a session mounts only the servers its caller can authenticate, and
+  a forked agent drops what it cannot.
+- Channel and thread history pagination is bounded and flags truncation
+  instead of quietly returning a partial view.
+- Rotated MCP credentials propagate in place and reach every caller.
+- Skill sync is hardened: decompressed tarballs are size- and member-capped,
+  paging goes past 100 entries, the boot sweep no longer exhausts the Skills
+  API rate limit, and duplicate mount names are refused.
+- Billing errors are honest: the Slack top-up modal answers when checkout
+  fails, error rendering no longer surfaces SQL, and pooled database
+  connections are pre-pinged.
+- Wiping a workspace is refused unless the workspace is marked disposable.
 
 ### Security
 
-- Slack refreshes the caller's admin role on every mention; failed lookups do
-  not overwrite a stored role. Both adapters include caller admin status in
-  turn context. Discord turn replies suppress mass mentions.
-- Setup guidance and private-input controls use consistent key/token language,
-  preserve operation permissions and partial results, and avoid obsolete panel
-  redirects or claims that newly stored keys refreshed an existing session.
-
-- Slack mentions queued behind an in-flight turn are now partitioned by author,
-  one turn per caller. Previously the whole queue was coalesced into a single
+- Slack mentions queued behind an in-flight turn are partitioned by author,
+  one turn per caller. The whole queue used to be coalesced into a single
   turn run as the first queued author, so a second member's instructions
   executed inside the first member's session, under their credentials and
   visibility, billed to them.
-- `tokens_revoked` no longer tears down the install unless the event names the
-  bot token. Slack also emits it when a single member revokes their own user
-  token, which meant one member disconnecting could uninstall the app for the
-  entire workspace.
-- Agents seeded from `defaults/` can no longer be deleted. Both adapters refuse
-  server-side before archiving; the Discord panel's disabled button was
-  client-side only, and the Slack panel offered deletion outright.
-- Reading a routine's last run output now requires the same authority as
-  pausing or deleting it (workspace admin, or the routine's creator).
+- `tokens_revoked` no longer tears down the install unless the event names
+  the bot token. Slack also emits it when a single member revokes their own
+  user token, which meant one member disconnecting could uninstall the app
+  for the entire workspace.
+- Slack refreshes the caller's admin role on every mention and re-checks it
+  at click time; a failed lookup does not overwrite a stored role. Both
+  adapters carry caller admin status into turn context, and Discord turn
+  replies suppress mass mentions.
 
 ## [0.1.0] - 2026-07-15
 
@@ -183,4 +237,5 @@ Initial public release.
   default.
 - Docker Compose deployment with a single-revision schema bootstrap.
 
+[0.2.0]: https://github.com/pymc-labs/daimon/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/pymc-labs/daimon/releases/tag/v0.1.0
