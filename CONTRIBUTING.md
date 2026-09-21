@@ -84,6 +84,20 @@ value. `scripts/lint_migrations.py` (wired into pre-commit and CI)
 AST-cross-checks the declared value against the `downgrade()` body, so
 declaring `unsupported` requires actually raising `NotImplementedError`.
 
+### Designators in comments
+
+Comments and test names cite short ids: `D-14` is an architecture decision,
+`T-05-04a` a threat-model item, `SYNC-03` and friends a requirement. They
+are traceability anchors, not tickets you need access to — the sentence
+around one always states the rule it stands for, and that sentence is the
+part that has to hold. Keep an id when you move the code it annotates;
+never add one for a rule you have not written down in prose.
+
+`scripts/lint_designators.sh` (pre-commit and CI) guards the other
+direction: this repository is public, so it must not name the maintainers'
+private planning repository, production hostnames or cloud project ids.
+Describe the behaviour instead.
+
 ## Pull request expectations
 
 - Keep diffs focused: one logical change per PR.
