@@ -12,7 +12,7 @@ resolves once per interaction; no cross-interaction cache.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 import aiohttp
 import structlog
@@ -20,6 +20,10 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 log = structlog.get_logger()
+
+#: Slack's own name for the person a member is sent to when a change needs
+#: elevated permission. Copy never says "admin" in the abstract.
+ADMIN_NOUN: Final = "a workspace admin"
 
 
 def _is_admin_signal(user: dict[str, Any]) -> bool:

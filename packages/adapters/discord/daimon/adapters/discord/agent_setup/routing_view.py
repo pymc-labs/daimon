@@ -28,6 +28,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.roster import Page, paginate
 from daimon.core.routing_facts import PRECEDENCE_LINE, build_routing_request
+from daimon.core.setup_conversations import setup_thread_name
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
@@ -151,7 +152,7 @@ def routing_lines_from_map(
 def setup_conversation_links(answering_map: AnsweringMap, *, guild_id: int) -> list[str]:
     """Jump links to the install's live setup conversations, newest first."""
     return [
-        f"[Set up {thread.target_name or 'an agent'}]"
+        f"[{setup_thread_name(thread.target_name)}]"
         f"(https://discord.com/channels/{guild_id}/{thread.thread_id})"
         for thread in answering_map.setup_threads
     ]

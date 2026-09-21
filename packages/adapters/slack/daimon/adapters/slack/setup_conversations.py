@@ -6,12 +6,14 @@ import contextlib
 from typing import Any
 
 import aiohttp
+from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.setup_conversations import (
+    SETUP_ACTION_LABEL,
     build_setup_opener,
     resolve_setup_agents,
     setup_thread_name,
@@ -33,7 +35,7 @@ def setup_button(target_ma_agent_id: str | None) -> dict[str, Any]:
             {
                 "type": "button",
                 "action_id": "agent_setup__conversation",
-                "text": {"type": "plain_text", "text": "💬 Set up with Daimon"},
+                "text": {"type": "plain_text", "text": SETUP_ACTION_LABEL},
                 "value": target_ma_agent_id or "choose",
             }
         ],
@@ -85,11 +87,13 @@ async def create_setup_conversation(
             session, tenant_id=tenant_id, platform="slack", external_id=user_id
         )
     opener = build_setup_opener(
-        target_name=escape_mrkdwn(target_name) if target_name else None,
+        target_display=escape_mrkdwn(target_name) if target_name else None,
         bot_mention=f"<@{bot_user_id}>",
+        is_admin=await resolve_is_admin(client, user_id=user_id),
+        admin_noun=ADMIN_NOUN,
     )
     posted = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-        channel=channel_id, text="Opening setup with Daimon…"
+        channel=channel_id, text="Starting a thread with Daimon…"
     )
     thread_id = str(posted.get("ts") or "")
     if not thread_id:

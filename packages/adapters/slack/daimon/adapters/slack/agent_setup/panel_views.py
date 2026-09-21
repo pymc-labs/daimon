@@ -70,6 +70,7 @@ __all__ = [
     "build_agents_view",
     "build_creating_view",
     "build_details_view",
+    "build_error_view",
     "build_new_agent_form",
     "build_routing_view",
 ]
@@ -199,19 +200,17 @@ def _setup_elements(
     target_ma_agent_id: str | None,
     *,
     target_name: str | None,
-    target_explicit: bool,
 ) -> list[dict[str, Any]]:
-    """The Set-up-with-Daimon button, styled as the view's primary action.
+    """The Manage button, styled as the view's primary action.
 
-    Taken from `setup_conversations.setup_button` so the label, action id and
-    `value` convention have one home — the panel only restyles it and puts it
-    in a row with its neighbours.
+    Taken from `setup_conversations.setup_button` so the action id and `value`
+    convention have one home — the panel only restyles it, names the agent it
+    carries, and puts it in a row with its neighbours.
     """
     elements: list[dict[str, Any]] = list(setup_button(target_ma_agent_id)["elements"])
     for element in elements:
         element["style"] = "primary"
-        if target_explicit:
-            element["text"]["text"] = setup_target_label(target_name)
+        element["text"]["text"] = setup_target_label(target_name)
     return elements
 
 
@@ -301,7 +300,6 @@ def build_agents_view(
     elements = _setup_elements(
         answering.ma_agent_id if answering is not None else None,
         target_name=answering.name if answering is not None else None,
-        target_explicit=True,
     )
     elements.append(_button(action_id=ACTION_NEW, label=NEW_AGENT_LABEL))
     elements.append(_button(action_id=ACTION_ROUTING, label=ROUTING_LABEL))
@@ -375,7 +373,6 @@ def build_details_view(
             "elements": _setup_elements(
                 details.ma_agent_id,
                 target_name=details.name,
-                target_explicit=False,
             ),
         }
     )
@@ -639,6 +636,34 @@ def _routing_request_line(
         agent_name=escape_mrkdwn(agent_name or "an agent"), channel_label=f"<#{channel_id}>"
     )
     return f"{PRECEDENCE_LINE} {lead}{request}"
+
+
+# ---------------------------------------------------------------------------
+# Failure
+# ---------------------------------------------------------------------------
+
+
+def build_error_view(*, request_id: str) -> dict[str, Any]:
+    """Error modal shown when background content fetch fails (Loading-modal pattern).
+
+    Replaces the "Loading…" placeholder via ``views.update`` so the modal is
+    never left in a permanent spinner state.
+
+    Args:
+        request_id: Opaque request identifier for support cross-referencing.
+
+    Returns:
+        A modal view dict safe to pass to ``views.update(view=...)``.
+    """
+    text = f":x: *Couldn’t load agent setup.* Please try again. (ref: {escape_mrkdwn(request_id)})"
+    return {
+        "type": "modal",
+        "callback_id": CALLBACK_AGENTS,
+        "title": {"type": "plain_text", "text": "Agent Setup"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------

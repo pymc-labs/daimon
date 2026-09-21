@@ -130,14 +130,14 @@ async def _set_setup_target_impl(
                 "This thread is not a setup conversation, so there is no selected "
                 "target to switch. That does not block configuring the agent: name "
                 "it and use update_agent or a request tool directly. A setup "
-                "conversation is opened from the Set up with Daimon button in the "
+                "conversation is opened with the Manage agents button in the "
                 "setup panel. Nothing was changed."
             )
         if binding.kind == "handoff":
             raise ToolError(
                 f"This is a handoff conversation: {binding.responder_name} answers here "
                 "because this task was handed to it, so there is no setup target to "
-                "change. Open Set up with Daimon to configure an agent. Nothing was changed."
+                "change. Use Manage agents to pick an agent. Nothing was changed."
             )
         updated_binding = await update_target(
             session,

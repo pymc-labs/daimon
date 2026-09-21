@@ -4,14 +4,14 @@ renderer's own output, byte-for-byte -- never adapter-side hand-written copy.
 `daimon.core.continuity.messages.render_change_confirmation` is the single
 place person-facing configuration-change copy is written; every adapter ack
 site is required to call it rather than compose its own string. This file
-drives three representative Discord entry points -- one per `ConfigurationChange`
-axis (a plain key add, a bulk paste, and a removal) spanning both modules that
-own acks (`credential_modals.py`, `agent_setup/credentials.py`) -- and asserts
-the posted text equals a fresh, independent call to the renderer with the same
-fields. The remaining ack sites (model/instructions, mcp/mcp_removed,
-skill_removed, repo) are covered the same way as unit tests colocated with
-each adapter module (`packages/adapters/discord/tests/...`); this file is the
-cross-adapter parity anchor, not the exhaustive sweep.
+drives the Discord key-add entry point on `credential_modals.py`, the one
+module that still owns a configuration-change ack after the legacy setup
+editor was removed, and asserts the posted text equals a fresh, independent
+call to the renderer with the same fields. The remaining ack sites
+(model/instructions, mcp/mcp_removed, skill_removed, repo) are covered the
+same way as unit tests colocated with each adapter module
+(`packages/adapters/discord/tests/...`); this file is the cross-adapter
+parity anchor, not the exhaustive sweep.
 
 A posted control has no ack of its own: its receipt is the card the request
 was posted as, re-rendered in place. So the key-add case below reads the
@@ -30,8 +30,6 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
-from daimon.adapters.discord.agent_setup.credentials import CredentialsSubView, PasteSecretModal
-from daimon.adapters.discord.agent_setup.state import PanelState, RosterEntry
 from daimon.adapters.discord.credential_modals import EnvCredentialModal
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
@@ -41,7 +39,6 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.posted_controls import classify_card_state
 from daimon.core.scope import DeploymentDefault
-from daimon.core.specs import AgentSpec
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.credential_requests import create_credential_request
 from daimon.testing import ma_agent
@@ -192,69 +189,3 @@ async def test_discord_env_key_add_ack_matches_core_renderer(
     async with db_session_factory() as session:
         stored = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
     assert [f.key for f in stored] == ["STRIPE_KEY"], "sanity: the key write actually happened"
-
-
-async def test_discord_paste_keys_bulk_add_ack_matches_core_renderer(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with db_session_factory() as session, session.begin():
-        tenant = await make_tenant(session, platform="discord", workspace_id="800000002")
-    tenant_id = tenant.id
-    agent_id = uuid.uuid4()
-    entry = RosterEntry(
-        name="research-bot",
-        model="claude-sonnet-4-6",
-        spec=AgentSpec(name="research-bot", model="claude-sonnet-4-6"),
-    )
-    runtime = _make_runtime(db_session_factory)
-    on_added = AsyncMock()
-    modal = PasteSecretModal(
-        runtime=runtime, tenant_id=tenant_id, agent_id=agent_id, entry=entry, on_added=on_added
-    )
-    modal.content_input._value = (  # pyright: ignore[reportPrivateUsage]
-        "XERO_API_KEY=abc123\nTOGGL_TOKEN=xyz789\n"
-    )
-
-    interaction = _interaction()
-    await modal.on_submit(interaction)
-
-    posted = interaction.followup.send.call_args.args[0]
-    expected = render_change_confirmation(
-        ConfigurationChange(
-            target_name="research-bot", kind="keys_bulk", availability="next_message", count=2
-        )
-    )
-    assert posted == expected, f"expected the renderer's own copy, got {posted!r}"
-
-
-async def test_discord_key_remove_ack_matches_core_renderer(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant_id = uuid.uuid4()
-    agent_id = uuid.uuid4()
-    entry = RosterEntry(
-        name="ops-bot",
-        model="claude-sonnet-4-6",
-        spec=AgentSpec(name="ops-bot", model="claude-sonnet-4-6"),
-    )
-    state = PanelState(roster=[entry], selected=entry, account_id=uuid.uuid4())
-    runtime = _make_runtime(db_session_factory)
-    view = CredentialsSubView(
-        runtime=runtime,
-        state=state,
-        allowed_user_id=100000000000000001,
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        secret_names=["LINEAR_TOKEN"],
-    )
-
-    interaction = _interaction()
-    await view._on_remove(interaction, "LINEAR_TOKEN")  # pyright: ignore[reportPrivateUsage]
-
-    posted = interaction.followup.send.call_args.args[0]
-    expected = render_change_confirmation(
-        ConfigurationChange(
-            target_name="ops-bot", kind="key_removed", availability="saved", detail="LINEAR_TOKEN"
-        )
-    )
-    assert posted == expected, f"expected the renderer's own copy, got {posted!r}"

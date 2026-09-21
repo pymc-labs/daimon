@@ -45,7 +45,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import AnsweringPlace, DeploymentDefault
-from daimon.core.setup_conversations import SETUP_ACTION_LABEL, shared_keys_sentence
+from daimon.core.setup_conversations import setup_target_label, shared_keys_sentence
 from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.testing import ma_agent
@@ -689,10 +689,10 @@ async def test_setup_targets_the_agent_this_card_describes(account_id: uuid.UUID
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(details_view_mod, "open_setup_conversation", _spy_open)
-        await _find_button(view, SETUP_ACTION_LABEL).callback(interaction)
+        await _find_button(view, setup_target_label("churn-explorer")).callback(interaction)
 
     assert captured["target"] is state.selected_agent, (
-        "Set up with Daimon must carry this card's agent as its target"
+        "Manage must carry this card's agent as its target"
     )
     assert captured["target"] is not None and captured["target"].name == "churn-explorer"
     interaction.response.defer.assert_called_once()

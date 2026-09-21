@@ -1,1 +1,1 @@
-"""Agent-setup panel: roster picker + section modals + lifecycle buttons."""
+"""Agent-setup panel: the read-only roster, details, and routing screens."""

@@ -282,7 +282,7 @@ def test_roster_preserves_long_names_but_bounds_the_targeted_setup_label() -> No
     assert f"**{answering.name}**\n-# answers here" in _text(view), (
         "the readable row keeps the full agent identity and its status"
     )
-    setup_label = next(label for label in _labels(view) if label.startswith("💬 Set up"))
+    setup_label = next(label for label in _labels(view) if label.startswith("⚙️ Manage"))
     assert len(setup_label) <= 30 and setup_label.endswith("…"), (
         "the targeted action stays within its product copy limit and marks truncation"
     )

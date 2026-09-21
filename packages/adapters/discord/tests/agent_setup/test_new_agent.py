@@ -340,9 +340,9 @@ async def test_setup_button_targets_the_newly_created_agent(
     monkeypatch: pytest.MonkeyPatch,
     account_id: uuid.UUID,
 ) -> None:
-    """Set up with Daimon on the returned card must configure the agent just created."""
+    """Manage on the returned card must configure the agent just created."""
     import daimon.adapters.discord.agent_setup.details_view as details_view_mod
-    from daimon.core.setup_conversations import SETUP_ACTION_LABEL
+    from daimon.core.setup_conversations import setup_target_label
 
     state, interaction, _seen = await _drive_submit(
         db_session, db_session_factory, monkeypatch, account_id=account_id
@@ -358,12 +358,12 @@ async def test_setup_button_targets_the_newly_created_agent(
     setup_button = next(
         node
         for node in _walk(view)
-        if isinstance(node, discord.ui.Button) and node.label == SETUP_ACTION_LABEL
+        if isinstance(node, discord.ui.Button) and node.label == setup_target_label(_CREATED_NAME)
     )
     await setup_button.callback(_interaction())
 
     assert captured["target"] is state.selected_agent, (
-        "Set up with Daimon must carry the newly created agent as its target"
+        "Manage must carry the newly created agent as its target"
     )
     assert captured["target"].name == _CREATED_NAME
 

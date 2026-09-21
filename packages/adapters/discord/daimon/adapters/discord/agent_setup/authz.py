@@ -48,7 +48,7 @@ from __future__ import annotations
 import structlog
 from daimon.adapters.discord.agent_setup.state import RosterEntry
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
-from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.checks import ADMIN_NOUN, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
@@ -58,18 +58,16 @@ import discord
 log = structlog.get_logger()
 
 _SYSTEM_AGENT_MESSAGE = (
-    "This agent ships with the deployment and is managed from the repo defaults. "
-    "Fork it to make an editable copy."
+    "This is a starting agent and can't be changed directly. Ask me to fork it and change the fork."
 )
 _REACHABLE_AGENT_MESSAGE = (
-    "This agent is currently the default for this channel or the server, so "
-    "changing its setup needs Manage Server. Fork it to make an editable copy."
+    f"This agent answers for other people here, so this change needs {ADMIN_NOUN}. "
+    "Ask me and I'll write the request for them."
 )
 _SHARED_AGENT_MESSAGE = (
-    "This agent is shared — it either ships with the deployment or is the "
-    "current default for this channel or the server — so changing its repo or "
-    "keys needs Manage Server. Ask a server admin to make this change with Daimon, "
-    "or ask Daimon to fork it to make an editable copy; the fork starts with no keys of its own."
+    "This agent answers for other people here, so changing its repo or its keys "
+    f"needs {ADMIN_NOUN}. Ask me and I'll write the request for them, or ask me "
+    "to fork it; the fork starts with no keys of its own."
 )
 
 

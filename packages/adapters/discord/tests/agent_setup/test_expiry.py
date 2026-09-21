@@ -67,13 +67,7 @@ async def test_edit_expired_message_propagates_other_http_errors(
 # ---------------------------------------------------------------------------
 
 _RENDER_SITE_MODULE_NAMES = [
-    "daimon.adapters.discord.agent_setup.panel",
-    "daimon.adapters.discord.agent_setup.edit_view",
-    "daimon.adapters.discord.agent_setup.credentials",
-    "daimon.adapters.discord.agent_setup.set_default",
     "daimon.adapters.discord.agent_setup.mcp_access",
-    "daimon.adapters.discord.agent_setup.modals",
-    "daimon.adapters.discord.agent_setup.modals_mcp",
     "daimon.adapters.discord.commands.agent_setup",
     "daimon.adapters.discord.agent_setup.roster_view",
     "daimon.adapters.discord.agent_setup.details_view",

@@ -290,7 +290,7 @@ async def test_roster_lists_the_same_agents_in_the_same_order_on_both_platforms(
         "Details",
         "Details",
         "Details",
-        f"Set up {_ANSWERING}",
+        f"Manage {_ANSWERING}",
         "New agent",
         "Who answers where",
         "Done",
@@ -365,7 +365,7 @@ async def test_empty_roster_shows_the_setup_copy_and_keeps_the_setup_action(
     assert view.rows == (EMPTY_ROSTER_COPY,), (
         f"{driver.param_id}: an empty roster says what to do next, and lists nothing else"
     )
-    assert "Set up an agent" in view.action_labels, (
+    assert "Manage agents" in view.action_labels, (
         f"{driver.param_id}: setup stays available with no agent answering here"
     )
     assert view.page is None, f"{driver.param_id}: an empty roster needs no pager"
@@ -505,8 +505,9 @@ async def test_details_reads_the_same_sections_in_the_same_order_on_both_platfor
         f"{driver.param_id}: Details carries one section per thing the agent is wired to, "
         "in one shared order"
     )
-    assert details.action_labels[0] == "Set up with Daimon", (
-        f"{driver.param_id}: setup is the primary action before configuration details"
+    assert details.action_labels[0] == f"Manage {_UNROUTED}", (
+        f"{driver.param_id}: setup is the primary action before configuration details, "
+        "and it names the agent this screen is about"
     )
     assert "claude mcp add" not in details.body, (
         f"{driver.param_id}: Details does not expose coding-tool commands before the action is used"

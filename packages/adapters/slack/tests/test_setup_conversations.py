@@ -12,6 +12,7 @@ import pytest
 from aioresponses import aioresponses
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsModelConfig
 from cryptography.fernet import Fernet
+from daimon.adapters.slack.admin import ADMIN_NOUN
 from daimon.adapters.slack.agent_setup.actions import handle_agent_setup_action
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
@@ -157,6 +158,7 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
             slack.get(
                 re.compile(r"https://slack.com/api/users.info.*"),
                 payload={"ok": True, "user": {"is_admin": is_admin}},
+                repeat=True,
             )
             slack.post(
                 "https://slack.com/api/chat.postMessage", payload={"ok": True, "ts": "123.456"}
@@ -334,8 +336,10 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
             ]
             assert posts[1]["thread_ts"] == "123.456", "welcome belongs inside the setup thread"
             assert posts[1]["text"] == build_setup_opener(
-                target_name="specialist",
+                target_display="specialist",
                 bot_mention="<@U_BOT>",
+                is_admin=is_admin,
+                admin_noun=ADMIN_NOUN,
             ), "the opener is posted as core renders it, with no Slack-only preamble"
             assert "specialist" in posts[1]["text"] and "<@U_BOT>" in posts[1]["text"], (
                 "thread opener should name target and actual bot mention"

@@ -9,14 +9,14 @@ import discord
 import httpx
 import pytest
 from daimon.adapters.discord.agent_setup.conversations import open_setup_conversation
-from daimon.adapters.discord.agent_setup.panel import AgentSetupView
-from daimon.adapters.discord.agent_setup.state import PanelState, RosterEntry
+from daimon.adapters.discord.agent_setup.roster_view import RosterView
+from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
 from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
+from daimon.core.roster import RosterAgent
 from daimon.core.scope import DeploymentDefault
-from daimon.core.specs import AgentSpec
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
@@ -83,19 +83,21 @@ async def test_setup_entry_binds_exact_target_before_ready_without_a_billed_turn
             billing_config=None,
         ),
     )
-    entry = RosterEntry(
+    specialist = RosterAgent(
         name="specialist",
-        model="claude-sonnet-4-6",
         ma_agent_id="agent_specialist",
-        spec=AgentSpec(name="specialist", model="claude-sonnet-4-6"),
+        model_id="claude-sonnet-4-6",
+        is_built_in=False,
     )
     state = PanelState(
-        roster=[entry],
-        selected=entry,
+        roster=[],
+        selected=None,
         account_id=uuid.uuid4() if storage_fails else account.id,
         is_admin=is_admin,
         channel_id=222,
         deployment_default=defaults,
+        roster_agents=(specialist,),
+        answering=specialist,
     )
     interaction = MagicMock(spec=discord.Interaction)
     interaction.user = MagicMock(spec=discord.Member)
@@ -130,8 +132,8 @@ async def test_setup_entry_binds_exact_target_before_ready_without_a_billed_turn
         )
 
     thread.send = AsyncMock(side_effect=send_opener)
-    view = AgentSetupView(state, runtime=runtime, allowed_user_id=42)
-    await view._on_setup_conversation(interaction)
+    view = RosterView(state, runtime=runtime, allowed_user_id=42)
+    await view._on_setup(interaction)  # pyright: ignore[reportPrivateUsage]  # the live setup entry point
     interaction.response.defer.assert_awaited_once()
     assert (
         interaction.channel.create_thread.call_args.kwargs["type"]

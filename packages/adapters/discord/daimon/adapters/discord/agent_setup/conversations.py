@@ -8,6 +8,7 @@ import anthropic
 import structlog
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
+from daimon.adapters.discord.checks import ADMIN_NOUN
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
@@ -84,8 +85,10 @@ async def open_setup_conversation(
         )
         target_name = selected.name if ma_target is not None and selected is not None else None
         opener = build_setup_opener(
-            target_name=target_name,
+            target_display=target_name,
             bot_mention=interaction.client.user.mention,
+            is_admin=state.is_admin,
+            admin_noun=ADMIN_NOUN,
         )
         thread = await channel.create_thread(
             name=setup_thread_name(target_name),
@@ -130,7 +133,7 @@ async def open_setup_conversation(
                     await session.commit()
             raise
         await interaction.followup.send(
-            f"[Continue setup with Daimon]({thread.jump_url})",
+            f"[Open the thread]({thread.jump_url})",
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )

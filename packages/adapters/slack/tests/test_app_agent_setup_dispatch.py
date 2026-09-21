@@ -4,7 +4,7 @@ Covers:
 - /agent-setup slash command routes to handle_agent_setup_command
 - agent_setup__new_agent view_submission: ack-with-payload before any I/O (STURN-01);
   invalid name → errors acked, no background run spawns
-- agent_setup__roster_select block_action: empty ack first, then handler dispatches
+- agent_setup__* block_action: empty ack first, then handler dispatches
 - Existing routes regression guard (no agent_setup changes break prior routes)
 """
 
@@ -312,10 +312,10 @@ async def test_on_request_new_agent_view_submission_sources_channel_id_from_priv
 # ---------------------------------------------------------------------------
 
 
-async def test_on_request_roster_select_block_action_when_arrives_acks_empty_first_then_dispatches() -> (
+async def test_on_request_panel_block_action_when_arrives_acks_empty_first_then_dispatches() -> (
     None
 ):
-    """agent_setup__roster_select block_action:
+    """An agent_setup__* block_action:
     - the unconditional empty ack fires first (STURN-01)
     - handle_agent_setup_action is spawned
     """
@@ -329,21 +329,16 @@ async def test_on_request_roster_select_block_action_when_arrives_acks_empty_fir
 
     req = SocketModeRequest(
         type="interactive",
-        envelope_id="env_roster_select_001",
+        envelope_id="env_panel_action_001",
         payload={
             "type": "block_actions",
             "team": {"id": "T_TEST"},
             "user": {"id": "U_TEST"},
             "view": {
                 "id": "V_TEST",
-                "private_metadata": json.dumps({"team_id": "T_TEST", "channel_id": "C_TEST"}),
+                "private_metadata": json.dumps({"t": "T_TEST", "c": "C_TEST", "v": "agents"}),
             },
-            "actions": [
-                {
-                    "action_id": "agent_setup__roster_select",
-                    "selected_option": {"value": "my-agent"},
-                }
-            ],
+            "actions": [{"action_id": "agent_setup__details", "value": "my-agent"}],
         },
     )
 
@@ -358,7 +353,7 @@ async def test_on_request_roster_select_block_action_when_arrives_acks_empty_fir
         "block_actions must ack empty envelope first — before any handler dispatch (STURN-01)"
     )
     assert "agent_setup_action" in spawned_actions, (
-        "handle_agent_setup_action must be spawned for an agent_setup__roster_select block_action"
+        "handle_agent_setup_action must be spawned for an agent_setup__* block_action"
     )
 
 
