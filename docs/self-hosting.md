@@ -59,6 +59,33 @@ Once it settles, send a message that `@mention`s the bot. It replies in a
 new thread. If the bot stays silent, check `docker compose logs discord`; an
 unset `DAIMON_DISCORD__BOT_TOKEN` is the usual cause.
 
+### Running a published image instead of building
+
+Every tagged release is published to the GitHub Container Registry as
+`ghcr.io/pymc-labs/daimon`, so a host that should not compile anything can run
+a release straight from the registry. All five application services run the
+same image and differ only in the command Compose gives them, so one `image:`
+line per service is the whole change. Put it in `docker-compose.override.yml`,
+which Compose reads on top of `docker-compose.yml` automatically:
+
+```yaml
+services:
+  init:
+    image: ghcr.io/pymc-labs/daimon:0.2.0
+  mcp:
+    image: ghcr.io/pymc-labs/daimon:0.2.0
+  discord:
+    image: ghcr.io/pymc-labs/daimon:0.2.0
+  slack:
+    image: ghcr.io/pymc-labs/daimon:0.2.0
+  scheduler:
+    image: ghcr.io/pymc-labs/daimon:0.2.0
+```
+
+Then `docker compose pull && docker compose up -d`. Leave `--build` off: it
+rebuilds from the working tree and throws the pulled image away. Upgrading is
+editing the tag and running those two commands again.
+
 ### Running the processes by hand
 
 Requires [`uv`](https://docs.astral.sh/uv/):
