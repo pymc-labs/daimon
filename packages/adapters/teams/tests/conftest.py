@@ -19,6 +19,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.teams.app import AuthorizedTeamsActivity, DirectCoreTurnDispatcher
 from daimon.adapters.teams.runtime import TeamsRuntime, build_turn_deps
+from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
@@ -42,6 +43,7 @@ from microsoft_teams.common import Client, ClientOptions  # pyright: ignore[repo
 from microsoft_teams.common.http.client import (  # pyright: ignore[reportMissingTypeStubs]
     MiddlewareContext,
 )
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Synthetic UUIDs; no real directory or user identifiers are used.
@@ -177,6 +179,11 @@ def build_teams_runtime(
     deployment default so tenant-scope config resolves the same tags.
     """
     settings = MagicMock()
+    settings.teams = TeamsSettings(
+        client_id=BOT_CLIENT_ID,
+        client_secret=SecretStr("test-secret"),
+        tenant_id=ENTRA_TENANT_ID,
+    )
     settings.crypto.keys = ()
     settings.mcp.public_url = None
     settings.defaults_root = MagicMock()
@@ -297,7 +304,9 @@ def make_dispatch_target(
     """A real ``DirectCoreTurnDispatcher`` over the test DB, plus the faked
     inbound context and verified activity its ``dispatch`` accepts."""
     runtime = build_teams_runtime(db_factory)
-    dispatcher = DirectCoreTurnDispatcher(turn_deps=runtime.turn_deps, sessionmaker=db_factory)
+    dispatcher = DirectCoreTurnDispatcher(
+        settings=runtime.settings.teams, turn_deps=runtime.turn_deps, sessionmaker=db_factory
+    )
     ctx = FakeTurnContext(stream=FakeStream())
     activity = AuthorizedTeamsActivity(
         tenant_id=derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID),

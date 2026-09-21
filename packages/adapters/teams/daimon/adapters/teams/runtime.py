@@ -113,6 +113,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
             entra_tenant_id=teams_settings.tenant_id,
         )
         dispatcher = DirectCoreTurnDispatcher(
+            settings=teams_settings,
             turn_deps=turn_deps,
             sessionmaker=sessionmaker,
         )

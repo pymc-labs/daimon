@@ -61,7 +61,9 @@ def _service(
     """A real ingress service whose resolver/dispatcher are the production classes."""
     runtime = build_teams_runtime(db_factory)
     resolver = VerifiedTeamsTurnResolver(sessionmaker=db_factory, entra_tenant_id=ENTRA_TENANT_ID)
-    dispatcher = DirectCoreTurnDispatcher(turn_deps=runtime.turn_deps, sessionmaker=db_factory)
+    dispatcher = DirectCoreTurnDispatcher(
+        settings=_settings(), turn_deps=runtime.turn_deps, sessionmaker=db_factory
+    )
     runtime = dataclasses.replace(runtime, resolver=resolver, dispatcher=dispatcher)
     service = create_teams_http_service(
         settings=_settings(), runtime=runtime, client=build_teams_client(fake)
