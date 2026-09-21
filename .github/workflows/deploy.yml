@@ -1,5 +1,17 @@
 name: Deploy
 
+# How the maintainers deploy the hosted instance to their own Google Cloud
+# project. Self-hosting needs none of this: docker compose is the supported
+# path and the self-hosting guide in docs/ is the one to read. It lives here
+# so the pipeline that ships the hosted instance is reviewable alongside the
+# code it ships.
+#
+# Every project id, region, bucket and domain arrives through repository
+# variables, so a fork inherits nothing. The assets the VM steps pull from a
+# bucket (the env refresh script, the compose files, the Caddyfile) describe
+# one particular estate and are kept in the operator's private
+# infrastructure repository rather than here.
+#
 # Reusable deploy body: callable from other workflows (workflow_call) or
 # dispatched manually (workflow_dispatch). Deliberately no push trigger —
 # adding this file changes no existing deploy behavior.
@@ -144,8 +156,8 @@ jobs:
               # real time in the past. DAIMON_IMAGE must keep coming from the
               # freshly computed tag exported above and must never be
               # re-derived from VM metadata (stale metadata rolls the image
-              # back). The refresh script (from the companion infra repo, via
-              # the assets bucket) exits nonzero on a permission or transient
+              # back). The refresh script (pulled from the assets bucket)
+              # exits nonzero on a permission or transient
               # Secret Manager failure, failing the deploy — intended: a
               # config the pipeline cannot assemble must not read green.
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/daimon-refresh-env /usr/local/bin/daimon-refresh-env
@@ -205,12 +217,10 @@ jobs:
               export NOTEBOOK_IMAGE="${{ steps.tags.outputs.notebook }}"
               # Caddy fronts notebook-host with TLS on this domain; the compose
               # file interpolates NOTEBOOK_DOMAIN + NOTEBOOK_PUBLIC_URL_BASE
-              # (the compose file and Caddyfile live in the operator private infra repo).
               export NOTEBOOK_DOMAIN="${{ env.NOTEBOOK_DOMAIN }}"
               export NOTEBOOK_PUBLIC_URL_BASE="https://${{ env.NOTEBOOK_DOMAIN }}"
               # report-host is the second service on this same VM, behind the
-              # same Caddy on its own hostname (the compose file and Caddyfile
-              # live in the companion infra repo).
+              # same Caddy on its own hostname.
               export REPORT_IMAGE="${{ steps.tags.outputs.report }}"
               export REPORT_DOMAIN="${{ env.REPORT_DOMAIN }}"
               export REPORT_PUBLIC_URL_BASE="https://${{ env.REPORT_DOMAIN }}"
@@ -223,8 +233,8 @@ jobs:
               # read the new env_file; docker restart does NOT. NOTEBOOK_IMAGE
               # must keep coming from the freshly computed tag exported above
               # and must never be re-derived from VM metadata (stale metadata
-              # rolls the image back). The refresh script (from the companion
-              # infra repo, via the assets bucket) exits nonzero on a
+              # rolls the image back). The refresh script (pulled from the
+              # assets bucket) exits nonzero on a
               # permission or transient Secret Manager failure, failing the
               # deploy — intended: a config the pipeline cannot assemble must
               # not read green.

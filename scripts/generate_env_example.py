@@ -7,6 +7,10 @@ recursively (unwrapping optional nested blocks) to build a complete, tiered
 Stripe billing vars (billing.py:load_billing_config) and the
 docker-compose-only Postgres vars.
 
+The walk itself lives in `_settings_walk.py`, shared with
+`generate_config_reference.py` so the two pages can never disagree about
+which env vars exist.
+
 Run: uv run python scripts/generate_env_example.py [--check]
 """
 
@@ -14,26 +18,27 @@ from __future__ import annotations
 
 import argparse
 import sys
-import typing
 from dataclasses import dataclass
 from pathlib import Path
 
+from _settings_walk import (
+    ADAPTER_REQUIRED_NOTES,
+    BILLING_FLAT_VARS,
+    ENV_DEPENDENT_PLACEHOLDERS,
+    SettingsLeaf,
+    collect_leaves,
+    is_secret_annotation,
+    section_title,
+    split_top_level,
+    stringify_default,
+)
 from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core.config import Settings
-from pydantic import BaseModel, HttpUrl, SecretStr
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
-
-# Vars whose default is derived from the machine/process environment the
-# generator happens to run on (e.g. os.environ.get("USER", ...)). Rendered as
-# a stable placeholder comment instead of the evaluated value so --check
-# never flaps across machines/CI (Pitfall 7).
-ENV_DEPENDENT_PLACEHOLDERS: dict[str, str] = {
-    "DAIMON_CLI__LOCAL_USER": "defaults to $USER",
-}
 
 # Vars that are always required to boot the app at all — uncommented at the
 # top of the file.
@@ -47,53 +52,6 @@ ALWAYS_REQUIRED = {
 EXAMPLE_VALUES: dict[str, str] = {
     "DAIMON_DATABASE__URL": "postgresql+asyncpg://daimon:daimon@localhost:5432/daimon",
 }
-
-# Vars required only when running a specific adapter — stay commented, but
-# carry a "required to run the X adapter" note.
-ADAPTER_REQUIRED_NOTES: dict[str, str] = {
-    "DAIMON_MCP__JWT_SECRET": "required to run the MCP adapter",
-    "DAIMON_MCP__PUBLIC_URL": "required to run the MCP adapter",
-    "DAIMON_DISCORD__BOT_TOKEN": "required to run the Discord adapter",
-    "DAIMON_SLACK__SIGNING_SECRET": "required to run the Slack adapter",
-    "DAIMON_SLACK__APP_TOKEN": "required to run the Slack adapter",
-}
-
-# Human-friendly section titles for nested settings blocks, keyed by the
-# Settings field name that holds them. Falls back to a title-cased version of
-# the field name when a block is added without updating this map.
-SECTION_TITLES: dict[str, str] = {
-    "database": "Database",
-    "anthropic": "Anthropic",
-    "cli": "CLI",
-    "log": "Logging",
-    "mcp": "MCP Server",
-    "discord": "Discord",
-    "slack": "Slack",
-    "github": "GitHub",
-    "crypto": "Crypto",
-    "credentials": "Credentials",
-    "gemini": "Gemini",
-    "notebook": "Notebook Host",
-    "report_host": "Report Host",
-    "sentry": "Sentry",
-    "billing": "Billing Policy",
-    "support": "Support",
-    "thread_naming": "Thread Naming",
-    "artifacts": "Artifacts",
-}
-
-# The 7-key flat billing env vars consumed by billing.py:load_billing_config.
-# Not part of Settings/model_fields — no DAIMON_ prefix, and billing is
-# disabled (not an error) when any of these is unset.
-BILLING_FLAT_VARS: tuple[str, ...] = (
-    "STRIPE_SECRET_KEY",
-    "STRIPE_WEBHOOK_SECRET",
-    "STRIPE_PRICE_10_USD",
-    "STRIPE_PRICE_25_USD",
-    "STRIPE_PRICE_50_USD",
-    "STRIPE_PRICE_100_USD",
-    "MCP_PUBLIC_URL",
-)
 
 
 @dataclass(frozen=True)
@@ -112,32 +70,6 @@ class Section:
     variables: list[EnvVar]
 
 
-def _unwrap_nested_model(annotation: object) -> type[BaseModel] | None:
-    """Return the nested BaseModel type if `annotation` is a BaseModel, or an
-    `X | None` union wrapping one; otherwise None (leaf/scalar field)."""
-    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        return annotation
-    for arg in typing.get_args(annotation):
-        if isinstance(arg, type) and issubclass(arg, BaseModel):
-            return arg
-    return None
-
-
-def _is_secret_annotation(annotation: object) -> bool:
-    if annotation is SecretStr:
-        return True
-    return any(_is_secret_annotation(arg) for arg in typing.get_args(annotation))
-
-
-def _stringify_default(value: object) -> str:
-    if isinstance(value, tuple):
-        items = typing.cast("tuple[object, ...]", value)
-        return ",".join(_stringify_default(v) for v in items)
-    if isinstance(value, HttpUrl):
-        return str(value).rstrip("/")
-    return str(value)
-
-
 def _render_default(env_name: str, field: FieldInfo, is_secret: bool) -> str:
     """Render the text that goes after '=' — never the evaluated value of an
     env-dependent default_factory (Pitfall 7), never a secret value."""
@@ -150,57 +82,42 @@ def _render_default(env_name: str, field: FieldInfo, is_secret: bool) -> str:
         # every non-placeholder factory in this codebase is a pure
         # constructor (e.g. `lambda: Path("defaults")`) with no env reads.
         value = field.default_factory()  # pyright: ignore[reportCallIssue]
-        return _stringify_default(value)
+        return stringify_default(value)
     if field.default is None or field.default is PydanticUndefined:
         return ""
-    return _stringify_default(field.default)
+    return stringify_default(field.default)
 
 
-def _build_env_var(env_name: str, field_name: str, field: FieldInfo) -> EnvVar:
-    is_secret = _is_secret_annotation(field.annotation)
-    description = field.description or field_name
-    note = ENV_DEPENDENT_PLACEHOLDERS.get(env_name) or ADAPTER_REQUIRED_NOTES.get(env_name)
+def _build_env_var(leaf: SettingsLeaf) -> EnvVar:
+    is_secret = is_secret_annotation(leaf.field.annotation)
+    description = leaf.field.description or leaf.field_name
+    note = ENV_DEPENDENT_PLACEHOLDERS.get(leaf.env_name) or ADAPTER_REQUIRED_NOTES.get(
+        leaf.env_name
+    )
     return EnvVar(
-        name=env_name,
+        name=leaf.env_name,
         description=description,
-        default_line=_render_default(env_name, field, is_secret),
+        default_line=_render_default(leaf.env_name, leaf.field, is_secret),
         is_secret=is_secret,
         note=note,
-        uncommented=env_name in ALWAYS_REQUIRED,
+        uncommented=leaf.env_name in ALWAYS_REQUIRED,
     )
 
 
-def _collect_leaves(model: type[BaseModel], prefix: str) -> list[EnvVar]:
-    """Depth-first walk of `model.model_fields`, unwrapping nested optional
-    settings blocks, returning one EnvVar per leaf (scalar) field."""
-    leaves: list[EnvVar] = []
-    for field_name, field in model.model_fields.items():
-        env_name = f"{prefix}{field_name.upper()}"
-        nested = _unwrap_nested_model(field.annotation)
-        if nested is not None:
-            leaves.extend(_collect_leaves(nested, env_name + "__"))
-        else:
-            leaves.append(_build_env_var(env_name, field_name, field))
-    return leaves
-
-
 def _build_sections() -> list[Section]:
-    sections: list[Section] = []
-    core_vars: list[EnvVar] = []
-
-    for field_name, field in Settings.model_fields.items():
-        env_name = f"DAIMON_{field_name.upper()}"
-        nested = _unwrap_nested_model(field.annotation)
-        if nested is not None:
-            title = SECTION_TITLES.get(field_name, field_name.replace("_", " ").title())
-            variables = _collect_leaves(nested, env_name + "__")
-            sections.append(Section(title=title, variables=variables))
-        else:
-            core_vars.append(_build_env_var(env_name, field_name, field))
-
-    sections.insert(0, Section(title="Core", variables=core_vars))
-    scheduler_vars = _collect_leaves(SchedulerSettings, "DAIMON_SCHEDULER__")
-    sections.append(Section(title="Scheduler", variables=scheduler_vars))
+    core_leaves, blocks = split_top_level(Settings, "DAIMON_")
+    sections = [Section(title="Core", variables=[_build_env_var(v) for v in core_leaves])]
+    sections.extend(
+        Section(
+            title=section_title(block.field_name),
+            variables=[_build_env_var(v) for v in block.leaves],
+        )
+        for block in blocks
+    )
+    scheduler_leaves = collect_leaves(SchedulerSettings, "DAIMON_SCHEDULER__")
+    sections.append(
+        Section(title="Scheduler", variables=[_build_env_var(v) for v in scheduler_leaves])
+    )
     return sections
 
 

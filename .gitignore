@@ -24,9 +24,9 @@ node_modules/
 .claude
 graphify-out/
 
-# Local symlinks into the private companion repo.
+# Local symlinks into the private companion repo. CLAUDE.md is tracked: it
+# carries the repo-wide conventions every contributor and coding agent needs.
 /infra
-/CLAUDE.md
 /AGENTS.md
 /.agents
 

@@ -11,9 +11,10 @@ permissions:
 
 # Reusable Postgres service block + shared bootstrap (checkout, uv sync,
 # alembic upgrade) are duplicated across pytest-* jobs by necessity —
-# GitHub Actions doesn't support YAML anchors. The org enforces a ~6min
-# per-job budget that our combined test suite can't fit, so we split
-# pytest across parallel jobs (each gets its own 6min).
+# GitHub Actions doesn't support YAML anchors. The suites are split across
+# parallel jobs rather than run as one: together they take longer than a
+# reviewer should wait, and a split run names the failing area in the job
+# list instead of somewhere inside a single long log.
 
 jobs:
   lint:
@@ -47,11 +48,17 @@ jobs:
       - name: lint migrations
         run: uv run python scripts/lint_migrations.py
 
-      - name: lint companion-repo leakage
+      - name: lint private material leakage
         run: bash scripts/lint_designators.sh
 
       - name: env example check
         run: uv run python scripts/generate_env_example.py --check
+
+      - name: config reference check
+        run: uv run python scripts/generate_config_reference.py --check
+
+      - name: mcp tool catalogue check
+        run: uv run python scripts/generate_mcp_tool_catalogue.py --check
 
   pytest-core:
     runs-on: ubuntu-latest
