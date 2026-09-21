@@ -157,9 +157,9 @@ tempfile.gettempdir() / 'daimon-mcp-files' resolved at startup.
 
 `int` · optional · default `26214400`
 
-Per-upload byte cap enforced by the bundle upload route. The default sits below the 32
-MiB request ceiling that HTTP/1-only proxies commonly impose, so a deployment behind one
-has headroom.
+Per-upload byte cap enforced by the bundle upload route. The default keeps headroom
+under a 32 MiB proxy request limit; raise it if the front end in front of the mcp
+service allows larger bodies.
 
 ### `DAIMON_MCP__BUNDLE_UPLOADS_PER_HOUR`
 
