@@ -157,9 +157,9 @@ tempfile.gettempdir() / 'daimon-mcp-files' resolved at startup.
 
 `int` · optional · default `26214400`
 
-Per-upload byte cap enforced by the bundle upload route. The mcp service runs on Cloud
-Run over HTTP/1, whose maximum request size is 32 MiB, so the default sits below it with
-headroom.
+Per-upload byte cap enforced by the bundle upload route. The default sits below the 32
+MiB request ceiling that HTTP/1-only proxies commonly impose, so a deployment behind one
+has headroom.
 
 ### `DAIMON_MCP__BUNDLE_UPLOADS_PER_HOUR`
 
@@ -816,14 +816,15 @@ advanced by advance_stale rather than fired.
 `int` · optional · default `4918292864457134915`
 
 Postgres pg_try_advisory_lock int64 key. Default is the ASCII encoding of 'DAIMONSC'.
-Two scheduler processes share the key; the second exits cleanly.
+Two scheduler processes share the key; the second logs that it did not get the lock and
+exits non-zero.
 
 ### `DAIMON_SCHEDULER__HEALTH_PORT`
 
 `int` · optional · default `8082`
 
-Port for the stdlib liveness responder (Fly health check). Must not collide with mcp's
-8080 or discord's 8081 on the shared host.
+Port for the stdlib liveness responder (used by the platform health check). Must not
+collide with mcp's 8080 or discord's 8081 on the shared host.
 
 ## Notebook host (standalone service)
 
