@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -183,3 +184,43 @@ async def test_internal_cancelled_error_does_not_strand_the_marker(
         "a dependency-originated CancelledError is an ordinary failure — "
         "the failure card must have replaced the progress card"
     )
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_bind_matches_documented_window(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fresh mapping does not exist until bind returns; docs must say so."""
+    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    dispatcher, ctx, activity = make_dispatch_target(db_session_factory)
+    marked_ids: list[uuid.UUID] = []
+    binding = asyncio.Event()
+
+    async def blocked_create_session(*args: Any, **kwargs: Any) -> Any:
+        assert ctx.stream.updates, "progress must precede the slow session bind"
+        assert not marked_ids, "the marker requires the mapping returned by bind"
+        binding.set()
+        await asyncio.Event().wait()
+
+    with (
+        patched_turn_pipeline(marked_ids),
+        patch("daimon.core.turn.prepare.create_session", side_effect=blocked_create_session),
+    ):
+        await dispatcher.dispatch(ctx, activity)
+        try:
+            await asyncio.wait_for(binding.wait(), timeout=10)
+        finally:
+            await dispatcher.drain(timeout=0)
+
+    assert not marked_ids
+    assert not ctx.stream.closed
+    async with db_session_factory() as session:
+        assert await list_orphaned_turns(session, platform="teams") == []
+
+    docs = (Path(__file__).resolve().parents[4] / "docs/teams.md").read_text()
+    restart = " ".join(docs.split("### Restart behavior\n", 1)[1].split("### Files", 1)[0].split())
+    assert (
+        "progress is posted before `bind_session`; the active-turn marker is written only after binding returns"
+        in restart
+    )
+    assert "Cancellation or process death in between leaves an unswept progress message" in restart
