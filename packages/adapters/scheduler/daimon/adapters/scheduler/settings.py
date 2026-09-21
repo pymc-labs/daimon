@@ -73,14 +73,15 @@ class SchedulerSettings(BaseSettings):
         description=(
             "Postgres pg_try_advisory_lock int64 key. Default is the ASCII "
             "encoding of 'DAIMONSC'. Two scheduler processes share the key; "
-            "the second exits cleanly."
+            "the second logs that it did not get the lock and exits non-zero."
         ),
     )
 
     health_port: int = Field(
         default=8082,
         description=(
-            "Port for the stdlib liveness responder (Fly health check). "
+            "Port for the stdlib liveness responder (used by the platform "
+            "health check). "
             "Must not collide with mcp's 8080 or discord's 8081 on the "
             "shared host."
         ),

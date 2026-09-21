@@ -25,9 +25,18 @@ hand does nothing — change the source and re-run the generator.
 | add an adapter panel or change a user-facing flow | `docs/architecture.md` | by hand — keep the turn path, the package table and the entry-point list true |
 | change compose, deployment or the env a service needs | `docs/self-hosting.md` | by hand |
 | add a default skill, agent or environment | `defaults/README.md` | by hand |
+| change scheduler dispatch, routine permissions or the failure path | `docs/routines.md` | by hand |
+| change metering, pricing or one of the balance and cap gates | `docs/billing.md` | by hand |
+| change the `defaults/` tree, `daimon defaults apply`/`verify` or the seeded-skill fingerprint | `docs/defaults.md` | by hand |
+| change Slack file delivery or per-user access | `docs/slack.md` | by hand |
+| change the plugin's login mounts, commands or install prerequisites | `docs/plugin.md`, `plugin/README.md` | by hand |
+| change `packages/mux` or what imports it | `docs/mux.md` | by hand |
 | change anything a user can notice | `CHANGELOG.md` under `[Unreleased]` | by hand |
 
-Adding a page to `docs/` also means a line in `docs/README.md`.
+Adding a page to `docs/` means two more edits: a line in `docs/README.md`
+and a nav entry in `mkdocs.yml`. A page missing from the nav is only an INFO
+line in the mkdocs log, so the strict build stays green and the page ships
+unreachable from the site.
 
 A PR that touches one of those areas without the matching documentation update
 is incomplete. Re-run the generator rather than editing a generated page: CI

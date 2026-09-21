@@ -426,9 +426,9 @@ async def run(
         await engine.dispose()
         return 1
 
-    # Liveness responder on THIS loop (OB-3): a hung loop stops answering → Fly
-    # restarts the machine. Started after the lock so only the active scheduler
-    # serves the check; closed in the finally below.
+    # Liveness responder on THIS loop (OB-3): a hung loop stops answering → the
+    # platform's health check restarts the process. Started after the lock so
+    # only the active scheduler serves the check; closed in the finally below.
     health_server = await start_liveness_responder(scheduler_settings.health_port)
 
     deployment_default = parse_deployment_default(settings.defaults_root)

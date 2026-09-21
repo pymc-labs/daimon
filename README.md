@@ -18,6 +18,7 @@ back into the thread.
 **[Add it to your server in one click →](https://daimon.decision.ai/)**
 or self-host it from this repo.
 
+[Documentation site](https://pymc-labs.github.io/daimon/) ·
 [Self-hosting guide](docs/self-hosting.md) ·
 [Slack setup](docs/slack.md) ·
 [Claude Code plugin](plugin/README.md) ·

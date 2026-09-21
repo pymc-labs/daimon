@@ -103,9 +103,10 @@ class McpSettings(BaseModel):
     bundle_max_bytes: int = Field(
         default=25 * 1024 * 1024,
         description=(
-            "Per-upload byte cap enforced by the bundle upload route. The mcp "
-            "service runs on Cloud Run over HTTP/1, whose maximum request size "
-            "is 32 MiB, so the default sits below it with headroom."
+            "Per-upload byte cap enforced by the bundle upload route. The "
+            "default keeps headroom under a 32 MiB proxy request limit; raise "
+            "it if the front end in front of the mcp service allows larger "
+            "bodies."
         ),
     )
     bundle_uploads_per_hour: int = Field(
