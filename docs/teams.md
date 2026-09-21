@@ -64,6 +64,13 @@ sender's verified `aad_object_id` (their Entra / Azure AD object id). A
 first-contact user in a provisioned tenant is authorized like users on the
 other adapters.
 
+### Capacity
+
+Each tenant may run three turns concurrently by default. Set
+`DAIMON_TEAMS__MAX_CONCURRENT_TURNS_PER_TENANT` to change that limit. An excess
+activity gets a retry-later reply in its personal chat without spawning a
+turn; completing, failing, or cancelling a task releases its slot.
+
 ### Restart behavior
 
 The progress is posted before `bind_session`; the active-turn marker is
