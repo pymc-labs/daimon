@@ -26,6 +26,13 @@ nav:
 
 theme:
   name: material
+  # The readme's sticker, downscaled, for the header and the sidebar; the
+  # favicon is a square crop of its face. Colours live in
+  # docs/assets/extra.css.
+  logo: assets/daimon-sticker.png
+  favicon: assets/favicon.png
+  icon:
+    repo: fontawesome/brands/github
   features:
     - content.code.copy
     - navigation.sections
@@ -35,14 +42,21 @@ theme:
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-night
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
+
+extra_css:
+  - assets/extra.css
 
 markdown_extensions:
   - admonition

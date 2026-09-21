@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The documentation site carries daimon's own look: the readme sticker as
+  logo and favicon, and a palette taken from it.
+
 ## [0.2.0] - 2026-09-21
 
 Everything since the first release. Slack catches up with Discord across
