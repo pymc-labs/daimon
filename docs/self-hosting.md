@@ -82,9 +82,12 @@ services:
     image: ghcr.io/pymc-labs/daimon:0.2.0
 ```
 
-Then `docker compose pull && docker compose up -d`. Leave `--build` off: it
-rebuilds from the working tree and throws the pulled image away. Upgrading is
-editing the tag and running those two commands again.
+Then `docker compose pull && docker compose up -d`. Drop the `--build` flag
+from step 3 and from the Slack profile command: it rebuilds from the working
+tree under the same tag and throws the pulled image away. The image ships
+only code; `init` still seeds `defaults/` from your checkout, so check out the
+matching tag first (`git checkout v0.2.0`). Upgrading is checking out the
+next tag, editing the override and running those two commands again.
 
 ### Running the processes by hand
 
