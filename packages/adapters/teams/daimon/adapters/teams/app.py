@@ -16,11 +16,13 @@ from collections import OrderedDict
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 import structlog
 from daimon.adapters.teams.lifecycle import FAILURE_MESSAGE
 from daimon.adapters.teams.turn_lifecycle import TeamsTurnLifecycle
+from daimon.core.config import TeamsSettings
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
@@ -35,6 +37,7 @@ from daimon.core.turn.errors import (
     SessionBusyError,
     SessionPreparationFailed,
 )
+from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
@@ -104,10 +107,13 @@ class DirectCoreTurnDispatcher:
     the SDK handler returns as soon as the task is spawned.
     """
 
+    settings: TeamsSettings
     turn_deps: TurnDeps
     sessionmaker: async_sessionmaker[AsyncSession]
     _tasks: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]])
     _seen_activities: OrderedDict[str, None] = field(default_factory=OrderedDict[str, None])
+
+    _inflight: dict[uuid.UUID, int] = field(default_factory=dict[uuid.UUID, int])
 
     @property
     def in_flight(self) -> int:
@@ -124,22 +130,41 @@ class DirectCoreTurnDispatcher:
         self._seen_activities[activity.activity_id] = None
         while len(self._seen_activities) > _SEEN_ACTIVITY_CAP:
             self._seen_activities.popitem(last=False)
-        self._spawn(self._run_turn(ctx, activity))
+        # Reserve capacity in one synchronous read-check-increment span.
+        count = self._inflight.get(activity.tenant_id, 0)
+        if not should_admit_turn(
+            current_in_flight=count, cap=self.settings.max_concurrent_turns_per_tenant
+        ):
+            await ctx.send("Too many chats are in progress. Please try again in a moment.")
+            return
+        self._inflight[activity.tenant_id] = count + 1
+        self._spawn(self._run_turn(ctx, activity), tenant_id=activity.tenant_id)
 
-    def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+    def _spawn(
+        self, coro: Coroutine[Any, Any, None], *, tenant_id: uuid.UUID
+    ) -> asyncio.Task[None]:
         """Strong-reference a background task (``SlackApp._spawn`` model)."""
         task = asyncio.create_task(coro, name="teams.turn")
         self._tasks.add(task)
-        task.add_done_callback(self._turn_done)
+        task.add_done_callback(partial(self._turn_done, tenant_id=tenant_id))
         return task
 
-    def _turn_done(self, task: asyncio.Task[None]) -> None:
+    def _turn_done(self, task: asyncio.Task[None], *, tenant_id: uuid.UUID) -> None:
         self._tasks.discard(task)
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            log.error("teams.turn.crashed", exc_info=exc)
+        try:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                log.error("teams.turn.crashed", exc_info=exc)
+        finally:
+            # A done callback also releases tasks cancelled before their
+            # coroutine starts, when a coroutine-level finally cannot run.
+            remaining = self._inflight[tenant_id] - 1
+            if remaining:
+                self._inflight[tenant_id] = remaining
+            else:
+                del self._inflight[tenant_id]
 
     async def drain(self, timeout: float = 30.0) -> None:
         """Let in-flight turns finish, then cancel stragglers (lifespan shutdown)."""

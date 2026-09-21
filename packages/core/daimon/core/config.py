@@ -451,6 +451,14 @@ class TeamsSettings(BaseModel):
             "tenant both equal this value."
         ),
     )
+    max_concurrent_turns_per_tenant: int = Field(
+        default=3,
+        description=(
+            "Maximum number of agent turns a single Teams tenant may have "
+            "in flight at once. Caps one noisy tenant from starving others "
+            "on the shared Anthropic key."
+        ),
+    )
     port: int = Field(
         default=3978,
         description=(
