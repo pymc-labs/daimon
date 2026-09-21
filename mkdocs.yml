@@ -26,10 +26,11 @@ nav:
 
 theme:
   name: material
-  # One asset for the header, the favicon and the sidebar: the readme's
-  # sticker. Colours live in docs/assets/extra.css.
+  # The readme's sticker, downscaled, for the header and the sidebar; the
+  # favicon is a square crop of its face. Colours live in
+  # docs/assets/extra.css.
   logo: assets/daimon-sticker.png
-  favicon: assets/daimon-sticker.png
+  favicon: assets/favicon.png
   icon:
     repo: fontawesome/brands/github
   features:

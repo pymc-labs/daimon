@@ -1,17 +1,15 @@
 /* Brand colours sampled from assets/daimon-sticker.png: sky-blue body, cream
    robe, salmon cheeks, near-black outline. mkdocs.yml sets the Material
-   palette to "custom", so the theme takes every colour from here. */
+   palette to "custom", so the theme takes every colour from here. Text
+   colours are checked at 4.5:1 or better on the surfaces they sit on. */
 
 :root {
   --md-primary-fg-color: #7fc0d8;
   --md-primary-fg-color--light: #a8d7e7;
   --md-primary-fg-color--dark: #4f98b3;
-  /* Text and icons on the header: the outline colour, so the light blue
-     header stays readable (about 7:1). */
+  /* Text and icons on the header: the outline colour. */
   --md-primary-bg-color: #1a2a33;
-  --md-primary-bg-color--light: rgba(26, 42, 51, 0.7);
-  --md-accent-fg-color: #d9705f;
-  --md-accent-fg-color--transparent: rgba(217, 112, 95, 0.1);
+  --md-primary-bg-color--light: rgba(26, 42, 51, 0.8);
   --md-accent-bg-color: #ffffff;
   --md-accent-bg-color--light: rgba(255, 255, 255, 0.7);
 }
@@ -19,15 +17,34 @@
 [data-md-color-scheme="default"] {
   --md-default-bg-color: #fdfbf5;
   --md-code-bg-color: #f3efe4;
-  /* The body blue is too light for text on cream; this is the same hue at
-     a 4.5:1 contrast. */
-  --md-typeset-a-color: #2b7c9c;
+  /* The body blue is too light for text on cream; this is the same hue
+     darkened until it also holds on the code background. */
+  --md-typeset-a-color: #256b87;
+  /* The cheek colour, darkened the same way: it is the hover colour of
+     every link and nav entry. */
+  --md-accent-fg-color: #bd4c39;
+  --md-accent-fg-color--transparent: rgba(189, 76, 57, 0.1);
 }
 
 [data-md-color-scheme="slate"] {
   /* Material derives the whole dark scheme from this hue. */
   --md-hue: 200;
   --md-typeset-a-color: #7fc0d8;
+  --md-accent-fg-color: #e8836f;
+  --md-accent-fg-color--transparent: rgba(232, 131, 111, 0.1);
+}
+
+/* Material dims the search field with a black overlay, which reads as
+   dark-on-dark once the header is light blue. Lighten it instead; the
+   open state keeps Material's own colours. */
+.md-search__form {
+  background-color: rgba(255, 255, 255, 0.4);
+}
+
+/* Material renders the logo at 1.2rem; the sticker needs a little more to
+   be recognisable. */
+.md-header__button.md-logo img {
+  height: 1.6rem;
 }
 
 /* The readme's sticker at the top of the navigation. Desktop only: below
