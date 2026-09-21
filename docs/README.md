@@ -1,13 +1,25 @@
 # Documentation
 
+- [architecture.md](architecture.md) — what the packages are and why the
+  boundaries hold, how a message becomes a turn, tenancy and sessions.
 - [self-hosting.md](self-hosting.md) — run the stack: Compose, Discord and
   Slack setup, Claude Code login mounts, chart storage, connecting MCP servers.
 - [configuration.md](configuration.md) — every environment variable, with type,
   default and description. Generated from the settings models.
 - [mcp-tools.md](mcp-tools.md) — every MCP tool the agent can call, grouped by
   module, with who may call it. Generated from the tool registry.
+- [routines.md](routines.md) — scheduled routines: creating one, how the
+  scheduler fires it, the timeouts, permissions and what a failure leaves.
+- [billing.md](billing.md) — the credit model: metering, pricing, the balance
+  and cap gates, the signup credit, top-ups and the ledger tables.
+- [defaults.md](defaults.md) — authoring `defaults/`: agents, environments and
+  skills, `daimon defaults apply` and `verify`, the seeded-skill fingerprint.
 - [slack.md](slack.md) — the Slack adapter's trust model: file delivery and
   per-user access.
+- [plugin.md](plugin.md) — the Claude Code plugin: what the hub login mounts
+  are and what has to be configured before installing it.
+- [mux.md](mux.md) — what `packages/mux` is for, and that it is a scaffold
+  nothing imports yet.
 - [slack-app-manifest.yaml](slack-app-manifest.yaml) — paste-in manifest for
   creating the Slack app.
 
