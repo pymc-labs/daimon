@@ -60,7 +60,9 @@ user-facing missing-config reply instead of a clean deny.
 
 `tenant_id` is deterministic — `derive_tenant_uuid(platform="teams",
 workspace_id=<Entra tenant id>)` — and `tenants.external_id` carries the Entra
-tenant id itself. The resolver rejects the activity unless that row exists
+tenant id itself. `provision_tenant` canonicalizes a Teams `workspace_id` to
+the lowercase UUID form first, so the GUID can be pasted from the portal in
+either case; a value that is not a UUID raises `ValueError`. The resolver rejects the activity unless that row exists
 with `provision_status="ready"` and is unarchived.
 
 User principals need no manual step: `admit()` get-or-creates the

@@ -89,7 +89,14 @@ async def provision_tenant(
 
     NOTE: kwarg name `workspace_id` is intentional — migration 0014 calls
     derive_tenant_uuid(workspace_id=...) and this signature must match (Critical Warning 4).
+
+    A Teams `workspace_id` is an Entra tenant GUID, which the Azure portal may
+    show in either case. It is canonicalized to the lowercase UUID form the
+    Teams resolver derives from (`TeamsSettings.tenant_id`); a non-UUID raises
+    ValueError rather than creating a row no activity can ever match.
     """
+    if platform == "teams":
+        workspace_id = str(uuid.UUID(workspace_id))
     tenant_id = derive_tenant_uuid(platform=platform, workspace_id=workspace_id)
     account_id = _derive_account_uuid(tenant_id)
 

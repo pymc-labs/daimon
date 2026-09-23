@@ -158,6 +158,32 @@ async def test_oversized_text_gets_length_notice(
 
 
 @pytest.mark.asyncio
+async def test_tenant_provisioned_from_uppercase_portal_guid_is_admitted(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The documented provisioning call takes the tenant id as pasted from the
+    Azure portal, while TeamsSettings canonicalizes it to lowercase — both
+    must land on the same tenant row, or every message is silently denied."""
+    pasted = "7F3E2A10-BC4D-4E5F-9A6B-C0D1E2F3A4B5"
+    canonical = pasted.lower()  # what TeamsSettings stores and Teams activities carry
+    result = await provision_tenant(db_session_factory, platform="teams", workspace_id=pasted)
+    ctx, sent = _ctx(make_message_activity(tenant_id=canonical, channel_tenant_id=canonical))
+    authorized = await _resolver(db_session_factory, tenant_id=canonical)(ctx)
+    assert sent == [], "every message from the provisioned tenant is denied"
+    assert authorized is not None
+    assert authorized.tenant_id == result.tenant_id
+    assert result.external_id == canonical
+
+
+@pytest.mark.asyncio
+async def test_provisioning_a_non_uuid_teams_tenant_is_rejected(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with pytest.raises(ValueError):
+        await provision_tenant(db_session_factory, platform="teams", workspace_id="contoso")
+
+
+@pytest.mark.asyncio
 async def test_unprovisioned_tenant_denies(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
