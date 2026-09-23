@@ -219,8 +219,11 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         display_name: str | None = None,
         avatar_url: str | None = None,
     ) -> DisplayIdentityRow:
-        """Change how daimon appears in this Discord server: its display name,
-        its avatar, or both.
+        """Change the shared Discord bot's display name, avatar, or both.
+
+        All agents in the server use this bot handle. Changing it does not select,
+        rename, or replace a named agent. Use hand_off_task to have another agent
+        answer in this thread, or set_agent_default for channel routing.
 
         Use when the user asks you to rename yourself or change your profile
         picture. ``display_name`` is the new nickname (1-32 characters).

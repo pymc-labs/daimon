@@ -115,9 +115,8 @@ def render_turn_origin(
     `responder_handle` is the platform handle people mention this deployment
     by (`@daimon-staging`). It is the bot account's display name, which an
     operator may set to anything, while `responder.name` is the MA agent's
-    name — they are routinely different, and a model that sees only the name
-    reads the difference as two agents. Rendering both under one `responder`
-    says they are one identity.
+    name. The same bot handle delivers replies from many distinct agents;
+    it is not an alias for a roster identity.
 
     `session_state` and `handoff` are optional server-supplied facts about the
     workspace this turn runs in. They are rendered inside the same JSON object
@@ -177,10 +176,12 @@ def render_turn_origin(
     # sentence points at a key that is not there.
     if responder_handle is not None:
         rendered += (
-            "\nresponder.handle is how people mention the agent answering here. That handle, "
-            "responder.name, and any casing of either are the same agent — never ask whether "
-            "they are the same, and never treat that difference as target ambiguity. Ask about "
-            "the target only when a different agent is named."
+            "\nresponder.handle is the shared bot account's display name. "
+            "responder.name and responder.ma_agent_id identify the agent answering. "
+            "Multiple agents use the same bot handle. A mention alone addresses the "
+            "current responder. When a person names an agent, resolve it with list_agents "
+            "and get_agent, even when that name matches the bot handle. Never dismiss an "
+            "explicit agent choice as another name for yourself."
         )
     rendered += (
         "\nUse the explicitly requested target when named; otherwise configure the "
@@ -191,7 +192,13 @@ def render_turn_origin(
         "target is missing or ambiguous. Pass expected_ma_agent_id with target-bearing "
         "tools. Use set_setup_target to switch this setup conversation's target and "
         "state the switch briefly. Pass origin_context_id to credential-request tools. "
-        "These controls grant no additional mutation or routing permissions."
+        "For saved-key questions, use list_agent_keys for the resolved target; session "
+        "files and environment variables describe only this session's resources. "
+        "To replace the agent in a channel, inspect explain_agent_resolution and use "
+        "set_agent_default with parent_channel_id. Existing thread bindings are separate; "
+        "hand_off_task changes this task's responder, and set_setup_target only changes "
+        "what is being configured. These controls grant no additional mutation or routing "
+        "permissions."
     )
     # The continuity paragraph is appended only when there is continuity to
     # describe: on an ordinary turn neither block is present and every sentence

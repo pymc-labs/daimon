@@ -58,5 +58,11 @@ async def _list_credentials_impl(
 def register_vault_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def list_credentials(ctx: Context) -> list[VaultCredentialSummary]:  # pyright: ignore[reportUnusedFunction]
-        """List credentials in the caller's MCP vault (safe projection — no secrets)."""
+        """List MCP connection credential metadata for the calling agent and account.
+
+        Returns no secret values. This only inspects the caller's MCP vault, not
+        another named agent or stored environment/API keys. For "what keys does
+        <agent> have?", use ``list_agent_keys(agent_name=...)``. An empty MCP vault
+        does not mean the agent has no API keys.
+        """
         return await _list_credentials_impl(runtime.client, await _auth(ctx))

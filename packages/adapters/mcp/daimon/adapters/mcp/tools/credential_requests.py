@@ -721,6 +721,10 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         """Give an agent an API key or token for any service: Toggl, OpenAI,
         Higgsfield, or a platform that just launched. Unknown services work too.
 
+        For an inventory question, use ``list_agent_keys`` with the requested agent's
+        name. This tool posts an input form; it does not inspect existing keys.
+        Target the agent the user named, which may differ from the answering agent.
+
         Never accept secret values in chat; ask for rotation if pasted. One named key
         → pass `key`. To load, upload or import a whole `.env` file of several keys at
         once, omit it. For MCP credentials use ``request_mcp_token``; GitHub access

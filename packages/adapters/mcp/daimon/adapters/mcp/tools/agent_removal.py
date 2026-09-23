@@ -383,14 +383,20 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def list_agent_keys(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
-        agent_name: str,
-        expected_ma_agent_id: str | None = None,
+        agent_name: Annotated[
+            str, Field(description="Exact name of the agent whose stored keys were requested.")
+        ],
+        expected_ma_agent_id: Annotated[
+            str | None,
+            Field(description="ID returned by get_agent for that same named agent, when known."),
+        ] = None,
     ) -> list[str]:
         """What keys does an agent have? List its stored API key names, never values.
 
-        Use ``get_agent`` for skills and MCP access, ``request_agent_key`` to add
-        keys or ``remove_agent_key`` to remove them. Stored names on this target
-        are not proof that the answering agent can use those keys."""
+        Pass the named agent, even when another agent is answering. The current
+        session's .env cannot establish that agent's keys. Use ``get_agent`` to
+        resolve its identity or inspect MCP access. Stored keys do not prove
+        availability in this session. Use ``request_agent_key`` to add keys."""
         return await _list_agent_keys_impl(
             runtime,
             await _auth(ctx),

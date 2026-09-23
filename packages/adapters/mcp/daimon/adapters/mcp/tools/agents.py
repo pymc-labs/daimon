@@ -790,18 +790,30 @@ async def _archive_agent_impl(
 def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def list_agents(ctx: Context, page: str | None = None) -> list[AgentInfo]:  # pyright: ignore[reportUnusedFunction]
-        """List agents in the tenant pool, including each agent's attached
-        ``mcp_servers`` and ``skills``. ``page`` is reserved for future pagination."""
+        """Find named agents in this server/workspace and their current IDs.
+
+        Resolve a requested agent here before inspecting its keys or changing who
+        answers. Several distinct agents can share the same Discord/Slack bot
+        handle; the handle does not identify the responding agent. A named agent
+        such as daimon can differ from the current responder.
+
+        Returns each agent's name, id, model, attached ``mcp_servers`` and ``skills``.
+        Use the returned name and id for tools that require ``expected_ma_agent_id``.
+        ``page`` is reserved for future pagination."""
         return await _list_agents_impl(runtime, await _auth(ctx), page)
 
     @mcp.tool
     async def get_agent(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, name: str, expected_ma_agent_id: str | None = None
     ) -> AgentInfo:
-        """Show what an agent can access: attached MCP servers and skills.
+        """Show a named agent's configured MCP servers and skills.
 
-        Use ``list_agent_keys`` for stored key names. Configuration does not prove
-        the answering session's access. Returns server names/URLs and skills; custom
+        Resolve the requested name with ``list_agents`` and pass its current id as
+        ``expected_ma_agent_id``. The requested agent can differ from the responder;
+        the bot's display name does not make them the same agent.
+
+        Use ``list_agent_keys`` for that agent's stored key names. Configuration does
+        not prove the answering session's access. Returns server names/URLs and skills; custom
         skills have a display name (null if deleted), Anthropic skills have a readable id."""
         return await _get_agent_impl(
             runtime,

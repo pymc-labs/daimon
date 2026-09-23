@@ -537,14 +537,22 @@ def register_self_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         key: str,
     ) -> AgentFileRow | None:
-        """Read a per-agent file by `key`. Returns null if no file exists at that key."""
+        """Read a stored file belonging to the calling agent by `key`.
+
+        Always uses the authenticated calling agent, even when a different agent
+        is selected for setup or named by the user. To list a named agent's API
+        keys, use list_agent_keys with that agent's name and current id instead.
+        Returns null if no file exists at that key."""
         return await _self_read_file_impl(runtime, await _auth(ctx), key=key)
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def self_list_files(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
     ) -> list[AgentFileRow]:
-        """List all keys + metadata for files in your private agent_files namespace."""
+        """List file keys and metadata in the calling agent's private namespace.
+
+        These keys identify stored files, not API credentials. For a named agent's
+        stored API key names, use list_agent_keys with its name and current id."""
         return await _self_list_files_impl(runtime, await _auth(ctx))
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
