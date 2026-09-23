@@ -215,7 +215,7 @@ class DirectCoreTurnDispatcher:
             return
 
         cancel = asyncio.Event()
-        lifecycle = TeamsTurnLifecycle(stream=ctx.stream)
+        lifecycle = TeamsTurnLifecycle(stream=ctx.stream, fallback_send=ctx.send)
         # Post the progress message BEFORE bind_session — MA sessions.create
         # can hold for minutes and the user must see something first.
         await lifecycle.post_initial()
@@ -273,7 +273,9 @@ class DirectCoreTurnDispatcher:
                 # keeps the recovered turn's progress and terminal card on the
                 # SAME Teams message id (Slack's adopt_status_ts parity), and
                 # the marker written above stays valid for the orphan sweep.
-                adopted = TeamsTurnLifecycle(stream=ctx.stream, message_id=lifecycle.message_id)
+                adopted = TeamsTurnLifecycle(
+                    stream=ctx.stream, message_id=lifecycle.message_id, fallback_send=ctx.send
+                )
                 lifecycle_holder[0] = adopted
                 return adopted
 

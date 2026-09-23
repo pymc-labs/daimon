@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 import structlog
@@ -81,8 +82,15 @@ class TeamsTurnLifecycle:
     the driver is the only caller, and each hook is awaited in turn order.
     """
 
-    def __init__(self, *, stream: StreamerProtocol, message_id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        stream: StreamerProtocol,
+        message_id: str | None = None,
+        fallback_send: Callable[[MessageActivityInput], Awaitable[SentActivity]] | None = None,
+    ) -> None:
         self._stream = stream
+        self._fallback_send = fallback_send
         self._message_id = message_id
         self._first_chunk = asyncio.Event()
         if message_id is not None:
@@ -128,22 +136,23 @@ class TeamsTurnLifecycle:
 
     async def on_terminal_success(self, state: TurnState) -> None:
         answer = extract_final_response(state.content).strip() or NO_ANSWER_MESSAGE
-        await self._close_with_card(terminal_card(answer))
+        await self._close_with_card(answer)
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         reason = state.error.message if state.error is not None else str(err)
         if not reason:
             reason = str(err) or "unknown error"
-        await self._close_with_card(terminal_card(f"{FAILURE_MESSAGE}\n\n{reason}"))
+        await self._close_with_card(f"{FAILURE_MESSAGE}\n\n{reason}")
 
     async def close_with_text(self, text: str) -> None:
         """Terminal render for adapter-side bailouts (bind failures)."""
-        await self._close_with_card(terminal_card(text))
+        await self._close_with_card(text)
 
-    async def _close_with_card(self, activity: MessageActivityInput) -> None:
+    async def _close_with_card(self, text: str) -> None:
         if self._closed or self._stream.canceled:
             return
         self._closed = True
+        sent: SentActivity | None = None
         try:
             # A stream that never got a first chunk has no id for close() to
             # wait on — it would stall for the SDK's internal timeout and
@@ -152,15 +161,32 @@ class TeamsTurnLifecycle:
             if not self._first_chunk.is_set():
                 self._stream.update(WORKING_MESSAGE)
             self._stream.clear_text()
-            self._stream.emit(activity)
+            self._stream.emit(terminal_card(text))
             sent = await self._stream.close()
         except Exception:
             # Delivery failures are absorbed at the lifecycle boundary, same
             # contract as Slack's terminal hooks: the turn's outcome is not
             # masked by a render error.
             log.warning("teams.turn.terminal_render_failed", exc_info=True)
-            return
-        self._final_message_id = sent_message_id(sent) or self._message_id
+        # close() also reports failure by returning None (stream wait timed
+        # out, nothing to send) or a receipt with no usable id. Only a real
+        # receipt means the card landed; otherwise post the same content as
+        # a new message (Slack's `_repair_terminal_flush`). A Stop is the
+        # user's choice, not a failure, so it gets no fallback.
+        final_id = sent_message_id(sent)
+        if final_id is None and not self._stream.canceled:
+            final_id = await self._send_fallback(text)
+        self._final_message_id = final_id
+
+    async def _send_fallback(self, text: str) -> str | None:
+        if self._fallback_send is None:
+            return None
+        try:
+            sent = await self._fallback_send(terminal_card(text))
+        except Exception:
+            log.warning("teams.turn.terminal_fallback_failed", exc_info=True)
+            return None
+        return sent_message_id(sent)
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         return None

@@ -54,6 +54,8 @@ BOT_CLIENT_ID = "bot-client-id"
 SERVICE_URL = "https://smba.trafficmanager.net/test"
 CONVERSATION_ID = "a:conversation-1"
 AAD_OBJECT_ID = str(uuid.UUID(int=2))
+# The id FakeTurnContext.send hands back for a message sent outside the stream.
+FALLBACK_MESSAGE_ID = "m-fallback"
 
 
 def make_message_activity(
@@ -288,14 +290,16 @@ class FakeTurnContext:
 
     stream: FakeStream
     service_url: str = SERVICE_URL
-    sent: list[str] = dataclasses.field(default_factory=list)
+    sent: list[Any] = dataclasses.field(default_factory=list)
 
     @property
     def conversation_ref(self) -> Any:
         return SimpleNamespace(service_url=self.service_url)
 
-    async def send(self, text: str) -> None:
-        self.sent.append(text)
+    async def send(self, message: Any) -> SentActivity:
+        """Record a new-message send: bailout text, or a terminal fallback card."""
+        self.sent.append(message)
+        return SentActivity(id=FALLBACK_MESSAGE_ID, activity_params=MessageActivityInput())
 
 
 def make_dispatch_target(
