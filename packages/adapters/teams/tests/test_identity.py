@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from daimon.adapters.teams import identity
 from daimon.adapters.teams.identity import (
     DENIED_MESSAGE,
     INPUT_TOO_LONG_MESSAGE,
@@ -94,7 +95,6 @@ async def test_contradictory_group_flag_fails_closed(
         {"aad_object_id": None},
         {"aad_object_id": "not-a-uuid"},
         {"channel_id": "webchat"},
-        {"text": "   "},
     ],
     ids=[
         "wrong_conversation_tenant",
@@ -102,7 +102,6 @@ async def test_contradictory_group_flag_fails_closed(
         "missing_aad_object_id",
         "malformed_aad_object_id",
         "wrong_channel",
-        "empty_text",
     ],
 )
 async def test_unverifiable_fields_deny(
@@ -111,6 +110,39 @@ async def test_unverifiable_fields_deny(
     payload_kwargs: dict[str, object],
 ) -> None:
     ctx, sent = _ctx(make_message_activity(**payload_kwargs))
+    assert await _resolver(db_session_factory)(ctx) is None
+    assert sent == [DENIED_MESSAGE]
+
+
+def _without_text(text: str | None) -> dict[str, object]:
+    payload = make_message_activity()
+    if text is None:
+        payload.pop("text")  # attachment-only / card-submit activities carry no text
+    else:
+        payload["text"] = text
+    return payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", [None, "", "   "], ids=["absent", "empty", "blank"])
+async def test_verified_message_without_text_gets_text_only_notice(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    provisioned: uuid.UUID,
+    text: str | None,
+) -> None:
+    """A verified user who sends only an image, a file or a card submit is
+    told the agent reads text — not that their account has no access."""
+    ctx, sent = _ctx(_without_text(text))
+    assert await _resolver(db_session_factory)(ctx) is None
+    assert sent != [DENIED_MESSAGE], "a verified user was told their account has no access"
+    assert sent == [identity.TEXT_ONLY_MESSAGE]
+
+
+@pytest.mark.asyncio
+async def test_message_without_text_from_unprovisioned_tenant_still_denies(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    ctx, sent = _ctx(_without_text(None))
     assert await _resolver(db_session_factory)(ctx) is None
     assert sent == [DENIED_MESSAGE]
 

@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 PERSONAL_CHAT_ONLY_MESSAGE = "This agent is only available in a personal (1:1) chat."
 DENIED_MESSAGE = "This agent is not available for this account."
+TEXT_ONLY_MESSAGE = "This agent only reads text messages. Please type your request."
 INPUT_TOO_LONG_MESSAGE = "That message is too long for this agent. Please shorten it."
 MAX_INBOUND_MESSAGE_BYTES = 16 * 1024
 
@@ -58,8 +59,11 @@ class VerifiedTeamsTurnResolver:
     False — Teams omits it on 1:1, and a contradictory flag fails closed);
     the conversation tenant AND channel-data tenant both equal the configured
     Entra tenant; the sender's ``aad_object_id`` is a well-formed UUID; ids
-    and text are present; and the derived daimon tenant row exists, is
+    are present; and the derived daimon tenant row exists, is
     ``platform="teams"``, is unarchived, and has ``provision_status="ready"``.
+    Only then is the text checked: a verified user whose message carries no
+    text (an image, a file, a card submit) gets a text-only notice, not the
+    access-denied one.
     """
 
     sessionmaker: async_sessionmaker[AsyncSession]
@@ -97,8 +101,6 @@ class VerifiedTeamsTurnResolver:
             and bool(conversation_id.strip())
             and isinstance(activity_id, str)
             and bool(activity_id.strip())
-            and isinstance(text, str)
-            and bool(text.strip())
         )
         if not verified:
             await ctx.send(self.denied_message)
@@ -108,12 +110,6 @@ class VerifiedTeamsTurnResolver:
         assert aad_object_id is not None
         assert isinstance(conversation_id, str)
         assert isinstance(activity_id, str)
-        assert isinstance(text, str)
-
-        normalized_text = text.strip()
-        if len(normalized_text.encode("utf-8")) > MAX_INBOUND_MESSAGE_BYTES:
-            await ctx.send(INPUT_TOO_LONG_MESSAGE)
-            return None
 
         tenant_id = derive_tenant_uuid(platform="teams", workspace_id=configured_tenant)
         async with self.sessionmaker() as session:
@@ -127,6 +123,14 @@ class VerifiedTeamsTurnResolver:
             or tenant.archived_at is not None
         ):
             await ctx.send(self.denied_message)
+            return None
+
+        normalized_text = text.strip() if isinstance(text, str) else ""
+        if not normalized_text:
+            await ctx.send(TEXT_ONLY_MESSAGE)
+            return None
+        if len(normalized_text.encode("utf-8")) > MAX_INBOUND_MESSAGE_BYTES:
+            await ctx.send(INPUT_TOO_LONG_MESSAGE)
             return None
 
         return AuthorizedTeamsActivity(

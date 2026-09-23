@@ -8,6 +8,8 @@ what operators should understand about the resulting trust model.
 The adapter answers only personal (1:1) `MessageActivity`s — the conversation
 must have `conversation_type == "personal"` and no `is_group` flag. Channel,
 team, and group-chat messages get a short refusal and never reach a turn.
+A verified personal-chat message with no text (an image, a file or a card
+submit) gets a text-only notice rather than the access-denied reply.
 Message extensions, commands, panels, and proactive outbound delivery are not
 part of this adapter.
 
