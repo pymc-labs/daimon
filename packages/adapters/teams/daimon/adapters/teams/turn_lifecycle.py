@@ -87,9 +87,11 @@ class TeamsTurnLifecycle:
         *,
         stream: StreamerProtocol,
         message_id: str | None = None,
+        cancel: asyncio.Event | None = None,
         fallback_send: Callable[[MessageActivityInput], Awaitable[SentActivity]] | None = None,
     ) -> None:
         self._stream = stream
+        self._cancel = cancel
         self._fallback_send = fallback_send
         self._message_id = message_id
         self._first_chunk = asyncio.Event()
@@ -129,8 +131,22 @@ class TeamsTurnLifecycle:
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._first_chunk.wait(), timeout=FIRST_CHUNK_TIMEOUT_S)
 
+    def _observe_stop(self) -> bool:
+        """True once the user pressed Stop; forwards it to the turn's cancel.
+
+        The SDK only learns of a Stop when a send comes back 403, and then
+        marks the stream canceled. Without this the turn keeps running (and
+        billing) to completion after the user asked it to stop.
+        """
+        if not self._stream.canceled:
+            return False
+        if self._cancel is not None and not self._cancel.is_set():
+            log.info("teams.turn.stopped_by_user", message_id=self._message_id)
+            self._cancel.set()
+        return True
+
     async def on_render(self, state: TurnState) -> None:
-        if self._closed or self._stream.canceled:
+        if self._observe_stop() or self._closed:
             return
         self._stream.update(bounded_text(_progress_text(state)))
 
