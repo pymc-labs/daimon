@@ -18,7 +18,10 @@ The adapter runs its own FastAPI listener on `DAIMON_TEAMS__PORT` (default
 `3978`). The Microsoft `App`/`FastAPIAdapter` owns `POST /api/messages` and
 validates the inbound Bot Framework JWT against the configured client id —
 unauthenticated or wrong-audience activities are rejected by the SDK before
-daimon code runs. The same listener serves `/healthz` and `/readyz`;
+daimon code runs. The adapter runs that validation in a worker thread and
+refreshes the signing keys for an unknown key id at most once a minute, so
+forged tokens cannot stall in-flight turns with key fetches on the event
+loop. The same listener serves `/healthz` and `/readyz`;
 `DAIMON_TEAMS__ENABLED=false` makes `/api/messages` answer 503 while health
 stays live, and a 64 KiB body limit is enforced before SDK parsing. The
 `docker-compose.yml` `teams` service (opt-in `teams` profile) publishes the

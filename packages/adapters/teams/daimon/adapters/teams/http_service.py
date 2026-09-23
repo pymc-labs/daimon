@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
+from daimon.adapters.teams.auth import harden_token_validation
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import TeamsSettings
@@ -145,6 +146,9 @@ def create_teams_http_service(
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         teams_app = teams_app_holder["app"]
         await teams_app.initialize()
+        # Before readiness opens: the SDK's validator fetches JWKS on the
+        # event loop, and a forged kid forces a fetch per request.
+        harden_token_validation(teams_app)
         readiness.initialized = True
         # Orphan-turn retirement, spawned rather than awaited so a slow Teams
         # API cannot delay message acceptance — the Slack listener's posture.

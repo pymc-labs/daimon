@@ -18,6 +18,7 @@ dependencies = [
     # (microsoft-teams-api, -cards, -common) at 2.1.0 — the siblings carry no
     # ceiling of their own, so the lock is the contract, not the pin alone.
     "microsoft-teams-apps>=2.0.16,<2.1",
+    "pyjwt>=2.12.1",
     "sentry-sdk>=2.61",
     "sqlalchemy[asyncio]>=2",
     "structlog>=24",
