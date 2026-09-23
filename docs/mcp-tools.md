@@ -67,8 +67,8 @@ Agent tools: list / get / create / update / fork / archive.
 | `attach_mcp_server` | all callers | Add an MCP server that needs no token, such as Context7, to an agent. |
 | `create_agent` | all callers | Create an agent called, for example, churn-explorer. |
 | `fork_agent` | all callers | Make a copy of Daimon or another agent that you can edit under a new name. |
-| `get_agent` | all callers | Show what an agent can access: attached MCP servers and skills. |
-| `list_agents` | all callers | List agents in the tenant pool, including each agent's attached ``mcp_servers`` and ``skills``. |
+| `get_agent` | all callers | Show a named agent's configured MCP servers and skills. |
+| `list_agents` | all callers | Find named agents in this server/workspace and their current IDs. |
 | `update_agent` | all callers | Change an agent's system prompt or switch its model; add existing skills such as build-models. |
 
 ## `channels`
@@ -87,7 +87,7 @@ Shared channel MCP tools with per-platform dispatch.
 | `rename_thread` | Discord callers | Rename a Discord thread; ``name`` is the new title (1-100 characters). |
 | `search_messages` | Discord callers, Slack callers | Search messages with server-side filters. |
 | `send_message` | Discord callers, Slack callers | Post a message to a channel. |
-| `set_display_identity` | Discord callers | Change how daimon appears in this Discord server: its display name, its avatar, or both. |
+| `set_display_identity` | Discord callers | Change the shared Discord bot's display name, avatar, or both. |
 
 ## `cli_token`
 
@@ -156,7 +156,7 @@ Propagation tools: set and clear agent defaults at workspace or channel scope.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `clear_agent_default` | admin only | Stop an agent answering in a channel by clearing its default routing. |
-| `explain_agent_resolution` | all callers | Who answers in this channel, for example #growth? Report who answers and which routing tier decided it. |
+| `explain_agent_resolution` | all callers | Who answers in #growth? Does this channel still use that agent? Report which agent answers in a channel or thread and why. |
 | `set_agent_default` | admin only | Make an agent answer in a channel or become the whole server/workspace default. |
 
 ## `publish`
@@ -198,8 +198,8 @@ MCP tools for an agent to edit its own ``agent_files`` and manage its
 | `clear_repo_binding` | agent tokens only | Remove the repo binding for your agent. |
 | `get_repo_binding` | agent tokens only | Return the current repo binding for your agent, or null if unbound. |
 | `self_delete_file` | agent tokens only | Delete a per-agent file by `key`. |
-| `self_list_files` | agent tokens only | List all keys + metadata for files in your private agent_files namespace. |
-| `self_read_file` | agent tokens only | Read a per-agent file by `key`. |
+| `self_list_files` | agent tokens only | List file keys and metadata in the calling agent's private namespace. |
+| `self_read_file` | agent tokens only | Read a stored file belonging to the calling agent by `key`. |
 | `self_write_file` | agent tokens only | Write or overwrite a per-agent file under `key`. |
 | `set_repo_binding` | agent tokens only | Bind your agent to a git repo. |
 
@@ -219,7 +219,7 @@ Authenticated turn origins and identity-pinned configuration targets.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_setup_target` | all callers | Switch this setup conversation to an explicitly selected MA agent identity. |
+| `set_setup_target` | all callers | Select which agent to configure in an existing setup conversation. |
 
 ## `skills`
 
@@ -238,7 +238,7 @@ Conversational task handoff and fresh start.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `hand_off_task` | all callers | Hand this task over to another agent in the same conversation: "have that one take over", "let churn-explorer finish this". |
+| `hand_off_task` | all callers | Switch which agent answers in this thread: "have daimon answer here instead", "have that one take over", "let churn-explorer finish this". |
 | `start_fresh_task` | all callers | Start this conversation's work over with an empty workspace: "let's start fresh", "start over", "clear the workspace and begin a new task". |
 
 ## `thread_participation`
@@ -265,7 +265,7 @@ Vault tool: list_credentials — safe projection of caller's MCP vault credentia
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `list_credentials` | agent tokens only | List credentials in the caller's MCP vault (safe projection — no secrets). |
+| `list_credentials` | agent tokens only | List MCP connection credential metadata for the calling agent and account. |
 
 ## `wizard`
 
