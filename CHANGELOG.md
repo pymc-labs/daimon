@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sweep that marks the turn as interrupted now also stops it on Managed
   Agents, so it no longer keeps running and billing after its card says it
   was interrupted.
+- A Discord mention answered in the first seconds after a restart, before
+  the bot has finished connecting to every server, is no longer mistaken for
+  a turn the restart cut off: its card is no longer marked as interrupted
+  while it is still running.
 - Reconnect replay keeps the current turn's answer and rendered content when
   the event history is incomplete or ends with a session termination; repeated
   SSE events no longer repeat adapter callbacks.

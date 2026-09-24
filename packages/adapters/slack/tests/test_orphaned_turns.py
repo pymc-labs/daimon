@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import pytest
 import yarl
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.boot_sweep import retire_orphaned_turns
@@ -380,4 +381,49 @@ async def test_sweep_leaves_a_marker_that_moved_while_the_sweep_was_running(
     )
     assert orphans[0].active_turn_channel_id == "C_MOVED", (
         "the conditional clear must null nothing at all here, not partially clear the row"
+    )
+
+
+async def test_a_hung_interrupt_does_not_hold_the_sweep(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every mention waits on the boot sweep, so an MA endpoint that never
+    answers must cost an orphan the interrupt's own timeout, not the adapter
+    client's retry budget (MA_MAX_RETRIES attempts of up to 600 s each)."""
+    import asyncio
+
+    from anthropic import AsyncAnthropic
+    from daimon.core import ma
+    from daimon.core.constants import MA_MAX_RETRIES
+
+    monkeypatch.setattr(ma, "ORPHAN_INTERRUPT_TIMEOUT_S", 0.05, raising=False)
+    fernet_key = Fernet.generate_key().decode()
+    await _seed_orphan(
+        db_session_factory, fernet_key, team_id="T_RUNNING", ma_session_id="sesn_hung"
+    )
+    calls: list[str] = []
+
+    async def _never_answers(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    anthropic = AsyncAnthropic(
+        api_key="test",
+        max_retries=MA_MAX_RETRIES,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(_never_answers), base_url="https://api.anthropic.com"
+        ),
+    )
+    runtime = build_slack_runtime(fernet_key, db_session_factory, anthropic=anthropic)
+
+    async with asyncio.timeout(5):
+        await retire_orphaned_turns(runtime, now=_NOW)
+
+    assert calls == ["/v1/sessions/sesn_hung/events"], "the interrupt must have been attempted"
+    assert await list_orphaned_turns(db_session, platform="slack") == [], (
+        "the sweep must finish, marker cleared, even though MA never answered"
     )

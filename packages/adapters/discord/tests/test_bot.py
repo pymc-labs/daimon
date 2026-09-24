@@ -2112,6 +2112,7 @@ class TestCredentialButtonRegistration:
 
         runtime = _make_runtime(db_session_factory)
         bot = make_bot(runtime)
+        bot.start_orphan_recovery = MagicMock()  # type: ignore[method-assign]  # the boot sweep is not under test
 
         await bot.setup_hook()
 

@@ -37,6 +37,7 @@ from daimon.core.ma import (
     delete_entire_workspace_for_testing,
     delete_sessions_for_account,
     find_workspace_disposable_sentinel,
+    interrupt_orphaned_session,
     replay_events,
     send_interrupt_and_wait,
     terminal_stop_reason,
@@ -719,3 +720,28 @@ async def test_find_workspace_disposable_sentinel_returns_none_when_no_agent_car
     assert await find_workspace_disposable_sentinel(client) is None, (
         "a tenant agent without the workspace marker must not count as a sentinel"
     )
+
+
+async def test_interrupt_orphaned_session_gives_up_after_its_timeout() -> None:
+    """The boot sweeps hold turn admission while this runs; an MA endpoint
+    that never answers must be cut off by the call's own bound, retries
+    included, and reported as not interrupted rather than raised."""
+
+    async def _never_answers(_request: httpx.Request) -> httpx.Response:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    anthropic = AsyncAnthropic(
+        api_key="test",
+        max_retries=8,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(_never_answers), base_url="https://api.anthropic.com"
+        ),
+    )
+
+    async with asyncio.timeout(5):
+        interrupted = await interrupt_orphaned_session(
+            anthropic, session_id="sesn_hung", timeout_s=0.05
+        )
+
+    assert interrupted is False
