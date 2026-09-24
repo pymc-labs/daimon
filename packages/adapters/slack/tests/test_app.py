@@ -214,6 +214,22 @@ async def test_on_request_ack_first_when_events_api_request_sends_ack_before_spa
         await asyncio.gather(*pending, return_exceptions=True)
 
 
+async def test_on_request_malformed_event_payload_when_events_api_still_acks() -> None:
+    """Malformed event shape must not break the ack path before validation."""
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+    req = SocketModeRequest(
+        type="events_api",
+        envelope_id="env_malformed_event",
+        payload={"event": "not-an-object"},
+    )
+
+    await app.on_request(fake_client, req)  # type: ignore[arg-type]
+
+    assert len(fake_client.sent_responses) == 1, "malformed Events API payloads must still be acked"
+    assert not app._bg_tasks, "malformed Events API payloads must not spawn handlers"  # pyright: ignore[reportPrivateUsage]
+
+
 async def test_on_request_ignores_non_events_api_type_when_hello_arrives() -> None:
     """on_request returns immediately for non events_api types (e.g. hello)."""
     fake_client = _FakeSocketClient()
@@ -417,6 +433,65 @@ async def test_drain_and_close_waits_for_in_flight_tasks_before_closing() -> Non
 
     assert not app._processing, "drain must poll until _processing is empty"  # pyright: ignore[reportPrivateUsage]
     assert "close" in fake_client.call_log, "drain_and_close must call client.close() after drain"
+
+
+async def test_drain_and_close_waits_for_acked_mention_before_thread_registration() -> None:
+    """An acked mention still in admission must finish before the socket closes."""
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+    handler_started = asyncio.Event()
+    release_handler = asyncio.Event()
+
+    async def _paused_handle(event: dict[str, Any], *, team_id: str) -> None:
+        handler_started.set()
+        await release_handler.wait()
+
+    app._handle_app_mention = _paused_handle  # type: ignore[method-assign]
+
+    await app.on_request(
+        fake_client,
+        _make_events_api_request(event_type="app_mention"),
+    )  # type: ignore[arg-type]
+    await handler_started.wait()
+
+    drain = asyncio.create_task(app.drain_and_close(fake_client))  # type: ignore[arg-type]
+    await asyncio.sleep(0.01)
+    assert "close" not in fake_client.call_log, (
+        "drain must wait for an acked mention before it acquires _processing"
+    )
+
+    release_handler.set()
+    await drain
+    assert "close" in fake_client.call_log, "client must close after the mention handler exits"
+
+
+async def test_drain_and_close_waits_for_mention_ack_to_handler_handoff() -> None:
+    """Drain covers the interval after an ack is sent but before task creation."""
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+    ack_started = asyncio.Event()
+    release_ack = asyncio.Event()
+
+    async def _paused_ack(response: SocketModeResponse) -> None:
+        fake_client.call_log.append("send_socket_mode_response")
+        fake_client.sent_responses.append(response)
+        ack_started.set()
+        await release_ack.wait()
+
+    fake_client.send_socket_mode_response = _paused_ack  # type: ignore[method-assign]
+
+    request = asyncio.create_task(
+        app.on_request(fake_client, _make_events_api_request(event_type="app_mention"))  # type: ignore[arg-type]
+    )
+    await ack_started.wait()
+    drain = asyncio.create_task(app.drain_and_close(fake_client))  # type: ignore[arg-type]
+    await asyncio.sleep(0.01)
+    assert "close" not in fake_client.call_log, "drain must account for an in-flight mention ack"
+
+    release_ack.set()
+    await request
+    await drain
+    assert "close" in fake_client.call_log, "client must close after ack dispatch completes"
 
 
 # ---------------------------------------------------------------------------

@@ -122,9 +122,9 @@ slack_dedupe	SlackDedupe	SlackDedupe	clean	953059	-	dedupe + per-author drain + 
 slack_dedupe	SlackDedupe	SlackPre997b3d8	violates:TurnPrincipal	268977	-	pre-997b3d8: the drain loop merged every queued author into one turn
 slack_dedupe	SlackDedupe	SlackPre0cda77e	violates:NoSilentLoss	595	-	pre-0cda77e: a failed turn logged and returned with nothing posted
 slack_dedupe	SlackDedupe	SlackShortRetention	violates:AtMostOneTurn	850886	-	retention shorter than Slack's redelivery window admits a redelivered mention twice
-slack_dedupe	SlackDedupe	SlackExitSafety	clean	1826463	-	crashes and SIGTERM drains keep at-most-once: the committed dedupe row outlives the process
+slack_dedupe	SlackDedupe	SlackExitSafety	clean	728529	-	graceful drain waits for mention handlers and _processing; exit preserves at-most-once
 slack_dedupe	SlackDedupe	SlackCrashLoss	violates:NoSilentLoss	48	-	documented residual: a crash any time after the ack (before or after the dedupe commit) loses the mention
-slack_dedupe	SlackDedupe	SlackDrainWindow	violates:NoUndocumentedLoss	974	-	residual: a mention past the draining check but not yet in _processing is lost when the drain exits
+slack_dedupe	SlackDedupe	SlackDrainWindow	clean	3877947	-	graceful drain waits for acked mention handlers as well as _processing
 # ---- notebook upload capability ----
 notebook_upload	NotebookUpload	UploadSafe	clean	29	-	two concurrent attempts; atomic burn before body; restart persistence; no duplicate accepted upload
 notebook_upload	NotebookUpload	CrashLoss	violates:CrashEventuallyUploads	29	-	retained gap: process death after burn and before body makes a retry fail after restart

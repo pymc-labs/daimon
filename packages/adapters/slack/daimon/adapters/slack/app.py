@@ -273,6 +273,11 @@ class SlackApp:
         self._inflight: dict[uuid.UUID, int] = {}
         # Background task references (prevent GC before done-callbacks fire).
         self._bg_tasks: set[asyncio.Task[None]] = set()
+        # Mention handlers can be acked and running before they acquire a
+        # thread's _processing slot. Drain waits for these too, closing that
+        # pre-orchestration gap without changing crash recovery semantics.
+        self._mention_tasks: set[asyncio.Task[None]] = set()
+        self._mention_acks_pending: int = 0
         # Cancel registry: status_ts -> (cancel Event, author_id).
         self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
         # Output-delivery abort-notice dedup, keyed "{team_id}:{error_code}".
@@ -380,6 +385,11 @@ class SlackApp:
         # req.payload field annotation is `dict` (SDK normalises all input to dict in __init__).
         # Annotate explicitly as dict[str, Any] — the Unknown parameter is an SDK stub gap.
         payload: dict[str, Any] = req.payload  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        raw_event: object = payload.get("event")
+        event_for_ack: dict[str, Any] = (
+            cast(dict[str, Any], raw_event) if isinstance(raw_event, dict) else {}
+        )
+        is_app_mention = req.type == "events_api" and event_for_ack.get("type") == "app_mention"
 
         # view_submission acks WITH the computed response_action payload (Pattern 2).
         # evaluate_delete_submission is PURE (no I/O), safe to call before the ack.
@@ -675,17 +685,31 @@ class SlackApp:
             return  # view_submission fully handled
 
         # ACK FIRST for all non-view_submission envelope types.
-        await client.send_socket_mode_response(  # ACK FIRST — no I/O before this line
-            SocketModeResponse(envelope_id=req.envelope_id)
-        )
+        if is_app_mention:
+            # Cover the ack-to-task handoff too: a signal can arrive while this
+            # await is suspended after Slack has received the response.
+            self._mention_acks_pending += 1
+        try:
+            await client.send_socket_mode_response(  # ACK FIRST — no I/O before this line
+                SocketModeResponse(envelope_id=req.envelope_id)
+            )
+        except BaseException:
+            if is_app_mention:
+                self._mention_acks_pending -= 1
+            raise
+        if is_app_mention:
+            # No await occurs before the handler task is registered below.
+            self._mention_acks_pending -= 1
 
         if req.type == "events_api":
-            event: dict[str, Any] = payload.get("event") or {}
+            event = event_for_ack
             team_id_raw = payload.get("team_id") or event.get("team")
             team_id: str = str(team_id_raw) if team_id_raw is not None else ""
             etype: str | None = event.get("type")
             if etype == "app_mention":
-                self._spawn(self._handle_app_mention(event, team_id=team_id))
+                task = self._spawn(self._handle_app_mention(event, team_id=team_id))
+                self._mention_tasks.add(task)
+                task.add_done_callback(self._mention_tasks.discard)
             elif etype in {
                 "channel_archive",
                 "channel_unarchive",
@@ -2371,14 +2395,25 @@ class SlackApp:
     async def drain_and_close(self, client: AsyncBaseSocketModeClient) -> None:
         """Graceful shutdown drain.
 
-        Sets draining=True so new mentions are rejected, polls ``_processing``
-        until it empties or the grace window elapses, then closes the
-        WebSocket client. Stays within the deployment's 60s kill timeout.
+        Sets draining=True so new mentions are rejected, waits for acked
+        mention handlers and ``_processing`` to drain (or the grace window to
+        elapse), then closes the WebSocket client. Stays within the
+        deployment's 60s kill timeout.
         """
         self.draining = True
-        log.info("slack.draining", inflight_threads=len(self._processing))
+        log.info(
+            "slack.draining",
+            inflight_threads=len(self._processing),
+            inflight_mentions=len(self._mention_tasks) + self._mention_acks_pending,
+        )
         deadline = asyncio.get_running_loop().time() + _DRAIN_GRACE_S
-        while self._processing and asyncio.get_running_loop().time() < deadline:
+        while (
+            self._processing or self._mention_tasks or self._mention_acks_pending
+        ) and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.5)
-        log.info("slack.drain_complete", remaining=len(self._processing))
+        log.info(
+            "slack.drain_complete",
+            remaining_threads=len(self._processing),
+            remaining_mentions=len(self._mention_tasks) + self._mention_acks_pending,
+        )
         await client.close()

@@ -231,16 +231,19 @@ StartDrain ==
     /\ UNCHANGED <<clock, firstAt, handler, redelivered, dedup, running, groups, busy,
                    pending, turns, notified, alive>>
 
-(* ... and exits once _processing is empty (or the grace window ends), or  *)
+(* ... and exits after mention handlers and _processing drain (or the       *)
+(* grace window ends), or                                                    *)
 (* the process simply crashes. In-memory work dies; acked events are not   *)
 (* redelivered; the dedupe rows stay. A replacement process takes over.    *)
 Exit ==
     /\ AllowExit
     /\ alive
     /\ (AllowDrain => draining)
-    \* drain_and_close awaits (sleep/close) before exit, so an already
-    \* spawned handler runs its synchronous draining check first.
-    /\ (AllowDrain => \A d \in Deliveries : handler[d][2] # "spawned")
+    \* Successful drain waits for every tracked mention handler and active
+    \* thread turn to finish before exit; grace expiry is not modeled here.
+    /\ (AllowDrain => \A d \in Deliveries :
+                       handler[d][2] \notin {"spawned", "checked", "admitted"})
+    /\ (AllowDrain => ~busy)
     /\ handler' = [d \in Deliveries |->
                      IF handler[d][2] \in {"spawned", "checked", "admitted"}
                      THEN <<handler[d][1], "lost">> ELSE handler[d]]
