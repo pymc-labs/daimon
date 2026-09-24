@@ -127,7 +127,9 @@ Two boundaries of the design worth stating plainly:
   Until then the gate reads a balance that leaves out earlier headless turns,
   and MCP turns have no concurrency cap. The overdraft is therefore bounded
   by what a tenant can start between two sweeps, not by N concurrent turns.
-  `formal/metering/BalanceGate.tla` checks both bounds.
+  `formal/metering/BalanceGate.tla` checks the concurrent-turn bound for chat
+  turns, where it holds, and has a counterexample in which headless turns
+  exceed it. The between-sweeps bound is stated here, not model-checked.
 - **A caller with no platform user identity is not gated and not billed live** — an
   operator or CLI token runs with no balance check, no cap check, and no
   inline usage row or debit. That is deliberate, and the module asks in as

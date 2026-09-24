@@ -45,8 +45,9 @@ Metering(a) ==
       [] Kind(a) = "classifier" -> IF MeterClassifier THEN "live" ELSE "never"
       [] Kind(a) = "headless" -> "sweep"
 
-VARIABLES status, spent, debited, admittedSolvent, sweeps
-vars == <<status, spent, debited, admittedSolvent, sweeps>>
+\* admitBalance[a]: the ledger balance when a was let through (0 until then).
+VARIABLES status, spent, debited, admitBalance, sweeps
+vars == <<status, spent, debited, admitBalance, sweeps>>
 
 RECURSIVE SumOver(_, _)
 SumOver(f, S) == IF S = {} THEN 0 ELSE LET x == CHOOSE x \in S : TRUE IN f[x] + SumOver(f, S \ {x})
@@ -59,7 +60,7 @@ Init ==
     /\ status = [a \in Activities |-> "idle"]
     /\ spent = [a \in Activities |-> 0]
     /\ debited = [a \in Activities |-> 0]
-    /\ admittedSolvent = [a \in Activities |-> FALSE]
+    /\ admitBalance = [a \in Activities |-> 0]
     /\ sweeps = 0
 
 (* admission.admit / _ctx._admit / the routine fire: read, then decide. *)
@@ -68,9 +69,9 @@ Admit(a) ==
     /\ Inflight < MaxInflight
     /\ IF Gated(a) /\ Balance <= 0
        THEN /\ status' = [status EXCEPT ![a] = "denied"]
-            /\ UNCHANGED admittedSolvent
+            /\ UNCHANGED admitBalance
        ELSE /\ status' = [status EXCEPT ![a] = "running"]
-            /\ admittedSolvent' = [admittedSolvent EXCEPT ![a] = Gated(a) /\ Balance > 0]
+            /\ admitBalance' = [admitBalance EXCEPT ![a] = Balance]
     /\ UNCHANGED <<spent, debited, sweeps>>
 
 (* One span.model_request_end; the live recorder debits it inline. *)
@@ -79,20 +80,20 @@ Spend(a) ==
     /\ spent[a] < C
     /\ spent' = [spent EXCEPT ![a] = @ + 1]
     /\ debited' = IF Metering(a) = "live" THEN [debited EXCEPT ![a] = @ + 1] ELSE debited
-    /\ UNCHANGED <<status, admittedSolvent, sweeps>>
+    /\ UNCHANGED <<status, admitBalance, sweeps>>
 
 Finish(a) ==
     /\ status[a] = "running"
     /\ spent[a] = C
     /\ status' = [status EXCEPT ![a] = "done"]
-    /\ UNCHANGED <<spent, debited, admittedSolvent, sweeps>>
+    /\ UNCHANGED <<spent, debited, admitBalance, sweeps>>
 
 (* usage_sweep: catches up every MA session's recorded calls. *)
 Sweep ==
     /\ sweeps < MaxSweeps
     /\ debited' = [a \in Activities |-> IF Metering(a) = "sweep" THEN spent[a] ELSE debited[a]]
     /\ sweeps' = sweeps + 1
-    /\ UNCHANGED <<status, spent, admittedSolvent>>
+    /\ UNCHANGED <<status, spent, admitBalance>>
 
 Done ==
     /\ \A a \in Activities : status[a] \in {"done", "denied"}
@@ -109,9 +110,12 @@ TypeOK ==
     /\ spent \in [Activities -> 0..C]
     /\ debited \in [Activities -> 0..C]
 
-(* Every unit of spend belongs to an activity a gate admitted on a positive *)
-(* balance.                                                                 *)
-GatedSpend == \A a \in Activities : spent[a] > 0 => admittedSolvent[a]
+(* Every unit of spend belongs to an activity that started while the      *)
+(* ledger balance was positive. Stated over the balance recorded at        *)
+(* admission, not over Gated(a), so it does not restate the fix flags: an  *)
+(* ungated activity violates it only if it actually starts on a balance    *)
+(* that is already zero or below.                                          *)
+GatedSpend == \A a \in Activities : spent[a] > 0 => admitBalance[a] > 0
 
 (* A finished activity that is not left to the sweep is fully debited. *)
 SpendMetered ==

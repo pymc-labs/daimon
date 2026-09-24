@@ -59,7 +59,7 @@ Invariants:
 | `SlackPre0cda77e` | `NotifyOnFailure = FALSE` | violates `NoSilentLoss` | 595, trace 6 |
 | `SlackShortRetention` | `Retention = 1 < Window` | violates `AtMostOneTurn` | 850,886, trace 18 |
 | `SlackExitSafety` | `AllowExit`, `AllowDrain`, `MaxClock = 1`; checks `AtMostOneTurn`, `TurnPrincipal` | clean | 1,826,463 (depth 26) |
-| `SlackCrashLoss` | `AllowExit` (plain crash) | violates `NoSilentLoss` | 48, trace 4 |
+| `SlackCrashLoss` | `AllowExit` (plain crash, any time after the ack) | violates `NoSilentLoss` | 48, trace 4 |
 | `SlackDrainWindow` | `AllowExit`, `AllowDrain`; checks `NoUndocumentedLoss` | violates | 974, trace 6 |
 
 ## Calibration
@@ -86,9 +86,12 @@ No new live bug in the modelled boundary. What the model establishes:
   longer than the retention could insert after the prune. In the code the
   longest wait before the insert is the boot orphan-recovery gate (seconds to
   minutes).
-- **Documented residual (at-most-once): a crash after the dedupe commit loses
-  the mention** (`SlackCrashLoss`). Slack got its ack, so it does not redeliver.
-  If it did, the committed row would drop the redelivery anyway. The same holds
+- **Documented residual (at-most-once): a crash at any point after the ack
+  loses the mention** (`SlackCrashLoss`), whether it lands before or after the
+  dedupe commit. The shortest trace is a delivery followed by an exit while the
+  handler is still spawned, before its dedupe insert. Slack got its ack, so it
+  does not redeliver. After the commit, a redelivery would be dropped by the
+  committed row anyway. The same holds
   for queued mentions and a drain whose 50 s grace expires.
 - **Residual, same class: the drain window** (`SlackDrainWindow`), confirmed in
   the code. `drain_and_close` waits only for `_processing` to empty. A mention

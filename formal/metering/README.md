@@ -74,10 +74,10 @@ construction, because `rows` is a function. That is the unique idempotency key.
 | --- | --- | --- | --- | --- |
 | `Metering` | all fixes on | clean | 8,006 (depth 17) | all safety invariants above except `AttributionPreserved` and `ExemptNotBilled` |
 | `MeteringReplayGap` | `BillReplayed = FALSE` | violates `LiveMetersWholeTurn` | 160, trace 6 | **new finding, fixed by #234**: two calls emitted, the stream drops before delivering them, MA goes idle, and the driver finalizes from the replay with no recorder call |
-| `MeteringPre44528cb` | `DedupeHooks = FALSE` | violates `HookOnce` | 99, trace 5 | **calibration**: an event re-emitted after a reconnect re-runs the billing hook |
-| `MeteringPre1c4df18` | `LiveFrozenPrice = FALSE` | violates `PriceAgreement` | 28, trace 4 | **calibration**: after an `agents.update`, the live recorder prices an old session's call at the new model |
+| `MeteringPre44528cb` | `DedupeHooks = FALSE`, `BillReplayed = FALSE`; checks `TypeOK`, `HookOnce` | violates `HookOnce` | 230, trace 6 | **calibration**: an event re-emitted after a reconnect re-runs the billing hook |
+| `MeteringPre1c4df18` | `LiveFrozenPrice = FALSE`, `BillReplayed = FALSE` | violates `PriceAgreement` | 28, trace 4 | **calibration**: after an `agents.update`, the live recorder prices an old session's call at the new model |
 | `MeteringSharedTenant` | `SharedTenant = TRUE` | violates `NoForeignDebit` | 57, trace 4 | deployment precondition (see below) |
-| `MeteringSharedTenantOwned` | `SharedTenant`, `SweepChecksOwner` | clean | 8,006 | a deployment stamp on sessions would close it |
+| `MeteringSharedTenantOwned` | `SharedTenant`, `SweepChecksOwner` | clean | 8,006 | hypothetical deployment stamp; clean by construction (see below) |
 | `MeteringSweepRace` | checks `AttributionPreserved` only | violates | 41, trace 4 | documented residual: the sweep lists a live turn's call before the driver commits it |
 | `MeteringExemptSwept` | `LiveExempt = TRUE` | violates `ExemptNotBilled` | 41, trace 4 | documented discrepancy (see below) |
 
@@ -85,8 +85,16 @@ construction, because `rows` is a function. That is the unique idempotency key.
 
 | Bug | Pre-fix config | Pre-fix counterexample | Post-fix config | Post-fix |
 | --- | --- | --- | --- | --- |
-| 44528cb: delivery and billing hooks re-ran for events redelivered after a reconnect | `MeteringPre44528cb` | `HookOnce`, 5 states: emit e1, deliver (hook), drop, reconnect re-emitting e1, deliver (hook again) | `Metering` | clean, 8,006 states |
+| 44528cb: delivery and billing hooks re-ran for events redelivered after a reconnect | `MeteringPre44528cb` | `HookOnce`, trace of 6 states: emit e1, deliver (hook), drop, reconnect re-emitting e1, deliver (hook again) | `Metering` | clean, 8,006 states |
 | 1c4df18 (#177): turns billed at the agent's live model, not the session's | `MeteringPre1c4df18` | `PriceAgreement`, 4 states: agent model changes, e1 emitted and delivered, row priced at `m1` | `Metering` | clean |
+
+Both calibration configs set `BillReplayed = FALSE`, because the replay folds
+did not bill until #234, long after either fix; the post-fix column is today's
+`Metering` shape. That shape also violates `LiveMetersWholeTurn` (the #234 gap
+existed then too), and a breadth-first search reaches that violation first, so
+`MeteringPre44528cb` checks only `TypeOK` and `HookOnce` to isolate 44528cb.
+`MeteringPre1c4df18` keeps every invariant, because its `PriceAgreement`
+trace is shorter.
 
 Before 44528cb the double hook call did not double-debit, because the database
 key absorbed it. The adapter's `on_sse_event` was not protected that way, and
@@ -100,6 +108,8 @@ that side effect is what the invariant models.
    only through the sweep: later, with the sweep's attribution, or never
    without a scheduler. Failing tests and the fix are in #234. The model's
    `BillReplayed = TRUE` is the fixed shape, and `Metering.cfg` is clean with it.
+   `Metering` being clean therefore describes the code only once #234 merges;
+   until then, main has the `MeteringReplayGap` shape.
 2. **Cross-deployment debit** (`MeteringSharedTenant`). I confirmed this in the
    code. The sweep bills every session whose `daimon_tenant` stamp names a
    tenant in its own database. Tenant ids are `uuid5(platform, workspace)`, so
@@ -109,8 +119,10 @@ that side effect is what the invariant models.
    did not run it debits too. Nothing on a session identifies the deployment.
    DECISION: documented as a deployment precondition in `docs/billing.md`, not
    fixed. The hosted topology is unknown, and a fix needs a deployment identity
-   stamp (a new setting or table). `MeteringSharedTenantOwned` shows that such a
-   stamp closes it.
+   stamp (a new setting or table). `MeteringSharedTenantOwned` models such a
+   stamp as "D2's sweep never bills D1's session" (`Bills` in `Metering.tla`),
+   so it is clean by construction. Its state count equals `Metering`'s. It
+   says nothing about how a real stamp would be written or checked.
 3. **Sweep attribution race** (`MeteringSweepRace`). This is inherent to two
    writers with first-writer-wins rows. The amount is identical once prices
    agree. The reason and platform user are the sweep's when it commits first.
@@ -145,14 +157,17 @@ per-tenant concurrency cap). Nothing re-checks the balance after admission.
 | --- | --- |
 | `Admit` (new/reused chat) | [`admission.admit`](../../packages/core/daimon/core/turn/admission.py) (`is_over_balance` then `is_over_cap`); Slack [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py), Discord [`bot.py`](../../packages/adapters/discord/daimon/adapters/discord/bot.py) |
 | `Admit` (headless) | [`tools/_ctx.py:_admit`](../../packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py) before `start_turn` / `continue_turn` in [`agent_chat.py`](../../packages/adapters/mcp/daimon/adapters/mcp/tools/agent_chat.py) |
-| `Admit` / `Spend` (classifier) | Discord [`auto_respond.py`](../../packages/adapters/discord/daimon/adapters/discord/auto_respond.py), `record_classifier_usage` in [`usage_recording.py`](../../packages/core/daimon/core/usage_recording.py) |
+| `Admit` / `Spend` (classifier) | Discord [`thread_participation.py`](../../packages/adapters/discord/daimon/adapters/discord/thread_participation.py), `record_classifier_usage` in [`usage_recording.py`](../../packages/core/daimon/core/usage_recording.py) |
 | `Balance` | [`tenant_ledger.get_balance`](../../packages/core/daimon/core/stores/tenant_ledger.py) via [`tenant_balance.is_over_balance`](../../packages/core/daimon/core/tenant_balance.py) |
 | `Sweep` | [`usage_sweep.sweep_headless_usage`](../../packages/core/daimon/core/usage_sweep.py) |
 
 Invariants:
 
-- `GatedSpend`: all spend belongs to an activity that a gate admitted on a
-  positive balance.
+- `GatedSpend`: all spend belongs to an activity that started while the ledger
+  balance was positive. `admitBalance[a]` records the balance `Admit` read, so
+  the invariant is stated over the ledger, not over the gate flags: an ungated
+  activity violates it only when it actually starts on a balance that is
+  already zero or below.
 - `SpendMetered`: a finished activity not left to the sweep is fully debited.
 - `OverdraftBound`: `Balance >= -(MaxInflight * C)`. This is the bound implied
   by "N concurrent turns x max turn cost".
@@ -160,16 +175,18 @@ Invariants:
 | Config | Activities / toggles | Verdict | Distinct states |
 | --- | --- | --- | --- |
 | `BalanceGate` | 2 new, 1 reused, 1 classifier, `MaxInflight = 2`, fixes on | clean (all three) | 969 (depth 13) |
-| `BalanceGatePre8192ff7` | same, `GateOnReuse = MeterReuseLive = FALSE` | violates `GatedSpend` | 19, trace 3 |
-| `BalanceGatePreFa83d3c` | same, `GateClassifier = MeterClassifier = FALSE` | violates `GatedSpend` | 21, trace 3 |
+| `BalanceGatePre8192ff7` | same, `GateOnReuse = MeterReuseLive = FALSE` | violates `GatedSpend` | 105, trace 5 |
+| `BalanceGatePre8192ff7Overdraft` | same as above; checks `TypeOK`, `OverdraftBound` | violates `OverdraftBound` | 3,398, trace 12 |
+| `BalanceGatePreFa83d3c` | same, `GateClassifier = MeterClassifier = FALSE` | violates `GatedSpend` | 104, trace 5 |
+| `BalanceGatePreFa83d3cUnmetered` | same as above; checks `TypeOK`, `SpendMetered` | violates `SpendMetered` | 141, trace 5 |
 | `BalanceGateHeadless` | 3 headless, `MaxInflight = 1` | violates `OverdraftBound` | 192, trace 9 |
 
 ### Calibration
 
 | Bug | Pre-fix counterexample | Post-fix (`BalanceGate`) |
 | --- | --- | --- |
-| 8192ff7: Slack follow-up turns on a reused session skipped both gates and the live recorder | `GatedSpend`, 3 states (the reused turn is admitted without a gate). With only `OverdraftBound` checked: violated, 1,938 states (a reused turn admitted after the balance is spent) | clean, 969 states |
-| fa83d3c: the participation classifier ran before the gates and was never debited | `GatedSpend`, 3 states. With only `SpendMetered` checked: violated, 126 states | clean |
+| 8192ff7: Slack follow-up turns on a reused session skipped both gates and the live recorder | `GatedSpend`, trace of 5 states: a new turn is admitted at balance 1 and spends one unit, then the reused turn starts at balance 0 and spends. `BalanceGatePre8192ff7Overdraft` (only `OverdraftBound`): violated, trace of 12 states, the ledger below `-(MaxInflight * C)` | clean, 969 states |
+| fa83d3c: the participation classifier ran before the gates and was never debited | `GatedSpend`, trace of 5 states: a new turn spends the balance to 0, then the classifier starts and spends. `BalanceGatePreFa83d3cUnmetered` (only `SpendMetered`): violated, trace of 5 states, a finished classifier call with no debit | clean |
 
 ### Findings
 
@@ -186,6 +203,12 @@ Invariants:
   one turn's cost. Replay-only calls before #234 widened the lag the same way.
   DECISION: this is the by-design gate TOCTOU (M5), so the boundary is
   documented in `docs/billing.md` and not changed.
+  The config's `MaxInflight = 1` makes the compared bound one turn's cost. With
+  `MaxInflight = 3` the same three headless turns stay above `-(3 * C)` and the
+  config is clean, so what the trace shows is sequential headless turns each
+  passing a stale gate, not a specific numeric overdraft. In the fixed
+  `BalanceGate` config the worst reachable balance is -3, so its
+  `OverdraftBound` (-4) holds but is not tight.
 
 ## Bounds and assumptions
 
