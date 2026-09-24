@@ -39,7 +39,11 @@ from daimon.core.errors import StoreError
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import resolve_clone_token
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
-from daimon.core.mcp_vault import add_github_copilot_credential, ensure_agent_mcp_vault
+from daimon.core.mcp_vault import (
+    add_github_copilot_credential,
+    ensure_agent_mcp_vault,
+    hold_agent_vault_lock,
+)
 from daimon.core.memory_resource import ensure_memory_store_and_mount
 from daimon.core.repo_resource import build_repo_resource
 from daimon.core.stores.agent_repo_binding import get_binding
@@ -181,16 +185,27 @@ async def create_session(
     # via the github MCP toolset. Rides the same
     # vault already attached to the session via vault_ids. Bound to the REAL
     # per-agent identity only — the operator fallback PAT is never mirrored here.
-    if vault_id is not None and per_agent_pat is not None:
+    if (
+        vault_id is not None
+        and per_agent_pat is not None
+        and account_id is not None
+        and agent_uuid is not None
+        and session_factory is not None
+    ):
         # Degrade-not-block: a transient MA failure on this optional credential
         # must not kill the turn. Mirrors the memory-store mount pattern below.
         try:
-            await add_github_copilot_credential(anthropic, vault_id=vault_id, token=per_agent_pat)
+            async with hold_agent_vault_lock(
+                session_factory, account_id=account_id, agent_id=agent_uuid
+            ):
+                await add_github_copilot_credential(
+                    anthropic, vault_id=vault_id, token=per_agent_pat
+                )
         except anthropic_pkg.APIError as exc:
             _log.warning(
                 "copilot_credential.mount_failed",
                 vault_id=vault_id,
-                agent_uuid=str(agent_uuid) if agent_uuid is not None else None,
+                agent_uuid=str(agent_uuid),
                 error=str(exc),
             )
 
@@ -203,21 +218,26 @@ async def create_session(
     # mirror_credentials_into_vault.
     if (
         vault_id is not None
+        and account_id is not None
         and tenant_id is not None
         and agent_uuid is not None
         and session_factory is not None
         and fernet is not None
     ):
-        await mirror_credentials_into_vault(
-            anthropic,
-            vault_id=vault_id,
-            credentials=await resolve_agent_mcp_credentials(
-                sessionmaker=session_factory,
-                fernet=fernet,
-                tenant_id=tenant_id,
-                agent_id=agent_uuid,
-            ),
+        credentials = await resolve_agent_mcp_credentials(
+            sessionmaker=session_factory,
+            fernet=fernet,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
         )
+        # Locked so a person's OAuth grant replacing a shared token at the same
+        # URL never sees this recreate it between its delete and its create.
+        async with hold_agent_vault_lock(
+            session_factory, account_id=account_id, agent_id=agent_uuid
+        ):
+            await mirror_credentials_into_vault(
+                anthropic, vault_id=vault_id, credentials=credentials
+            )
 
     resources: list[Resource] = list(extra_resources)
     if tenant_id is not None and agent_uuid is not None and session_factory is not None:

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
@@ -72,6 +74,31 @@ async def _lock_vault_namespace(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": lock_key},
     )
+
+
+@asynccontextmanager
+async def hold_agent_vault_lock(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    account_id: uuid.UUID,
+    agent_id: uuid.UUID,
+) -> AsyncIterator[None]:
+    """Hold this (account_id, agent_id)'s vault lock for the body of the block.
+
+    For writers that replace one URL's credential in the vault (the OAuth
+    grant, the per-turn mirror of the agent's shared tokens, the Copilot
+    PAT): each lists the slot and then writes it, and a vault holds one
+    credential per URL, so two of them interleaving can leave the loser with
+    a 409 or a 404. Holding the same lock as ``ensure_agent_mcp_vault`` makes
+    each read-then-write see the other's finished result.
+
+    Never call ``ensure_agent_mcp_vault`` or ``add_external_mcp_credential``
+    inside the block: they take this lock on another connection and would
+    wait on it forever.
+    """
+    async with session_factory() as session, session.begin():
+        await _lock_vault_namespace(session, account_id=account_id, agent_id=agent_id)
+        yield
 
 
 async def _ensure_agent_mcp_vault_locked(

@@ -38,7 +38,7 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.mcp_personal_servers import hidden_mcp_server_names
-from daimon.core.mcp_vault import ensure_agent_mcp_vault
+from daimon.core.mcp_vault import ensure_agent_mcp_vault, hold_agent_vault_lock
 from daimon.core.stores import agent_mcp_credentials as cred_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -145,8 +145,11 @@ async def mirror_credentials_into_vault(
     a missing credential here means MA hard-fails the whole turn at MCP init.
     Swallowing an error would only convert this clear failure into that
     confusing one, so ``anthropic.APIError`` propagates (the loud-failure
-    precedent is ``resolve_clone_token``). Two exceptions, both concurrent
-    writers this function does not lock out: a 409 on create means the
+    precedent is ``resolve_clone_token``). Callers hold the per-(account,
+    agent) vault lock (``mcp_vault.hold_agent_vault_lock``), which is what
+    keeps this from landing inside a person's OAuth grant write. Two
+    exceptions remain for writers outside that lock (a process on an older
+    release during a deploy, or an auth type this code does not know): a 409 on create means the
     credential exists, whether a concurrent turn or an auth type this code
     does not know wrote it, and MA can use it as it is; a 404 on update means
     the listed credential was deleted underneath us (a person's OAuth grant
@@ -297,7 +300,8 @@ async def sync_agent_mcp_credentials(
         now=now,
         session_factory=sessionmaker,
     )
-    await mirror_credentials_into_vault(client, vault_id=vault_id, credentials=credentials)
+    async with hold_agent_vault_lock(sessionmaker, account_id=account_id, agent_id=agent_id):
+        await mirror_credentials_into_vault(client, vault_id=vault_id, credentials=credentials)
 
 
 async def resolve_hidden_mcp_server_names(

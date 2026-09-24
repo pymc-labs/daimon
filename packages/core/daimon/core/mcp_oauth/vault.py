@@ -33,8 +33,9 @@ from daimon.core.mcp_vault import same_server_url
 _REFRESHABLE_DEFAULT_LIFETIME = dt.timedelta(hours=1)
 _UNREFRESHABLE_DEFAULT_LIFETIME = dt.timedelta(days=365)
 
-# Bounded: each retry follows a concurrent writer landing in the slot, and the
-# mirror stops writing a URL once the grant holds it.
+# Defence in depth only: callers hold the per-(account, agent) vault lock, so
+# no daimon writer lands in the slot mid-write. The retry covers one outside
+# the lock, such as a process still on an older release during a deploy.
 _WRITE_ATTEMPTS = 3
 
 
@@ -96,14 +97,17 @@ async def put_mcp_oauth_credential(
 ) -> str:
     """Replace whatever credential the vault holds for the URL; return the new id.
 
-    Runs outside the per-(account, agent) vault lock, after the callback has
-    spent the flow, so it must not lose to a writer that lands between its
-    list and its create. A turn's `mirror_credentials_into_vault` can recreate
-    the agent's shared token in the slot this just emptied (the create is then
-    a 409), and another writer can delete a listed credential first (the
-    delete is then a 404). Either way the slot is re-read and replaced again,
-    up to `_WRITE_ATTEMPTS` times. Once the grant is in, the mirror leaves the
-    URL alone, so the retry converges.
+    The caller holds the per-(account, agent) vault lock
+    (`mcp_vault.hold_agent_vault_lock`), as every writer that replaces a
+    URL's credential does. A turn's `mirror_credentials_into_vault` therefore
+    either finished before this lists the slot or waits and then sees the
+    grant and leaves the URL alone, however many turns are mirroring.
+
+    A writer outside the lock could still land between the list and the
+    create (the create is then a 409) or delete a listed credential first
+    (the delete is then a 404). The slot is re-read and replaced again, up
+    to `_WRITE_ATTEMPTS` times; that retry is not what makes the common
+    case safe, the lock is.
     """
     auth = build_mcp_oauth_auth(
         mcp_server_url=mcp_server_url,
