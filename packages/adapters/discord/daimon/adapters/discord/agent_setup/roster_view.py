@@ -28,7 +28,7 @@ from daimon.adapters.discord.agent_setup.hydrate import (
     load_answering_map_for,
     load_details_for,
 )
-from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
+from daimon.adapters.discord.agent_setup.navigation import STALE_PANEL_MESSAGE, PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
@@ -260,10 +260,18 @@ class RosterView(PanelViewBase):
     async def _on_details(self, interaction: discord.Interaction, *, agent: RosterAgent) -> None:
         from daimon.adapters.discord.agent_setup.details_view import DetailsView
 
+        if self._is_superseded():
+            await interaction.response.send_message(STALE_PANEL_MESSAGE, ephemeral=True)
+            return
+        self.state.details_request_seq += 1
+        request_seq = self.state.details_request_seq
+        render_seq = self.state.render_seq
+        source_render_seq = self._render_seq
         await interaction.response.defer()
-        self.state.select_agent(agent)
+        if source_render_seq != self.state.render_seq or self._is_superseded():
+            return
         try:
-            self.state.details = await load_details_for(self.runtime, state=self.state, agent=agent)
+            details = await load_details_for(self.runtime, state=self.state, agent=agent)
         except (DaimonError, anthropic.APIError, discord.HTTPException) as error:
             request_id = generate_request_id()
             log.exception(
@@ -273,9 +281,21 @@ class RosterView(PanelViewBase):
                 render_error(error, request_id=request_id), ephemeral=True
             )
             return
+        # Multiple clicks on one still-live roster can complete out of order.
+        # Do not let an older read replace a newer selection or another screen.
+        if request_seq != self.state.details_request_seq or render_seq != self.state.render_seq:
+            return
+        self.state.select_agent(agent)
+        self.state.details = details
         await self.swap_to(
             interaction,
-            DetailsView(self.state, runtime=self.runtime, allowed_user_id=self.allowed_user_id),
+            DetailsView(
+                self.state,
+                runtime=self.runtime,
+                allowed_user_id=self.allowed_user_id,
+                details=details,
+                agent=agent,
+            ),
         )
 
     async def _on_setup(self, interaction: discord.Interaction) -> None:

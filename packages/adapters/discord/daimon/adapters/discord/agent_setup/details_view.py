@@ -32,6 +32,7 @@ from daimon.core.agent_detail_lists import (
 )
 from daimon.core.agent_details import AgentDetails, RepoBinding
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
+from daimon.core.roster import RosterAgent
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import (
     setup_target_label,
@@ -289,11 +290,14 @@ class DetailsView(PanelViewBase):
         *,
         runtime: DiscordRuntime,
         allowed_user_id: int,
+        details: AgentDetails | None = None,
+        agent: RosterAgent | None = None,
     ) -> None:
         super().__init__(state, runtime=runtime, allowed_user_id=allowed_user_id)
-        details = state.details
+        details = details or state.details
         assert details is not None, "DetailsView needs a loaded AgentDetails on the panel state"
         self.details = details
+        self.agent = agent or state.selected_agent
         container = build_details_container(
             state,
             details,
@@ -341,7 +345,7 @@ class DetailsView(PanelViewBase):
             interaction,
             runtime=self.runtime,
             state=self.state,
-            target=self.state.selected_agent,
+            target=self.agent,
         )
 
     async def _on_coding_tools(self, interaction: discord.Interaction) -> None:
@@ -362,6 +366,7 @@ class DetailsView(PanelViewBase):
             runtime=self.runtime,
             state=self.state,
             allowed_user_id=self.allowed_user_id,
+            agent=self.agent,
         )
 
     async def _on_toggle_detail(
@@ -371,7 +376,13 @@ class DetailsView(PanelViewBase):
         self.state.expanded_detail = None if self.state.expanded_detail == name else name
         await self.swap_to(
             interaction,
-            DetailsView(self.state, runtime=self.runtime, allowed_user_id=self.allowed_user_id),
+            DetailsView(
+                self.state,
+                runtime=self.runtime,
+                allowed_user_id=self.allowed_user_id,
+                details=self.details,
+                agent=self.agent,
+            ),
         )
 
     async def _on_back(self, interaction: discord.Interaction) -> None:

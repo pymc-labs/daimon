@@ -100,6 +100,13 @@ on:
       - "packages/core/daimon/core/ma.py"
       - "packages/adapters/slack/daimon/adapters/slack/credential_submissions.py"
       - "packages/adapters/discord/daimon/adapters/discord/credential_modals.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/roster_view.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/details_view.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/navigation.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/expiry.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/state.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/mcp_access.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/new_agent.py"
   pull_request:
     paths:
       - "formal/**"
@@ -211,6 +218,13 @@ on:
       - "packages/core/daimon/core/ma.py"
       - "packages/adapters/slack/daimon/adapters/slack/credential_submissions.py"
       - "packages/adapters/discord/daimon/adapters/discord/credential_modals.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/roster_view.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/details_view.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/navigation.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/expiry.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/state.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/mcp_access.py"
+      - "packages/adapters/discord/daimon/adapters/discord/agent_setup/new_agent.py"
   workflow_dispatch:
 
 permissions:
