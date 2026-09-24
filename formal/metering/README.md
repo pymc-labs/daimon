@@ -252,8 +252,10 @@ is owed. Neither model states a combined bound.
     executable regressions in
     [`test_usage_sweep.py`](../../packages/core/tests/test_usage_sweep.py): an
     invalid tenant tag skips that session, while an invalid optional account
-    tag preserves tenant billing with no member attribution. The TLA+ model
-    still abstracts metadata parsing and does not verify this handling.
+    tag preserves tenant billing with no member attribution. The same tests
+    verify a valid account from another tenant cannot supply platform-user
+    attribution to the session tenant. The TLA+ model still abstracts metadata
+    parsing and account-to-tenant checks and does not verify this handling.
 - `BalanceGate`:
   - Integers stand in for dollars. Every call costs the same, and there is one
     tenant.

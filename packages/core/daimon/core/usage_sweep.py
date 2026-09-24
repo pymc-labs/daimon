@@ -82,7 +82,10 @@ async def sweep_headless_usage(
             # is meaningless (not our tenant to bill). Skip.
             continue
         platform_user_id = await _resolve_platform_user_id(
-            sessionmaker, session.metadata, session_id=session.id
+            sessionmaker,
+            session.metadata,
+            session_id=session.id,
+            expected_tenant_id=tenant_id,
         )
         model_id = session.agent.model.id
         pricing = MODEL_PRICING.get(model_id)
@@ -109,6 +112,7 @@ async def _resolve_platform_user_id(
     metadata: dict[str, str],
     *,
     session_id: str,
+    expected_tenant_id: uuid.UUID,
 ) -> str | None:
     """Resolve the owning human's platform_user_id from the session's daimon_account.
 
@@ -131,4 +135,13 @@ async def _resolve_platform_user_id(
         return None
     async with sessionmaker() as s:
         identity = await get_account_with_tenant(s, account_id=account_id)
-    return identity.platform_user_id if identity is not None else None
+    if identity is None:
+        return None
+    if identity.tenant_id != expected_tenant_id:
+        log.warning(
+            "usage_sweep.member_attribution_omitted",
+            session_id=session_id,
+            reason="account_tenant_mismatch",
+        )
+        return None
+    return identity.platform_user_id
