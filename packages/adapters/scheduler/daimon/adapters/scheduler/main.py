@@ -32,6 +32,7 @@ from decimal import Decimal
 import anthropic
 import structlog
 from anthropic import AsyncAnthropic
+from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.config import Settings, load_settings
@@ -56,6 +57,7 @@ from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.scheduler import FireFn, run_one_tick
 from daimon.core.scope import DeploymentDefault
+from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -415,6 +417,8 @@ async def run(
             max_retries=MA_MAX_RETRIES,
         )
     )
+    crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
+    push_resync_fernet = build_multifernet(crypto_keys) if crypto_keys else None
 
     lock_conn = await _acquire_advisory_lock(engine, scheduler_settings.advisory_lock_key)
     if lock_conn is None:
@@ -468,6 +472,13 @@ async def run(
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_hub_oauth_kv(sm)
+            await _drain_github_push_resync(
+                engine=engine,
+                sm=sm,
+                client=client,
+                settings=settings,
+                fernet=push_resync_fernet,
+            )
             return 0
 
         while not stop_event.is_set():
@@ -485,6 +496,13 @@ async def run(
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_hub_oauth_kv(sm)
+            await _drain_github_push_resync(
+                engine=engine,
+                sm=sm,
+                client=client,
+                settings=settings,
+                fernet=push_resync_fernet,
+            )
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
                     stop_event.wait(), timeout=scheduler_settings.tick_interval_s
@@ -505,6 +523,27 @@ async def run(
         await client.close()
         if _engine_override is None:
             await engine.dispose()
+
+
+async def _drain_github_push_resync(
+    *,
+    engine: AsyncEngine,
+    sm: async_sessionmaker[AsyncSession],
+    client: AsyncAnthropic,
+    settings: Settings,
+    fernet: MultiFernet | None,
+) -> None:
+    """Keep queue failures inside a named scheduler boundary; later ticks retry."""
+    try:
+        await drain_github_push_resync_queue(
+            engine=engine,
+            sessionmaker=sm,
+            fernet=fernet,
+            anthropic_client=client,
+            github_settings=settings.github,
+        )
+    except Exception:
+        log.exception("scheduler.github_push_resync.failed")
 
 
 def run_sync() -> None:

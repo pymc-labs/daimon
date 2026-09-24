@@ -10,6 +10,7 @@ Patterns:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -17,8 +18,10 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.skill_sync import resync as resync_module
 from daimon.core.skill_sync.orchestrator import sync_agent_skills
 from daimon.core.skill_sync.resync import resync_bound_repo, should_resync
 from daimon.core.specs import SkillRepo
@@ -241,6 +244,60 @@ async def test_resync_records_error_on_failure(
     assert row is not None, "binding row must still exist after failed resync"
     assert row.last_sync_error is not None, (
         "last_sync_error must be set when the resync fails at the named boundary"
+    )
+
+
+async def test_resync_cancellation_does_not_clear_existing_error(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = await make_cli_principal(db_session, os_user="resync-cancel")
+    tenant_id = cli.tenant_id
+    repo_url = "owner/cancel-test-repo"
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent_cancel_probe")
+    await _setup_binding(db_session, tenant_id=tenant_id, agent_id=agent_id, repo_url=repo_url)
+    await db_session.commit()
+
+    async with db_session_factory.begin() as session:
+        await binding_store.update_last_sync(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            last_sync_at=datetime.now(UTC),
+            last_sync_error="earlier sync failed",
+        )
+
+    async def cancel_during_bridge_resolution(
+        *,
+        session: AsyncSession,
+        binding: object,
+        anthropic_client: object,
+    ) -> tuple[str, uuid.UUID] | None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        resync_module, "_resolve_agent_name_and_principal", cancel_during_bridge_resolution
+    )
+    anthropic_client = build_fake_anthropic(lambda request: NotHandled)
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b""))
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await resync_bound_repo(
+            repo_full_name=repo_url,
+            ref="refs/heads/main",
+            sessionmaker=db_session_factory,
+            fernet=make_fernet(),
+            http_client=http_client,
+            anthropic_client=anthropic_client,
+        )
+
+    async with db_session_factory() as check_session:
+        row = await binding_store.get_binding(check_session, tenant_id=tenant_id, agent_id=agent_id)
+    assert row is not None, "the binding should remain available after cancellation"
+    assert row.last_sync_error == "resync cancelled", (
+        "cancellation must remain visible instead of clearing the earlier sync error"
     )
 
 

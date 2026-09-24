@@ -547,6 +547,27 @@ class GitHubAppInstallationRow(BaseModel):
     updated_at: datetime
 
 
+class GitHubPushResyncRow(BaseModel):
+    """A coalesced, leased repository-ref resync job."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    repo_full_name: str
+    ref: str
+    delivery_id: str
+    generation: int
+    claimed_generation: int | None
+    state: str
+    attempts: int
+    available_at: datetime
+    lease_owner: uuid.UUID | None
+    lease_expires_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class CredentialRequestRow(BaseModel):
     """Pydantic row for CredentialRequest — the credential-button handshake."""
 

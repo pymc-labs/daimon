@@ -933,6 +933,59 @@ class GitHubAppInstallation(Base):
     )
 
 
+class GitHubPushResync(Base):
+    """Coalesced durable work for one GitHub repository ref."""
+
+    __tablename__ = "github_push_resyncs"
+    __table_args__ = (
+        UniqueConstraint("repo_full_name", "ref", name="uq_github_push_resyncs_repo_ref"),
+        CheckConstraint(
+            "state IN ('pending', 'running', 'done')",
+            name="ck_github_push_resyncs_state",
+        ),
+        Index("ix_github_push_resyncs_due", "state", "available_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    repo_full_name: Mapped[str] = mapped_column(Text, nullable=False)
+    ref: Mapped[str] = mapped_column(Text, nullable=False)
+    delivery_id: Mapped[str] = mapped_column(Text, nullable=False)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
+    claimed_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class GitHubPushDelivery(Base):
+    """Finite-retention idempotency receipts for verified push deliveries."""
+
+    __tablename__ = "github_push_deliveries"
+    __table_args__ = (Index("ix_github_push_deliveries_received_at", "received_at"),)
+
+    delivery_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    repo_full_name: Mapped[str] = mapped_column(Text, nullable=False)
+    ref: Mapped[str] = mapped_column(Text, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class McpToken(Base):
     """JTI registry for per-agent MCP JWTs.
 

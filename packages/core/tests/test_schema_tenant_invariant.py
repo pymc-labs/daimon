@@ -39,6 +39,11 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # the binding side (repo-access proven at bind). Unfiltered get_for_repo
     # is issue #1 — this exemption documents the structural gap, not safety.
     "github_app_installations": "no Daimon tenant at GitHub-install time; see #1",
+    # Push delivery receipts and jobs are deployment-wide GitHub metadata, not
+    # tenant data. Resync resolves each tenant's bindings and scoped credentials
+    # at execution time from the canonical repository/ref.
+    "github_push_deliveries": "global GitHub delivery IDs; no tenant or credential payload",
+    "github_push_resyncs": "global canonical repo/ref work; bindings and credentials are tenant-scoped at execution",
     # Slack-native tables keyed by team_id, which is 1:1 with a tenant's
     # external_id (tenant = uuid5('slack', team_id)).
     "slack_bot_tokens": "keyed by team_id (1:1 with tenant external_id)",
