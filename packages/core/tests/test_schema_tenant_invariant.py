@@ -51,6 +51,10 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # File-GC queue keyed by server-minted file_id; rows are transient and
     # reference no tenant-owned data beyond the opaque handle.
     "pending_file_deletes": "keyed by server-minted file_id; transient GC queue",
+    # A signed Stripe refund/dispute can arrive before Checkout completion.
+    # The event has no tenant identity yet; the verified payment_intent links
+    # it to the tenant-scoped credit when that credit is committed.
+    "pending_payment_clawbacks": "keyed by verified Stripe event_id/payment_intent until the tenant credit exists",
     # Keyed by mapping_id, an FK to thread_sessions.id — a globally unique UUID
     # that belongs to exactly one tenant, and the only way a preparation is ever
     # looked up. The row holds no tenant-owned data of its own beyond opaque
