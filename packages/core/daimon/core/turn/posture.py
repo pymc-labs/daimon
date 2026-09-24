@@ -9,16 +9,26 @@ closed `ExemptReason` literal: widening the set of exempt reasons is a
 deliberate, reviewable act (edit the `Literal`, not a free-form string),
 not something a caller can invent inline.
 
-Two members exist today. `"cli-operator-run"` is the CLI operator's own
+Three members exist today. `"cli-operator-run"` is the CLI operator's own
 bypass. `"headless-unrecorded"` (plan 19-09) is a headless turn
 (`daimon.core.headless_runner`) invoked without a `usage_record_factory` —
-genuinely nothing to meter, not the operator bypass. This is deliberately
-NOT modeled as `Billed(record=<no-op recorder>)`: that would record a
-metered turn that meters nothing, which is a worse lie than an honest
+genuinely nothing to meter, not the operator bypass. `"mcp-internal-caller"`
+is an MCP `start_turn` by a caller with no platform user (an internal or CLI
+token, admitted ungated by `_admit`); that path never drives a stream, so it
+only ever appears as a session stamp, never as a `run_turn` posture.
+
+`"headless-unrecorded"` is deliberately NOT modeled as
+`Billed(record=<no-op recorder>)`: that would record a metered turn that
+meters nothing, which is a worse lie than an honest
 "exempt, and here is why" reason. `Billed` means "this turn's usage is being
 recorded somewhere"; a no-op recorder would satisfy the type while breaking
 that meaning for anyone reading a `turn.billing_exempt`-adjacent log line or
 auditing billing coverage.
+
+Exempt usage is absorbed by the operator, not debited to the tenant. The live
+recorder never sees it, and a session created for an exempt caller is stamped
+`daimon_billing_exempt=<reason>` (`daimon.core.sessions.create_session`) so the
+usage sweep skips it too and only logs what it would have cost.
 
 Every call to `run_turn` also declares a `ToolConfirmation` posture — how a
 `requires_action` idle (the agent paused, waiting for a tool call to be
@@ -43,7 +53,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 
-ExemptReason = Literal["cli-operator-run", "headless-unrecorded"]
+ExemptReason = Literal["cli-operator-run", "headless-unrecorded", "mcp-internal-caller"]
 
 
 class UsageRecorder(Protocol):

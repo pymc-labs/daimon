@@ -62,6 +62,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_unknown_error import (
 )
 from cryptography.fernet import Fernet
 from daimon.core.config import McpSettings
+from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT
 from daimon.core.errors import TurnError
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from daimon.core.headless_runner import LAST_RESULT_TAIL_MAX, run_turn
@@ -780,6 +781,10 @@ async def test_run_turn_stamps_session_metadata_with_tenant_and_account() -> Non
     ]
     session_create_capture: list[dict[str, Any]] = []
     client = _build_client(events, session_create_capture=session_create_capture)
+    from unittest.mock import AsyncMock
+
+    def factory(session_id: str, model_id: str) -> AsyncMock:
+        return AsyncMock(return_value=None)
 
     tail = await run_turn(
         anthropic=client,
@@ -788,6 +793,7 @@ async def test_run_turn_stamps_session_metadata_with_tenant_and_account() -> Non
         trigger_message="hi",
         tenant_id=tenant_id,
         account_id=account_id,
+        usage_record_factory=factory,  # the scheduler always passes one
     )
 
     assert tail == "ok"
@@ -801,6 +807,31 @@ async def test_run_turn_stamps_session_metadata_with_tenant_and_account() -> Non
     )
     assert metadata["daimon_account"] == str(account_id), (
         "metadata must tag daimon_account with the account UUID string"
+    )
+    assert MA_METADATA_KEY_BILLING_EXEMPT not in metadata, (
+        "a recorded (Billed) routine session must stay sweepable"
+    )
+
+
+async def test_run_turn_without_usage_record_factory_stamps_session_billing_exempt() -> None:
+    """An unrecorded headless run is BillingExempt("headless-unrecorded"); its
+    session carries daimon_billing_exempt so sweep_headless_usage skips it
+    instead of debiting the tenant."""
+    session_create_capture: list[dict[str, Any]] = []
+    client = _build_client(_idle_events(), session_create_capture=session_create_capture)
+
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="hi",
+        tenant_id=uuid.uuid4(),
+    )
+
+    assert len(session_create_capture) == 1, "exactly one session-create call"
+    metadata = session_create_capture[0]["metadata"]
+    assert metadata[MA_METADATA_KEY_BILLING_EXEMPT] == "headless-unrecorded", (
+        f"an unrecorded headless session must be stamped exempt; got {metadata!r}"
     )
 
 

@@ -26,7 +26,9 @@ CONSTANTS
     SweepEnabled,      \* the scheduler's usage sweep runs
     SharedTenant,      \* another deployment has this tenant row and lists this MA workspace
     SweepChecksOwner,  \* the sweep skips sessions another deployment created
-    LiveExempt         \* the turn runs BillingExempt (daimon run; MCP caller with no platform user)
+    LiveExempt,        \* the session was created for a BillingExempt caller (headless run
+                       \* with no recorder; MCP caller with no platform user)
+    SweepSkipsExempt   \* the session carries daimon_billing_exempt and the sweep skips it
 
 Events == 1..K
 Terminal == 0                    \* the session.status_idle event, as an inbox item
@@ -192,8 +194,11 @@ Crash ==
                    redeliveries, rows, SweepVars>>
 
 (* usage_sweep.sweep_headless_usage in deployment d. A deployment bills the *)
-(* session when the daimon_tenant stamp names a tenant in its own DB.       *)
-Bills(d) == d = Owner \/ (SharedTenant /\ ~SweepChecksOwner)
+(* session when the daimon_tenant stamp names a tenant in its own DB, and   *)
+(* (with the fix) the session has no daimon_billing_exempt stamp.           *)
+Bills(d) ==
+    /\ ~(LiveExempt /\ SweepSkipsExempt)
+    /\ (d = Owner \/ (SharedTenant /\ ~SweepChecksOwner))
 
 SweepStart(d) ==
     /\ SweepEnabled
@@ -262,9 +267,9 @@ PriceAgreement ==
 LiveMetersWholeTurn ==
     liveState = "finalized" => \A e \in Events : hookCalls[e] >= 1
 
-(* docs/billing.md: a caller with no platform user identity (and `daimon   *)
-(* run`) is not billed. Expected to fail with the sweep enabled: the sweep *)
-(* bills any session carrying a known daimon_tenant stamp.                 *)
+(* docs/billing.md: a BillingExempt turn is absorbed by the operator, never *)
+(* debited to the tenant. Fails without SweepSkipsExempt: the sweep bills   *)
+(* any session carrying a known daimon_tenant stamp.                        *)
 ExemptNotBilled ==
     LiveExempt => \A d \in Deployments, e \in Events : rows[d][e] = None
 

@@ -11,7 +11,7 @@ import datetime as dt
 import time
 import uuid
 from collections.abc import Sequence
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import anthropic as anthropic_pkg
 import httpx
@@ -34,7 +34,11 @@ from daimon.core.agent_mcp_credentials import (
 )
 from daimon.core.config import McpSettings
 from daimon.core.credential_env import upload_env_and_mount
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_BILLING_EXEMPT,
+    MA_METADATA_KEY_TENANT,
+)
 from daimon.core.errors import StoreError
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import resolve_clone_token
@@ -50,9 +54,37 @@ from daimon.core.stores.agent_repo_binding import get_binding
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+if TYPE_CHECKING:
+    # Type-only: importing `daimon.core.turn` at runtime would cycle back here
+    # through `daimon.core.turn.prepare`.
+    from daimon.core.turn.posture import ExemptReason
+
 _log = structlog.get_logger(__name__)
 
 __all__ = ["create_session", "create_isolated_session"]
+
+
+def _session_metadata(
+    *,
+    account_id: uuid.UUID | None,
+    tenant_id: uuid.UUID | None,
+    billing_exempt: ExemptReason | None,
+) -> dict[str, str]:
+    """The metadata stamp every Daimon-created session carries.
+
+    `daimon_tenant` names the tenant the usage sweep debits; `daimon_account`
+    the owning account. `daimon_billing_exempt=<reason>` marks a session
+    created for a `BillingExempt` caller, which the sweep skips (the operator
+    absorbs its usage). It is decided once, here, from the creator's posture.
+    """
+    metadata: dict[str, str] = {}
+    if account_id is not None:
+        metadata[MA_METADATA_KEY_ACCOUNT] = str(account_id)
+    if tenant_id is not None:
+        metadata[MA_METADATA_KEY_TENANT] = str(tenant_id)
+    if billing_exempt is not None:
+        metadata[MA_METADATA_KEY_BILLING_EXEMPT] = billing_exempt
+    return metadata
 
 
 async def create_session(
@@ -71,6 +103,7 @@ async def create_session(
     github_app_private_key: str | None = None,
     http_client: httpx.AsyncClient | None = None,
     extra_resources: Sequence[Resource] = (),
+    billing_exempt: ExemptReason | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -136,6 +169,11 @@ async def create_session(
     assembles, for a caller that has a file the new session must start with —
     today, the bundle carrying a replaced session's work. They are passed
     through untouched; this function never inspects or filters them.
+
+    ``billing_exempt`` is the creating caller's ``ExemptReason`` when it runs
+    ``BillingExempt``; it is stamped as ``daimon_billing_exempt`` so the usage
+    sweep never debits the session to the tenant. ``None`` (every billed
+    caller) leaves the session sweepable.
 
     On MA failure: ``anthropic.APIError`` propagates uncaught.
     """
@@ -347,11 +385,9 @@ async def create_session(
                 server_names=sorted(hidden),
             )
 
-    metadata: dict[str, str] = {}
-    if account_id is not None:
-        metadata[MA_METADATA_KEY_ACCOUNT] = str(account_id)
-    if tenant_id is not None:
-        metadata[MA_METADATA_KEY_TENANT] = str(tenant_id)
+    metadata = _session_metadata(
+        account_id=account_id, tenant_id=tenant_id, billing_exempt=billing_exempt
+    )
 
     return await anthropic.beta.sessions.create(
         agent=agent_argument,
@@ -370,6 +406,7 @@ async def create_isolated_session(
     account_id: uuid.UUID | None,
     tenant_id: uuid.UUID | None,
     resources: list[Resource],
+    billing_exempt: ExemptReason | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session for an isolated agent — `create_session` with every
     optional mount removed.
@@ -393,13 +430,13 @@ async def create_isolated_session(
     an isolated session with an empty resource list is a caller bug, not a
     degraded mode.
 
+    `billing_exempt` stamps the session the same way `create_session` does.
+
     On MA failure: `anthropic.APIError` propagates uncaught.
     """
-    metadata: dict[str, str] = {}
-    if account_id is not None:
-        metadata[MA_METADATA_KEY_ACCOUNT] = str(account_id)
-    if tenant_id is not None:
-        metadata[MA_METADATA_KEY_TENANT] = str(tenant_id)
+    metadata = _session_metadata(
+        account_id=account_id, tenant_id=tenant_id, billing_exempt=billing_exempt
+    )
 
     return await anthropic.beta.sessions.create(
         agent=agent.id,

@@ -132,14 +132,28 @@ Two boundaries of the design worth stating plainly:
   exceed it. The between-sweeps bound is stated here, not model-checked.
   Neither bound covers a refund or dispute of credit already spent: that
   clawback is a further debit, and can take the balance lower still.
-- **A caller with no platform user identity is not gated and not billed live** — an
-  operator or CLI token runs with no balance check, no cap check, and no
-  inline usage row or debit. That is deliberate, and the module asks in as
-  many words that no one add a fallback that bills it. The usage sweep below
-  does not know who drove a session, though. A `daimon run` turn, or an MCP
-  `start_turn` by such a caller, acts on a session stamped with the tenant.
-  The next sweep therefore records its model calls and debits that tenant,
-  with the platform user taken from the session's account stamp.
+- **`BillingExempt` usage is absorbed by the operator, not debited to the
+  tenant.** A caller with no platform user identity (an operator, CLI or
+  internal token) runs with no balance check, no cap check, and no usage row
+  or debit. That is deliberate, and `_admit` asks in as many words that no one
+  add a fallback that bills it. The same holds for a headless run with no
+  recorder (`BillingExempt(reason="headless-unrecorded")`). The live recorder
+  never sees these turns, and the session such a caller creates is stamped
+  `daimon_billing_exempt=<reason>` (`create_session` in
+  `packages/core/daimon/core/sessions.py`), so [the sweep](#the-tables) skips
+  it too. The sweep still prices the session and logs what the tenant would
+  have paid; see [Seeing absorbed spend](#seeing-absorbed-spend).
+
+  The stamp is written once, when the session is created, so **the posture of
+  the session's creator covers every turn on it.** The same account can hold
+  both an internal token and a platform token, and `continue_turn` checks only
+  the agent and the account, so one session can see both kinds of caller. A
+  platform user continuing an exempt session is absorbed as well; an exempt
+  caller acting on a billed session (an MCP `continue_turn` with an internal
+  token, or `daimon run --session` on a chat thread's session) is debited to
+  the tenant by the sweep, with the platform user taken from the session's
+  account stamp. `daimon run` normally targets a session from
+  `daimon sessions create`, which carries no tenant stamp and is never swept.
 
 ## The signup credit
 
@@ -215,8 +229,9 @@ after their Stripe events.
 never drives the stream, so the inline hook never fires for it.
 `packages/core/daimon/core/usage_sweep.py` closes that hole: each scheduler
 tick it walks Managed Agents sessions, skips any without a `daimon_tenant`
-stamp or belonging to a tenant this deployment does not own, and replays their
-`span.model_request_end` events through the same recorder. It is safe to run
+stamp, belonging to a tenant this deployment does not own, or stamped
+`daimon_billing_exempt`, and replays the rest's `span.model_request_end`
+events through the same recorder. It is safe to run
 against already-metered sessions precisely because the idempotency grain is
 the same.
 
@@ -233,6 +248,24 @@ derived from `(platform, workspace id)`. Two deployments whose API keys share
 one Managed Agents workspace, and which both have the same Discord server or
 Slack workspace installed, would each debit the other's sessions. Give each
 deployment its own Managed Agents workspace.
+
+### Seeing absorbed spend
+
+For every exempt session it skips, the sweep reads the session's
+`span.model_request_end` events, prices them exactly as the recorder would,
+and logs `usage_sweep.exempt_skipped` with `tenant_id`, `managed_session_id`,
+`reason`, `model_id`, `priced` (false for a model with no published rates,
+which prices at zero as in the recorder), `model_calls`, the four token
+counts, `cost_usd` (the raw price) and `would_be_debit_usd` (with
+`DAIMON_BILLING__MARKUP` applied). Each pass ends with one
+`usage_sweep.completed` line carrying `recorded`, `exempt_sessions`,
+`exempt_model_calls`, `exempt_cost_usd` and `exempt_would_be_debit_usd`.
+
+Nothing is written to the database for these sessions, and the sweep has no
+watermark, so an exempt session is logged again on every tick for as long as
+Managed Agents lists it. Total the absorbed spend by distinct
+`managed_session_id` (taking its latest line), not by summing every line or
+the per-pass totals.
 
 ## Settings that turn things on
 
@@ -272,6 +305,9 @@ Two things those numbers are not. They are pre-markup, as above. And tenant
 aggregates exclude rows with no platform user attached, so spend recovered by
 the sweep from a session with no account stamp is debited to the ledger but
 does not appear in the panel's tenant total.
+Usage the operator absorbs (`BillingExempt` sessions) is in neither the
+ledger nor the panel; it appears only in the sweep's logs, as described in
+[Seeing absorbed spend](#seeing-absorbed-spend).
 
 For a single finished turn there is `get_turn_cost` in
 `packages/adapters/mcp/daimon/adapters/mcp/tools/agent_chat.py`, which folds

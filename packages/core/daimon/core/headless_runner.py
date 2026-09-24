@@ -62,7 +62,13 @@ from daimon.core.sessions import create_session
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.driver import run_turn as drive_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
-from daimon.core.turn.posture import AutoApprove, Billed, BillingExempt, BillingPosture
+from daimon.core.turn.posture import (
+    AutoApprove,
+    Billed,
+    BillingExempt,
+    BillingPosture,
+    ExemptReason,
+)
 from daimon.core.turn.state import TurnState, extract_final_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -153,7 +159,9 @@ async def run_turn(
        one window, two disjoint legs, no double enforcement), and a billing
        posture of ``Billed(record=usage_record)`` when a
        ``usage_record_factory`` was given, else
-       ``BillingExempt(reason="headless-unrecorded")``. A routine turn now
+       ``BillingExempt(reason="headless-unrecorded")``. The exempt case is
+       also stamped on the session at step 2 (``daimon_billing_exempt``), so
+       the usage sweep skips it rather than debiting the tenant. A routine turn now
        inherits the driver's full liveness story — status-checked
        eventless-cycle reconnect, the per-call read timeout, the cancel race,
        the hardened render error policy — instead of a bespoke bare drain
@@ -185,6 +193,12 @@ async def run_turn(
     (platform, user, guild) via ``functools.partial`` before fire time.
     """
     effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
+    # Decided before the session exists so the session carries it: an
+    # unrecorded run is stamped exempt, and the usage sweep then skips it
+    # instead of debiting the tenant for a turn nobody meant to bill.
+    billing_exempt: ExemptReason | None = (
+        "headless-unrecorded" if usage_record_factory is None else None
+    )
 
     async def _assemble_session() -> BetaManagedAgentsSession:
         agent = await anthropic.beta.agents.retrieve(agent_id)
@@ -202,6 +216,7 @@ async def run_turn(
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
+            billing_exempt=billing_exempt,
         )
 
     try:

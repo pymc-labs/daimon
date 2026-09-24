@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TLA+ models for usage metering (live recorder, usage sweep, balance gate)
   and Slack event dedupe and redelivery, each calibrated against earlier bug
   fixes. `docs/billing.md` now states the overdraft bound for concurrent and
-  MCP-started turns, the sweep's attribution and its debits of operator-run
-  turns, and why deployments must not share a Managed Agents workspace.
+  MCP-started turns, the sweep's attribution, and why deployments must not
+  share a Managed Agents workspace.
 
 ### Changed
 
@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The usage sweep no longer attributes a session to a platform user from a
   different tenant when its account metadata points across tenant boundaries.
 
+- The scheduler's usage sweep no longer debits a tenant for `BillingExempt`
+  usage: MCP turns started by a caller with no platform user (an operator,
+  CLI or internal token) and headless runs with no recorder. Such sessions are
+  now stamped `daimon_billing_exempt` when created, the sweep skips them, and
+  the operator absorbs their cost. The sweep logs each skipped session's
+  would-be cost as `usage_sweep.exempt_skipped` and totals it per pass in
+  `usage_sweep.completed`. See `docs/billing.md`.
 - A session recovery that is rolled back (by the turn time limit or a
   cancel) after creating its replacement session now archives that session
   instead of leaving it running upstream with nothing pointing at it. The
