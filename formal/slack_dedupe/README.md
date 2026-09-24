@@ -19,8 +19,11 @@ three distinct user messages: A, then B, then A again. Steps:
    logical event with a fresh envelope id (`Redeliver`: a lost ack, a
    reconnect, or another Socket Mode connection), but only within `Window`
    ticks of the first delivery.
-2. `on_request` acks before any work and spawns one handler task per delivery.
-3. The handler checks the draining flag (`CheckDraining`).
+2. `on_request` snapshots whether the event arrived before drain, acks, then
+   spawns one handler task per delivery.
+3. The handler uses that callback-time snapshot in `CheckDraining`: a mention
+   received before drain proceeds even if its ack was suspended while drain
+   began; a mention first received during drain is rejected.
 4. The handler inserts and commits the `(team_id, channel, event_ts)` dedupe row
    (`Dedupe`). On a conflict the delivery is dropped.
 5. The handler either takes the thread or queues behind the running turn
@@ -41,7 +44,7 @@ redelivered, and committed dedupe rows survive.
 | `Orchestrate`, `busy`, `pending` | `_orchestrate` in [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py) (`_processing`, `_pending`) |
 | `FirstTurnEnds`, `PopQueue`, `DrainTurn`, `Release` | `_orchestrate` turn, drain loop (`_author_id` partition, per-author `try`), `finally` notice; `_handle_app_mention` error boundary (`render_error`) |
 | `Prune`, `Retention` | [`slack_event_dedup_sweep.py`](../../packages/core/daimon/core/slack_event_dedup_sweep.py) (`_RETENTION = 7 days`), [`delete_event_dedup_older_than`](../../packages/core/daimon/core/stores/slack_event_dedup.py) |
-| `StartDrain`, `Exit` | `drain_and_close` in [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py), [`__main__.py`](../../packages/adapters/slack/daimon/adapters/slack/__main__.py) |
+| `StartDrain`, `Exit` | `drain_and_close` in [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py) waits for tracked app-mention handlers as well as `_processing`, [`__main__.py`](../../packages/adapters/slack/daimon/adapters/slack/__main__.py) |
 
 Invariants:
 
@@ -50,7 +53,8 @@ Invariants:
 - `NoSilentLoss`: once the adapter is idle, every delivered mention got a turn
   or an error notice.
 - `NoUndocumentedLoss`: the same as `NoSilentLoss`, but it exempts a mention the
-  draining check rejected. That is the documented IN-02 drop.
+  draining check rejected only when its delivery began during drain. A
+  pre-drain delivery cannot be excused as a drain-window drop.
 
 | Config | Toggles vs `SlackDedupe.cfg` | Verdict | Distinct states |
 | --- | --- | --- | --- |
@@ -58,9 +62,10 @@ Invariants:
 | `SlackPre997b3d8` | `PartitionByAuthor = FALSE` | violates `TurnPrincipal` | 268,977, trace 16 |
 | `SlackPre0cda77e` | `NotifyOnFailure = FALSE` | violates `NoSilentLoss` | 595, trace 6 |
 | `SlackShortRetention` | `Retention = 1 < Window` | violates `AtMostOneTurn` | 850,886, trace 18 |
-| `SlackExitSafety` | `AllowExit`, `AllowDrain`, `MaxClock = 1`; checks `AtMostOneTurn`, `TurnPrincipal` | clean | 1,826,463 (depth 26) |
+| `SlackExitSafety` | `AllowExit`, `AllowDrain`, `MaxClock = 1`; checks `AtMostOneTurn`, `TurnPrincipal` | clean | 735,303 (depth 27) |
 | `SlackCrashLoss` | `AllowExit` (plain crash, any time after the ack) | violates `NoSilentLoss` | 48, trace 4 |
-| `SlackDrainWindow` | `AllowExit`, `AllowDrain`; checks `NoUndocumentedLoss` | violates | 974, trace 6 |
+| `SlackDrainWindow` | `AllowExit`, `AllowDrain`; checks `NoUndocumentedLoss` | clean | 3,833,637 (depth 32) |
+| `SlackPreDrainAckLoss` | `HonorPreDrainAck = FALSE`; checks `NoUndocumentedLoss` | violates `NoUndocumentedLoss` | 64, trace 4 |
 
 ## Calibration
 
@@ -71,7 +76,8 @@ Invariants:
 
 ## Findings
 
-No new live bug in the modelled boundary. What the model establishes:
+The audit found and closed one graceful-drain loss window. What the model
+establishes:
 
 - **At most one turn per delivered mention holds.** It holds across
   redeliveries, a second connection racing the first, crashes, and SIGTERM
@@ -93,17 +99,25 @@ No new live bug in the modelled boundary. What the model establishes:
   does not redeliver. After the commit, a redelivery would be dropped by the
   committed row anyway. The same holds
   for queued mentions and a drain whose 50 s grace expires.
-- **Residual, same class: the drain window** (`SlackDrainWindow`), confirmed in
-  the code. `drain_and_close` waits only for `_processing` to empty. A mention
-  that passed the `draining` check before SIGTERM, but has not reached
-  `self._processing.add` yet, is lost when the drain sees an empty set and
-  closes. The mention can be waiting on `_wait_for_orphan_recovery()` (at boot),
-  the dedupe insert, the token lookup, or the setup-binding read. No reply is
-  ever posted. This is not the documented IN-02 case (which covers mentions
-  arriving during the drain), but it has the same cause (ack-first) and the
-  same outcome. DECISION: documented, not fixed. Waiting on in-flight handlers
-  in `drain_and_close` would narrow it. It is realistic mainly for a SIGTERM
-  during a slow boot recovery.
+- **Graceful drain now waits for acked mention handlers as well as
+  `_processing`** (`SlackDrainWindow`). It also preserves callback-time
+  admission across an ack-to-handler handoff: the pre-fix trace in
+  `SlackPreDrainAckLoss` delivers a mention, starts drain while its ack is
+  suspended, then drops it when the handler checks the now-true drain flag.
+  The listener now passes its pre-drain snapshot into the handler, so that
+  already-accepted mention reaches orchestration; new callbacks during drain
+  remain rejected. The wait shares the existing 50-second grace bound; a
+  handler still active when that bound expires can still be lost. The model's
+  successful drain path assumes the grace window has not expired.
+- **Hard-crash residual: process death after the ack can lose a mention**
+  (`SlackCrashLoss`), before or after the dedupe commit. Slack retries failed,
+  unacked Socket Mode events, but an acked event is considered received.
+  Retrying a durable job after a crash is not generally safe: the process can
+  die after the Managed Agents turn has incurred usage or performed a tool or
+  external action but before the job is marked complete, so replay could double
+  bill or repeat effects. This needs an explicit at-most-once versus
+  at-least-once product decision plus idempotency boundaries before runtime
+  replay is added.
 - The uninstall teardown (`delete_event_dedup_for_team`) also removes rows. A
   redelivery of a pre-uninstall event after a reinstall within Slack's retry
   window would be admitted again. This is not modelled, because it needs an
@@ -113,7 +127,9 @@ No new live bug in the modelled boundary. What the model establishes:
 
 - One thread and three mentions from two authors. `MaxRedeliveries = 1`, and
   `MaxClock = 3` (1 for `SlackExitSafety`). There is one adapter process at a
-  time. A replacement is a restart with empty memory.
+  time. A replacement is a restart with empty memory. The graceful-drain model
+  covers completion within the grace period; expiry is represented by the
+  hard-exit residual.
 - A second Socket Mode connection receiving a redelivery is modelled as a
   concurrent handler. The dedupe PK serializes the handlers. Per-thread
   serialization (`_processing`) is in-memory and per process. Two replicas

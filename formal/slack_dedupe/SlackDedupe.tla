@@ -22,7 +22,8 @@ CONSTANTS
     PartitionByAuthor, \* drain runs one turn per author (997b3d8)
     NotifyOnFailure,   \* a failed turn posts an error into the thread (0cda77e)
     AllowExit,         \* the adapter process may crash or finish a SIGTERM drain
-    AllowDrain         \* SIGTERM sets the draining flag before the process exits
+    AllowDrain,        \* SIGTERM sets the draining flag before the process exits
+    HonorPreDrainAck   \* preserve callback-time admission across a later drain
 
 \* Three distinct user messages in one thread: A, then B, then A again.
 Mentions == {1, 2, 3}
@@ -33,7 +34,7 @@ Deliveries == 1..(Cardinality(Mentions) + MaxRedeliveries)
 VARIABLES
     clock,
     firstAt,      \* [Mentions -> clock of first delivery, or MaxClock + 1 if none]
-    handler,      \* [Deliveries -> <<mention, phase>>]; phase "none" = unused slot
+    handler,      \* [Deliveries -> <<mention, phase, receivedBeforeDrain>>]
     redelivered,  \* redeliveries used
     dedup,        \* [Mentions -> clock the row was inserted, or Never]
     running,      \* mentions in the turn currently running ({} = thread idle)
@@ -54,7 +55,7 @@ Phases == {"none", "spawned", "checked", "admitted", "done", "dropped", "lost"}
 Init ==
     /\ clock = 0
     /\ firstAt = [m \in Mentions |-> Never]
-    /\ handler = [d \in Deliveries |-> <<CHOOSE m \in Mentions : TRUE, "none">>]
+    /\ handler = [d \in Deliveries |-> <<CHOOSE m \in Mentions : TRUE, "none", FALSE>>]
     /\ redelivered = 0
     /\ dedup = [m \in Mentions |-> Never]
     /\ running = {}
@@ -69,7 +70,7 @@ Init ==
 FreeSlot == CHOOSE d \in Deliveries : handler[d][2] = "none"
 HasFreeSlot == \E d \in Deliveries : handler[d][2] = "none"
 Delivered(m) == firstAt[m] # Never
-SetPhase(d, p) == handler' = [handler EXCEPT ![d] = <<handler[d][1], p>>]
+SetPhase(d, p) == handler' = [handler EXCEPT ![d] = <<handler[d][1], p, handler[d][3]>>]
 
 (* Time moves in ticks far longer than a handler's path from the ack to   *)
 (* insert_if_new (milliseconds; at boot, the orphan-recovery wait). A tick *)
@@ -87,7 +88,7 @@ Deliver(m) ==
     /\ ~Delivered(m)
     /\ HasFreeSlot
     /\ firstAt' = [firstAt EXCEPT ![m] = clock]
-    /\ handler' = [handler EXCEPT ![FreeSlot] = <<m, "spawned">>]
+    /\ handler' = [handler EXCEPT ![FreeSlot] = <<m, "spawned", ~draining>>]
     /\ UNCHANGED <<clock, redelivered, dedup, running, groups, busy, pending, turns,
                    notified, draining, alive>>
 
@@ -99,16 +100,17 @@ Redeliver(m) ==
     /\ clock - firstAt[m] < Window
     /\ redelivered < MaxRedeliveries
     /\ HasFreeSlot
-    /\ handler' = [handler EXCEPT ![FreeSlot] = <<m, "spawned">>]
+    /\ handler' = [handler EXCEPT ![FreeSlot] = <<m, "spawned", ~draining>>]
     /\ redelivered' = redelivered + 1
     /\ UNCHANGED <<clock, firstAt, dedup, running, groups, busy, pending, turns, notified,
                    draining, alive>>
 
-(* _handle_app_mention step 1: the draining fast path (no I/O). *)
+(* _handle_app_mention carries the listener's callback-time drain snapshot. *)
 CheckDraining(d) ==
     /\ alive
     /\ handler[d][2] = "spawned"
-    /\ SetPhase(d, IF draining THEN "dropped" ELSE "checked")
+    /\ SetPhase(d, IF (HonorPreDrainAck /\ handler[d][3]) \/ ~draining
+                    THEN "checked" ELSE "dropped")
     /\ UNCHANGED <<clock, firstAt, redelivered, dedup, running, groups, busy, pending,
                    turns, notified, draining, alive>>
 
@@ -231,19 +233,22 @@ StartDrain ==
     /\ UNCHANGED <<clock, firstAt, handler, redelivered, dedup, running, groups, busy,
                    pending, turns, notified, alive>>
 
-(* ... and exits once _processing is empty (or the grace window ends), or  *)
+(* ... and exits after mention handlers and _processing drain (or the       *)
+(* grace window ends), or                                                    *)
 (* the process simply crashes. In-memory work dies; acked events are not   *)
 (* redelivered; the dedupe rows stay. A replacement process takes over.    *)
 Exit ==
     /\ AllowExit
     /\ alive
     /\ (AllowDrain => draining)
-    \* drain_and_close awaits (sleep/close) before exit, so an already
-    \* spawned handler runs its synchronous draining check first.
-    /\ (AllowDrain => \A d \in Deliveries : handler[d][2] # "spawned")
+    \* Successful drain waits for every tracked mention handler and active
+    \* thread turn to finish before exit; grace expiry is not modeled here.
+    /\ (AllowDrain => \A d \in Deliveries :
+                       handler[d][2] \notin {"spawned", "checked", "admitted"})
+    /\ (AllowDrain => ~busy)
     /\ handler' = [d \in Deliveries |->
                      IF handler[d][2] \in {"spawned", "checked", "admitted"}
-                     THEN <<handler[d][1], "lost">> ELSE handler[d]]
+                     THEN <<handler[d][1], "lost", handler[d][3]>> ELSE handler[d]]
     /\ running' = {}
     /\ groups' = <<>>
     /\ busy' = FALSE
@@ -279,7 +284,7 @@ Spec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------
 TypeOK ==
-    /\ handler \in [Deliveries -> Mentions \X Phases]
+    /\ handler \in [Deliveries -> Mentions \X Phases \X BOOLEAN]
     /\ running \subseteq Mentions
     /\ busy \in BOOLEAN
     /\ notified \subseteq Mentions
@@ -297,7 +302,11 @@ TurnPrincipal == \A t \in turns : \A m \in t.members : Author(m) = t.author
 NoSilentLoss == Quiescent => \A m \in Mentions : Delivered(m) => Answered(m)
 
 (* The documented drop (IN-02): a mention the draining check rejected.     *)
-DroppedByDrainCheck(m) == \E d \in Deliveries : handler[d] = <<m, "dropped">>
+DroppedByDrainCheck(m) ==
+    \E d \in Deliveries :
+        handler[d][1] = m /\ handler[d][2] = "dropped" /\ ~handler[d][3]
+    /\ \A d2 \in Deliveries :
+        handler[d2][1] = m /\ handler[d2][3] => handler[d2][2] # "lost"
 
 (* NoSilentLoss minus the documented drain-window drop. *)
 NoUndocumentedLoss ==

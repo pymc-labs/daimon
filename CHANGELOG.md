@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Slack shutdown now waits for acknowledged mention handlers that are still
+  preparing a turn, closing the graceful-drain loss window before thread
+  registration. A hard process crash after acknowledgement can still lose work.
 - A Cancel click on a newly posted Slack status card is routed while Slack's
   `chat.postMessage` response is still pending; after the response, routing
   follows the message timestamp so recovery can rebind the active turn.
