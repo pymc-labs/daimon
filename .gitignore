@@ -43,3 +43,4 @@ err.txt
 agents_err.txt
 download.html
 .playwright-mcp/
+formal/tla2tools.jar

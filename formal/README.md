@@ -50,7 +50,25 @@ printf '%s  %s\n' '936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050
 export TLA2TOOLS_JAR="$HOME/.cache/daimon/tla/tla2tools.jar"
 ```
 
-From the repository root, follow the sequential run commands in
+Then check every configuration from the repository root:
+
+```sh
+formal/check.sh    # about 30 s
+```
+
+`check.sh` runs each row of [`expected.tsv`](expected.tsv) (model directory,
+spec, config, expected verdict, TLC flags) and fails unless TLC's verdict
+matches: `clean` for safe configurations, `violates:<Invariant>` or
+`violates:<Property>` for the deliberately unsafe configurations that keep a
+counterexample reproducible. The
+[`formal-models`](../.github/workflows/formal-models.yml) workflow runs it on
+pull requests that touch `formal/` or a source file a model describes. When
+you change that code, update the matching model action; when you close a gap,
+add a safe configuration expected `clean` and keep the unsafe one expected
+`violates:…`. Add every new configuration to `expected.tsv`.
+
+To run one configuration and read its trace, follow the sequential run
+commands in
 [`turn/README.md`](turn/README.md), [`scheduler/README.md`](scheduler/README.md),
 [`session_preparation/README.md`](session_preparation/README.md),
 [`continuation/README.md`](continuation/README.md),
