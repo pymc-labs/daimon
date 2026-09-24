@@ -29,6 +29,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
+import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
 from daimon.core.pricing import MODEL_PRICING
@@ -36,6 +37,8 @@ from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.tenants import list_all_tenant_ids
 from daimon.core.usage_recording import record_turn_usage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+log = structlog.get_logger(__name__)
 
 
 async def sweep_headless_usage(
@@ -61,14 +64,26 @@ async def sweep_headless_usage(
         tenant_raw = session.metadata.get(MA_METADATA_KEY_TENANT)
         if tenant_raw is None:
             continue
-        tenant_id = uuid.UUID(tenant_raw)
+        try:
+            tenant_id = uuid.UUID(tenant_raw)
+        except ValueError:
+            # An invalid tenant tag cannot be attributed safely; skip only this
+            # session so it cannot prevent later sessions from being swept.
+            log.warning(
+                "usage_sweep.session_skipped",
+                session_id=session.id,
+                reason="invalid_tenant_metadata",
+            )
+            continue
         if tenant_id not in known_tenants:
             # Session belongs to a tenant this deployment doesn't own. A shared MA
             # workspace holds sessions from other deployments/evals whose tenant_ids
             # are absent from this DB; recording them violates usage_events' FK and
             # is meaningless (not our tenant to bill). Skip.
             continue
-        platform_user_id = await _resolve_platform_user_id(sessionmaker, session.metadata)
+        platform_user_id = await _resolve_platform_user_id(
+            sessionmaker, session.metadata, session_id=session.id
+        )
         model_id = session.agent.model.id
         pricing = MODEL_PRICING.get(model_id)
 
@@ -92,6 +107,8 @@ async def sweep_headless_usage(
 async def _resolve_platform_user_id(
     sessionmaker: async_sessionmaker[AsyncSession],
     metadata: dict[str, str],
+    *,
+    session_id: str,
 ) -> str | None:
     """Resolve the owning human's platform_user_id from the session's daimon_account.
 
@@ -102,6 +119,16 @@ async def _resolve_platform_user_id(
     account_raw = metadata.get(MA_METADATA_KEY_ACCOUNT)
     if account_raw is None:
         return None
+    try:
+        account_id = uuid.UUID(account_raw)
+    except ValueError:
+        # Account attribution is optional; keep tenant usage billing intact.
+        log.warning(
+            "usage_sweep.member_attribution_omitted",
+            session_id=session_id,
+            reason="invalid_account_metadata",
+        )
+        return None
     async with sessionmaker() as s:
-        identity = await get_account_with_tenant(s, account_id=uuid.UUID(account_raw))
+        identity = await get_account_with_tenant(s, account_id=account_id)
     return identity.platform_user_id if identity is not None else None
