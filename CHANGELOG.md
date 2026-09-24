@@ -7,10 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Bounded TLA+ models and a source-linked coverage report for turn rendering,
+  scheduling, session preparation, continuations, adapter recovery, billing,
+  and wizard submission.
+
 ### Changed
 
 - The documentation site carries daimon's own look: the readme sticker as
   logo and favicon, and a palette taken from it.
+
+### Fixed
+
+- Reconnect replay keeps the current turn's answer and rendered content when
+  the event history is incomplete or ends with a session termination; repeated
+  SSE events no longer repeat adapter callbacks.
+- Stripe Checkout credits once per payment intent. Concurrent refunds and
+  disputes cannot claw back more than the original credit, and a refund that
+  arrives before Checkout completion is applied when the credit appears.
+- Discord and Slack orphan recovery no longer clears a newer active turn;
+  Slack retries a failed startup sweep before admitting turns.
+- A stale wizard submit cannot replace newer answers, and expiry cannot
+  abandon an already submitted session.
 
 ## [0.2.0] - 2026-09-21
 
