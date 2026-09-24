@@ -156,6 +156,11 @@ log = structlog.get_logger()
 # and health-server cleanup after the drain completes.
 _DRAIN_GRACE_S: float = 50.0
 
+# Recovery gates turn admission, so retry transient failures with a capped
+# delay instead of leaving the process permanently unable to turn.
+_ORPHAN_RECOVERY_RETRY_DELAY_S: float = 1.0
+_ORPHAN_RECOVERY_MAX_RETRY_DELAY_S: float = 30.0
+
 _CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
 _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
 
@@ -280,7 +285,15 @@ class SlackApp:
         return self._orphan_recovery_task
 
     async def _recover_orphaned_turns(self) -> None:
-        await retire_orphaned_turns(self.runtime, now=datetime.now(UTC))
+        delay_s = _ORPHAN_RECOVERY_RETRY_DELAY_S
+        while True:
+            try:
+                await retire_orphaned_turns(self.runtime, now=datetime.now(UTC))
+                return
+            except Exception:
+                log.exception("slack.turn.orphan_recovery_failed", retry_delay_s=delay_s)
+                await asyncio.sleep(delay_s)
+                delay_s = min(delay_s * 2, _ORPHAN_RECOVERY_MAX_RETRY_DELAY_S)
 
     async def _wait_for_orphan_recovery(self) -> None:
         if self._orphan_recovery_task is not None:

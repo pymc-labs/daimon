@@ -262,36 +262,19 @@ async def retire_orphaned_turns(runtime: SlackRuntime, *, now: datetime) -> None
     has not changed since this function's read still matches the predicate.
     Gate on an owner id before scaling this service out.
 
-    The actual race: ``list_orphaned_turns`` is read ONCE up front, for every
-    tenant, and the per-tenant, per-row loop that follows is fully sequential
-    with live ``chat_update`` calls and no concurrency bound -- unlike the
-    reconcile half of this module, which runs at a bounded semaphore. So the
-    window between a given row's read and its clear scales with total sweep duration,
-    not with one row's edit latency; a row late in a large sweep is exposed
-    longest, which is exactly the fleet-wide-crash case this function exists
-    for. Socket Mode dispatch is already live before the sweep task is created:
-    the listener is registered and the client connected before
-    ``asyncio.create_task`` schedules this coroutine, so a mention can be in
-    flight before this function gets its first scheduling opportunity.
+    ``list_orphaned_turns`` snapshots every row once, then the per-tenant,
+    per-row loop is sequential with live ``chat_update`` calls. The sweep can
+    take a while when many cards need edits. The entrypoint starts this task
+    before ``client.connect()``, and mention/continuation turn admission waits
+    for it to finish, so this process cannot register a new active marker in
+    the snapshot window. A transient sweep failure is retried with capped
+    backoff by ``SlackApp``; admission stays gated until a complete pass
+    succeeds.
 
-    The card edit itself was never the unsafe half. The ``chat_update`` below
-    targets the ts read at sweep start, and a newly admitted turn posts a NEW
-    card at a NEW ts before its own marker is written -- so the ts this
-    function holds always names the genuinely frozen card, never the live
-    one. Even when the new turn reuses the same mapping row, the edit lands
-    on the dead card and the clear below then correctly skips.
-
-    What the clear does about the exposure above: it is now predicated on the
-    marker still naming the message this function read, so a marker written
-    since the read survives. A skip is self-healing -- the process that wrote
-    it clears it on its own terminal path, or crashes and is swept on the
-    next boot.
-
-    The boot ordering was deliberately NOT changed to close the window
-    described above: completing this sweep before ``client.connect()`` would
-    diverge from the Discord adapter, whose sweep also runs after connect,
-    and would delay event acceptance by the sweep's duration. The
-    compare-and-clear makes the window harmless instead of absent.
+    The compare-and-clear remains useful if another process updates the row
+    after this sweep's snapshot: a marker written since the read survives.
+    This does not make overlapping adapter processes safe, as described above;
+    the sibling's old marker can still match the predicate.
     """
     async with runtime.sessionmaker() as session:
         orphans = await list_orphaned_turns(session, platform="slack")
