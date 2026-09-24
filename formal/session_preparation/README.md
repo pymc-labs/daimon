@@ -1,16 +1,17 @@
 # Per-thread session preparation
 
-Run from the repository root (Java 21 and the TLA+ tools JAR are required):
+Run from the repository root after setting `TLA2TOOLS_JAR` as described in
+[`formal/README.md`](../README.md). Java must be available on `PATH`.
 
 ```sh
-export TLA2TOOLS_JAR=/path/to/tla2tools.jar
-export JAVA=/path/to/java21/bin/java
-"$JAVA" -jar "$TLA2TOOLS_JAR" \
-  -metadir /tmp/daimon-tlc-session-preparation-safety \
+mkdir -p "${TMPDIR:-/tmp}/daimon-tlc-session-preparation-safety"
+mkdir -p "${TMPDIR:-/tmp}/daimon-tlc-session-preparation-progress"
+java -jar "$TLA2TOOLS_JAR" \
+  -metadir "${TMPDIR:-/tmp}/daimon-tlc-session-preparation-safety" \
   -config formal/session_preparation/SessionPreparation.cfg \
   formal/session_preparation/SessionPreparation.tla
-"$JAVA" -jar "$TLA2TOOLS_JAR" \
-  -metadir /tmp/daimon-tlc-session-preparation-progress \
+java -jar "$TLA2TOOLS_JAR" \
+  -metadir "${TMPDIR:-/tmp}/daimon-tlc-session-preparation-progress" \
   -config formal/session_preparation/SessionPreparationProgress.cfg \
   formal/session_preparation/SessionPreparation.tla
 ```
