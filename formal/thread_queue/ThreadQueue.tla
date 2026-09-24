@@ -20,7 +20,7 @@ CONSTANTS
     PartitionByAuthor,      \* 997b3d8: the drain runs one turn per author
     ClearBeforeDispatch,    \* 090ecc1: the tail clears its marker before dispatching
     RedispatchAfterRelease, \* #233 (merged): a dispatch skipped while processing reruns at release
-    DrainAfterDispatch,     \* #237 (open): an out-of-turn dispatch drains _pending before releasing
+    DrainAfterDispatch,     \* #237 (merged): an out-of-turn dispatch drains _pending before releasing
     WithHandoff,            \* the first turn may queue a handoff continuation
     WithForm                \* a credential form may record + dispatch a continuation
 

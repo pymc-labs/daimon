@@ -46,8 +46,8 @@ oauth	VaultSlot	MirrorRotate	clean	13	-	rotation updates in place
 oauth	VaultSlot	GrantVsMirror	violates:SignInNeverLost	17	-	regression, fixed on main by #230: a concurrent mirror makes the grant write 409 after consume
 oauth	VaultSlot	GrantVsStaleMirror	violates:MirrorNever404	14	-	regression, fixed on main by #230: the grant write replaces a stale token under a mirror update
 oauth	VaultSlot	GrantRetry	clean	259	-	#230 (merged): grant write re-reads on 404/409, mirror re-reads on 404; clean with two concurrent mirrors
-oauth	VaultSlot	GrantRetryThreeMirrors	violates:SignInNeverLost	2875	-	bug on main, fix proposed in #239 (open): three concurrent mirrors exhaust the grant write's three attempts
-oauth	VaultSlot	GrantLocked	clean	119	-	#239 (open) shape: grant write and mirror under the vault lock, three mirrors
+oauth	VaultSlot	GrantRetryThreeMirrors	violates:SignInNeverLost	2875	-	pre-#239 bug, now fixed: three concurrent mirrors exhaust the grant write's three attempts
+oauth	VaultSlot	GrantLocked	clean	119	-	#239 (merged) shape: grant write and mirror under the vault lock, three mirrors
 oauth	SlackInstall	SlackReinstallPre231	violates:ReinstallLeavesLiveTenant	12	-	regression, fixed on main by #231: reinstall never clears archived_at
 oauth	SlackInstall	DiscordRejoinShape	clean	12	-	Discord rejoin clears the archive (#132 shape), no late teardown
 oauth	SlackInstall	SlackLateTeardown	violates:ReinstallLeavesLiveTenant	52	-	ablation of #231: archive cleared but a late teardown deletes the reinstall's token
@@ -60,8 +60,8 @@ thread_queue	ThreadQueue	HandoffDispatchFirst	violates:HandoffOnDestination	15	-
 thread_queue	ThreadQueue	HandoffClearFirst	clean	75	-	clear then dispatch
 thread_queue	ThreadQueue	FormDuringTail	violates:NoStrandedContinuation	200	-	regression, fixed on main by #233: a dispatch skipped during the tail waited for the next turn
 thread_queue	ThreadQueue	FormRedispatch	clean	514	-	#233 (merged): skipped dispatch reruns after release (NoStrandedMention is in the FormDispatch rows)
-thread_queue	ThreadQueue	FormDispatchNoDrain	violates:NoStrandedMention	82	-	bug on main, fix proposed in #237 (open): a mention queued behind an out-of-turn dispatch is never drained
-thread_queue	ThreadQueue	FormDispatchDrain	clean	450	-	#237 (open) shape: the dispatch drains queued mentions before releasing the thread
+thread_queue	ThreadQueue	FormDispatchNoDrain	violates:NoStrandedMention	82	-	pre-#237 bug, now fixed: a mention queued behind an out-of-turn dispatch is never drained
+thread_queue	ThreadQueue	FormDispatchDrain	clean	450	-	#237 (merged) shape: the dispatch drains queued mentions before releasing the thread
 adapter_recovery	AdapterOverlap	OverlapPreCAS	violates:NoStaleClear	229	-	pre-2d3a002 (287b719 shape): blind sweep clear wipes a marker written after its snapshot
 adapter_recovery	AdapterOverlap	OverlapCASNoStale	clean	561	-	0bc1b14/2d3a002: compare-and-clear spares a marker written after the snapshot (clean by construction)
 adapter_recovery	AdapterOverlap	OverlapCASOnly	violates:NoStolenClear	88	-	pre-c923083 (Slack): compare-and-clear alone; a marker written before the snapshot still matches

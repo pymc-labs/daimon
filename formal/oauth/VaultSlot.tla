@@ -28,7 +28,7 @@ CONSTANTS
     RotateInPlace,      \* dc2d866: a stale stamp is updated in place
     MirrorRetries404,   \* #230 (merged): an update whose id vanished re-reads the slot
     OAuthRetries,       \* #230 (merged): the grant write re-reads and replaces on 404/409
-    OAuthLocked,        \* #239 (open): grant write and mirror under the vault lock
+    OAuthLocked,        \* #239 (merged): grant write and mirror under the vault lock
     MaxTries
 
 None == "none"
