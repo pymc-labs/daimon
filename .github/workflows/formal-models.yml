@@ -43,6 +43,19 @@ on:
       - "packages/core/daimon/core/stores/wizard_session.py"
       - "packages/core/daimon/core/wizard/state.py"
       - "packages/core/daimon/core/wizard_sweep.py"
+      # oauth callbacks, vault slot, slack install
+      - "packages/core/daimon/core/mcp_oauth/**"
+      - "packages/core/daimon/core/stores/mcp_oauth_flows.py"
+      - "packages/core/daimon/core/agent_mcp_credentials.py"
+      - "packages/core/daimon/core/mcp_vault.py"
+      - "packages/core/daimon/core/mcp_credential_sweep.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/oauth_mcp.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/oauth_slack.py"
+      - "packages/core/daimon/core/slack_oauth.py"
+      - "packages/core/daimon/core/defaults/provisioning.py"
+      # thread queue / adapter overlap
+      - "packages/core/daimon/core/turn/run.py"
+      - "packages/core/daimon/core/stores/thread_sessions.py"
   workflow_dispatch:
 
 permissions:

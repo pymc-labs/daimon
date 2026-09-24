@@ -32,3 +32,41 @@ wizard	WizardLifecycle	WizardLifecycle	clean	92	-	guarded submit and sweep: safe
 wizard	WizardLifecycle	WizardLifecycleProgress	clean	92	-	liveness: submit settles, second submit loses, expiry settles
 wizard	WizardLifecycle	WizardStaleSubmit	violates:SubmittedUsesCurrentAnswers	37	-	pre-fix: stale submit overwrote a newer edit
 wizard	WizardLifecycle	WizardSweepRace	violates:SubmittedNeverDowngrades	67	-	pre-fix: expiry sweep downgraded an in-flight submit
+# ---- oauth callbacks, vault slot, slack install, thread queue, adapter overlap (#236) ----
+oauth	McpOAuthFlow	McpOAuthFlow	clean	4162	-	flow row: client CAS, single consume, completion stamp
+oauth	McpOAuthFlow	McpOAuthFlowPreClientCAS	violates:ExchangeMatchesIssuer	271	-	pre-7a5a74b: a reopened link overwrote the client the first browser authorised as
+oauth	McpOAuthFlow	McpOAuthFlowPreCompletion	violates:ConnectedImpliesGrant	18	-	pre-41234e9: a declined sign-in counted as connected
+oauth	McpOAuthFlow	McpOAuthFlowNoConsumeCAS	violates:AtMostOneConsume	140	-	mutation: consume without used_at IS NULL spends a replayed flow twice
+oauth	VaultSlot	VaultPreLock	violates:NoDuplicateVault	19	-	pre-2cbe69e: concurrent session creates make two vaults
+oauth	VaultSlot	VaultLocked	clean	13	-	vault get-or-create under the advisory lock
+oauth	VaultSlot	MirrorPreGrantSkip	violates:MirrorNeverFails409	3	-	pre-39450e8: mirroring onto a URL held by a grant fails every turn
+oauth	VaultSlot	MirrorGrantSkip	clean	9	-	mirror skips grant-held URLs and tolerates 409
+oauth	VaultSlot	MirrorPreRotate	violates:MirrorLeavesCurrent	3	-	pre-dc2d866: a rotated token never reaches an existing vault
+oauth	VaultSlot	MirrorRotate	clean	13	-	rotation updates in place
+oauth	VaultSlot	GrantVsMirror	violates:SignInNeverLost	17	-	main before #230: a concurrent mirror makes the grant write 409 after consume
+oauth	VaultSlot	GrantVsStaleMirror	violates:MirrorNever404	14	-	main before #230: the grant write replaces a stale token under a mirror update
+oauth	VaultSlot	GrantRetry	clean	259	-	#230: grant write re-reads on 404/409, mirror re-reads on 404
+oauth	VaultSlot	GrantLocked	clean	35	-	alternative: grant write and mirror under the vault lock
+oauth	SlackInstall	SlackReinstallCurrent	violates:ReinstallLeavesLiveTenant	12	-	main before #231: reinstall never clears archived_at
+oauth	SlackInstall	DiscordRejoinShape	clean	12	-	Discord rejoin clears the archive (#132 shape), no late teardown
+oauth	SlackInstall	SlackLateTeardown	violates:ReinstallLeavesLiveTenant	52	-	archive cleared but a late teardown deletes the reinstall's token
+oauth	SlackInstall	SlackGuardWrongOrder	violates:ReinstallLeavesLiveTenant	19	-	guarded teardown between archive clear and token write re-archives
+oauth	SlackInstall	SlackReinstallFixed	clean	20	-	#231: token before archive clear, guarded one-transaction teardown
+thread_queue	ThreadQueue	QueueBeforeReact	clean	32	-	enqueue before the reaction, per-author drain
+thread_queue	ThreadQueue	DiscordReactFirst	violates:NoStrandedMention	51	-	Discord before #228: reaction awaited before enqueue strands a mention
+thread_queue	ThreadQueue	DrainMergedAuthors	violates:PrincipalIsAuthor	19	-	pre-997b3d8: drain ran every author under the first
+thread_queue	ThreadQueue	HandoffDispatchFirst	violates:HandoffOnDestination	15	-	pre-090ecc1: dispatch before marker clear ran the handoff in the old session
+thread_queue	ThreadQueue	HandoffClearFirst	clean	75	-	clear then dispatch
+thread_queue	ThreadQueue	FormDuringTail	violates:NoStrandedContinuation	149	-	main: a dispatch skipped during the tail waits for the next turn
+thread_queue	ThreadQueue	FormRedispatch	clean	399	-	skipped dispatch reruns at release
+adapter_recovery	AdapterOverlap	OverlapPreCAS	violates:NoStolenClear	88	-	pre-0bc1b14: blind sweep clear, admission before recovery
+adapter_recovery	AdapterOverlap	OverlapCASOnly	violates:NoStolenClear	88	-	pre-c923083: compare-and-clear alone
+adapter_recovery	AdapterOverlap	OverlapGated	clean	205	-	c923083: admission waits for recovery
+adapter_recovery	AdapterOverlap	OrphanedTurnReuse	violates:NoMessageIntoRunning	135	-	main before #232: restart orphan keeps running, next message ignored
+adapter_recovery	AdapterOverlap	OrphanSweepInterrupts	clean	187	-	#232: sweep interrupts the orphan
+adapter_recovery	AdapterOverlap	OrphanSendWaits	clean	197	-	alternative: never send into a running session
+adapter_recovery	AdapterOverlap	RollingOverlap	violates:NoStolenClear	86	-	assumption: overlapping processes reap the sibling's live marker
+adapter_recovery	AdapterOverlap	WizardBypassMessage	violates:NoMessageIntoRunning	102	-	accepted limitation: wizard turn beside a mention turn
+adapter_recovery	AdapterOverlap	WizardBypassRows	violates:AtMostOneLiveRow	291	-	accepted limitation: lock-free recovery beside a wizard bind
+adapter_recovery	AdapterOverlap	WizardBypassRowsLocked	clean	1580	-	recovery under the bind lock adopting a replacement
+adapter_recovery	AdapterOverlap	SingleProcessRecovery	clean	672	-	one process: lock-free recovery is safe
