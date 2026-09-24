@@ -383,6 +383,7 @@ async def _pump(
     # re-delivered `requires_action` idle after an eventless-cycle
     # reconnect must not be double-confirmed (T-19-08-B).
     confirmed_tool_use_ids: set[str] = set()
+    delivered_event_ids: set[str] = set()
 
     from daimon.core.turn.render import diff as _diff  # local import to avoid cycles
 
@@ -482,6 +483,7 @@ async def _pump(
                                 billing=billing,
                                 tool_confirmation=tool_confirmation,
                                 confirmed_tool_use_ids=confirmed_tool_use_ids,
+                                delivered_event_ids=delivered_event_ids,
                                 stream_read_timeout_s=stream_read_timeout_s,
                             )
                     break  # a terminal event was found — exit the outer loop too
@@ -715,6 +717,7 @@ async def _consume_with_reconnect(
     billing: BillingPosture,
     tool_confirmation: ToolConfirmation,
     confirmed_tool_use_ids: set[str],
+    delivered_event_ids: set[str],
     stream_read_timeout_s: float,
 ) -> None:
     """One attempt at the consume leg. On retry, replay + re-fold first."""
@@ -836,17 +839,19 @@ async def _consume_with_reconnect(
                 # `_CONNECTION_LOST` retry budget). The `finally` below
                 # closes the abandoned stream.
                 raise _EventlessCycle(reason="read_timeout") from None
-            # D-06: the one inline I/O the consume loop is allowed to do.
-            # A local Postgres write, correctness not delivery -- unlike the
-            # chat-API flush I/O this hook contract forbids, an unmetered
-            # event is revenue lost. Exceptions propagate (fail-closed).
-            match billing:
-                case Billed(record=record):
-                    if event.type == "span.model_request_end":
-                        await record(event=event)
-                case BillingExempt():
-                    pass
-            await lifecycle.on_sse_event(event)
+            if event.id not in delivered_event_ids:
+                # D-06: the one inline I/O the consume loop is allowed to do.
+                # A local Postgres write, correctness not delivery -- unlike the
+                # chat-API flush I/O this hook contract forbids, an unmetered
+                # event is revenue lost. Exceptions propagate (fail-closed).
+                match billing:
+                    case Billed(record=record):
+                        if event.type == "span.model_request_end":
+                            await record(event=event)
+                    case BillingExempt():
+                        pass
+                await lifecycle.on_sse_event(event)
+                delivered_event_ids.add(event.id)
             state_cell[0] = apply(state_cell[0], event)
             events_folded_cell[0] += 1
             if event.type == "session.status_terminated":

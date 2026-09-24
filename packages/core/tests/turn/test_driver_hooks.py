@@ -79,6 +79,36 @@ async def test_driver_calls_on_sse_event_for_each_upstream_event() -> None:
     )
 
 
+async def test_driver_does_not_forward_redelivered_event_to_lifecycle() -> None:
+    fa = FakeAnthropic()
+    message = make_agent_message(event_id="sevt_1", text="hello")
+    done = make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(message), RaiseConnection()],
+        [YieldEvent(message), YieldEvent(done)],
+    ]
+    fa.beta.sessions.events.replay_events = [message]
+    lifecycle = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lifecycle,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert [event.id for event in lifecycle.sse_events] == ["sevt_1", "sevt_2"], (
+        "replayed live events must not update adapter activity twice"
+    )
+    assert final.content == [TextBlock(kind="text", text="hello")], (
+        "the core reducer must keep one copy of the message"
+    )
+
+
 @pytest.mark.asyncio
 async def test_driver_calls_on_reconnect_on_connection_drop() -> None:
     fa = FakeAnthropic()
