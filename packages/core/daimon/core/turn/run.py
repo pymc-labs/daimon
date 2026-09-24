@@ -46,6 +46,7 @@ from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLif
 from daimon.core.turn.posture import Billed
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
+    CreatedSession,
     PreparedTurn,
     bind_recorder,
     create_ma_session,
@@ -256,6 +257,35 @@ class _Replacement:
     """True when another turn had already replaced the dead session."""
 
 
+_ORPHAN_ARCHIVE_TIMEOUT_S = 5.0
+"""How long a rolled-back recovery waits to archive the session it created.
+Short: the caller is usually unwinding a ceiling or a cancel."""
+
+
+async def _archive_orphaned_session(
+    anthropic: _anthropic.AsyncAnthropic, *, session_id: str
+) -> None:
+    """Best-effort archive of an upstream session no mapping row names.
+
+    Shielded so a second cancel does not abandon the call mid-flight, and
+    bounded so it cannot hold up the unwinding turn. A failure is logged and
+    swallowed: the error being unwound is the one the caller must see.
+    """
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(anthropic.beta.sessions.archive(session_id)),
+            timeout=_ORPHAN_ARCHIVE_TIMEOUT_S,
+        )
+    except Exception as err:
+        log.warning(
+            "turn.recovery_orphan_archive_failed",
+            session_id=session_id,
+            error=str(err)[:200],
+        )
+    else:
+        log.info("turn.recovery_orphan_archived", session_id=session_id)
+
+
 async def _replace_dead_session(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -279,76 +309,87 @@ async def _replace_dead_session(
     """
     admission = prepared.admission
     session_account_id = prepared.session_account_id
-    async with deps.sessionmaker() as db, db.begin():
-        await lock_preparation(
-            db,
-            tenant_id=tenant_id,
-            platform=platform,
-            thread_id=thread_id,
-            account_id=session_account_id,
-        )
-        dead_row = await get_thread_session_by_id(db, id=dead_mapping_id)
-        live = await get_live_thread_session(
-            db,
-            tenant_id=tenant_id,
-            platform=platform,
-            thread_id=thread_id,
-            account_id=session_account_id,
-        )
-        await mark_dead(db, id=dead_mapping_id)
+    created: CreatedSession | None = None
+    try:
+        async with deps.sessionmaker() as db, db.begin():
+            await lock_preparation(
+                db,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                account_id=session_account_id,
+            )
+            dead_row = await get_thread_session_by_id(db, id=dead_mapping_id)
+            live = await get_live_thread_session(
+                db,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                account_id=session_account_id,
+            )
+            await mark_dead(db, id=dead_mapping_id)
 
-        if live is not None and live.id != dead_mapping_id:
-            snapshot = live.effective_config
-            return _Replacement(
-                ma_session_id=live.ma_session_id,
-                mapping_id=live.id,
-                model_id=(snapshot.model_id if snapshot is not None else admission.agent.model.id),
-                transfer_kind=live.transfer_kind or "history",
-                previous_session=None,
-                adopted=True,
+            if live is not None and live.id != dead_mapping_id:
+                snapshot = live.effective_config
+                return _Replacement(
+                    ma_session_id=live.ma_session_id,
+                    mapping_id=live.id,
+                    model_id=(
+                        snapshot.model_id if snapshot is not None else admission.agent.model.id
+                    ),
+                    transfer_kind=live.transfer_kind or "history",
+                    previous_session=None,
+                    adopted=True,
+                )
+
+            # Whose conversation it was, for the quoted block's `from` attribute:
+            # the snapshot the dead session actually froze, or the responder
+            # resolved for this turn on a row written before snapshots existed.
+            dead_snapshot = dead_row.effective_config if dead_row is not None else None
+            from_agent_name = (
+                dead_snapshot.agent_name if dead_snapshot is not None else admission.agent.name
+            )
+            previous_session = await _replay_previous_session(
+                deps.anthropic,
+                session_id=dead_session_id,
+                from_agent_name=from_agent_name,
             )
 
-        # Whose conversation it was, for the quoted block's `from` attribute:
-        # the snapshot the dead session actually froze, or the responder
-        # resolved for this turn on a row written before snapshots existed.
-        dead_snapshot = dead_row.effective_config if dead_row is not None else None
-        from_agent_name = (
-            dead_snapshot.agent_name if dead_snapshot is not None else admission.agent.name
-        )
-        previous_session = await _replay_previous_session(
-            deps.anthropic,
-            session_id=dead_session_id,
-            from_agent_name=from_agent_name,
-        )
+            # What the successor actually inherited, recorded on its row as the
+            # rung it came in on: `transcript` when the archived log read,
+            # `history` when nothing of the old session was left to read.
+            loss_transfer_kind: TransferKind = (
+                "transcript" if previous_session is not None else "history"
+            )
+            # The upstream session first, then its row IN this locked transaction:
+            # a cancel or ceiling landing anywhere up to the commit rolls back the
+            # dead-mark, the replacement row and the link together, instead of
+            # leaving a live, unlinked replacement the next mention would continue
+            # on without the lost-workspace framing.
+            created = await create_ma_session(deps, admission, tenant_id=tenant_id)
+            fresh = await insert_mapping(
+                db,
+                created,
+                admission,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                session_account_id=session_account_id,
+                predecessor_id=dead_mapping_id,
+                transfer_kind=loss_transfer_kind,
+            )
 
-        # What the successor actually inherited, recorded on its row as the
-        # rung it came in on: `transcript` when the archived log read,
-        # `history` when nothing of the old session was left to read.
-        loss_transfer_kind: TransferKind = (
-            "transcript" if previous_session is not None else "history"
-        )
-        # The upstream session first, then its row IN this locked transaction:
-        # a cancel or ceiling landing anywhere up to the commit rolls back the
-        # dead-mark, the replacement row and the link together, instead of
-        # leaving a live, unlinked replacement the next mention would continue
-        # on without the lost-workspace framing.
-        created = await create_ma_session(deps, admission, tenant_id=tenant_id)
-        fresh = await insert_mapping(
-            db,
-            created,
-            admission,
-            tenant_id=tenant_id,
-            platform=platform,
-            thread_id=thread_id,
-            session_account_id=session_account_id,
-            predecessor_id=dead_mapping_id,
-            transfer_kind=loss_transfer_kind,
-        )
-
-        # Close the chain from the other end. The dead row keeps
-        # `status="dead"` -- it says how this session ended, which a supersede
-        # would overwrite -- and gains only the pointer forward.
-        await link_replacement(db, id=dead_mapping_id, replaced_by_id=fresh.mapping_id)
+            # Close the chain from the other end. The dead row keeps
+            # `status="dead"` -- it says how this session ended, which a supersede
+            # would overwrite -- and gains only the pointer forward.
+            await link_replacement(db, id=dead_mapping_id, replaced_by_id=fresh.mapping_id)
+    except BaseException:
+        # The locked transaction rolled back after the upstream session was
+        # created (a ceiling, a cancel, a failed insert or commit). No row
+        # names that session any more, so nothing else would ever archive it.
+        if created is not None:
+            await _archive_orphaned_session(deps.anthropic, session_id=created.ma_session_id)
+        raise
 
     return _Replacement(
         ma_session_id=fresh.ma_session_id,

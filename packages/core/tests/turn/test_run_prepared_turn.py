@@ -2438,3 +2438,97 @@ async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement
     assert [r.ma_session_id for r in rows] == ["sess_old"], (
         "the replacement row must roll back with the dead-mark and the link"
     )
+
+
+async def test_a_rolled_back_recovery_archives_the_session_it_created(
+    db_session: AsyncSession,
+    db_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the locked recovery transaction rolls back after the upstream
+    session was created, no row names that session any more, so nothing would
+    ever archive it. The recovery archives it on the way out (best effort)."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-orphan-archive",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+    archived: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        m = re.fullmatch(r"/v1/sessions/(?P<id>[^/]+)/archive", request.url.path)
+        if request.method == "POST" and m is not None:
+            archived.append(m.group("id"))
+            return httpx.Response(500, json={"type": "error", "error": {"type": "api_error"}})
+        return router.dispatch(request)
+
+    real_link = run_module.link_replacement
+
+    async def slow_link(*args: object, **kwargs: object) -> None:
+        await asyncio.sleep(30)  # the ceiling fires here, after the session exists
+        await real_link(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(run_module, "link_replacement", slow_link)
+
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, poolclass=NullPool
+    )
+    try:
+        deps = dataclasses.replace(
+            _deps(
+                sessionmaker=async_sessionmaker(bind=engine, expire_on_commit=False),
+                router=router,
+            ),
+            anthropic=anthropic.AsyncAnthropic(
+                api_key="test",
+                http_client=httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+                ),
+                max_retries=0,
+            ),
+        )
+        agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+        env = ma_environment(id="env_1", tenant_id=tenant.id)
+        admission = _admission(account_id=account.id, agent=agent, env=env)
+        prepared = _prepared_turn(
+            deps=deps,
+            admission=admission,
+            tenant_id=tenant.id,
+            external_user_id="user-1",
+            ma_session_id="sess_old",
+            mapping_id=row.id,
+            session_account_id=account.id,
+        )
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-orphan-archive",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+            deadline=datetime.now(UTC) + timedelta(seconds=1.0),
+        )
+    finally:
+        await engine.dispose()
+
+    assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    assert len(session_bodies) == 1, "recovery created one upstream session"
+    assert archived == ["sess_1"], (
+        "the session the rolled-back recovery created must be archived; "
+        "a failing archive call is logged, not raised (this one answers 500)"
+    )
