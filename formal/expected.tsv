@@ -74,3 +74,24 @@ adapter_recovery	AdapterOverlap	WizardBypassMessage	violates:NoMessageIntoRunnin
 adapter_recovery	AdapterOverlap	WizardBypassRows	violates:AtMostOneLiveRow	291	-	regression, fixed on main by #238: lock-free recovery beside a wizard bind leaves two live rows
 adapter_recovery	AdapterOverlap	WizardBypassRowsLocked	clean	1580	-	#238 (merged): recovery under the bind lock, adopting the live replacement
 adapter_recovery	AdapterOverlap	SingleProcessRecovery	clean	672	-	one process: lock-free recovery is safe
+# ---- metering ----
+metering	Metering	Metering	clean	?	-	live recorder + usage sweep + per-deployment ledger with the replay-billing fix: all safety invariants
+metering	Metering	MeteringReplayGap	violates:LiveMetersWholeTurn	?	-	pre-#234: a model call seen only in the reconnect/finalize replay is never billed by the turn
+metering	Metering	MeteringPre44528cb	violates:HookOnce	?	-	pre-44528cb: an event re-emitted after a reconnect re-runs the billing hook
+metering	Metering	MeteringPre1c4df18	violates:PriceAgreement	?	-	pre-1c4df18: live recorder priced at the agent's current model, not the session's
+metering	Metering	MeteringSharedTenant	violates:NoForeignDebit	?	-	documented precondition: two deployments sharing an MA workspace and a chat workspace debit each other's sessions
+metering	Metering	MeteringSharedTenantOwned	clean	?	-	hypothetical deployment stamp: sweep skips sessions another deployment created
+metering	Metering	MeteringSweepRace	violates:AttributionPreserved	?	-	documented residual: the sweep can commit a live session's call first, with its own attribution
+metering	Metering	MeteringExemptSwept	violates:ExemptNotBilled	?	-	documented gap: the sweep debits a BillingExempt turn (daimon run, MCP operator token) on a tenant-stamped session
+metering	BalanceGate	BalanceGate	clean	?	-	gated chat turns and classifier: every spend gated and debited, overdraft within MaxInflight x C
+metering	BalanceGate	BalanceGatePre8192ff7	violates:GatedSpend	?	-	pre-8192ff7: reused-session Slack turns skipped the balance gate and live billing
+metering	BalanceGate	BalanceGatePreFa83d3c	violates:GatedSpend	?	-	pre-fa83d3c: the participation classifier ran ungated and unmetered
+metering	BalanceGate	BalanceGateHeadless	violates:OverdraftBound	?	-	documented residual: headless MCP turns are debited only by the sweep, so the gate reads a stale balance
+# ---- slack dedupe ----
+slack_dedupe	SlackDedupe	SlackDedupe	clean	?	-	dedupe + per-author drain + 7-day prune vs redelivery window: at most one turn, one caller, no silent loss
+slack_dedupe	SlackDedupe	SlackPre997b3d8	violates:TurnPrincipal	?	-	pre-997b3d8: the drain loop merged every queued author into one turn
+slack_dedupe	SlackDedupe	SlackPre0cda77e	violates:NoSilentLoss	?	-	pre-0cda77e: a failed turn logged and returned with nothing posted
+slack_dedupe	SlackDedupe	SlackShortRetention	violates:AtMostOneTurn	?	-	retention shorter than Slack's redelivery window admits a redelivered mention twice
+slack_dedupe	SlackDedupe	SlackExitSafety	clean	?	-	crashes and SIGTERM drains keep at-most-once: the committed dedupe row outlives the process
+slack_dedupe	SlackDedupe	SlackCrashLoss	violates:NoSilentLoss	?	-	documented residual: a crash after the dedupe commit loses the acked mention
+slack_dedupe	SlackDedupe	SlackDrainWindow	violates:NoUndocumentedLoss	?	-	residual: a mention past the draining check but not yet in _processing is lost when the drain exits

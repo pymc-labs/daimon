@@ -118,11 +118,24 @@ Two boundaries of the design worth stating plainly:
 
 - **The gates run once, before the turn; debits land per model call.** Nothing
   re-checks mid-turn, so a single long turn can take a tenant's balance
-  negative. The ledger allows it.
-- **A caller with no platform user identity is not gated and not billed** — an
-  operator or CLI token runs with no balance check, no cap check, no usage row
-  and no debit. That is deliberate, and the module asks in as many words that
-  no one add a fallback that bills it.
+  negative. The ledger allows it. Concurrent turns compound this: every turn
+  admitted while the balance was still positive runs to completion, so a chat
+  tenant can overdraw by up to `max_concurrent_turns_per_tenant` (default 3)
+  times one turn's cost. An MCP `start_turn` session is worse. Its spend
+  reaches the ledger only when the scheduler's usage sweep next runs (after
+  the tick's routine fires, which can take up to the 45-minute turn ceiling).
+  Until then the gate reads a balance that leaves out earlier headless turns,
+  and MCP turns have no concurrency cap. The overdraft is therefore bounded
+  by what a tenant can start between two sweeps, not by N concurrent turns.
+  `formal/metering/BalanceGate.tla` checks both bounds.
+- **A caller with no platform user identity is not gated and not billed live** — an
+  operator or CLI token runs with no balance check, no cap check, and no
+  inline usage row or debit. That is deliberate, and the module asks in as
+  many words that no one add a fallback that bills it. The usage sweep below
+  does not know who drove a session, though. A `daimon run` turn, or an MCP
+  `start_turn` by such a caller, acts on a session stamped with the tenant.
+  The next sweep therefore records its model calls and debits that tenant,
+  with the platform user taken from the session's account stamp.
 
 ## The signup credit
 
@@ -201,6 +214,20 @@ stamp or belonging to a tenant this deployment does not own, and replays their
 `span.model_request_end` events through the same recorder. It is safe to run
 against already-metered sessions precisely because the idempotency grain is
 the same.
+
+The sweep and the live recorder race for each model call, and the first
+commit wins. The amount is the same either way, because both price at the
+session's own model. The attribution is not: when the sweep commits first, or
+is the only writer (a crashed adapter, an interrupted turn, a headless
+session), the row carries `turn_debit` and the platform user of the session's
+`daimon_account` stamp. It does not carry the turn's reason and author.
+
+The sweep bills every session whose `daimon_tenant` stamp names a tenant in
+its own database, and a session carries no deployment identity. Tenant ids are
+derived from `(platform, workspace id)`. Two deployments whose API keys share
+one Managed Agents workspace, and which both have the same Discord server or
+Slack workspace installed, would each debit the other's sessions. Give each
+deployment its own Managed Agents workspace.
 
 ## Settings that turn things on
 
