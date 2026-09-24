@@ -29,6 +29,32 @@ fi
 META=$(mktemp -d "${TMPDIR:-/tmp}/daimon-formal-check.XXXXXX")
 trap 'rm -rf "$META"' EXIT
 
+# Run one TLC check under a disk and time guard. A model whose state space is
+# larger than intended grows its metadir without bound (one local run filled a
+# host disk with 16G); kill TLC past TLC_MAX_META_MB (default 2048) or
+# TLC_TIMEOUT_S (default 1200), and delete each config's metadir as soon as its
+# run ends instead of at the end of the whole check.
+# usage: run_tlc <workdir> <metadir> <outfile> <java args...>  (pass -metadir <metadir>/m)
+run_tlc() {
+  local dir=$1 meta=$2 outfile=$3; shift 3
+  local max_mb=${TLC_MAX_META_MB:-2048} max_s=${TLC_TIMEOUT_S:-1200}
+  mkdir -p "$meta"
+  (cd "$dir" && exec timeout "$max_s" java -XX:+UseParallelGC -Djava.io.tmpdir="$meta" "$@") >"$outfile" 2>&1 &
+  local pid=$! mb
+  while kill -0 "$pid" 2>/dev/null; do
+    mb=$(du -sm "$meta" 2>/dev/null | cut -f1)
+    if [[ "${mb:-0}" -gt "$max_mb" ]]; then
+      echo "DISK GUARD: metadir ${mb}M > ${max_mb}M, TLC killed" >>"$outfile"
+      pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null
+      break
+    fi
+    sleep 2
+  done
+  wait "$pid"; local code=$?
+  rm -rf "$meta"
+  return $code
+}
+
 # Property names declared in a TLC config (PROPERTY / PROPERTIES sections).
 properties() {
   awk '
@@ -45,9 +71,10 @@ while IFS=$'\t' read -r dir spec cfg expect expect_states flags _note; do
   [[ "$flags" == "-" ]] && flags=""
   start=$SECONDS
   # shellcheck disable=SC2086  # flags is a deliberately word-split list
-  out=$(cd "$dir" && java -XX:+UseParallelGC -Djava.io.tmpdir="$META" -cp "$JAR" tlc2.TLC -workers 1 ${flags} \
-          -metadir "$META/$dir-$cfg" -config "$cfg.cfg" "$spec.tla" 2>&1)
+  run_tlc "$dir" "$META/$dir-$cfg" "$META/out" -cp "$JAR" tlc2.TLC -workers 1 ${flags} \
+          -metadir "$META/$dir-$cfg/m" -config "$cfg.cfg" "$spec.tla"
   code=$?
+  out=$(cat "$META/out")
   secs=$((SECONDS - start))
   if [[ $code -eq 0 ]] && grep -q "No error has been found" <<<"$out"; then
     got=clean
