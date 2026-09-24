@@ -26,8 +26,8 @@ CONSTANTS
     MirrorSkipsGrant,   \* 39450e8: a URL held by an mcp_oauth grant is left alone
     MirrorCatches409,   \* 39450e8: a create that loses to a concurrent writer is fine
     RotateInPlace,      \* dc2d866: a stale stamp is updated in place
-    MirrorRetries404,   \* proposed: an update whose id vanished re-reads the slot
-    OAuthRetries,       \* proposed: the grant write re-reads and replaces on 404/409
+    MirrorRetries404,   \* #230 (merged): an update whose id vanished re-reads the slot
+    OAuthRetries,       \* #230 (merged): the grant write re-reads and replaces on 404/409
     OAuthLocked,        \* alternative: grant write and mirror under the vault lock
     MaxTries
 

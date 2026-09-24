@@ -42,24 +42,31 @@ for c in DiscordReactFirst DrainMergedAuthors HandoffDispatchFirst FormDuringTai
 | --- | --- | --- | --- | --- |
 | `997b3d8` partition the drain queue by author | `DrainMergedAuthors` | violates `PrincipalIsAuthor` | `QueueBeforeReact` | clean |
 | `090ecc1` clear the marker before dispatching the handoff | `HandoffDispatchFirst` | violates `HandoffOnDestination` | `HandoffClearFirst` | clean |
-| Slack WR-05 enqueue before the ⌛ reaction (before the public history) | `DiscordReactFirst` (Discord's order on main until pymc-labs/daimon#228) | violates `NoStrandedMention` | `QueueBeforeReact` | clean |
 
-## Findings (current code)
+## Regression rows (fixed on main)
 
-- **Discord strands a mention queued while the turn ends** (`DiscordReactFirst`).
-  Discord awaited the ⌛ reaction before appending to `_pending`; if the running
+These bugs were found while building the model and are fixed on main by
+pymc-labs/daimon#228 and #233. The pre-fix configs stay as regression rows, not
+independent calibrations: Slack's enqueue-before-reaction order (WR-05) predates
+the public history, so `DiscordReactFirst` is confirmed by #228 rather than by a
+recoverable past commit.
+
+- **Discord stranded a mention queued while the turn ends** (`DiscordReactFirst`;
+  fixed on main by #228). Before #228, Discord awaited the ⌛ reaction before appending to `_pending`; if the running
   turn drained and released the thread during that await, the message sat in
   `_pending` until the next mention. Found first by code reading; the model
-  reproduces it. Fix: pymc-labs/daimon#228.
-- **A continuation recorded as the turn ends waits for the next turn**
-  (`FormDuringTail`). A credential form submitted after the running turn's tail
+  reproduces it. Fixed on main by pymc-labs/daimon#228.
+- **A continuation recorded as the turn ends waited for the next turn**
+  (`FormDuringTail`; fixed on main by #233). Before #233, a credential form submitted after the running turn's tail
   dispatch but before the thread is released calls
   `dispatch_continuations_in_thread`, which skips a processing thread; nothing
   dispatches the row until another turn in that thread completes. Trace: turn
   ends → marker cleared → continuations dispatched (none yet) → form records its
   continuation → dispatch skipped (thread processing) → thread released.
   `FormRedispatch` (a skipped dispatch re-runs when the thread is released) is
-  clean. Fix: pymc-labs/daimon#233.
+  clean. Fixed on main by pymc-labs/daimon#233; the code spawns a deferred
+  dispatch that waits for orphan recovery and can defer again, which the model
+  collapses into one atomic redispatch.
 
 ## Bounds and assumptions
 

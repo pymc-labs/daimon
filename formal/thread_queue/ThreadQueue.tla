@@ -19,7 +19,7 @@ CONSTANTS
     AppendBeforeReact,      \* Slack WR-05 / Discord #228: enqueue before awaiting the ⌛ reaction
     PartitionByAuthor,      \* 997b3d8: the drain runs one turn per author
     ClearBeforeDispatch,    \* 090ecc1: the tail clears its marker before dispatching
-    RedispatchAfterRelease, \* proposed: a dispatch skipped while processing reruns at release
+    RedispatchAfterRelease, \* #233 (merged): a dispatch skipped while processing reruns at release
     WithHandoff,            \* the first turn may queue a handoff continuation
     WithForm                \* a credential form may record + dispatch a continuation
 

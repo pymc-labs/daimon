@@ -23,7 +23,7 @@ for c in DiscordRejoinShape SlackReinstallFixed; do run SlackInstall $c; done
 # counterexample configs exit 12 with a trace
 for c in McpOAuthFlowPreClientCAS McpOAuthFlowPreCompletion McpOAuthFlowNoConsumeCAS; do run McpOAuthFlow $c || test $? -eq 12; done
 for c in VaultPreLock MirrorPreGrantSkip MirrorPreRotate GrantVsMirror GrantVsStaleMirror; do run VaultSlot $c || test $? -eq 12; done
-for c in SlackReinstallCurrent SlackLateTeardown SlackGuardWrongOrder; do run SlackInstall $c || test $? -eq 12; done
+for c in SlackReinstallPre231 SlackLateTeardown SlackGuardWrongOrder; do run SlackInstall $c || test $? -eq 12; done
 ```
 
 ## Properties
@@ -57,7 +57,7 @@ is clean with the fix, before any new counterexample was taken seriously.
 | `2cbe69e` serialize vault get-or-create | `VaultPreLock` | violates `NoDuplicateVault` | `VaultLocked` | clean |
 | `39450e8` mirror leaves a URL held by the caller's own grant alone | `MirrorPreGrantSkip` | violates `MirrorNeverFails409` | `MirrorGrantSkip` | clean |
 | `dc2d866` propagate a rotated MCP token in place | `MirrorPreRotate` | violates `MirrorLeavesCurrent` | `MirrorRotate` | clean |
-| Discord rejoin clears the archive (`clear_archive=True`, #132, before the public history) | `SlackReinstallCurrent` is that pre-fix shape | violates `ReinstallLeavesLiveTenant` | `DiscordRejoinShape` | clean |
+| Discord rejoin clears the archive (`clear_archive=True`, #132, before the public history; weak, see below) | `SlackReinstallPre231` is that pre-fix shape | violates `ReinstallLeavesLiveTenant` | `DiscordRejoinShape` | clean |
 
 `McpOAuthFlowNoConsumeCAS` is a mutation check rather than a past fix: without
 `used_at IS NULL` in `consume_flow`, a replayed callback spends the flow twice.
@@ -66,10 +66,16 @@ The Slack install calibration is weaker than the others: #132 predates the
 public git history, so the pre-fix shape is the Discord adapter's documented
 behaviour, not a recoverable commit.
 
-## Findings (current code)
+## Regression rows (fixed on main)
+
+These bugs were found while building the models and are fixed on main by
+pymc-labs/daimon#230 and #231. The pre-fix configs stay as regression rows: they
+must keep finding the counterexample, and the fixed configs must stay clean.
+They are not independent history, so they are kept out of the calibration table
+above.
 
 - **Sign-in lost to a concurrent mirror** (`GrantVsMirror`, violates
-  `SignInNeverLost`). `put_mcp_oauth_credential` lists the vault, deletes the
+  `SignInNeverLost`; fixed on main by #230). Before #230, `put_mcp_oauth_credential` lists the vault, deletes the
   credential at the URL and creates the grant, with no lock. A turn for the same
   person and agent can mirror the agent's shared token for that URL inside that
   window: it sees the slot empty and creates the static credential. The grant's
@@ -86,10 +92,10 @@ behaviour, not a recoverable commit.
   tolerates a 404 on delete and re-reads on a 409, three attempts; the mirror
   re-reads once on a 404). Holding the vault lock in both writers
   (`GrantLocked`) is also clean, but every other unlocked writer of the same URL
-  would need it too. Fix: pymc-labs/daimon#230.
-- **Reinstall leaves the tenant archived** (`SlackReinstallCurrent`). The Slack
-  callback's `provision_tenant` is `ON CONFLICT DO NOTHING`, so a reinstall never
-  clears `archived_at`; hub login and the boot defaults sweep then treat the
+  would need it too. Fixed on main by pymc-labs/daimon#230.
+- **Reinstall left the tenant archived** (`SlackReinstallPre231`; fixed on main
+  by #231). Before #231 the Slack callback's `provision_tenant` was
+  `ON CONFLICT DO NOTHING`, so a reinstall never cleared `archived_at`; hub login and the boot defaults sweep then treat the
   workspace as gone while chat keeps working.
 - **Late teardown deletes the reinstall's token** (`SlackLateTeardown`): with the
   archive cleared, a teardown that runs after the reinstall still archives the
@@ -98,7 +104,8 @@ behaviour, not a recoverable commit.
   `SlackGuardWrongOrder` shows a teardown between the reinstall's archive clear
   and its token write re-archiving the tenant, so the reinstall must store its
   token before clearing the archive. `SlackReinstallFixed` (clear after upsert,
-  guarded single-transaction teardown) is clean. Fix: pymc-labs/daimon#231.
+  guarded single-transaction teardown) is clean and matches main. Fixed on main
+  by pymc-labs/daimon#231.
 
 ## Bounds and assumptions
 

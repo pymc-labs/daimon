@@ -45,7 +45,7 @@ Uninstall ==
     /\ tpc' = [d \in Deliveries |-> "pending"]
     /\ UNCHANGED <<tenant, token, rpc>>
 
-\* Current teardown_slack_install: archive_tenant, then a separate txn deleting the token.
+\* Before #231, teardown_slack_install: archive_tenant, then a separate txn deleting the token.
 TeardownArchive(d) ==
     /\ ~GuardedTeardown
     /\ tpc[d] = "pending"
@@ -60,7 +60,7 @@ TeardownDelete(d) ==
     /\ tpc' = [tpc EXCEPT ![d] = "done"]
     /\ UNCHANGED <<phase, tenant, rpc>>
 
-\* Proposed: one txn; a token stored after the event (t2) means the event is stale.
+\* #231 (merged): one txn; a token stored after the event (t2) means the event is stale.
 TeardownGuarded(d) ==
     /\ GuardedTeardown
     /\ tpc[d] = "pending"
