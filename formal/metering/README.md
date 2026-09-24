@@ -107,9 +107,8 @@ that side effect is what the invariant models.
    recorder, so a call MA made while no stream was attached reached the ledger
    only through the sweep: later, with the sweep's attribution, or never
    without a scheduler. Failing tests and the fix are in #234. The model's
-   `BillReplayed = TRUE` is the fixed shape, and `Metering.cfg` is clean with it.
-   `Metering` being clean therefore describes the code only once #234 merges;
-   until then, main has the `MeteringReplayGap` shape.
+   `BillReplayed = TRUE` is the fixed shape (#234, merged), and `Metering.cfg`
+   is clean with it; `MeteringReplayGap` keeps the pre-#234 shape.
 2. **Cross-deployment debit** (`MeteringSharedTenant`). I confirmed this in the
    code. The sweep bills every session whose `daimon_tenant` stamp names a
    tenant in its own database. Tenant ids are `uuid5(platform, workspace)`, so
