@@ -84,6 +84,8 @@ nothing else. It is the bottom tier of the config cascade described in
 thread, channel or tenant setting applies. Which agents exist is decided by
 which files are in `defaults/agents/`; which skills an agent has is the
 `skills:` list in that agent's own file; the model is that file's `model:`.
+The shipped `daimon` agent and new-agent fallback use `claude-opus-5-5`.
+The optional `dev_agent` stays on `claude-sonnet-5`.
 
 ### `agents-optional/`
 

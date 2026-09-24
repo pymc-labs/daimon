@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.loader import (
     load_agent_specs,
     load_environment_specs,
@@ -29,17 +28,14 @@ def test_defaults_ships_dev_agent_with_copilot_mcp() -> None:
     Moved out of auto-seeded defaults/agents/ into defaults/agents-optional/ so it
     stops appearing in every customer guild.
 
-    The model is asserted against DEFAULT_AGENT_MODEL rather than a literal: this
-    seed sat on claude-sonnet-4-6 for a generation after the shipped agent moved
-    on, and a hardcoded expectation is what let that pass. The Sonnet family
-    itself is deliberate — an earlier revision ran claude-opus-4-8 and was moved
-    off it.
+    The Sonnet family is deliberate — an earlier revision ran claude-opus-4-8
+    and was moved off it. This optional agent does not follow the main default.
     """
     specs = load_agent_specs(DEFAULTS / "agents-optional")
     dev = next((s for s in specs if s.name == "dev_agent"), None)
     assert dev is not None, "defaults/agents-optional/dev_agent.yaml must exist"
-    assert dev.model == DEFAULT_AGENT_MODEL, (
-        f"dev_agent pins {dev.model}; expected the shared default {DEFAULT_AGENT_MODEL}"
+    assert dev.model == "claude-sonnet-5", (
+        f"dev_agent pins {dev.model}; expected the deliberate Sonnet 5 model"
     )
 
     servers = dev.mcp_servers or []

@@ -59,11 +59,11 @@ def test_default_agent_model_is_selectable() -> None:
 def test_current_generation_opus_and_sonnet_are_both_selectable() -> None:
     """The two models a user asks for by word must both resolve to something allowed.
 
-    Someone saying "use Opus" gets `claude-opus-5`; the panel validates free-text
+    Someone saying "use Opus" gets `claude-opus-5-5`; the panel validates free-text
     input against ALLOWED_MODEL_IDS, so an id missing from the pricing table is
     refused at submit with no hint that the model exists.
     """
-    for model in ("claude-opus-5", "claude-sonnet-5"):
+    for model in ("claude-opus-5-5", "claude-sonnet-5"):
         assert model in ALLOWED_MODEL_IDS, f"{model} must be selectable as an agent model"
 
 

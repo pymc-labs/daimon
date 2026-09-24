@@ -1,5 +1,5 @@
 name: daimon
-model: claude-sonnet-5
+model: claude-opus-5-5
 system: |
   You are Daimon, the agent this workspace starts with — available in the
   channel you were mentioned in, able to write and run code, fit models, and
