@@ -24,7 +24,7 @@ from daimon.core.mcp_attach import attach_mcp_server_to_agent
 from daimon.core.mcp_oauth.flow import exchange_authorization_code
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenEndpointAuthMethod
 from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
-from daimon.core.mcp_vault import ensure_agent_mcp_vault
+from daimon.core.mcp_vault import ensure_agent_mcp_vault, hold_agent_vault_lock
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.domain import McpOAuthFlowRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -95,16 +95,23 @@ async def complete_mcp_oauth_flow(
         now=now,
         session_factory=session_factory,
     )
-    credential_id = await put_mcp_oauth_credential(
-        anthropic,
-        vault_id=vault_id,
-        mcp_server_url=flow.mcp_server_url,
-        tokens=tokens,
-        client=client,
-        token_endpoint=flow.token_endpoint,
-        resource=flow.resource,
-        now=now,
-    )
+    # Locked like the mirror, the Copilot PAT and the pasted-token writers
+    # (see hold_agent_vault_lock for the two that are not), so a turn
+    # mirroring the agent's shared token cannot recreate it between the
+    # delete and the create.
+    async with hold_agent_vault_lock(
+        session_factory, account_id=flow.account_id, agent_id=flow.agent_id
+    ):
+        credential_id = await put_mcp_oauth_credential(
+            anthropic,
+            vault_id=vault_id,
+            mcp_server_url=flow.mcp_server_url,
+            tokens=tokens,
+            client=client,
+            token_endpoint=flow.token_endpoint,
+            resource=flow.resource,
+            now=now,
+        )
     # The grant is in this person's vault now, which is what makes them
     # connected: their sessions mount the server, nobody else's do. Stamped
     # before the attach, since a grant outlives an agent that has gone away.

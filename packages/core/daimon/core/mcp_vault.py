@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
@@ -72,6 +74,55 @@ async def _lock_vault_namespace(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": lock_key},
     )
+
+
+@asynccontextmanager
+async def hold_agent_vault_lock(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    account_id: uuid.UUID,
+    agent_id: uuid.UUID,
+) -> AsyncIterator[None]:
+    """Hold this (account_id, agent_id)'s vault lock for the body of the block.
+
+    A vault holds one credential per URL, and each writer below lists the
+    slot and then writes it, so two of them interleaving can leave the loser
+    with a 409 or a 404. Holding one lock makes each read-then-write see the
+    other's finished result. The writers that hold it:
+
+    - ``ensure_agent_mcp_vault`` (the daimon-mcp JWT at ``public_url``) and
+      ``add_external_mcp_credential`` (a person's pasted token) take it
+      themselves;
+    - the OAuth grant (``complete_mcp_oauth_flow`` around
+      ``put_mcp_oauth_credential``), the mirror of the agent's shared tokens
+      (``create_session`` and ``sync_agent_mcp_credentials`` around
+      ``mirror_credentials_into_vault``) and the Copilot PAT
+      (``create_session`` around ``add_github_copilot_credential``) take it
+      through this block.
+
+    Two vault writers do not hold it. Neither can take a URL from a person's
+    grant or the mirror:
+
+    - ``set_repo_binding`` / ``clear_repo_binding`` (MCP self-edit) create
+      a fresh credential at the ``https://github.com`` placeholder and delete
+      only the ids their binding row recorded. They never list and replace
+      a slot, and the placeholder is no MCP server's URL, so neither a grant
+      nor the mirror writes it.
+    - The operator's ``daimon mcp sweep-credentials`` deletes and recreates
+      the JWT at ``public_url``. A turn's ``ensure_agent_mcp_vault`` landing
+      between those two calls recreates the JWT itself (without ``is_admin``,
+      which is what the sweep wants). The sweep's own create is then a 409
+      and it stops, and re-running it is safe. A session that starts inside
+      that gap can also start without the JWT. This is a known gap, accepted
+      because the sweep is a manual, one-off backfill.
+
+    Never call ``ensure_agent_mcp_vault`` or ``add_external_mcp_credential``
+    inside the block: they take this lock on another connection and would
+    wait on it forever.
+    """
+    async with session_factory() as session, session.begin():
+        await _lock_vault_namespace(session, account_id=account_id, agent_id=agent_id)
+        yield
 
 
 async def _ensure_agent_mcp_vault_locked(
@@ -220,9 +271,10 @@ async def add_github_copilot_credential(
     This is the second credential in the per-agent vault — the first is the
     daimon-mcp JWT placed by `ensure_agent_mcp_vault`.
 
-    The caller (OAuth callback) runs this best-effort.
-    If it raises, the local Fernet blob is already the source of truth;
-    the operator can retry by re-OAuthing.
+    The caller (``create_session``) holds the per-(account, agent) vault
+    lock (``hold_agent_vault_lock``) and runs this best-effort. If it raises,
+    the local Fernet blob is already the source of truth, and the next
+    session create writes it again.
 
     Idempotent on retry: list existing credentials, delete any static one
     pointed at the GitHub Copilot URL, then create the new one. A person's own

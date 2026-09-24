@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   complete" when one of your turns re-copies the agent's shared token for the
   same server at that moment; the sign-in replaces it and is kept. That turn
   also no longer fails when the sign-in replaces the token it was updating.
+- That sign-in is now kept however many of your turns with the same agent are
+  running while it finishes. With three or more of them it could still fail
+  with "Sign-in did not complete".
 - Reinstalling daimon in a Slack workspace that had uninstalled it leaves the
   workspace live again. The uninstall's archive stamp used to survive the
   reinstall, so the hub and the boot defaults sweep kept treating the workspace
