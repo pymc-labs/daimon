@@ -1,10 +1,16 @@
 # Routine scheduler model
 
-Run TLC from the repository root:
+Set `TLA2TOOLS_JAR` to a local TLC 2.19+ `tla2tools.jar` path, then run from
+the repository root. This uses `java` from `PATH` and writes TLC state files
+under the temporary directory:
 
 ```sh
-/tmp/daimon-tla-tools/jdk-21.0.12.1+1-jre/bin/java -jar /tmp/daimon-tla-tools/tla2tools.jar -metadir /tmp/daimon-tla-tools/scheduler-states -config formal/scheduler/RoutineScheduler.cfg formal/scheduler/RoutineScheduler.tla
-/tmp/daimon-tla-tools/jdk-21.0.12.1+1-jre/bin/java -jar /tmp/daimon-tla-tools/tla2tools.jar -metadir /tmp/daimon-tla-tools/scheduler-progress-states -config formal/scheduler/RoutineSchedulerProgress.cfg formal/scheduler/RoutineScheduler.tla
+set -eu
+: "${TLA2TOOLS_JAR:?Set TLA2TOOLS_JAR to the path of tla2tools.jar}"
+TLC_META_DIR="${TMPDIR:-/tmp}/daimon-scheduler-tlc"
+mkdir -p "$TLC_META_DIR/safety" "$TLC_META_DIR/progress"
+java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/safety" -config formal/scheduler/RoutineScheduler.cfg formal/scheduler/RoutineScheduler.tla
+java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/progress" -config formal/scheduler/RoutineSchedulerProgress.cfg formal/scheduler/RoutineScheduler.tla
 ```
 
 The finite model checks one routine, two scheduler processes contending for one
@@ -42,15 +48,29 @@ swallowed failure to persist the error result.
   and lease expiry are excluded. In particular, this does not establish
   exactly-once external side effects under a crash between claim commit and
   dispatch.
-- No fairness or liveness condition is asserted: TLC checks state invariants,
-  while whether a tick or fire eventually runs depends on scheduling, upstream
-  responsiveness, and database availability.
+- Safety checking uses no fairness assumptions. TLC checks the declared state
+  invariants over all reachable states in the finite model.
 
 The progress configuration assumes weak fairness for acquire, release, claim,
 dispatch, and the next recurrence. Under that scheduling assumption and the
 exclusion of process death, it checks that pending work completes and that the
 first occurrence advances to the next. This does not guarantee upstream calls
 or database operations complete in the real system.
+
+## Local TLC evidence
+
+Checked on 2026-09-24 with TLC 2.19 and the local Java 21 runtime. Exact local
+commands:
+
+```sh
+/tmp/daimon-tla-tools/jdk-21.0.12.1+1-jre/bin/java -jar /tmp/daimon-tla-tools/tla2tools.jar -metadir /tmp/daimon-tla-tools/scheduler-states -config formal/scheduler/RoutineScheduler.cfg formal/scheduler/RoutineScheduler.tla
+/tmp/daimon-tla-tools/jdk-21.0.12.1+1-jre/bin/java -jar /tmp/daimon-tla-tools/tla2tools.jar -metadir /tmp/daimon-tla-tools/scheduler-progress-states -config formal/scheduler/RoutineSchedulerProgress.cfg formal/scheduler/RoutineScheduler.tla
+```
+
+Both runs completed with no error: 197 states generated, 86 distinct states,
+depth 9. The safety run checked the invariants; the progress run also checked
+both temporal properties. The local paths above are evidence of that run, not
+requirements for using the portable command.
 
 The checked safety properties are: one dispatch attempt per occurrence, only a
 claimed occurrence can finish, consistent terminal results, and claim ownership
