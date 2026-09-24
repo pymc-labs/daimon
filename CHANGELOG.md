@@ -102,6 +102,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub App installation tokens are minted for the one bound repository
   instead of every repository in the installation, and read-only when the
   binding was verified as a public repo or the token is used for skill sync.
+  If you bound your own public repository with `bind_public_repo` and the
+  GitHub App is installed on it, the agent can no longer push to it through
+  that binding: its token is now read-only. To let the agent push, rebind the
+  repository with a personal access token (the repo credential form in Discord
+  or Slack).
 
 ## [0.2.0] - 2026-09-21
 
