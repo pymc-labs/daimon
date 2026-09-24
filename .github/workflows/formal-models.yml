@@ -54,7 +54,6 @@ on:
       - "packages/adapters/mcp/daimon/adapters/mcp/tools/agent_chat.py"
       - "packages/adapters/discord/daimon/adapters/discord/thread_participation.py"
       # slack_dedupe/
-      - "packages/adapters/slack/daimon/adapters/slack/__main__.py"
       - "packages/core/daimon/core/slack_event_dedup_sweep.py"
       - "packages/core/daimon/core/stores/slack_event_dedup.py"
       # wizard/

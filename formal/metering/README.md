@@ -210,6 +210,32 @@ Invariants:
   `BalanceGate` config the worst reachable balance is -3, so its
   `OverdraftBound` (-4) holds but is not tight.
 
+## Related model: `billing/` (credits and clawbacks)
+
+[`billing/`](../billing/README.md) (`Clawback.tla`, `OutOfOrder.tla`) models
+the credit side of the same `tenant_ledger`: Stripe top-up credits, refund and
+dispute clawbacks, and clawbacks that arrive before their credit. This
+directory models the debit side: per-model-call usage rows, the usage sweep,
+and the admission gate that reads the balance. The two do not model the same
+writer:
+
+- `billing/` abstracts "all other ledger writes", which are the usage debits
+  modelled here.
+- `Metering.tla` and `BalanceGate.tla` abstract credits and clawbacks, apart
+  from `BalanceGate`'s starting balance `B0`.
+
+They rely on the same mechanism, and do not contradict each other: every
+ledger insert is `ON CONFLICT DO NOTHING` on a unique `idempotency_key`, and
+the key spaces are disjoint (`turn:{session}:{event}`, and the media,
+classifier and thread-naming prefixes, here; `topup:…` and
+`clawback:{pi}:{event}` there).
+
+One scope gap between them: `BalanceGate`'s `OverdraftBound` counts only turn
+spend admitted against a positive balance. A clawback of credit that has
+already been spent debits the ledger too, and can take the balance further
+below zero than that bound. This is by design, since a refund of spent credit
+is owed. Neither model states a combined bound.
+
 ## Bounds and assumptions
 
 - `Metering`:

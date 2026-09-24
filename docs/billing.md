@@ -130,6 +130,8 @@ Two boundaries of the design worth stating plainly:
   `formal/metering/BalanceGate.tla` checks the concurrent-turn bound for chat
   turns, where it holds, and has a counterexample in which headless turns
   exceed it. The between-sweeps bound is stated here, not model-checked.
+  Neither bound covers a refund or dispute of credit already spent: that
+  clawback is a further debit, and can take the balance lower still.
 - **A caller with no platform user identity is not gated and not billed live** — an
   operator or CLI token runs with no balance check, no cap check, and no
   inline usage row or debit. That is deliberate, and the module asks in as
@@ -178,7 +180,8 @@ subscription:
    until that credit establishes the tenant. Unmatched pending events are
    removed after 90 days by later webhook traffic.
 
-Completion and clawback transactions serialize by payment intent. An existing
+Completion and clawback transactions serialize by payment intent
+(`formal/billing/Clawback.tla` and `OutOfOrder.tla` model this ordering). An existing
 credit with a different tenant or amount is an integrity conflict: processing
 fails and rolls back so the event remains retryable for investigation. A
 retry alone cannot resolve inconsistent payment data; inspect the Stripe

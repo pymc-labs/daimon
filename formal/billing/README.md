@@ -130,3 +130,13 @@ retry and investigation. It does not credit either tenant a second time.
 Conflicting provider payloads and operator reconciliation remain outside the
 finite model; acknowledging such a conflict as a successful duplicate would
 hide a payment or tenant-integrity error.
+
+## Related model: `metering/` (usage debits and the balance gate)
+
+[`metering/`](../metering/README.md) models the debit side of the same
+`tenant_ledger`: the per-call usage rows written by the live recorder and the
+usage sweep, and the admission gate that reads the balance. These models
+abstract those writes as "all other ledger writes". Both sides rely on the
+unique `idempotency_key` with `ON CONFLICT DO NOTHING`, and their key spaces
+are disjoint. `metering/README.md` also notes that a clawback of credit
+already spent can take a balance below `BalanceGate`'s overdraft bound.
