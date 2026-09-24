@@ -32,8 +32,8 @@ trap 'rm -rf "$META"' EXIT
 # Property names declared in a TLC config (PROPERTY / PROPERTIES sections).
 properties() {
   awk '
-    /^[[:space:]]*(SPECIFICATION|INIT|NEXT|CONSTANTS?|INVARIANTS?|CHECK_DEADLOCK|SYMMETRY|VIEW|CONSTRAINTS?|ACTION_CONSTRAINTS?|ALIAS|POSTCONDITION)\>/ { inprop = 0 }
-    /^[[:space:]]*PROPERT(Y|IES)\>/ { inprop = 1; sub(/^[[:space:]]*PROPERT(Y|IES)/, "") }
+    /^[[:space:]]*(SPECIFICATION|INIT|NEXT|CONSTANTS?|INVARIANTS?|CHECK_DEADLOCK|SYMMETRY|VIEW|CONSTRAINTS?|ACTION_CONSTRAINTS?|ALIAS|POSTCONDITION)([[:space:]]|$)/ { inprop = 0 }
+    /^[[:space:]]*PROPERT(Y|IES)([[:space:]]|$)/ { inprop = 1; sub(/^[[:space:]]*PROPERT(Y|IES)([[:space:]]|$)/, "") }
     inprop { for (i = 1; i <= NF; i++) print $i }
   ' "$1"
 }
