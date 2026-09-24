@@ -15,6 +15,7 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
     AnthropicSettings,
@@ -25,6 +26,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.stores import github_app_installations as install_store
+from daimon.core.stores import github_push_resync
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -97,11 +99,12 @@ async def _post_github(
     event: str = "push",
     delivery_id: str = "delivery-001",
     bad_signature: bool = False,
+    raise_app_exceptions: bool = True,
 ) -> httpx.Response:
     """POST a signed (or forged) GitHub webhook to the app."""
     body = json.dumps(payload_dict).encode()
     sig = _sign_payload(body, secret) if not bad_signature else "sha256=badhex000"
-    transport = httpx.ASGITransport(app=app)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=raise_app_exceptions)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
         return await ac.post(
             "/webhooks/github",
@@ -174,11 +177,64 @@ async def test_github_webhook_rejects_bad_signature(
 
 async def test_github_webhook_valid_push_returns_200(
     sessionmaker: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A correctly-signed push to the bound default branch returns 200 with a BackgroundTask attached."""
+    """A correctly-signed push is committed before the webhook returns 200."""
     app = _build_app(sessionmaker)
-    r = await _post_github(app, payload_dict=_push_payload(), event="push")
+    r = await _post_github(
+        app,
+        payload_dict=_push_payload(full_name="https://github.com/owner/my-repo.git"),
+        event="push",
+        delivery_id="durable-delivery",
+    )
     assert r.status_code == 200, "correctly-signed push webhook must return 200"
+    async with db_session_factory() as session:
+        row = await github_push_resync.get_for_repo_ref(
+            session,
+            repo_full_name="owner/my-repo",
+            ref="refs/heads/main",
+        )
+    assert row is not None, "the 200 response must follow durable queue insertion"
+    assert row.delivery_id == "durable-delivery", "the job should retain the GitHub delivery ID"
+    assert row.generation == 1, "the first push should create the first generation"
+    assert row.state == "pending", "the persisted push must remain schedulable after process death"
+
+    duplicate = await _post_github(
+        app,
+        payload_dict=_push_payload(),
+        event="push",
+        delivery_id="durable-delivery",
+    )
+    assert duplicate.status_code == 200, "GitHub delivery retries should be acknowledged"
+    async with db_session_factory() as session:
+        after_duplicate = await github_push_resync.get_for_repo_ref(
+            session,
+            repo_full_name="owner/my-repo",
+            ref="refs/heads/main",
+        )
+    assert after_duplicate is not None, "the original queue row should remain present"
+    assert after_duplicate.generation == 1, "a duplicate delivery must not add a generation"
+
+
+async def test_github_webhook_queue_failure_is_not_acknowledged(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistence failure returns non-2xx; GitHub does not auto-redeliver it."""
+    app = _build_app(sessionmaker)
+
+    async def fail_enqueue(*args: Any, **kwargs: Any) -> bool:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(github_push_resync, "enqueue", fail_enqueue)
+    response = await _post_github(
+        app,
+        payload_dict=_push_payload(),
+        delivery_id="persistence-failure",
+        raise_app_exceptions=False,
+    )
+
+    assert response.status_code == 500, "unpersisted work must never receive HTTP 200"
 
 
 async def test_github_webhook_installation_event_upserts(

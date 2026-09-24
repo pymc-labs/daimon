@@ -20,17 +20,14 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from anthropic import AsyncAnthropic
-from cryptography.fernet import MultiFernet
 from daimon.core.billing import BillingConfig
 from daimon.core.config import GithubSettings
 from daimon.core.errors import StoreError
 from daimon.core.github_app_auth import verify_signature
-from daimon.core.skill_sync.resync import resync_bound_repo
+from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.stores import github_app_installations as install_store
-from daimon.core.stores import payment_events, pending_clawbacks, tenant_ledger
+from daimon.core.stores import github_push_resync, payment_events, pending_clawbacks, tenant_ledger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -77,8 +74,6 @@ def build_github_webhook(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
     github_settings: GithubSettings,
-    anthropic: AsyncAnthropic,
-    fernet: MultiFernet,
 ) -> Callable[[Request], Awaitable[Response]]:
     """Construct a GitHub App webhook handler with collaborators bound. SC-3.
 
@@ -88,7 +83,7 @@ def build_github_webhook(
          Forged/unsigned -> 401 immediately (SC-3).
       3. Dispatch on X-GitHub-Event header:
          - push: extract repository.full_name + ref; missing -> 200 no-op + log.warning.
-           Otherwise: Response(200, background=BackgroundTask(resync_bound_repo, ...)).
+           Otherwise: persist a coalesced resync job and delivery receipt before 200.
          - installation: upsert install store (created / deleted); 200.
          - installation_repositories: add_repos / remove_repos; 200.
          - anything else: log info + 200 no-op.
@@ -126,7 +121,7 @@ def build_github_webhook(
             return Response(status_code=200)
         payload: dict[str, Any] = parsed  # pyright: ignore[reportUnknownVariableType]
 
-        # --- push: schedule resync as a BackgroundTask ---
+        # --- push: durably enqueue resync before acknowledging the delivery ---
         if event == "push":
             repo_info = _get(payload, "repository")
             ref_raw = _get(payload, "ref")
@@ -138,35 +133,44 @@ def build_github_webhook(
                 )
                 return Response(status_code=200)
             full_name_val = _get(repo_info, "full_name")  # pyright: ignore[reportUnknownArgumentType]
-            full_name: str = str(full_name_val) if isinstance(full_name_val, str) else ""
+            full_name_raw: str = str(full_name_val) if isinstance(full_name_val, str) else ""
             ref: str = ref_raw
-            if not full_name:
+            if not full_name_raw:
                 log.warning(
                     "github.webhook.malformed_push",
                     delivery_id=delivery_id,
                     missing="repository.full_name",
                 )
-                return Response(status_code=200)
+                return Response(status_code=400)
+            if not delivery_id or len(delivery_id) > 255:
+                log.warning("github.webhook.malformed_delivery_id", event=event)
+                return Response(status_code=400)
 
+            full_name = normalize_owner_repo(full_name_raw)
+            repo_parts = full_name.split("/")
+            if len(repo_parts) != 2 or not all(repo_parts):
+                log.warning(
+                    "github.webhook.malformed_push",
+                    delivery_id=delivery_id,
+                    missing="canonical repository owner/name",
+                )
+                return Response(status_code=400)
+
+            async with sessionmaker.begin() as session:
+                enqueued = await github_push_resync.enqueue(
+                    session,
+                    repo_full_name=full_name,
+                    ref=ref,
+                    delivery_id=delivery_id,
+                )
             log.info(
-                "github.webhook.push_received",
+                "github.webhook.push_persisted",
                 delivery_id=delivery_id,
                 repo=full_name,
                 ref=ref,
+                enqueued=enqueued,
             )
-            return Response(
-                status_code=200,
-                background=BackgroundTask(
-                    resync_bound_repo,
-                    repo_full_name=full_name,
-                    ref=ref,
-                    sessionmaker=sessionmaker,
-                    fernet=fernet,
-                    anthropic_client=anthropic,
-                    github_settings=github_settings,
-                    # http_client=None: resync_bound_repo creates its own
-                ),
-            )
+            return Response(status_code=200)
 
         # --- installation lifecycle: upsert / delete ---
         if event == "installation":

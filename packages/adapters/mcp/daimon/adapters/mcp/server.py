@@ -459,8 +459,6 @@ def create_mcp_app(
             build_github_webhook(
                 sessionmaker=effective_sessionmaker,
                 github_settings=github_cfg,
-                anthropic=effective_anthropic,
-                fernet=fernet,
             ),
             methods=["POST"],
         )

@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import httpx
@@ -63,6 +64,13 @@ _log = structlog.get_logger(__name__)
 
 _RESYNC_MAX_ATTEMPTS = 3
 _RESYNC_BACKOFF_BASE = 1.0  # seconds (doubles each retry)
+
+
+@dataclass(frozen=True)
+class ResyncReport:
+    """Outcome summary used by the durable queue to decide whether to retry."""
+
+    failed_bindings: int
 
 
 def should_resync(ref: str, default_branch: str) -> bool:
@@ -266,7 +274,7 @@ async def resync_bound_repo(
     anthropic_client: AsyncAnthropic,
     http_client: httpx.AsyncClient | None = None,
     github_settings: GithubSettings | None = None,
-) -> None:
+) -> ResyncReport:
     """Resync skills for all bindings of the pushed repo.
 
     For each binding on repo_full_name:
@@ -299,9 +307,10 @@ async def resync_bound_repo(
     async with sessionmaker() as session:
         bindings = await binding_store.get_bindings_for_repo(session, repo_url=repo_full_name)
 
-    async def _resync_all(client: httpx.AsyncClient) -> None:
+    async def _resync_all(client: httpx.AsyncClient) -> int:
         # Shared per-binding loop body (D-01): http_client is the only input
         # that varies between the caller-owned and self-owned client paths.
+        failed_bindings = 0
         for binding in bindings:
             if not should_resync(ref, binding.default_branch):
                 _log.info(
@@ -313,7 +322,7 @@ async def resync_bound_repo(
                     agent_id=str(binding.agent_id),
                 )
                 continue
-            await _resync_one_binding(
+            succeeded = await _resync_one_binding(
                 binding=binding,
                 repo_full_name=repo_full_name,
                 sessionmaker=sessionmaker,
@@ -322,14 +331,18 @@ async def resync_bound_repo(
                 anthropic_client=anthropic_client,
                 github_settings=github_settings,
             )
+            if not succeeded:
+                failed_bindings += 1
+        return failed_bindings
 
     if http_client is not None:
         # Caller-owned client (e.g. test injection) — use directly, don't close.
-        await _resync_all(http_client)
+        failed_bindings = await _resync_all(http_client)
     else:
         # Self-owned client — create and close around the full batch.
         async with httpx.AsyncClient(timeout=120.0) as owned_client:
-            await _resync_all(owned_client)
+            failed_bindings = await _resync_all(owned_client)
+    return ResyncReport(failed_bindings=failed_bindings)
 
 
 async def _resync_one_binding(
@@ -341,10 +354,11 @@ async def _resync_one_binding(
     http_client: httpx.AsyncClient,
     anthropic_client: AsyncAnthropic,
     github_settings: GithubSettings | None,
-) -> None:
+) -> bool:
     """Attempt to resync a single binding. Records last_sync_at + last_sync_error."""
     now = datetime.now(UTC)
     last_sync_error: str | None = None
+    succeeded = False
 
     try:
         async with sessionmaker() as session:
@@ -355,7 +369,7 @@ async def _resync_one_binding(
             )
             if resolved is None:
                 last_sync_error = "agent not found in MA (bridge resolution failed)"
-                return
+                return False
 
             agent_name, principal_id = resolved
 
@@ -413,6 +427,8 @@ async def _resync_one_binding(
                     last_sync_error = "; ".join(
                         f"{name}: {reason}" for name, reason in report.failed_uploads
                     )
+                else:
+                    succeeded = True
                 _log.info(
                     "github.resync.success",
                     repo=repo_full_name,
@@ -420,7 +436,7 @@ async def _resync_one_binding(
                     agent_id=str(binding.agent_id),
                     agent_name=agent_name,
                 )
-                return  # success path — finally block persists last_sync_error
+                return succeeded  # finally persists last_sync_error before returning
 
             except (httpx.TransportError, httpx.HTTPStatusError) as err:
                 response = getattr(err, "response", None)
@@ -442,6 +458,11 @@ async def _resync_one_binding(
                 )
                 await asyncio.sleep(backoff)
 
+    except asyncio.CancelledError:
+        # Cancellation bypasses Exception but still runs finally; preserve an
+        # observable failure rather than clearing an earlier error as success.
+        last_sync_error = "resync cancelled"
+        raise
     except Exception as err:  # named boundary; per-binding failures captured
         last_sync_error = str(err)
         _log.warning(
@@ -463,9 +484,11 @@ async def _resync_one_binding(
                     last_sync_error=last_sync_error,
                 )
         except Exception as persist_err:
+            succeeded = False
             _log.error(
                 "github.resync.persist_failed",
                 repo=repo_full_name,
                 agent_id=str(binding.agent_id),
                 error=str(persist_err),
             )
+    return succeeded
