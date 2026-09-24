@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 
 import httpx
 import jwt
@@ -160,7 +161,9 @@ async def test_mint_installation_token_request_shape() -> None:
     transport = httpx.MockTransport(handler)
     client = httpx.AsyncClient(transport=transport)
 
-    token = await mint_installation_token(client, jwt="test-jwt", installation_id=42)
+    token = await mint_installation_token(
+        client, jwt="test-jwt", installation_id=42, repository="widgets"
+    )
 
     assert len(captured) == 1, "exactly one POST must be issued"
     req = captured[0]
@@ -178,6 +181,24 @@ async def test_mint_installation_token_request_shape() -> None:
         "API version header must be pinned to 2022-11-28"
     )
     assert token == "ghs_x", "returned token must be the value from JSON response"
+    assert json.loads(req.content) == {"repositories": ["widgets"]}, (
+        "the token must be narrowed to the one repository, never installation-wide"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repository", ["", "acme/widgets"])
+async def test_mint_installation_token_refuses_unscoped_or_owner_qualified_repository(
+    repository: str,
+) -> None:
+    """An empty or owner-qualified name cannot be sent as a repository scope."""
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: pytest.fail("no request may be issued"))
+    )
+    with pytest.raises(ValueError, match="one repository"):
+        await mint_installation_token(
+            client, jwt="test-jwt", installation_id=42, repository=repository
+        )
 
 
 @pytest.mark.asyncio
@@ -191,7 +212,9 @@ async def test_mint_installation_token_raises_on_401() -> None:
     client = httpx.AsyncClient(transport=transport)
 
     with pytest.raises(httpx.HTTPStatusError):
-        await mint_installation_token(client, jwt="bad-jwt", installation_id=99)
+        await mint_installation_token(
+            client, jwt="bad-jwt", installation_id=99, repository="widgets"
+        )
 
 
 # ---------------------------------------------------------------------------

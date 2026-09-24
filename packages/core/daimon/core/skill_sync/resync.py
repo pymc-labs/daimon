@@ -229,10 +229,13 @@ async def _select_credential(
             github_settings.app_id,
             now=int(time.time()),
         )
+        # Narrowed to the pushed repo, read-only: resync only fetches it.
         return await mint_installation_token(
             http_client,
             jwt=jwt,
             installation_id=installation.installation_id,
+            repository=repo_full_name.split("/", 1)[1],
+            permissions={"contents": "read"},
         )
     if mode == "public":
         assert fallback_pat is not None  # narrows: has_fallback_pat implies this is set

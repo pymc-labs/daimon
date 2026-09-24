@@ -51,6 +51,9 @@ from pydantic import BaseModel, ConfigDict, SecretStr
 
 log = structlog.get_logger()
 
+_READ_ONLY: dict[str, str] = {"contents": "read"}
+"""Installation-token permission subset for callers that only read a repo."""
+
 __all__ = [
     "RepoAccess",
     "RepoAccessKind",
@@ -415,8 +418,14 @@ async def resolve_clone_token(
                 http_client, jwt=app_jwt, owner=owner, repo=repo
             )
             if installation_id is not None:
+                # Narrow to the bound repo; a verified-public proof shows
+                # read access only, so its token is read-only as well.
                 app_token = await mint_installation_token(
-                    http_client, jwt=app_jwt, installation_id=installation_id
+                    http_client,
+                    jwt=app_jwt,
+                    installation_id=installation_id,
+                    repository=repo,
+                    permissions=_READ_ONLY if binding.proof_kind == "public" else None,
                 )
         except httpx.HTTPError as err:
             log.warning(
@@ -599,8 +608,13 @@ async def resolve_skill_sync_token(
         try:
             installation_id = await installation_lookup(owner, repo)
             if installation_id is not None:
+                # Skill sync only reads this one repo.
                 app_token = await mint_installation_token(
-                    http_client, jwt=app_jwt, installation_id=installation_id
+                    http_client,
+                    jwt=app_jwt,
+                    installation_id=installation_id,
+                    repository=repo,
+                    permissions=_READ_ONLY,
                 )
         except httpx.HTTPError as err:
             log.warning(

@@ -13,8 +13,10 @@ an external API.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 import uuid
+from collections.abc import Callable
 
 import httpx
 import pytest
@@ -1089,3 +1091,111 @@ async def test_resolve_skill_sync_token_unnormalizable_repo_raises() -> None:
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Installation-token scope: a minted App token must cover only the bound repo
+# ---------------------------------------------------------------------------
+#
+# The deployment's GitHub App is installed by repo owners for their own use,
+# and one installation usually covers many repositories. A binding's recorded
+# proof demonstrates access to ONE repository, so the token handed to that
+# binding's session must be narrowed to that repository — never the whole
+# installation. A verified-public proof demonstrates read access only, so its
+# token must also be read-only.
+
+
+def _capture_mint_body(
+    captured: list[dict[str, object]],
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/acme/widgets/installation":
+            return httpx.Response(status_code=200, json={"id": 777})
+        if request.url.path == "/app/installations/777/access_tokens":
+            captured.append(json.loads(request.content or b"{}"))
+            return httpx.Response(status_code=201, json={"token": "ghs_installation_token"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proof_kind", ["pat", "public"])
+async def test_resolve_clone_token_app_token_is_scoped_to_the_bound_repository(
+    proof_kind: RepoProofKind,
+) -> None:
+    """The clone token minted through the App covers only the bound repository."""
+    captured: list[dict[str, object]] = []
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_capture_mint_body(captured)))
+    binding = _make_binding(
+        repo_url="acme/widgets", ma_secret_ref="anon:public", proof_kind=proof_kind
+    )
+
+    token = await resolve_clone_token(
+        client,
+        binding=binding,
+        per_agent_pat=None,
+        fallback_pat=None,
+        app_id="12345",
+        app_private_key=SecretStr(_generate_rsa_keypair()),
+        now=1_000_000,
+    )
+
+    assert token == "ghs_installation_token"
+    assert len(captured) == 1
+    assert captured[0].get("repositories") == ["widgets"], (
+        "an installation token must be narrowed to the bound repository, "
+        f"not the whole installation; mint body was {captured[0]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_clone_token_public_proof_app_token_is_read_only() -> None:
+    """A verified-public proof demonstrates read access only: the App token
+    minted for it must request read-only contents permission."""
+    captured: list[dict[str, object]] = []
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_capture_mint_body(captured)))
+    binding = _make_binding(
+        repo_url="acme/widgets", ma_secret_ref="anon:public", proof_kind="public"
+    )
+
+    await resolve_clone_token(
+        client,
+        binding=binding,
+        per_agent_pat=None,
+        fallback_pat=None,
+        app_id="12345",
+        app_private_key=SecretStr(_generate_rsa_keypair()),
+        now=1_000_000,
+    )
+
+    assert len(captured) == 1
+    assert captured[0].get("permissions") == {"contents": "read"}, (
+        f"a public-proof binding must get a read-only token; mint body was {captured[0]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_skill_sync_token_app_token_is_read_only_and_repo_scoped() -> None:
+    """Skill sync only reads the named repo: its App token is narrowed to that
+    repository with read-only contents permission."""
+    captured: list[dict[str, object]] = []
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_capture_mint_body(captured)))
+
+    async def lookup(owner: str, repo: str) -> int | None:
+        return 777
+
+    token = await resolve_skill_sync_token(
+        client,
+        repo_url="https://github.com/acme/widgets",
+        per_agent_pat=None,
+        proof_kind="pat",
+        fallback_pat=None,
+        app_id="12345",
+        app_private_key=SecretStr(_generate_rsa_keypair()),
+        installation_lookup=lookup,
+        now=1_000_000,
+    )
+
+    assert token == "ghs_installation_token"
+    assert captured == [{"repositories": ["widgets"], "permissions": {"contents": "read"}}]
