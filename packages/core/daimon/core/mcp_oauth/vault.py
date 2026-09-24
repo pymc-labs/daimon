@@ -9,9 +9,10 @@ which the degraded-turn path names so the person can reconnect.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, ConflictError, NotFoundError
 from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_response import (
     BetaManagedAgentsEnvironmentVariableAuthResponse,
 )
@@ -31,6 +32,10 @@ from daimon.core.mcp_vault import same_server_url
 # MA retire a working credential after an hour with no way to renew it.
 _REFRESHABLE_DEFAULT_LIFETIME = dt.timedelta(hours=1)
 _UNREFRESHABLE_DEFAULT_LIFETIME = dt.timedelta(days=365)
+
+# Bounded: each retry follows a concurrent writer landing in the slot, and the
+# mirror stops writing a URL once the grant holds it.
+_WRITE_ATTEMPTS = 3
 
 
 def _token_endpoint_auth(client: ClientRegistration) -> TokenEndpointAuth:
@@ -89,26 +94,47 @@ async def put_mcp_oauth_credential(
     resource: str | None,
     now: dt.datetime,
 ) -> str:
-    """Replace whatever credential the vault holds for the URL; return the new id."""
-    # Collect first: deleting while the list paginates can skip an entry.
-    stale = [
-        existing.id
-        async for existing in anthropic.beta.vaults.credentials.list(vault_id=vault_id)
-        if not isinstance(existing.auth, BetaManagedAgentsEnvironmentVariableAuthResponse)
-        and same_server_url(existing.auth.mcp_server_url, mcp_server_url)
-    ]
-    for credential_id in stale:
-        await anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
-    created = await anthropic.beta.vaults.credentials.create(
-        vault_id=vault_id,
-        auth=build_mcp_oauth_auth(
-            mcp_server_url=mcp_server_url,
-            tokens=tokens,
-            client=client,
-            token_endpoint=token_endpoint,
-            resource=resource,
-            now=now,
-        ),
-        display_name=f"oauth:{mcp_server_url}"[:255],
+    """Replace whatever credential the vault holds for the URL; return the new id.
+
+    Runs outside the per-(account, agent) vault lock, after the callback has
+    spent the flow, so it must not lose to a writer that lands between its
+    list and its create. A turn's `mirror_credentials_into_vault` can recreate
+    the agent's shared token in the slot this just emptied (the create is then
+    a 409), and another writer can delete a listed credential first (the
+    delete is then a 404). Either way the slot is re-read and replaced again,
+    up to `_WRITE_ATTEMPTS` times. Once the grant is in, the mirror leaves the
+    URL alone, so the retry converges.
+    """
+    auth = build_mcp_oauth_auth(
+        mcp_server_url=mcp_server_url,
+        tokens=tokens,
+        client=client,
+        token_endpoint=token_endpoint,
+        resource=resource,
+        now=now,
     )
-    return created.id
+    for attempt in range(1, _WRITE_ATTEMPTS + 1):
+        # Collect first: deleting while the list paginates can skip an entry.
+        stale = [
+            existing.id
+            async for existing in anthropic.beta.vaults.credentials.list(vault_id=vault_id)
+            if not isinstance(existing.auth, BetaManagedAgentsEnvironmentVariableAuthResponse)
+            and same_server_url(existing.auth.mcp_server_url, mcp_server_url)
+        ]
+        for credential_id in stale:
+            # Already gone: another writer removed it, which is what we wanted.
+            with contextlib.suppress(NotFoundError):
+                await anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
+        try:
+            created = await anthropic.beta.vaults.credentials.create(
+                vault_id=vault_id,
+                auth=auth,
+                display_name=f"oauth:{mcp_server_url}"[:255],
+            )
+        except ConflictError:
+            # A concurrent writer filled the slot after our delete; re-read it.
+            if attempt == _WRITE_ATTEMPTS:
+                raise
+            continue
+        return created.id
+    raise AssertionError("unreachable: the last attempt returns or raises")
