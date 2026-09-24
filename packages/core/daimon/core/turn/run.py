@@ -48,7 +48,8 @@ from daimon.core.turn.prepare import (
     ContinuityOutcome,
     PreparedTurn,
     bind_recorder,
-    create_fresh_session,
+    create_ma_session,
+    insert_mapping,
 )
 from daimon.core.turn.state import TurnState
 
@@ -326,8 +327,15 @@ async def _replace_dead_session(
         loss_transfer_kind: TransferKind = (
             "transcript" if previous_session is not None else "history"
         )
-        fresh = await create_fresh_session(
-            deps,
+        # The upstream session first, then its row IN this locked transaction:
+        # a cancel or ceiling landing anywhere up to the commit rolls back the
+        # dead-mark, the replacement row and the link together, instead of
+        # leaving a live, unlinked replacement the next mention would continue
+        # on without the lost-workspace framing.
+        created = await create_ma_session(deps, admission, tenant_id=tenant_id)
+        fresh = await insert_mapping(
+            db,
+            created,
             admission,
             tenant_id=tenant_id,
             platform=platform,
