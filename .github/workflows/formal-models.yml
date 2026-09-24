@@ -5,7 +5,7 @@ name: Formal models
 # unsafe config must still find its counterexample, a safe config must stay
 # clean, and no config may explore 0 states. Runs when a model changes,
 # and when the code a model describes changes, as a reminder to keep the model
-# in step with it (the model does not read the code). About 30 s of TLC.
+# in step with it (the model does not read the code). TLC takes several minutes.
 on:
   pull_request:
     paths:
@@ -44,6 +44,11 @@ on:
       - "packages/core/daimon/core/stores/pending_clawbacks.py"
       - "packages/core/daimon/core/stores/payment_events.py"
       - "packages/core/daimon/core/stores/tenant_ledger.py"
+      # github_push_resync/
+      - "packages/core/daimon/core/skill_sync/resync_queue.py"
+      - "packages/core/daimon/core/stores/github_push_resync.py"
+      - "packages/core/daimon/core/skill_sync/resync.py"
+      - "packages/core/alembic/versions/0025_github_push_resync_queue.py"
       # metering/
       - "packages/core/daimon/core/usage_sweep.py"
       - "packages/core/daimon/core/usage_recording.py"
