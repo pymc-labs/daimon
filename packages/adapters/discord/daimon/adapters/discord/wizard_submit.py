@@ -84,14 +84,18 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role, WizardSessionRow
-from daimon.core.stores.thread_sessions import update_watermark
+from daimon.core.stores.thread_sessions import (
+    clear_active_turn_if_message_id,
+    mark_turn_active,
+    update_watermark,
+)
 from daimon.core.stores.wizard_session import try_claim_submit
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import bind_session
-from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.apply import apply
 from daimon.core.wizard.render import to_screen
@@ -214,6 +218,7 @@ class WizardSubmitButton(
                     short_id=row.id,
                     answers=submitted.answers,
                     current_step=submitted.current_step,
+                    expected_updated_at=row.updated_at,
                     now=now,
                 )
 
@@ -228,17 +233,37 @@ class WizardSubmitButton(
                         bot=bot, interaction=interaction, row=claimed, spec=spec, state=submitted
                     )
                 )
+                displayed_state = submitted
+            else:
+                # A navigation/edit tap or another submit may have changed
+                # the row after this callback loaded it. Re-read so a stale
+                # submit cannot hide a committed edit behind a button-free
+                # summary or display an abandoned row as submitted.
+                latest = await _load_row(bot, row.id)
+                if latest is None:
+                    await _reply_or_followup(interaction, "This form is no longer available.")
+                    return
+                displayed_state = WizardState(
+                    short_id=latest.id,
+                    current_step=latest.current_step,
+                    answers=latest.answers,
+                    status=WizardStatus(latest.status),
+                )
+                if (
+                    displayed_state.status is WizardStatus.ABANDONED
+                    or latest.expires_at <= datetime.now(UTC)
+                ):
+                    await _reply_or_followup(interaction, "This form has expired.")
+                    return
 
             # Collapse to the read-only, button-free summary regardless of
-            # who won the claim -- see the module docstring, point 2. Both a
-            # winning and a losing concurrent tapper must see the SAME
-            # consistent, submitted-looking result. Purely cosmetic, and
-            # caught here rather than at the callback's outer boundary: the
-            # row is already claimed, so the outer handler's "please try
-            # again" would invite a retry that can only ever be rejected.
+            # who won the claim -- see the module docstring, point 2. A fresh
+            # open state stays interactive when a concurrent edit invalidated
+            # this submit; a submitted state renders the collapsed summary.
+            # This is cosmetic, so an edit failure cannot undo the claim.
             try:
                 await interaction.edit_original_response(
-                    view=build_wizard_view(to_screen(spec, submitted)),
+                    view=build_wizard_view(to_screen(spec, displayed_state)),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             except discord.HTTPException:
@@ -319,6 +344,9 @@ async def run_wizard_submit_turn(
         if channel is None or not isinstance(channel, discord.abc.Messageable):
             _log.warning("wizard_submit.no_messageable_channel", short_id=row.id)
             return
+
+        if bot.is_ready():
+            await bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]  # share Discord's one-shot boot recovery barrier
 
         if isinstance(channel, discord.Thread):
             parent_channel_id = str(channel.parent_id)
@@ -512,26 +540,55 @@ async def run_wizard_submit_turn(
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
 
-        _log.info(
-            "wizard_submit.turn_started",
-            thread_id=thread_id,
-            session_id=prepared.ma_session_id,
-        )
-        outcome = await run_prepared_turn(
-            bot.runtime.turn_deps,
-            prepared,
-            tenant_id=row.tenant_id,
-            platform="discord",
-            thread_id=thread_id,
-            external_user_id=str(interaction.user.id),
-            user_message=user_message,
-            lifecycle=lifecycle,
-            cancel=cancel,
-            reseed_user_message=_reseed_user_message,
-            recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=2.0,
-            deadline=turn_deadline_at,
-        )
+        outcome: RunOutcome | None = None
+        marker_ids: dict[uuid.UUID, str] = {}
+        try:
+            if prepared.mapping_id is not None and lifecycle.final_message_id is not None:
+                marker_ids[prepared.mapping_id] = lifecycle.final_message_id
+                async with bot.runtime.sessionmaker() as marker_session:
+                    await mark_turn_active(
+                        marker_session,
+                        id=prepared.mapping_id,
+                        active_turn_message_id=lifecycle.final_message_id,
+                        now=datetime.now(UTC),
+                    )
+                    await marker_session.commit()
+
+            _log.info(
+                "wizard_submit.turn_started",
+                thread_id=thread_id,
+                session_id=prepared.ma_session_id,
+            )
+            outcome = await run_prepared_turn(
+                bot.runtime.turn_deps,
+                prepared,
+                tenant_id=row.tenant_id,
+                platform="discord",
+                thread_id=thread_id,
+                external_user_id=str(interaction.user.id),
+                user_message=user_message,
+                lifecycle=lifecycle,
+                cancel=cancel,
+                reseed_user_message=_reseed_user_message,
+                recovery_lifecycle=_recovery_lifecycle,
+                render_interval_s=2.0,
+                deadline=turn_deadline_at,
+            )
+        finally:
+            if outcome is not None and outcome.mapping_id is not None:
+                final_message_id = lifecycle_holder[0].final_message_id
+                if final_message_id is not None:
+                    marker_ids[outcome.mapping_id] = final_message_id
+            for marker_id, expected_message_id in marker_ids.items():
+                async with bot.runtime.sessionmaker() as marker_session:
+                    await clear_active_turn_if_message_id(
+                        marker_session,
+                        id=marker_id,
+                        expected_message_id=expected_message_id,
+                    )
+                    await marker_session.commit()
+
+        assert outcome is not None
         turn_state = outcome.state
         mapping_id = outcome.mapping_id
         final_lifecycle = lifecycle_holder[0]
