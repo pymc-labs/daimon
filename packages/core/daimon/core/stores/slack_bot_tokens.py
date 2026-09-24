@@ -71,12 +71,19 @@ async def delete_slack_bot_token(
     session: AsyncSession,
     *,
     team_id: str,
+    stored_at_or_before: datetime | None = None,
 ) -> int:
     """Delete the slack_bot_tokens row for a workspace. Idempotent.
 
+    With `stored_at_or_before`, only a token stored (or re-stored) no later
+    than that moment is deleted: a token a reinstall wrote afterwards stays.
+
     Returns rowcount; never raises on 0. Used by the GDPR purge orchestrator.
     """
-    result = await session.execute(delete(SlackBotToken).where(SlackBotToken.team_id == team_id))
+    stmt = delete(SlackBotToken).where(SlackBotToken.team_id == team_id)
+    if stored_at_or_before is not None:
+        stmt = stmt.where(SlackBotToken.updated_at <= stored_at_or_before)
+    result = await session.execute(stmt)
     rowcount = cast(CursorResult[Any], result).rowcount
     await session.flush()
     return rowcount

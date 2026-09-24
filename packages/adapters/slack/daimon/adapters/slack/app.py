@@ -201,6 +201,14 @@ def _compose_queued_content(events: list[dict[str, Any]]) -> str:
     return "\n\n".join(f"[{_author_id(e)}]: {e.get('text', '')}" for e in events)
 
 
+def _envelope_event_time(payload: dict[str, Any]) -> datetime | None:
+    """The Events API envelope's `event_time` (epoch seconds), or None."""
+    raw = payload.get("event_time")
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    return datetime.fromtimestamp(raw, tz=UTC)
+
+
 def _revokes_bot_token(event: dict[str, Any]) -> bool:
     """Return True if a ``tokens_revoked`` event revoked the workspace bot token.
 
@@ -684,7 +692,9 @@ class SlackApp:
             elif etype == "app_uninstalled" or (
                 etype == "tokens_revoked" and _revokes_bot_token(event)
             ):
-                self._spawn(self._handle_teardown(team_id=team_id))
+                self._spawn(
+                    self._handle_teardown(team_id=team_id, event_time=_envelope_event_time(payload))
+                )
         elif req.type == "slash_commands":
             # Slash commands arrive as req.type == "slash_commands".
             # Log req.type for unknown commands so the envelope type can be
@@ -763,19 +773,22 @@ class SlackApp:
         if self._inflight[tenant_id] <= 0:
             self._inflight.pop(tenant_id, None)
 
-    async def _handle_teardown(self, *, team_id: str) -> None:
+    async def _handle_teardown(self, *, team_id: str, event_time: datetime | None = None) -> None:
         """Archive the install: soft-archive the tenant, delete the bot token.
 
         Reached from app_uninstalled unconditionally, and from tokens_revoked
         only when the event names the bot token (see _revokes_bot_token).
 
         Soft-archives the tenant and deletes the bot-token row so subsequent
-        events see no token and are dropped cleanly.
+        events see no token and are dropped cleanly. `event_time` is the
+        envelope's: a delivery that arrives after the workspace reinstalled
+        finds a newer token and tears nothing down.
         """
         await teardown_slack_install(
             self.runtime.sessionmaker,
             team_id=team_id,
             now=datetime.now(UTC),
+            event_time=event_time,
         )
 
     async def _handle_block_action(self, payload: dict[str, Any]) -> None:
