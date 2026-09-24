@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The documentation site carries daimon's own look: the readme sticker as
   logo and favicon, and a palette taken from it.
+- Defaults reconciliation serializes writes and sweeps per tenant so concurrent
+  callers cannot create duplicate seeded resources or archive an ID another
+  caller has already resolved.
 
 ## [0.2.0] - 2026-09-21
 
