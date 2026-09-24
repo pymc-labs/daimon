@@ -60,6 +60,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a thread daimon opened may rename it, other threads need Manage Threads.
   Slack threads have no title, so both are Discord-only.
 
+### Changed
+
+- Opus 5.5 can be selected for an agent and is metered at $4 input, $20 output,
+  $5 five-minute cache write, and $0.20 cache read per million tokens. The
+  ledger cannot distinguish one-hour cache writes and prices them as five-minute
+  writes. The seeded and new-agent defaults remain Sonnet 5.
+
 ### Fixed
 
 - **A forked agent no longer warns everyone about a server it copied but
