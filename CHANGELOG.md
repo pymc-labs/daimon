@@ -32,7 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of leaving it running upstream with nothing pointing at it. The
   archive wait is bounded, its eventual result is logged, and repeated
   cancellation does not replace the error that caused the rollback.
-
+- A failed report publish keeps the reader's current PDF paired with its
+  accepted bundle. Each upload archive is stored separately, so a failed push
+  cannot replace the archive used to recover that bundle. A later publish
+  prunes unreferenced archives after at least 24 hours and the configured turn
+  deadline.
 - A session loss recovered right at a turn's time limit no longer leaves a
   replacement session behind that the next mention silently continues on
   without being told the previous work was lost.

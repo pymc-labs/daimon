@@ -334,6 +334,47 @@ def save_bundle_reference(
         )
 
 
+def record_published_revision(
+    conn: sqlite3.Connection,
+    *,
+    slug: str,
+    name: str,
+    handle: str,
+    sha256: str,
+    expires_at: datetime,
+    archive_path: str,
+    now: datetime,
+) -> None:
+    """Atomically make an accepted publish revision and bundle current."""
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO revisions (slug, name, created_at, by_thread, note)
+            VALUES (?, ?, ?, NULL, 'published')
+            """,
+            (slug, name, dt_to_text(now)),
+        )
+        conn.execute(
+            """
+            UPDATE reports
+            SET current_pdf = :name,
+                bundle_handle = :handle,
+                bundle_sha256 = :sha256,
+                bundle_expires_at = :expires_at,
+                archive_path = :archive_path
+            WHERE slug = :slug
+            """,
+            {
+                "slug": slug,
+                "name": name,
+                "handle": handle,
+                "sha256": sha256,
+                "expires_at": dt_to_text(expires_at),
+                "archive_path": archive_path,
+            },
+        )
+
+
 def set_seam_status(conn: sqlite3.Connection, *, slug: str, status: SeamStatus) -> None:
     with conn:
         conn.execute("UPDATE reports SET seam_status = ? WHERE slug = ?", (status, slug))

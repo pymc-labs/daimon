@@ -28,13 +28,14 @@ atomic `DELETE ... RETURNING` — the row itself is the single-use record.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import sqlite3
 import tarfile
 import tempfile
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import IO
 
@@ -58,12 +59,11 @@ _REPORT_UNAUTHORIZED_MESSAGE = (
 )
 
 _REPORT_PDF_NAME = "report.pdf"
-_BUNDLE_FILE_NAME = "bundle.tar.gz"
-
 # In-memory threshold before a spooled upload spills to disk — neither route
 # ever holds the full request body in memory beyond this, regardless of the
 # eventual size cap enforced on top of it.
 _SPOOL_MEMORY_BYTES = 1024 * 1024
+_ARCHIVE_RETENTION_MINIMUM = timedelta(hours=24)
 
 
 class _ArchiveRejected(Exception):
@@ -247,6 +247,20 @@ def _persist_archive_for_publish(*, spool: IO[bytes], archive_path: Path) -> Non
     spool.seek(0)
 
 
+def _prune_old_archives(*, report_dir: Path, current_archive: str | None, cutoff: datetime) -> None:
+    """Remove unreferenced upload archives older than the retry grace period."""
+    current_path = Path(current_archive).resolve() if current_archive is not None else None
+    for pattern in ("bundle.tar.gz", "bundle-*.tar.gz", ".bundle-*.tar.gz.tmp"):
+        for path in report_dir.glob(pattern):
+            if current_path is not None and path.resolve() == current_path:
+                continue
+            try:
+                if path.stat().st_mtime < cutoff.timestamp():
+                    path.unlink()
+            except FileNotFoundError:
+                continue
+
+
 def _report_dir(*, data_dir: Path, slug: str) -> Path:
     """Compose and containment-check the report's directory.
 
@@ -318,22 +332,20 @@ def build_uploads_router(
                 raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(err)) from err
 
             report_dir = _report_dir(data_dir=settings.data_dir, slug=report.slug)
-            revision_name = _next_revision_name(conn, slug=report.slug)
-            _atomic_write_bytes(report_dir / revision_name, pdf_bytes)
-            reports_store.add_revision(
-                conn,
-                slug=report.slug,
-                name=revision_name,
-                by_thread=None,
-                note="published",
-                now=datetime.now(UTC),
+            archive_retention = max(
+                _ARCHIVE_RETENTION_MINIMUM,
+                timedelta(seconds=settings.turn_timeout_seconds + 60),
             )
-            reports_store.set_current_pdf(conn, slug=report.slug, name=revision_name)
-
-            # Persist the archive itself, before touching the seam — this is
-            # the file a later re-push reads (SPEC D-03). Written under the
-            # same containment-checked directory the revision PDF just used.
-            archive_path = report_dir / _BUNDLE_FILE_NAME
+            _prune_old_archives(
+                report_dir=report_dir,
+                current_archive=report.archive_path,
+                cutoff=datetime.now(UTC) - archive_retention,
+            )
+            # Persist this upload separately so a failed push cannot overwrite
+            # the archive paired with the report's currently accepted bundle.
+            # A later turn re-pushes the path recorded with that bundle.
+            archive_id = hashlib.sha256(claims.jti.encode()).hexdigest()
+            archive_path = report_dir / f"bundle-{archive_id}.tar.gz"
             _persist_archive_for_publish(spool=spool, archive_path=archive_path)
 
             # Read into bytes rather than handing httpx the still-open spooled
@@ -357,19 +369,37 @@ def build_uploads_router(
                 ) from err
             except SeamError as err:
                 # The archive stays on disk in this failure case too — a
-                # re-publish is what replaces it, not this handler cleaning
-                # up after itself.
+                # fresh publish is what replaces it, not this handler
+                # cleaning up after itself. A transport timeout is ambiguous:
+                # the seam may have accepted the bundle before its response
+                # was lost, so a later publish can create an extra upstream
+                # file. The seam's expiry cleanup owns that orphan; this
+                # single-use capability cannot be retried.
                 raise HTTPException(
                     status.HTTP_502_BAD_GATEWAY, detail="the seam refused the archive"
                 ) from err
 
-            reports_store.save_bundle_reference(
+            # Do not expose the new PDF as current until the seam has accepted
+            # the archive. Otherwise a failed push leaves readers looking at
+            # a revision whose bundle handle and digest still name old bytes.
+            revision_name = _next_revision_name(conn, slug=report.slug)
+            _atomic_write_bytes(report_dir / revision_name, pdf_bytes)
+            # A turn may have loaded the previous report before awaiting the
+            # seam. Refresh that archive's mtime before atomically replacing
+            # its DB reference so cleanup retains it through the turn deadline.
+            if report.archive_path is not None:
+                previous_archive = Path(report.archive_path)
+                if previous_archive.is_file():
+                    previous_archive.touch()
+            reports_store.record_published_revision(
                 conn,
                 slug=report.slug,
+                name=revision_name,
                 handle=pushed.handle,
                 sha256=pushed.sha256,
                 expires_at=datetime.fromisoformat(pushed.expires_at),
                 archive_path=str(archive_path),
+                now=datetime.now(UTC),
             )
         finally:
             spool.close()
