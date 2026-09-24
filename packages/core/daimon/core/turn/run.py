@@ -315,14 +315,14 @@ async def _archive_orphaned_session(
                 )
                 return
             archive_task.result()
+            log.info("turn.recovery_orphan_archived", session_id=session_id)
+            return
     except Exception as err:
         log.warning(
             "turn.recovery_orphan_archive_failed",
             session_id=session_id,
             error=str(err)[:200],
         )
-    else:
-        log.info("turn.recovery_orphan_archived", session_id=session_id)
 
 
 async def _replace_dead_session(

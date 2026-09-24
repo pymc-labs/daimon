@@ -12,6 +12,8 @@ import dataclasses
 import json
 import os
 import re
+import subprocess
+import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -2584,6 +2586,40 @@ async def test_orphan_archive_timeout_does_not_wait_and_logs_late_failure(
         await anthropic_client.close()
 
 
+def test_orphan_archive_returns_after_successful_archive_with_timeout() -> None:
+    """A successful archive must return instead of spinning on its completed task."""
+    script = """
+import asyncio
+import anthropic
+import httpx
+from daimon.core.turn.run import _archive_orphaned_session
+from daimon.testing.ma_models import ma_session
+
+async def handler(_request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json=ma_session(id="sess_orphan").model_dump(mode="json"))
+
+async def main() -> None:
+    client = anthropic.AsyncAnthropic(
+        api_key="test",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+        ),
+        max_retries=0,
+    )
+    await _archive_orphaned_session(client, session_id="sess_orphan")
+    await client.close()
+
+asyncio.run(main())
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=3.0, check=False
+    )
+    assert result.returncode == 0, (
+        "a successful archive should finish within three seconds; "
+        f"stdout={result.stdout!r}, stderr={result.stderr!r}"
+    )
+
+
 async def test_orphan_archive_second_cancel_preserves_the_unwinding_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2605,7 +2641,7 @@ async def test_orphan_archive_second_cancel_preserves_the_unwinding_error(
         ),
         max_retries=0,
     )
-    monkeypatch.setattr(run_module, "_ORPHAN_ARCHIVE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(run_module, "_ORPHAN_ARCHIVE_TIMEOUT_S", 30.0)
 
     async def unwind() -> None:
         try:
