@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discord setup Details now drops superseded reads and binds setup and
   coding-tool actions to the agent shown on the card. A bounded TLA+ model
   retains the pre-fix wrong-target traces.
+- Discord guild removal and rejoin transitions are serialized per guild, and
+  delayed lifecycle work checks the current gateway cache before changing the
+  tenant. Startup now revives archived tenants for guilds still joined without
+  posting another welcome or issuing signup credit again.
 - Slack shutdown now waits for acknowledged mention handlers that are still
   preparing a turn, closing the graceful-drain loss window before thread
   registration. A hard process crash after acknowledgement can still lose work.

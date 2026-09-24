@@ -107,6 +107,12 @@ def _make_guild(
     return guild
 
 
+async def _dispatch_guild_join(bot: DaimonBot, guild: discord.Guild) -> None:
+    """Mirror discord.py: guild_create updates its cache before dispatching."""
+    bot._connection._guilds[guild.id] = guild  # pyright: ignore[reportPrivateUsage]
+    await bot.on_guild_join(guild)
+
+
 async def _drain_bg_tasks(bot: DaimonBot) -> None:
     """Await every spawned background task to completion (test determinism)."""
     while bot._bg_tasks:  # pyright: ignore[reportPrivateUsage]
@@ -128,7 +134,7 @@ async def test_on_guild_join_provisions_pending_then_seeds_ready(
         # _seed_tenant_defaults owns the status flip; emulate a successful reconcile.
         mock_reconcile.return_value = ApplyReport()
 
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
 
     # tenant_deterministic: the row keyed on the derived uuid exists.
@@ -177,7 +183,7 @@ async def test_seed_passes_mcp_public_url_to_reconcile(
         new_callable=AsyncMock,
         return_value=ApplyReport(),
     ) as mock_reconcile:
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
 
     assert mock_reconcile.await_args is not None, "seed must invoke reconcile_tenant_defaults"
@@ -199,7 +205,7 @@ async def test_seed_passes_none_public_url_when_mcp_unconfigured(
         new_callable=AsyncMock,
         return_value=ApplyReport(),
     ) as mock_reconcile:
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
 
     assert mock_reconcile.await_args is not None, "seed must invoke reconcile_tenant_defaults"
@@ -223,9 +229,9 @@ async def test_on_guild_join_idempotent_on_rejoin(
     ) as mock_reconcile:
         mock_reconcile.return_value = ApplyReport()
 
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
 
     # provision_idempotent: the deterministic Tenant + Account rows both resolve.
@@ -262,8 +268,8 @@ async def test_on_guild_join_in_flight_guard_prevents_duplicate_seed(
     ):
         # Two joins back-to-back without awaiting the bg seed: the in-flight
         # set[tenant_id] guard must keep the second from starting a duplicate seed.
-        await bot.on_guild_join(guild)
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
+        await _dispatch_guild_join(bot, guild)
         await asyncio.sleep(0)  # let bg tasks reach the await
         assert reconcile_starts == 1, "in-flight guard must prevent a concurrent duplicate seed"
         release.set()
@@ -292,7 +298,7 @@ async def test_on_guild_join_failed_posts_snag_followup(
         # _seed_tenant_defaults owns the status flip; return the failing report.
         mock_reconcile.return_value = failing_report
 
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
 
     derived = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
@@ -326,7 +332,7 @@ async def test_on_guild_join_welcome_channel_fallback(
         new_callable=AsyncMock,
         return_value=ApplyReport(),
     ):
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
 
     first_ch, second_ch = guild.text_channels
@@ -353,7 +359,7 @@ async def test_seed_pre_write_exception_flips_failed_and_posts_snag(
         new_callable=AsyncMock,
         side_effect=DaimonError("seed exploded"),
     ):
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
 
     derived = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
@@ -391,7 +397,7 @@ async def test_seed_pre_write_exception_never_shows_failed_word(
         new_callable=AsyncMock,
         side_effect=DaimonError("seed exploded"),
     ):
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
 
     welcome_ch = guild.system_channel
@@ -421,7 +427,7 @@ async def test_on_guild_join_rejoin_clears_archived_at(
         new_callable=AsyncMock,
         return_value=ApplyReport(),
     ):
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
 
     derived = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
@@ -438,7 +444,7 @@ async def test_on_guild_join_rejoin_clears_archived_at(
         new_callable=AsyncMock,
         return_value=ApplyReport(),
     ):
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
 
     tr = await get_tenant_liveness(db_session_factory, derived)
@@ -470,7 +476,7 @@ async def test_seed_unexpected_oserror_flips_failed_and_posts_snag(
             side_effect=OSError("read failed"),
         ),
     ):
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
 
     derived = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
@@ -527,7 +533,7 @@ async def test_seed_unexpected_sqlalchemyerror_flips_failed_and_posts_snag(
             side_effect=SQLAlchemyError("db hiccup"),
         ),
     ):
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         await _drain_bg_tasks(bot)
 
     derived = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
@@ -591,7 +597,7 @@ async def test_seed_catchall_flip_failure_is_best_effort_and_logged(
             side_effect=_flip_side_effect,
         ),
     ):
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         # _drain_bg_tasks must complete without raising — the exception must not escape
         await _drain_bg_tasks(bot)
 
@@ -644,7 +650,7 @@ async def test_seed_typed_branch_flip_failure_is_best_effort_and_logged(
             side_effect=_flip_side_effect,
         ),
     ):
-        await bot.on_guild_join(guild)
+        await _dispatch_guild_join(bot, guild)
         # _drain_bg_tasks must complete without raising — the exception must not escape
         await _drain_bg_tasks(bot)
 
