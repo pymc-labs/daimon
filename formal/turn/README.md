@@ -1,12 +1,18 @@
 # Turn reducer and render model
 
-Run with a JRE and the TLA+ tools jar:
+Run from the repository root with a JRE and the TLA+ tools jar (setup in the
+[coverage report](../README.md)):
 
 ```sh
-java -jar "$TLA2TOOLS_JAR" -config formal/turn/TurnLifecycle.cfg formal/turn/TurnLifecycle.tla
-java -jar "$TLA2TOOLS_JAR" -config formal/turn/TurnLifecycleReplay.cfg formal/turn/TurnLifecycle.tla
-java -jar "$TLA2TOOLS_JAR" -config formal/turn/TurnLifecycleBounded.cfg formal/turn/TurnLifecycle.tla
-java -jar "$TLA2TOOLS_JAR" -config formal/turn/TurnProgress.cfg formal/turn/TurnProgress.tla
+set -eu
+: "${TLA2TOOLS_JAR:?Set TLA2TOOLS_JAR to the path of tla2tools.jar}"
+TLC_META_DIR="${TMPDIR:-/tmp}/daimon-turn-tlc"
+mkdir -p "$TLC_META_DIR/terminal" "$TLC_META_DIR/replay" "$TLC_META_DIR/bounded" "$TLC_META_DIR/progress"
+# These two configurations intentionally find counterexamples (TLC exit 12).
+java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/terminal" -config formal/turn/TurnLifecycle.cfg formal/turn/TurnLifecycle.tla || test "$?" -eq 12
+java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/replay" -config formal/turn/TurnLifecycleReplay.cfg formal/turn/TurnLifecycle.tla || test "$?" -eq 12
+java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/bounded" -config formal/turn/TurnLifecycleBounded.cfg formal/turn/TurnLifecycle.tla
+java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/progress" -config formal/turn/TurnProgress.cfg formal/turn/TurnProgress.tla
 ```
 
 Run TLC commands sequentially in one checkout: TLC creates timestamp-named
