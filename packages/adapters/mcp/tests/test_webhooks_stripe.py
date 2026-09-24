@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import time
 import uuid
@@ -9,6 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+import pytest
 import stripe
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.billing import BillingConfig
@@ -352,7 +355,7 @@ async def test_clawback_charge_refunded_writes_negative_ledger_row(
     tenant = await _seed_tenant_via_sessionmaker(sessionmaker)
     app = _build_app(sessionmaker)
 
-    # Seed a credit first so get_by_payment_intent can resolve it.
+    # Seed a credit first so lock_by_payment_intent can resolve it.
     credit_payload = _checkout_session_completed_payload("evt_original_5", tenant_id=str(tenant))
     await _post_signed(app, credit_payload)
 
@@ -655,3 +658,97 @@ async def _seed_tenant_via_sessionmaker(
     async with sessionmaker() as s, s.begin():
         tenant = await make_tenant(s)
     return tenant.id
+
+
+# ---------------------------------------------------------------------------
+# Concurrent clawbacks: Stripe delivers webhooks concurrently and unordered, so
+# a refund and a dispute (or two growing partial refunds) for one payment_intent
+# can be in flight at once. Model A's high-water mark only holds if the second
+# handler reads the first one's clawback row.
+# ---------------------------------------------------------------------------
+
+
+async def _post_concurrently_with_overlapping_reads(
+    app: Starlette,
+    monkeypatch: pytest.MonkeyPatch,
+    payloads: list[dict[str, Any]],
+) -> list[httpx.Response]:
+    """Deliver ``payloads`` at once, holding each handler after its
+    already-clawed-back read until every handler has read (or 1 s passes, which
+    is what a correctly serialised handler costs here: the second one cannot
+    reach the read while the first holds the payment_intent)."""
+    real = tenant_ledger.get_clawed_back_total
+    arrived = 0
+    all_read = asyncio.Event()
+
+    async def read_then_wait(session: AsyncSession, *, payment_intent: str) -> Decimal:
+        nonlocal arrived
+        total = await real(session, payment_intent=payment_intent)
+        arrived += 1
+        if arrived == len(payloads):
+            all_read.set()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(all_read.wait(), timeout=1.0)
+        return total
+
+    monkeypatch.setattr(tenant_ledger, "get_clawed_back_total", read_then_wait)
+    return list(await asyncio.gather(*(_post_signed(app, p) for p in payloads)))
+
+
+async def test_concurrent_refund_and_dispute_claw_back_once(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full refund and a full dispute racing on one $10 credit claw back $10,
+    not $20 (CR-01, concurrent)."""
+    sessionmaker = committing_sessionmaker  # one connection per handler, real row locks
+    tenant = await _seed_tenant_via_sessionmaker(sessionmaker)
+    app = _build_app(sessionmaker)
+    await _post_signed(
+        app, _checkout_session_completed_payload("evt_cc_orig", tenant_id=str(tenant))
+    )
+
+    responses = await _post_concurrently_with_overlapping_reads(
+        app,
+        monkeypatch,
+        [
+            _charge_refunded_payload("evt_cc_refund", payment_intent="pi_evt_cc_orig"),
+            _charge_dispute_payload("evt_cc_dispute", payment_intent="pi_evt_cc_orig"),
+        ],
+    )
+
+    assert [r.status_code for r in responses] == [200, 200]
+    async with sessionmaker() as s:
+        balance = await tenant_ledger.get_balance(s, tenant_id=tenant)
+    assert balance == Decimal("0"), f"balance={balance}: $10 credit clawed back more than once"
+
+
+async def test_concurrent_growing_partial_refunds_claw_back_the_high_water_mark(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cumulative refunds of $4 then $7 racing on one $10 credit claw back $7
+    in total, not $11 (WR-01, concurrent)."""
+    sessionmaker = committing_sessionmaker  # one connection per handler, real row locks
+    tenant = await _seed_tenant_via_sessionmaker(sessionmaker)
+    app = _build_app(sessionmaker)
+    await _post_signed(
+        app, _checkout_session_completed_payload("evt_cp_orig", tenant_id=str(tenant))
+    )
+
+    await _post_concurrently_with_overlapping_reads(
+        app,
+        monkeypatch,
+        [
+            _charge_refunded_payload(
+                "evt_cp_r1", payment_intent="pi_evt_cp_orig", amount_refunded=400
+            ),
+            _charge_refunded_payload(
+                "evt_cp_r2", payment_intent="pi_evt_cp_orig", amount_refunded=700
+            ),
+        ],
+    )
+
+    async with sessionmaker() as s:
+        balance = await tenant_ledger.get_balance(s, tenant_id=tenant)
+    assert balance == Decimal("3"), f"balance={balance}: expected $10 - $7 = $3"

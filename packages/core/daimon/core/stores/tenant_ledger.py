@@ -82,14 +82,21 @@ async def list_for_tenant(
     return [TenantLedgerRow.model_validate(r, from_attributes=True) for r in result.scalars().all()]
 
 
-async def get_by_payment_intent(
+async def lock_by_payment_intent(
     session: AsyncSession, *, payment_intent: str
 ) -> TenantLedgerRow | None:
-    """Find the original topup credit row by its Stripe payment_intent.
+    """Find the original topup credit row by its Stripe payment_intent and lock it.
 
     Used by the clawback path (Plan 03) to resolve the tenant + original amount
     for a charge.refunded / charge.dispute.created event, which carries the
     payment_intent but not the original Checkout metadata.
+
+    The row is locked (FOR UPDATE) until the caller's transaction ends, which
+    serialises every clawback for one payment_intent. The clawback reads the
+    total already clawed back and writes the difference; Stripe delivers
+    webhooks concurrently, so without the lock a refund and a dispute (or two
+    growing partial refunds) can both read the same total and both write,
+    clawing back more than was ever refunded.
     """
     stmt = (
         select(TenantLedger)
@@ -98,6 +105,7 @@ async def get_by_payment_intent(
             TenantLedger.reason == "topup",
         )
         .limit(1)
+        .with_for_update()
     )
     orm = (await session.execute(stmt)).scalar_one_or_none()
     if orm is None:

@@ -476,7 +476,11 @@ async def _handle_clawback(
 ) -> Response:
     """Append a clawback ledger row on charge.refunded / charge.dispute.created.
 
-    resolve tenant + amount from the original credit via get_by_payment_intent.
+    resolve tenant + amount from the original credit via lock_by_payment_intent,
+    which locks that credit row for the rest of this transaction. The lock is
+    what makes the read-then-write below safe: Stripe delivers webhooks
+    concurrently, and two clawbacks for one payment_intent that both read the
+    same already-clawed-back total would both write.
 
     Model A (uniform high-water-mark): refunds and disputes share one cumulative
     clawed-back total per payment_intent. The pure _clawback_amount_from_event
@@ -495,7 +499,7 @@ async def _handle_clawback(
 
     async with sessionmaker() as s, s.begin():
         credit = (
-            await tenant_ledger.get_by_payment_intent(s, payment_intent=str(pi))
+            await tenant_ledger.lock_by_payment_intent(s, payment_intent=str(pi))
             if pi is not None
             else None
         )

@@ -128,7 +128,7 @@ async def test_get_balance_isolates_tenants(
     assert balance_b == Decimal("7.00"), "tenant B balance must not include tenant A rows"
 
 
-async def test_get_by_payment_intent_returns_topup_credit_row(
+async def test_lock_by_payment_intent_returns_topup_credit_row(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
@@ -140,18 +140,18 @@ async def test_get_by_payment_intent_returns_topup_credit_row(
         idempotency_key="topup:evt_pi_abc",
         payment_intent="pi_abc123",
     )
-    row = await tenant_ledger.get_by_payment_intent(db_session, payment_intent="pi_abc123")
-    assert row is not None, "get_by_payment_intent must return the matching topup row"
+    row = await tenant_ledger.lock_by_payment_intent(db_session, payment_intent="pi_abc123")
+    assert row is not None, "lock_by_payment_intent must return the matching topup row"
     assert row.tenant_id == tenant.id, "row must belong to the correct tenant"
     assert row.delta_usd == Decimal("50.00"), "row must carry the original credit amount"
     assert row.payment_intent == "pi_abc123", "row must carry the payment_intent"
 
 
-async def test_get_by_payment_intent_returns_none_when_no_match(
+async def test_lock_by_payment_intent_returns_none_when_no_match(
     db_session: AsyncSession,
 ) -> None:
-    row = await tenant_ledger.get_by_payment_intent(db_session, payment_intent="pi_does_not_exist")
-    assert row is None, "get_by_payment_intent must return None when no matching row exists"
+    row = await tenant_ledger.lock_by_payment_intent(db_session, payment_intent="pi_does_not_exist")
+    assert row is None, "lock_by_payment_intent must return None when no matching row exists"
 
 
 async def test_get_clawed_back_total_returns_zero_when_no_clawbacks(

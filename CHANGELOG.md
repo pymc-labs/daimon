@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A refund and a dispute (or two growing partial refunds) for one top-up
+  that Stripe delivered at the same time could each claw back the full
+  amount, taking more from the balance than was ever refunded.
+
 ### Changed
 
 - Opus 5.5 can be selected for an agent and is metered at its published rates.

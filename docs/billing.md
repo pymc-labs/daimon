@@ -148,6 +148,8 @@ subscription:
    the positive ledger entry. Refunds and disputes insert compensating
    negative entries against a cumulative high-water mark per payment intent,
    so a refund followed by a dispute on one charge cannot claw back twice.
+   Each clawback locks the original credit row before it reads that mark, so
+   the guarantee also holds when Stripe delivers the two events at once.
 
 Both the checkout and webhook routes are mounted only when Stripe is
 configured. A self-hoster without it credits a tenant by inserting a
