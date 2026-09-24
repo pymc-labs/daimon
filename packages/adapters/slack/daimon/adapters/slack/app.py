@@ -815,7 +815,8 @@ class SlackApp:
         status_ts: str = (container.get("message_ts") if container is not None else "") or ""
         user_info: dict[str, Any] | None = payload.get("user")
         clicker: str = (user_info.get("id") if user_info is not None else "") or ""
-        entry = self._cancel_registry.get(status_ts)
+        action_key = str(actions[0].get("value") or "")
+        entry = self._cancel_registry.get(action_key) or self._cancel_registry.get(status_ts)
         if entry is None:
             await self._refuse_cancel(payload, clicker=clicker, text=_CANCEL_TURN_ENDED)
             return
@@ -1430,6 +1431,8 @@ class SlackApp:
             model_id=_lc_model_id,
             register=self._register_cancel,
             deregister=self._deregister_cancel,
+            register_pending=self._register_cancel,
+            deregister_pending=self._deregister_cancel,
         )
         lifecycle_holder: list[SlackTurnLifecycle] = [lifecycle]
 
@@ -1823,6 +1826,8 @@ class SlackApp:
                     model_id=_lc_model_id,
                     register=self._register_cancel,
                     deregister=self._deregister_cancel,
+                    register_pending=self._register_cancel,
+                    deregister_pending=self._deregister_cancel,
                     # Take over the failed attempt's card so it is edited into
                     # this turn's answer rather than left standing beside a
                     # second, successful card.
@@ -2108,6 +2113,8 @@ class SlackApp:
             model_id=follow_admission.agent.model.id,
             register=self._register_cancel,
             deregister=self._deregister_cancel,
+            register_pending=self._register_cancel,
+            deregister_pending=self._deregister_cancel,
         )
         await follow_lifecycle.post_initial()
         if follow_prepared.mapping_id is not None and follow_lifecycle.status_ts is not None:
@@ -2179,6 +2186,8 @@ class SlackApp:
                 model_id=follow_admission.agent.model.id,
                 register=self._register_cancel,
                 deregister=self._deregister_cancel,
+                register_pending=self._register_cancel,
+                deregister_pending=self._deregister_cancel,
                 adopt_status_ts=follow_lifecycle.status_ts,
             )
             if follow_lifecycle.status_ts is not None:
