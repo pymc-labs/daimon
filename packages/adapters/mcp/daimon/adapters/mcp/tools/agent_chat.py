@@ -76,7 +76,7 @@ from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
 from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_ISOLATED
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
@@ -226,19 +226,32 @@ async def _verify_agent_owns_session(
     auth: AuthIdentity,
     handle: str,
 ) -> BetaManagedAgentsSession:
-    """Assert the caller's agent owns the session, not merely its tenant.
+    """Assert the caller's agent AND account own the session, not merely its tenant.
 
     Stricter than ``_verify_tenant_owns_session``: re-derives the session
     agent's UUID and compares it to ``auth.agent_id`` (the verified derived
-    per-agent UUID). Rejects sibling-agent handles within the same tenant
-    (WR-03). Raises ``ToolError("session not found")`` — same message as a
-    genuinely missing session, so existence isn't leaked across agents.
+    per-agent UUID), rejecting sibling-agent handles within the same tenant
+    (WR-03). It also requires the session's ``daimon_account`` tag to be the
+    caller's account: every member of a workspace talks to the same agent, and
+    a member's session runs with that member's vault, so an agent match alone
+    would let one member read, drive or stop another's conversation. Raises
+    ``ToolError("session not found")`` — same message as a genuinely missing
+    session, so existence isn't leaked across agents or accounts.
     """
     s = await runtime.client.beta.sessions.retrieve(handle)
     derived = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(s.agent.id))
-    if auth.agent_id is None or derived != auth.agent_id:
+    if auth.agent_id is None or derived != auth.agent_id or not _owned_by_caller(s, auth):
         raise ToolError("session not found")
     return s
+
+
+def _owned_by_caller(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:
+    """True when ``session`` was created for the caller's account.
+
+    ``create_session`` / ``create_isolated_session`` tag every session with
+    ``daimon_account``; an untagged session belongs to no caller.
+    """
+    return session.metadata.get(MA_METADATA_KEY_ACCOUNT) == str(auth.account_id)
 
 
 async def _resolve_ma_agent(
@@ -451,16 +464,18 @@ async def _list_sessions_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
 ) -> list[SessionInfo]:
-    """List sessions for THIS caller's agent only (agent-scoped, not tenant).
+    """List the sessions THIS caller started with its agent.
 
-    Resolves the caller's MA agent from the verified claim, then lists only
-    that agent's sessions. Other agents' sessions in the same tenant are never
-    returned — the headless token is scoped to its own agent.
+    Resolves the caller's MA agent from the verified claim, lists that agent's
+    sessions, and keeps only those tagged with the caller's account. Other
+    agents' sessions in the same tenant, and other members' sessions of this
+    agent, are never returned.
     """
     ma_agent = await _resolve_ma_agent(runtime, auth)
     results: list[SessionInfo] = []
     async for s in runtime.client.beta.sessions.list(agent_id=str(ma_agent.id)):
-        results.append(SessionInfo.from_ma(s))
+        if _owned_by_caller(s, auth):
+            results.append(SessionInfo.from_ma(s))
     return results
 
 
@@ -872,11 +887,12 @@ def register_agent_chat_tools(
 
     @mcp.tool(tags={"agent-chat"}, name="list_my_sessions")  # pyright: ignore[reportArgumentType]
     async def list_my_sessions(ctx: Context) -> list[SessionInfo]:  # pyright: ignore[reportUnusedFunction]
-        """List this agent's sessions (id, status, title, timestamps).
+        """List the sessions you started with this agent (id, status, title, timestamps).
 
         ``id`` is the handle you pass to ``get_session``, ``list_events``,
         ``deliver_turn_charts``, and ``continue_turn``. Scoped to this agent
-        only. No parameters — identity is read from the token claim.
+        and to the account the token was minted for. No parameters — identity
+        is read from the token claim.
         """
         return await _list_sessions_impl(runtime, await _auth(ctx))
 

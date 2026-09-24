@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Slack retries a failed startup sweep before admitting turns.
 - A stale wizard submit cannot replace newer answers, and expiry cannot
   abandon an already submitted session.
+- A per-agent MCP token (coding tools) now reaches only the sessions its own
+  account started with that agent: `list_my_sessions`, `get_my_session`,
+  `list_events`, `continue_turn`, `ask`, `cancel_turn`, `archive_my_session`,
+  `get_turn_cost` and `deliver_turn_charts` no longer see other workspace
+  members' sessions of the same agent.
 
 ## [0.2.0] - 2026-09-21
 

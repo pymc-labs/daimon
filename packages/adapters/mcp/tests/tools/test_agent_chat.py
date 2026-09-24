@@ -62,6 +62,7 @@ from daimon.adapters.mcp.tools.agent_chat import (
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut
 from daimon.core import bundle_handle
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import DeploymentDefault
@@ -96,6 +97,7 @@ _MA_AGENT_ID = "ag_test001"
 _AGENT_UUID = derive_agent_uuid(tenant_id=_TENANT_ID, ma_agent_id=_MA_AGENT_ID)
 _ENV_ID = "env_test001"
 _ENV_NAME = "production"
+_ACCOUNT_ID = uuid.uuid4()
 
 
 def _runtime(
@@ -118,7 +120,7 @@ def _runtime(
 
 def _auth(agent_id: uuid.UUID | None = _AGENT_UUID) -> AuthIdentity:
     return AuthIdentity(
-        account_id=uuid.uuid4(),
+        account_id=_ACCOUNT_ID,
         tenant_id=_TENANT_ID,
         role=Role.USER,
         agent_id=agent_id,
@@ -130,10 +132,19 @@ def _session_json(
     session_id: str = "ses_test001",
     agent_id: str = _MA_AGENT_ID,
     status: SessionStatus = "idle",
+    account_id: uuid.UUID | None = _ACCOUNT_ID,
 ) -> dict[str, Any]:
-    """A session payload under this module's fixed ids, as MA would serve it."""
+    """A session payload under this module's fixed ids, as MA would serve it.
+
+    Tagged with the account that created it, as ``create_session`` does;
+    ``account_id=None`` models an untagged session.
+    """
     return ma_session(
-        id=session_id, agent_id=agent_id, environment_id=_ENV_ID, status=status
+        id=session_id,
+        agent_id=agent_id,
+        environment_id=_ENV_ID,
+        status=status,
+        metadata=None if account_id is None else {MA_METADATA_KEY_ACCOUNT: str(account_id)},
     ).model_dump(mode="json")
 
 
@@ -1471,7 +1482,7 @@ async def test_list_events_admits_thread_status_events_through_fastmcp() -> None
     """
     token = "narrowed-agent-token"
     claims: dict[str, str] = {
-        "sub": str(uuid.uuid4()),
+        "sub": str(_ACCOUNT_ID),
         "tenant_id": str(_TENANT_ID),
         "role": "user",
         "agent_id": str(_AGENT_UUID),
@@ -2584,6 +2595,7 @@ async def test_get_turn_cost_returns_none_but_still_counts_events_for_unpriced_m
         agent_id=_MA_AGENT_ID,
         model="claude-unpriced-model-x",
         environment_id=_ENV_ID,
+        metadata={MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID)},
     ).model_dump(mode="json")
     usage = ma_model_usage(input_tokens=100, output_tokens=50)
     router = MARouter()
@@ -2804,3 +2816,126 @@ async def test_ask_with_handle_reads_only_this_turns_reply(
     assert result.message == "this turn", (
         f"ask returned the transcript's newest message instead of this turn's: {result!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Account scoping: an agent token reaches only its own account's sessions
+# ---------------------------------------------------------------------------
+
+_OTHER_ACCOUNT_ID = uuid.uuid4()
+
+
+def _other_accounts_session_router(
+    *, on_send: Any = None, on_archive: Any = None, on_events: Any = None
+) -> MARouter:
+    """One session of the caller's OWN agent, created by a different account."""
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=_session_json(session_id="ses_other", status="idle", account_id=_OTHER_ACCOUNT_ID),
+        ),
+    )
+    if on_send is not None:
+        router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
+    if on_archive is not None:
+        router.add("POST", r"/v1/sessions/([^/]+)/archive", on_archive)
+    if on_events is not None:
+        router.add("GET", r"/v1/sessions/([^/]+)/events", on_events)
+    return router
+
+
+async def test_list_sessions_omits_other_accounts_sessions_of_the_same_agent() -> None:
+    """Two members of a workspace share one agent; each member's token lists only
+    the sessions that member started, never a teammate's."""
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _r, _m: list_response(
+            [
+                ma_agent(
+                    id=_MA_AGENT_ID,
+                    name="test-agent",
+                    metadata={"daimon_tenant": str(_TENANT_ID), "daimon_name": "test-agent"},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions",
+        lambda _r, _m: list_response(
+            [
+                _session_json(session_id="ses_mine", account_id=_ACCOUNT_ID),
+                _session_json(session_id="ses_other", account_id=_OTHER_ACCOUNT_ID),
+                _session_json(session_id="ses_untagged", account_id=None),
+            ]
+        ),
+    )
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+
+    sessions = await _list_sessions_impl(runtime, _auth())
+
+    assert [s.id for s in sessions] == ["ses_mine"]
+
+
+async def test_get_my_session_rejects_another_accounts_session_of_the_same_agent() -> None:
+    runtime = _runtime(build_fake_anthropic(_other_accounts_session_router().dispatch))
+
+    with pytest.raises(ToolError, match="session not found"):
+        await _get_session_impl(runtime, _auth(), "ses_other")
+
+
+async def test_list_events_rejects_another_accounts_session_and_reads_no_transcript() -> None:
+    event_reads: list[str] = []
+
+    def on_events(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        event_reads.append(m.group(1))
+        return list_response([])
+
+    router = _other_accounts_session_router(on_events=on_events)
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+
+    with pytest.raises(ToolError, match="session not found"):
+        await _list_events_impl(runtime, _auth(), "ses_other", None, 100, "asc")
+
+    assert event_reads == []
+
+
+async def test_continue_and_cancel_reject_another_accounts_session_with_zero_sends() -> None:
+    """A teammate's session runs with the teammate's vault; neither a follow-up
+    message nor an interrupt may reach it from another member's token."""
+    send_calls: list[str] = []
+
+    def on_send(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        send_calls.append(m.group(1))
+        return send_events_response(data=[])
+
+    router = _other_accounts_session_router(on_send=on_send)
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+
+    with pytest.raises(ToolError, match="session not found"):
+        await _continue_turn_impl(runtime, _auth(), "ses_other", "hi")
+    with pytest.raises(ToolError, match="session not found"):
+        await _cancel_turn_impl(runtime, _auth(), "ses_other")
+
+    assert send_calls == []
+
+
+async def test_archive_my_session_rejects_another_accounts_session_with_no_archive() -> None:
+    archive_calls: list[str] = []
+
+    def on_archive(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        archive_calls.append(m.group(1))
+        return httpx.Response(200, json=_session_json(status="terminated"))
+
+    router = _other_accounts_session_router(on_archive=on_archive)
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+
+    with pytest.raises(ToolError, match="session not found"):
+        await _archive_my_session_impl(runtime, _auth(), "ses_other")
+
+    assert archive_calls == []

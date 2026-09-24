@@ -43,7 +43,7 @@ Agent-chat primitives plus bounded ``ask`` and completed-chart delivery.
 | `get_my_session` | agent tokens only | Get one session's status and metadata (no reply text, read-only). |
 | `get_turn_cost` | agent tokens only | Return one finished turn's raw provider cost, before markup. |
 | `list_events` | agent tokens only | List a session's events — the transcript. |
-| `list_my_sessions` | agent tokens only | List this agent's sessions (id, status, title, timestamps). |
+| `list_my_sessions` | agent tokens only | List the sessions you started with this agent (id, status, title, timestamps). |
 | `start_turn` | agent tokens only | Start a new conversation turn with the agent and return a handle. |
 
 ## `agent_removal`

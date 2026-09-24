@@ -165,7 +165,13 @@ async def test_hub_ask_creates_session_under_callers_account_in_that_tenant(
     router.add(
         "GET",
         r"/v1/sessions/([^/]+)$",
-        lambda _r, m: session_response(session_id=m.group(1), status="idle", agent_id=AGENT_ID),
+        # Tagged with the caller's account, as create_session tags a real one.
+        lambda _r, m: session_response(
+            session_id=m.group(1),
+            status="idle",
+            agent_id=AGENT_ID,
+            metadata={"daimon_account": str(principal.account_id)},
+        ),
     )
     router.add(
         "GET",

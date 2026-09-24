@@ -2340,11 +2340,12 @@
     }),
     'list_my_sessions': dict({
       'description': '''
-        List this agent's sessions (id, status, title, timestamps).
+        List the sessions you started with this agent (id, status, title, timestamps).
         
         ``id`` is the handle you pass to ``get_session``, ``list_events``,
         ``deliver_turn_charts``, and ``continue_turn``. Scoped to this agent
-        only. No parameters — identity is read from the token claim.
+        and to the account the token was minted for. No parameters — identity
+        is read from the token claim.
       ''',
       'parameters': dict({
         'additionalProperties': False,
