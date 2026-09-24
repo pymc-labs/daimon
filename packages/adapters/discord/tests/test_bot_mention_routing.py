@@ -290,6 +290,12 @@ class TestNonReadySelfHealGate:
         bot = make_bot(runtime)
         bot._post_to_guild = AsyncMock()  # type: ignore[method-assign]
         message = _make_channel_message(guild_id=int(guild_id))
+        # discord.py resolves a guild message through its guild cache before
+        # dispatch. Mirror that cache-before-dispatch state so this exercises
+        # self-heal for a live guild; a post-remove stale message has no cache
+        # entry and must not provision/unarchive the tenant.
+        bot._connection._guilds[int(guild_id)] = message.guild  # pyright: ignore[reportPrivateUsage]
+        assert bot.get_guild(int(guild_id)) is message.guild
 
         await bot.on_message(message)
         await _drain_bg_tasks(bot)
