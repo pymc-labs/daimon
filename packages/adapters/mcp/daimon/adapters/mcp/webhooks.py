@@ -412,22 +412,42 @@ async def _handle_completed(
         )
         claimed = await payment_events.try_claim_credit(s, event_id)
         if claimed:
-            # WR-03: act on the bool return; raise if insert unexpectedly no-ops after
-            # winning the CAS — that would mean a credit was silently lost.
-            inserted = await tenant_ledger.insert_entry(
-                s,
-                tenant_id=tenant_id,
-                delta_usd=amount_usd,
-                reason="topup",
-                idempotency_key=f"topup:{event_id}",
-                payment_event_id=event_id,
-                payment_intent=str(payment_intent) if payment_intent else None,
+            # Distinct Stripe event IDs can describe the same payment. Check
+            # existing rows keyed by the older event-ID scheme, then use the
+            # payment intent as the idempotency key for concurrent new events.
+            existing = (
+                await tenant_ledger.get_by_payment_intent(s, payment_intent=str(payment_intent))
+                if payment_intent
+                else None
             )
-            if not inserted:
-                raise RuntimeError(
-                    f"try_claim_credit won CAS for {event_id!r} but insert_entry returned False "
-                    "(idempotency_key conflict after a claimed credit — credit silently lost)"
+            inserted = False
+            if existing is None:
+                inserted = await tenant_ledger.insert_entry(
+                    s,
+                    tenant_id=tenant_id,
+                    delta_usd=amount_usd,
+                    reason="topup",
+                    idempotency_key=(
+                        f"topup:pi:{payment_intent}" if payment_intent else f"topup:{event_id}"
+                    ),
+                    payment_event_id=event_id,
+                    payment_intent=str(payment_intent) if payment_intent else None,
                 )
+            if not inserted:
+                existing = existing or (
+                    await tenant_ledger.get_by_payment_intent(s, payment_intent=str(payment_intent))
+                    if payment_intent
+                    else None
+                )
+                if (
+                    existing is None
+                    or existing.tenant_id != tenant_id
+                    or existing.delta_usd != amount_usd
+                ):
+                    raise RuntimeError(
+                        f"credit insert conflict for {event_id!r} "
+                        "without a matching original credit"
+                    )
 
     log.info(
         "stripe.webhook.processed",
@@ -495,7 +515,7 @@ async def _handle_clawback(
 
     async with sessionmaker() as s, s.begin():
         credit = (
-            await tenant_ledger.get_by_payment_intent(s, payment_intent=str(pi))
+            await tenant_ledger.get_by_payment_intent(s, payment_intent=str(pi), for_update=True)
             if pi is not None
             else None
         )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import time
 import uuid
@@ -9,6 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+import pytest
 import stripe
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.billing import BillingConfig
@@ -206,6 +209,74 @@ async def test_replay_is_idempotent_returns_200_no_new_row(
     async with sessionmaker() as s:
         row = await payment_events.get(s, "evt_replay")
     assert row is not None, "replay must not create a second row"
+
+
+async def test_distinct_completion_events_for_one_payment_credit_once(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    first = _checkout_session_completed_payload("evt_completion_one", tenant_id=str(tenant))
+    second = _checkout_session_completed_payload("evt_completion_two", tenant_id=str(tenant))
+    second["data"]["object"]["payment_intent"] = first["data"]["object"]["payment_intent"]
+
+    assert (await _post_signed(app, first)).status_code == 200
+    assert (await _post_signed(app, second)).status_code == 200
+
+    async with committing_sessionmaker() as session:
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant)
+        entries = await tenant_ledger.list_for_tenant(session, tenant_id=tenant)
+    assert balance == Decimal("10")
+    assert len([row for row in entries if row.reason == "topup"]) == 1
+
+
+async def test_concurrent_completion_events_for_one_payment_credit_once(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    first = _checkout_session_completed_payload("evt_parallel_one", tenant_id=str(tenant))
+    second = _checkout_session_completed_payload("evt_parallel_two", tenant_id=str(tenant))
+    second["data"]["object"]["payment_intent"] = first["data"]["object"]["payment_intent"]
+
+    responses = await asyncio.gather(_post_signed(app, first), _post_signed(app, second))
+    assert all(response.status_code == 200 for response in responses)
+
+    async with committing_sessionmaker() as session:
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant)
+    assert balance == Decimal("10")
+
+
+async def test_distinct_completion_event_reuses_legacy_credit(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    payment_intent = "pi_legacy_payment"
+    async with committing_sessionmaker() as session, session.begin():
+        await payment_events.upsert_for_dedup(
+            session,
+            event_id="evt_legacy_original",
+            amount_usd=Decimal("10"),
+            source="stripe",
+            tenant_id=tenant,
+        )
+        await payment_events.try_claim_credit(session, "evt_legacy_original")
+        await tenant_ledger.insert_entry(
+            session,
+            tenant_id=tenant,
+            delta_usd=Decimal("10"),
+            reason="topup",
+            idempotency_key="topup:evt_legacy_original",
+            payment_event_id="evt_legacy_original",
+            payment_intent=payment_intent,
+        )
+    duplicate = _checkout_session_completed_payload("evt_legacy_duplicate", tenant_id=str(tenant))
+    duplicate["data"]["object"]["payment_intent"] = payment_intent
+
+    assert (await _post_signed(_build_app(committing_sessionmaker), duplicate)).status_code == 200
+    async with committing_sessionmaker() as session:
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant)
+    assert balance == Decimal("10")
 
 
 async def test_unhandled_event_type_returns_200_noop(
@@ -455,6 +526,46 @@ async def test_cr01_clawback_idempotent_across_refund_and_dispute(
         f"refund + dispute on same payment_intent must produce exactly one reversal; "
         f"balance={balance} (expected 0)"
     )
+
+
+async def test_concurrent_clawbacks_cannot_exceed_original_credit(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinct callbacks reading the same total must serialize their debits."""
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    payment_intent = "pi_evt_concurrent_original"
+    credit = _checkout_session_completed_payload("evt_concurrent_original", tenant_id=str(tenant))
+    assert (await _post_signed(app, credit)).status_code == 200
+
+    original_get_total = tenant_ledger.get_clawed_back_total
+    both_read = asyncio.Event()
+    read_count = 0
+
+    async def synchronized_get_total(session: AsyncSession, *, payment_intent: str) -> Decimal:
+        nonlocal read_count
+        total = await original_get_total(session, payment_intent=payment_intent)
+        read_count += 1
+        if read_count == 2:
+            both_read.set()
+        # Hold the first callback briefly to expose a stale concurrent read.
+        # With a row lock, the second callback waits before reaching this read.
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(both_read.wait(), timeout=1)
+        return total
+
+    monkeypatch.setattr(tenant_ledger, "get_clawed_back_total", synchronized_get_total)
+    refund = _charge_refunded_payload("evt_concurrent_refund", payment_intent)
+    dispute = _charge_dispute_payload("evt_concurrent_dispute", payment_intent)
+    responses = await asyncio.gather(_post_signed(app, refund), _post_signed(app, dispute))
+    assert all(response.status_code == 200 for response in responses)
+
+    async with committing_sessionmaker() as session:
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant)
+        clawed_back = await original_get_total(session, payment_intent=payment_intent)
+    assert balance == Decimal("0")
+    assert clawed_back == Decimal("10")
 
 
 # ---------------------------------------------------------------------------
