@@ -40,6 +40,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
 )
+from daimon.core.turn import run as run_module
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
@@ -1271,7 +1272,7 @@ async def test_ceiling_breach_during_recovery_marks_the_new_mapping_dead_not_the
     # recreated session id is deterministically "sess_1".
     async def _slow_stream_for_recovered_session(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == "/v1/sessions/sess_1/events/stream":
-            await asyncio.sleep(1.0)
+            await asyncio.Event().wait()  # never opens: only the ceiling can end it
         return router.dispatch(request)
 
     transport = httpx.MockTransport(_slow_stream_for_recovered_session)
@@ -1293,7 +1294,9 @@ async def test_ceiling_breach_during_recovery_marks_the_new_mapping_dead_not_the
         session_account_id=account.id,
     )
 
-    deadline = datetime.now(UTC) + timedelta(seconds=0.2)
+    # Ten times the slowest observed first attempt + recovery setup (~0.18 s):
+    # the ceiling must land on the recovered stream, never inside setup.
+    deadline = datetime.now(UTC) + timedelta(seconds=2.0)
 
     caller_lifecycle = RecordingLifecycle()
     outcome = await run_prepared_turn(
@@ -2342,4 +2345,96 @@ async def test_two_turns_recovering_one_dead_session_leave_one_live_row(
     assert len(session_bodies) == 1, "the second recovery adopts the first one's replacement"
     assert mention.mapping_id == submit.mapping_id == live_rows[0].id, (
         "both turns report the one live replacement"
+    )
+
+
+async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement(
+    db_session: AsyncSession,
+    db_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replacement row used to be committed in its own transaction, inside
+    the recovery's locked one. A ceiling (or any cancel) landing after that
+    commit rolled back the dead-mark and the lineage link but left the new row
+    LIVE and unlinked: the next mention continued on it without the
+    lost-workspace framing. Mark-dead, insert and link must commit or roll
+    back together. A separate engine, because the shared-connection fixture
+    folds the inner commit into the outer transaction and hides the orphan."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-ceiling-in-setup",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+
+    real_link = run_module.link_replacement
+
+    async def slow_link(*args: object, **kwargs: object) -> None:
+        await asyncio.sleep(30)  # the ceiling fires here, after the replacement exists
+        await real_link(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(run_module, "link_replacement", slow_link)
+
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, poolclass=NullPool
+    )
+    try:
+        sessionmaker = async_sessionmaker(bind=engine, expire_on_commit=False)
+        deps = _deps(sessionmaker=sessionmaker, router=router)
+        agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+        env = ma_environment(id="env_1", tenant_id=tenant.id)
+        admission = _admission(account_id=account.id, agent=agent, env=env)
+        prepared = _prepared_turn(
+            deps=deps,
+            admission=admission,
+            tenant_id=tenant.id,
+            external_user_id="user-1",
+            ma_session_id="sess_old",
+            mapping_id=row.id,
+            session_account_id=account.id,
+        )
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-ceiling-in-setup",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+            deadline=datetime.now(UTC) + timedelta(seconds=1.0),
+        )
+        async with sessionmaker() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(ThreadSession).where(
+                            ThreadSession.tenant_id == tenant.id,
+                            ThreadSession.thread_id == "thread-ceiling-in-setup",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    finally:
+        await engine.dispose()
+
+    assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    live = [(r.ma_session_id, r.replaced_by_id) for r in rows if r.status == "live"]
+    assert live == [], f"a replacement survived the rolled-back recovery: {live}"
+    assert [r.ma_session_id for r in rows] == ["sess_old"], (
+        "the replacement row must roll back with the dead-mark and the link"
     )

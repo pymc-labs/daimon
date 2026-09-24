@@ -57,6 +57,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.usage_recording import record_turn_usage
+from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
     from daimon.core.session_preparation_stages import WorkspaceTransfer
@@ -122,7 +123,10 @@ __all__ = [
     "PreparedTurn",
     "bind_recorder",
     "bind_session",
+    "CreatedSession",
     "create_fresh_session",
+    "create_ma_session",
+    "insert_mapping",
     "get_live_thread_session",
 ]
 
@@ -147,35 +151,27 @@ async def _env_bytes_sha256(
     return hash_env_bytes(assemble_env_bytes(rows))
 
 
-async def create_fresh_session(
+@dataclass(frozen=True)
+class CreatedSession:
+    """An MA session that exists upstream but has no mapping row yet."""
+
+    ma_session_id: str
+    snapshot: SessionSnapshot
+
+
+async def create_ma_session(
     deps: TurnDeps,
     admission: Admission,
     *,
     tenant_id: uuid.UUID,
-    platform: str,
-    thread_id: str,
-    session_account_id: uuid.UUID,
     extra_resources: tuple[Resource, ...] = (),
-    predecessor_id: uuid.UUID | None = None,
-    transfer_file_id: str | None = None,
-    transfer_kind: TransferKind | None = None,
-) -> FreshSession:
-    """Create a brand-new MA session and its `thread_sessions` mapping row.
+) -> CreatedSession:
+    """Create a brand-new MA session and snapshot the configuration it froze.
 
-    The single shared `create_session` call site for a fresh session. Both
-    `bind_session`'s no-live-row path and 06-05's dead-session recovery cycle
-    call this helper rather than each carrying their own `create_session`
-    call -- a divergent second call site is exactly the bug shape this phase
-    exists to kill.
-
-    The configuration the new session froze is snapshotted from the object
-    `sessions.create` returned — the authority on what it will execute — and
-    persisted on the mapping row with both fingerprints.
-
-    The last four arguments belong to a session that REPLACES another: the
-    resources carrying the old session's work, and the lineage the new row
-    records about where that work came from. A first session for a thread
-    passes none of them.
+    The single shared `create_session` call site for a fresh session -- a
+    divergent second call site is exactly the bug shape this phase exists to
+    kill. The snapshot is taken from the object `sessions.create` returned,
+    the authority on what the session will execute.
     """
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
@@ -194,7 +190,6 @@ async def create_fresh_session(
         github_app_private_key=deps.github_app_private_key,
         extra_resources=extra_resources,
     )
-    ma_session_id = ma_session.id
 
     has_repo = any(
         isinstance(resource, BetaManagedAgentsGitHubRepositoryResource)
@@ -212,26 +207,92 @@ async def create_fresh_session(
         repo_token_issued_at=int(time.time()) if has_repo else None,
         vault_id=next(iter(ma_session.vault_ids), None),
     )
+    return CreatedSession(ma_session_id=ma_session.id, snapshot=snapshot)
 
+
+async def insert_mapping(
+    db: AsyncSession,
+    created: CreatedSession,
+    admission: Admission,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    session_account_id: uuid.UUID,
+    predecessor_id: uuid.UUID | None = None,
+    transfer_file_id: str | None = None,
+    transfer_kind: TransferKind | None = None,
+) -> FreshSession:
+    """Write the `thread_sessions` row for `created` in the caller's transaction.
+
+    The caller commits. Dead-session recovery inserts inside its locked
+    transaction so that marking the old row dead, inserting the replacement
+    and linking the two commit or roll back together.
+
+    The last three arguments belong to a session that REPLACES another: the
+    lineage the new row records about where its work came from.
+    """
+    snapshot = created.snapshot
+    row = await create_thread_session(
+        db,
+        tenant_id=tenant_id,
+        platform=platform,
+        thread_id=thread_id,
+        account_id=session_account_id,
+        ma_session_id=created.ma_session_id,
+        ma_agent_id=admission.agent.id,
+        effective_config=snapshot,
+        identity_fingerprint=fingerprint_identity(snapshot),
+        mutable_fingerprint=fingerprint_mutable(snapshot),
+        predecessor_id=predecessor_id,
+        transfer_file_id=transfer_file_id,
+        transfer_kind=transfer_kind,
+    )
+    return FreshSession(ma_session_id=created.ma_session_id, mapping_id=row.id, snapshot=snapshot)
+
+
+async def create_fresh_session(
+    deps: TurnDeps,
+    admission: Admission,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    session_account_id: uuid.UUID,
+    extra_resources: tuple[Resource, ...] = (),
+    predecessor_id: uuid.UUID | None = None,
+    transfer_file_id: str | None = None,
+    transfer_kind: TransferKind | None = None,
+) -> FreshSession:
+    """Create a brand-new MA session and commit its `thread_sessions` row.
+
+    `create_ma_session` followed by `insert_mapping` in a transaction of its
+    own, for callers with no transaction to join (the bind path's no-live-row
+    case and a replacement's successor).
+
+    The last four arguments belong to a session that REPLACES another: the
+    resources carrying the old session's work, and the lineage the new row
+    records about where that work came from. A first session for a thread
+    passes none of them.
+    """
+    created = await create_ma_session(
+        deps, admission, tenant_id=tenant_id, extra_resources=extra_resources
+    )
     async with deps.sessionmaker() as session:
-        row = await create_thread_session(
+        fresh = await insert_mapping(
             session,
+            created,
+            admission,
             tenant_id=tenant_id,
             platform=platform,
             thread_id=thread_id,
-            account_id=session_account_id,
-            ma_session_id=ma_session_id,
-            ma_agent_id=admission.agent.id,
-            effective_config=snapshot,
-            identity_fingerprint=fingerprint_identity(snapshot),
-            mutable_fingerprint=fingerprint_mutable(snapshot),
+            session_account_id=session_account_id,
             predecessor_id=predecessor_id,
             transfer_file_id=transfer_file_id,
             transfer_kind=transfer_kind,
         )
         await session.commit()
-
-    return FreshSession(ma_session_id=ma_session_id, mapping_id=row.id, snapshot=snapshot)
+    return fresh
 
 
 def bind_recorder(
