@@ -145,6 +145,40 @@ async def test_sweep_runs_once_per_process_not_once_per_reconnect(
     ], "a reconnect must not reap the turns this process is still rendering"
 
 
+async def test_sweep_does_not_clear_a_marker_rewritten_during_message_edit(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A turn that starts while the old card is being retired owns its new marker."""
+    mapping_id = await _make_orphan(db_session)
+    bot = _make_bot(db_session_factory)
+    message = MagicMock(spec=discord.Message)
+
+    async def _start_new_turn(**_kwargs: object) -> None:
+        await mark_turn_active(
+            db_session,
+            id=mapping_id,
+            active_turn_message_id="778",
+            now=datetime.now(UTC),
+        )
+        await db_session.commit()
+
+    message.edit = AsyncMock(side_effect=_start_new_turn)
+    thread = MagicMock(spec=discord.Thread)
+    thread.fetch_message = AsyncMock(return_value=message)
+    bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+
+    await bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]
+
+    orphans = await list_orphaned_turns(db_session, platform="discord")
+    assert [row.id for row in orphans] == [mapping_id], (
+        "the boot sweep must not clear a marker written after its orphan snapshot"
+    )
+    assert orphans[0].active_turn_message_id == "778", (
+        "the marker that belongs to the live turn must survive the old-card edit"
+    )
+
+
 async def test_ceiling_outcome_still_clears_the_active_turn_marker(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

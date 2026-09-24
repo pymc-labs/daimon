@@ -14,17 +14,23 @@ from typing import cast
 
 import anthropic
 import httpx
+import pytest
 from anthropic import AsyncAnthropic
+from anthropic.types.beta.sessions import (
+    BetaManagedAgentsTextBlock,
+    BetaManagedAgentsUserMessageEvent,
+)
 from daimon.core.turn import run_turn
-from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.posture import AutoApprove, BillingExempt, RequireApproval
 from daimon.core.turn.state import TextBlock
 from daimon.testing.turn_fakes import (
+    DelayThenYield,
     FakeAnthropic,
     RecordingLifecycle,
     YieldEvent,
 )
 
-from .conftest import make_agent_message, make_end_turn, make_status_idle
+from .conftest import make_agent_message, make_end_turn, make_status_idle, make_status_terminated
 
 _FROZEN_NOW = datetime(2026, 4, 21, 12, 0, 0, tzinfo=UTC)
 _EXEMPT = BillingExempt(reason="cli-operator-run")
@@ -342,6 +348,91 @@ async def test_replay_after_eventless_cycle_does_not_duplicate_already_folded_co
     assert final.content == [TextBlock(kind="text", text="hello ")], (
         "redelivered event must dedup, not duplicate"
     )
+
+
+async def test_incomplete_replay_does_not_erase_already_folded_content() -> None:
+    """A paginated replay that omits an already-folded event must not move
+    the state behind the append-only render anchor."""
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello ")
+    rendered_before_reconnect = make_agent_message(event_id="sevt_2", text="world")
+    done = make_status_idle(event_id="sevt_3", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pre), DelayThenYield(0.01, rendered_before_reconnect)],
+        [YieldEvent(done)],
+    ]
+    # Inject an incomplete history page. The SDK paginator has no documented
+    # snapshot-completeness guarantee, so replay must not erase live state.
+    fa.beta.sessions.events.replay_events = []
+    fa.beta.sessions.retrieve_statuses = ["running"]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert any(render.content == [TextBlock(kind="text", text="hello ")] for render in lc.renders)
+    assert final.content == [TextBlock(kind="text", text="hello world")]
+    assert final.stop_reason is not None
+    assert final.stop_reason.type == "end_turn"
+
+
+@pytest.mark.parametrize("tool_confirmation", [RequireApproval(), AutoApprove()])
+async def test_terminated_replay_keeps_answer_after_current_turn_idle(
+    tool_confirmation: RequireApproval | AutoApprove,
+) -> None:
+    """A trailing termination event must not make the current idle a prior-turn boundary."""
+    fa = FakeAnthropic()
+    previous_user = BetaManagedAgentsUserMessageEvent(
+        id="user_previous",
+        type="user.message",
+        content=[BetaManagedAgentsTextBlock(type="text", text="old request")],
+    )
+    previous_answer = make_agent_message(event_id="answer_previous", text="old answer")
+    previous_idle = make_status_idle(event_id="idle_previous", stop_reason=make_end_turn())
+    current_user = BetaManagedAgentsUserMessageEvent(
+        id="user_current",
+        type="user.message",
+        content=[BetaManagedAgentsTextBlock(type="text", text="current request")],
+    )
+    current_answer = make_agent_message(event_id="answer_current", text="current answer")
+    current_idle = make_status_idle(event_id="idle_current", stop_reason=make_end_turn())
+    terminated = make_status_terminated(event_id="terminated_after_idle")
+    fa.beta.sessions.events.stream_scripts = [[]]
+    fa.beta.sessions.events.replay_events = [
+        previous_user,
+        previous_answer,
+        previous_idle,
+        current_user,
+        current_answer,
+        current_idle,
+        terminated,
+    ]
+    fa.beta.sessions.retrieve_statuses = ["terminated"]
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="current request",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+        tool_confirmation=tool_confirmation,
+    )
+
+    assert final.content == [TextBlock(kind="text", text="current answer")]
+    assert final.error is None, "the terminal idle ended this turn before session termination"
+    assert final.stop_reason is not None
+    assert final.stop_reason.type == "end_turn"
 
 
 async def test_eventless_cycle_closes_the_abandoned_stream() -> None:

@@ -33,8 +33,9 @@ from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import TenantRow, WizardSessionRow
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.stores.thread_sessions import get_live_thread_session, list_orphaned_turns
 from daimon.core.stores.wizard_session import get_wizard_session
+from daimon.core.turn.run import run_prepared_turn
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec
 from daimon.core.wizard.state import WizardState, WizardStatus, build_custom_id
@@ -438,7 +439,24 @@ async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
     bot = _make_bot(runtime)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
 
-    with patch("daimon.core.turn.prepare.create_session") as mock_create_session:
+    real_run_prepared_turn = run_prepared_turn
+
+    async def _assert_marked_before_run(*args: Any, **kwargs: Any) -> Any:
+        async with db_session_factory() as session:
+            active = await list_orphaned_turns(session, platform="discord")
+        assert any(
+            marker.thread_id == str(channel.id) and marker.active_turn_message_id == "42"
+            for marker in active
+        ), "wizard turn marker must be durable before run_prepared_turn starts"
+        return await real_run_prepared_turn(*args, **kwargs)
+
+    with (
+        patch("daimon.core.turn.prepare.create_session") as mock_create_session,
+        patch(
+            "daimon.adapters.discord.wizard_submit.run_prepared_turn",
+            side_effect=_assert_marked_before_run,
+        ),
+    ):
         mock_create_session.return_value = ma_session(
             id="sess_fresh_slot", agent_id=_AGENT_ID, model=_MODEL_ID, environment_id=_ENV_ID
         )
@@ -452,6 +470,9 @@ async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
     assert stream_hits, "the turn must actually have run"
     assert bot._inflight == {}, (  # pyright: ignore[reportPrivateUsage]  # asserting the cap bookkeeping contract
         "the in-flight slot the turn claimed must be released once it finishes"
+    )
+    assert await list_orphaned_turns(db_session, platform="discord") == [], (
+        "a completed wizard turn must release its active marker"
     )
 
 

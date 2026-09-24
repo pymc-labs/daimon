@@ -41,6 +41,7 @@ from daimon.adapters.slack.attachments import (
     build_skipped_image_prefix,
 )
 from daimon.adapters.slack.billing_panel.actions import handle_billing_command, handle_topup_select
+from daimon.adapters.slack.boot_sweep import retire_orphaned_turns
 from daimon.adapters.slack.context import build_context_xml, build_delta_xml
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
@@ -155,6 +156,11 @@ log = structlog.get_logger()
 # and health-server cleanup after the drain completes.
 _DRAIN_GRACE_S: float = 50.0
 
+# Recovery gates turn admission, so retry transient failures with a capped
+# delay instead of leaving the process permanently unable to turn.
+_ORPHAN_RECOVERY_RETRY_DELAY_S: float = 1.0
+_ORPHAN_RECOVERY_MAX_RETRY_DELAY_S: float = 30.0
+
 _CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
 _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
 
@@ -262,6 +268,7 @@ class SlackApp:
         self._output_sweeps: dict[str, asyncio.Task[None]] = {}
         # Drain flag — set on SIGTERM; blocks new mention handling.
         self.draining: bool = False
+        self._orphan_recovery_task: asyncio.Task[None] | None = None
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Fire-and-forget a background task, tracked so it isn't GC'd."""
@@ -270,6 +277,27 @@ class SlackApp:
         task.add_done_callback(self._bg_tasks.discard)
         task.add_done_callback(_log_bg_task_exception)
         return task
+
+    def start_orphan_recovery(self) -> asyncio.Task[None]:
+        """Start one recovery sweep before Socket Mode accepts turns."""
+        if self._orphan_recovery_task is None:
+            self._orphan_recovery_task = self._spawn(self._recover_orphaned_turns())
+        return self._orphan_recovery_task
+
+    async def _recover_orphaned_turns(self) -> None:
+        delay_s = _ORPHAN_RECOVERY_RETRY_DELAY_S
+        while True:
+            try:
+                await retire_orphaned_turns(self.runtime, now=datetime.now(UTC))
+                return
+            except Exception:
+                log.exception("slack.turn.orphan_recovery_failed", retry_delay_s=delay_s)
+                await asyncio.sleep(delay_s)
+                delay_s = min(delay_s * 2, _ORPHAN_RECOVERY_MAX_RETRY_DELAY_S)
+
+    async def _wait_for_orphan_recovery(self) -> None:
+        if self._orphan_recovery_task is not None:
+            await self._orphan_recovery_task
 
     def _forget_output_sweep(self, session_id: str, task: asyncio.Task[None]) -> None:
         """Done-callback: drop the chain entry only if it still points at ``task``."""
@@ -831,6 +859,8 @@ class SlackApp:
             # Slack considers them delivered; they will not be redelivered to the
             # replacement instance — this is inherent to ack-first + drain (IN-02).
             return
+
+        await self._wait_for_orphan_recovery()
 
         channel: str = event.get("channel") or ""
         event_ts: str = event.get("event_ts") or event.get("ts") or ""
@@ -2216,6 +2246,7 @@ class SlackApp:
         running there reaches `_dispatch_continuations` at its own tail anyway,
         and will pick up whatever this call would have.
         """
+        await self._wait_for_orphan_recovery()
         if thread_id in self._processing:
             return
         self._processing.add(thread_id)

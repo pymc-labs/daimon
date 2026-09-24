@@ -143,11 +143,22 @@ subscription:
    tenant from the verified token claim and never from the request body.
 3. `packages/adapters/mcp/daimon/adapters/mcp/webhooks.py` handles the
    callback. It takes the amount from Stripe's own `amount_total` rather than
-   from metadata, dedups on the Stripe event id in `payment_events`, claims
-   the credit with a compare-and-set on `credited_at`, and only then inserts
-   the positive ledger entry. Refunds and disputes insert compensating
-   negative entries against a cumulative high-water mark per payment intent,
-   so a refund followed by a dispute on one charge cannot claw back twice.
+   from metadata. The event id dedups `payment_events`; the payment intent
+   identifies the ledger credit, so a second completion event for the same
+   payment cannot add a second top-up. Credit claim and ledger insert share
+   one transaction. Refunds and disputes insert negative entries against a
+   cumulative high-water mark per payment intent, so concurrent callbacks
+   cannot claw back more than the original credit. A signed refund or dispute
+   received before its Checkout credit is stored, then applied in the same
+   transaction that creates the credit. The pending event has no tenant id
+   until that credit establishes the tenant. Unmatched pending events are
+   removed after 90 days by later webhook traffic.
+
+Completion and clawback transactions serialize by payment intent. An existing
+credit with a different tenant or amount is an integrity conflict: processing
+fails and rolls back so the event remains retryable for investigation. A
+retry alone cannot resolve inconsistent payment data; inspect the Stripe
+event, payment intent, original credit, and tenant before replaying it.
 
 Both the checkout and webhook routes are mounted only when Stripe is
 configured. A self-hoster without it credits a tenant by inserting a
@@ -161,12 +172,13 @@ There is no CLI command and no MCP tool that adds credit.
 
 | Table | Holds |
 | --- | --- |
-| `tenant_ledger` | every credit and debit, append-only. **Balance is `SUM(delta_usd)`, never a column.** A unique index on `idempotency_key` is the entire idempotency story. |
+| `tenant_ledger` | every credit and debit, append-only. **Balance is `SUM(delta_usd)`, never a column.** A unique `idempotency_key` prevents replayed writes; top-ups also check the payment intent to recognize older event-keyed credits. |
 | `usage_events` | token counts per model call. No money column; cost is computed on read. |
 | `payment_events` | Stripe webhook dedup, keyed by the Stripe event id, with the compare-and-set `credited_at`. Explicitly not a ledger. |
+| `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
 
-All four are declared in `packages/core/daimon/core/_models.py` with stores
+These tables are declared in `packages/core/daimon/core/_models.py` with stores
 beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
 `trial`, `topup`, `turn_debit`, `checkpoint_debit`, `media_debit`,
 `classifier_debit`, `thread_naming_debit`, and the two clawback reasons named

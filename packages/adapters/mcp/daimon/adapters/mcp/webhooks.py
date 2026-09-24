@@ -15,6 +15,7 @@ import contextlib
 import json
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +28,7 @@ from daimon.core.errors import StoreError
 from daimon.core.github_app_auth import verify_signature
 from daimon.core.skill_sync.resync import resync_bound_repo
 from daimon.core.stores import github_app_installations as install_store
-from daimon.core.stores import payment_events, tenant_ledger
+from daimon.core.stores import payment_events, pending_clawbacks, tenant_ledger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.background import BackgroundTask
 from starlette.requests import Request
@@ -38,6 +39,28 @@ if TYPE_CHECKING:
     import stripe
 
 log = structlog.get_logger(__name__)
+
+_PENDING_CLAWBACK_RETENTION = timedelta(days=90)
+
+
+class _PaymentCreditConflict(RuntimeError):
+    """A payment intent already has a credit that does not match this event."""
+
+    def __init__(
+        self,
+        *,
+        payment_intent: str | None,
+        tenant_id: str,
+        existing_tenant_id: str | None,
+        amount_usd: str,
+        existing_amount_usd: str | None,
+    ) -> None:
+        super().__init__("payment intent credit conflicts with completed event")
+        self.payment_intent = payment_intent
+        self.tenant_id = tenant_id
+        self.existing_tenant_id = existing_tenant_id
+        self.amount_usd = amount_usd
+        self.existing_amount_usd = existing_amount_usd
 
 
 def _get(d: dict[str, Any], key: str) -> object:
@@ -335,7 +358,22 @@ def build_stripe_webhook(
 
         # --- completed checkout: credit the tenant ledger ---
         if event_type == "checkout.session.completed":
-            return await _handle_completed(sessionmaker, event_id, event)
+            try:
+                return await _handle_completed(sessionmaker, event_id, event)
+            except _PaymentCreditConflict as err:
+                log.error(
+                    "stripe.webhook.payment_credit_conflict",
+                    event_id=event_id,
+                    payment_intent=err.payment_intent,
+                    tenant_id=err.tenant_id,
+                    existing_tenant_id=err.existing_tenant_id,
+                    amount_usd=err.amount_usd,
+                    existing_amount_usd=err.existing_amount_usd,
+                )
+                # Preserve Stripe retries so an operator can repair inconsistent
+                # ledger state and replay the event. The failed transaction rolls
+                # back the dedup row and claim, so no cross-tenant credit is recorded.
+                return Response(status_code=500)
 
         # --- refund / dispute: clawback ---
         if event_type in ("charge.refunded", "charge.dispute.created"):
@@ -400,9 +438,16 @@ async def _handle_completed(
         )
         return Response(status_code=200)
 
-    payment_intent: str | None = getattr(event.data.object, "payment_intent", None)
+    payment_intent_raw: Any = getattr(  # pyright: ignore[reportExplicitAny]
+        event.data.object, "payment_intent", None
+    )
+    payment_intent = str(payment_intent_raw) if payment_intent_raw is not None else None
+    payment_intent = payment_intent or None
 
     async with sessionmaker() as s, s.begin():
+        if payment_intent:
+            await pending_clawbacks.lock_payment_intent(s, payment_intent=payment_intent)
+        await _expire_pending_clawbacks(s)
         await payment_events.upsert_for_dedup(
             s,
             event_id=event_id,
@@ -412,22 +457,55 @@ async def _handle_completed(
         )
         claimed = await payment_events.try_claim_credit(s, event_id)
         if claimed:
-            # WR-03: act on the bool return; raise if insert unexpectedly no-ops after
-            # winning the CAS — that would mean a credit was silently lost.
-            inserted = await tenant_ledger.insert_entry(
-                s,
-                tenant_id=tenant_id,
-                delta_usd=amount_usd,
-                reason="topup",
-                idempotency_key=f"topup:{event_id}",
-                payment_event_id=event_id,
-                payment_intent=str(payment_intent) if payment_intent else None,
+            # Distinct Stripe event IDs can describe the same payment. Check
+            # existing rows keyed by the older event-ID scheme, then use the
+            # payment intent as the idempotency key for concurrent new events.
+            existing = (
+                await tenant_ledger.get_by_payment_intent(s, payment_intent=str(payment_intent))
+                if payment_intent
+                else None
             )
-            if not inserted:
-                raise RuntimeError(
-                    f"try_claim_credit won CAS for {event_id!r} but insert_entry returned False "
-                    "(idempotency_key conflict after a claimed credit — credit silently lost)"
+            inserted = False
+            if existing is None:
+                inserted = await tenant_ledger.insert_entry(
+                    s,
+                    tenant_id=tenant_id,
+                    delta_usd=amount_usd,
+                    reason="topup",
+                    idempotency_key=(
+                        f"topup:pi:{payment_intent}" if payment_intent else f"topup:{event_id}"
+                    ),
+                    payment_event_id=event_id,
+                    payment_intent=str(payment_intent) if payment_intent else None,
                 )
+            if not inserted:
+                existing = existing or (
+                    await tenant_ledger.get_by_payment_intent(s, payment_intent=str(payment_intent))
+                    if payment_intent
+                    else None
+                )
+                if (
+                    existing is None
+                    or existing.tenant_id != tenant_id
+                    or existing.delta_usd != amount_usd
+                ):
+                    raise _PaymentCreditConflict(
+                        payment_intent=payment_intent,
+                        tenant_id=str(tenant_id),
+                        existing_tenant_id=(
+                            str(existing.tenant_id) if existing is not None else None
+                        ),
+                        amount_usd=str(amount_usd),
+                        existing_amount_usd=(
+                            str(existing.delta_usd) if existing is not None else None
+                        ),
+                    )
+        if payment_intent:
+            credit = await tenant_ledger.get_by_payment_intent(
+                s, payment_intent=payment_intent, for_update=True
+            )
+            if credit is not None:
+                await _drain_pending_clawbacks(s, payment_intent=payment_intent, credit=credit)
 
     log.info(
         "stripe.webhook.processed",
@@ -451,6 +529,17 @@ def _clawback_amount_from_event(
       - charge.dispute.created -> dispute.amount (minor units)
     Clamped to original_credit so we never claw back more than was credited.
     """
+    target = _clawback_target_from_event(event_type, charge)
+    if target is None:
+        return original_credit
+    return min(target, original_credit)
+
+
+def _clawback_target_from_event(
+    event_type: str,
+    charge: dict[str, Any],  # Stripe declares Event.Data.object as Dict[str, Any]
+) -> Decimal | None:
+    """Return the event's unbounded cumulative target, or None for full credit."""
     if event_type == "charge.refunded":
         raw: Any = getattr(charge, "amount_refunded", None)  # pyright: ignore[reportExplicitAny]
     else:
@@ -458,14 +547,105 @@ def _clawback_amount_from_event(
         raw = getattr(charge, "amount", None)
 
     if raw is None:
-        # Fallback to full credit if the field is absent (defensive).
-        return original_credit
+        return None
     try:
         amount = Decimal(int(raw)) / 100
     except (TypeError, ValueError, InvalidOperation):
-        return original_credit
-    # Never claw back more than the original credit.
-    return min(amount, original_credit)
+        return None
+    return max(amount, Decimal("0"))
+
+
+async def _expire_pending_clawbacks(session: AsyncSession) -> None:
+    cutoff = datetime.now(UTC) - _PENDING_CLAWBACK_RETENTION
+    expired = await pending_clawbacks.expire_before(session, cutoff=cutoff)
+    if expired:
+        log.info("stripe.webhook.pending_clawbacks_expired", count=expired)
+
+
+async def _record_clawback_delta(
+    session: AsyncSession,
+    *,
+    event_id: str,
+    event_type: str,
+    payment_intent: str,
+    tenant_id: uuid.UUID,
+    target_amount: Decimal,
+    already_clawed_back: Decimal,
+) -> Decimal:
+    new_delta = target_amount - already_clawed_back
+    if new_delta <= 0:
+        log.info(
+            "stripe.webhook.clawback_noop",
+            event_id=event_id,
+            event_type=event_type,
+            target_clawback=str(target_amount),
+            already_clawed_back=str(already_clawed_back),
+        )
+        return already_clawed_back
+
+    await payment_events.upsert_for_dedup(
+        session,
+        event_id=event_id,
+        amount_usd=new_delta,
+        source="stripe",
+        tenant_id=tenant_id,
+    )
+    await payment_events.try_claim_credit(session, event_id)
+    inserted = await tenant_ledger.insert_entry(
+        session,
+        tenant_id=tenant_id,
+        delta_usd=-new_delta,
+        reason=event_type,
+        idempotency_key=f"clawback:{payment_intent}:{event_id}",
+        payment_event_id=event_id,
+        payment_intent=payment_intent,
+    )
+    if not inserted:
+        raise RuntimeError(f"clawback insert conflict for {event_id!r} after a positive delta")
+    return target_amount
+
+
+async def _drain_pending_clawbacks(
+    session: AsyncSession,
+    *,
+    payment_intent: str,
+    credit: tenant_ledger.TenantLedgerRow,
+) -> None:
+    if credit.payment_event_id is None:
+        log.warning(
+            "stripe.webhook.pending_clawback_no_payment_event",
+            payment_intent=payment_intent,
+        )
+        return
+    original_pe = await payment_events.get(session, credit.payment_event_id)
+    if original_pe is None:
+        log.warning(
+            "stripe.webhook.pending_clawback_no_payment_event",
+            payment_intent=payment_intent,
+            payment_event_id=credit.payment_event_id,
+        )
+        return
+
+    rows = await pending_clawbacks.list_for_payment_intent(session, payment_intent=payment_intent)
+    already_clawed_back = await tenant_ledger.get_clawed_back_total(
+        session, payment_intent=payment_intent
+    )
+    for row in rows:
+        target = (
+            credit.delta_usd
+            if row.target_amount_usd is None
+            else min(row.target_amount_usd, credit.delta_usd)
+        )
+        already_clawed_back = await _record_clawback_delta(
+            session,
+            event_id=row.event_id,
+            event_type=row.event_type,
+            payment_intent=payment_intent,
+            tenant_id=credit.tenant_id,
+            target_amount=target,
+            already_clawed_back=already_clawed_back,
+        )
+        await pending_clawbacks.remove(session, event_id=row.event_id)
 
 
 async def _handle_clawback(
@@ -491,21 +671,39 @@ async def _handle_clawback(
     claw back more than the original credit (CR-03).
     """
     charge = event.data.object
-    pi: Any = getattr(charge, "payment_intent", None)  # pyright: ignore[reportExplicitAny]
+    pi_raw: Any = getattr(charge, "payment_intent", None)  # pyright: ignore[reportExplicitAny]
+    payment_intent = str(pi_raw) if pi_raw is not None else None
+    payment_intent = payment_intent or None
 
     async with sessionmaker() as s, s.begin():
+        if payment_intent:
+            await pending_clawbacks.lock_payment_intent(s, payment_intent=payment_intent)
+        await _expire_pending_clawbacks(s)
         credit = (
-            await tenant_ledger.get_by_payment_intent(s, payment_intent=str(pi))
-            if pi is not None
+            await tenant_ledger.get_by_payment_intent(
+                s, payment_intent=payment_intent, for_update=True
+            )
+            if payment_intent is not None
             else None
         )
         if credit is None:
-            log.warning(
-                "stripe.webhook.clawback_no_credit",
-                event_id=event_id,
-                payment_intent=str(pi) if pi is not None else None,
-            )
+            if payment_intent is not None:
+                await pending_clawbacks.enqueue(
+                    s,
+                    event_id=event_id,
+                    payment_intent=payment_intent,
+                    event_type=event_type,
+                    target_amount_usd=_clawback_target_from_event(event_type, charge),
+                )
+                log.info(
+                    "stripe.webhook.clawback_pending",
+                    event_id=event_id,
+                    payment_intent=payment_intent,
+                )
+            else:
+                log.warning("stripe.webhook.clawback_missing_payment_intent", event_id=event_id)
             return Response(status_code=200)
+        assert payment_intent is not None
 
         # Fetch the original credit's payment_events row to confirm tenant routing
         # before clawing back. credit.payment_event_id is the original event_id set
@@ -528,40 +726,17 @@ async def _handle_clawback(
         # Model A: target_clawback is the cumulative high-water-mark this event implies
         # (min(event_amount, original_credit)); new_delta is what is not yet clawed back.
         target_clawback = _clawback_amount_from_event(event_type, charge, credit.delta_usd)
-        already_clawed_back = await tenant_ledger.get_clawed_back_total(s, payment_intent=str(pi))
-        new_delta = target_clawback - already_clawed_back
-
-        if new_delta <= 0:
-            # Redundant event (e.g. dispute after a full refund, or a replayed/older
-            # cumulative total). Clean no-op before writing any dedup/clawback row.
-            log.info(
-                "stripe.webhook.clawback_noop",
-                event_id=event_id,
-                event_type=event_type,
-                target_clawback=str(target_clawback),
-                already_clawed_back=str(already_clawed_back),
-            )
-            return Response(status_code=200)
-
-        await payment_events.upsert_for_dedup(
+        already_clawed_back = await tenant_ledger.get_clawed_back_total(
+            s, payment_intent=payment_intent
+        )
+        applied_total = await _record_clawback_delta(
             s,
             event_id=event_id,
-            amount_usd=new_delta,
-            source="stripe",
+            event_type=event_type,
+            payment_intent=payment_intent,
             tenant_id=credit.tenant_id,
-        )
-        await payment_events.try_claim_credit(s, event_id)
-
-        # Per-event idempotency key so distinct growing events each get a durable row;
-        # clawback rows carry payment_intent so get_clawed_back_total sums them.
-        await tenant_ledger.insert_entry(
-            s,
-            tenant_id=credit.tenant_id,
-            delta_usd=-new_delta,
-            reason=event_type,
-            idempotency_key=f"clawback:{str(pi)}:{event_id}",
-            payment_event_id=event_id,
-            payment_intent=str(pi),
+            target_amount=target_clawback,
+            already_clawed_back=already_clawed_back,
         )
 
     log.info(
@@ -569,6 +744,6 @@ async def _handle_clawback(
         event_id=event_id,
         event_type=event_type,
         tenant_id=str(credit.tenant_id),
-        amount=str(new_delta),
+        amount=str(max(Decimal("0"), applied_total - already_clawed_back)),
     )
     return Response(status_code=200)

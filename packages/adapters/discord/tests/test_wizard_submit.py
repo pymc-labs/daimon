@@ -12,6 +12,7 @@ button dispatches (or doesn't) correctly.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -19,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 from daimon.adapters.discord.wizard_submit import WizardSubmitButton
 from daimon.core.stores.domain import WizardSessionRow
-from daimon.core.stores.wizard_session import get_wizard_session
+from daimon.core.stores.wizard_session import get_wizard_session, update_wizard_state
 from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec
 from daimon.core.wizard.state import build_custom_id
 from daimon.testing.factories import make_wizard_session
@@ -250,6 +251,40 @@ async def test_two_sequential_submits_the_second_claims_nothing_and_spawns_nothi
         after = await get_wizard_session(session, short_id=row.id)
     assert after is not None
     assert after.status == "submitted"
+
+
+async def test_stale_submit_rerenders_a_concurrent_edit_without_spawning(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed(db_session_factory, current_step=1)
+    call_order: list[str] = []
+    bot = _fake_bot(db_session_factory, call_order)
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot)
+
+    item = await WizardSubmitButton.from_custom_id(interaction, MagicMock(), _submit_match(row.id))
+    async with db_session_factory() as session, session.begin():
+        updated = await update_wizard_state(
+            session,
+            short_id=row.id,
+            answers={"colour": ["blue"]},
+            current_step=1,
+            expected_updated_at=row.updated_at,
+            now=row.updated_at + timedelta(seconds=1),
+        )
+    assert updated == 1, "the concurrent answer edit must commit before stale submit dispatch"
+
+    await item.callback(interaction)
+
+    async with db_session_factory() as session:
+        after = await get_wizard_session(session, short_id=row.id)
+    assert after is not None
+    assert after.status == "open", "the stale submit must not claim the edited row"
+    assert after.answers == {"colour": ["blue"]}, "the stale submit must preserve current answers"
+    assert bot.spawned == [], "a stale submit must not spawn a turn"
+    view = interaction.edit_original_response.call_args.kwargs["view"]
+    container = _container(view)
+    action_rows = [child for child in container.children if isinstance(child, discord.ui.ActionRow)]
+    assert action_rows, "the current open form must remain interactive after a stale submit"
 
 
 async def test_a_submit_during_drain_claims_nothing_and_leaves_the_form_tappable(

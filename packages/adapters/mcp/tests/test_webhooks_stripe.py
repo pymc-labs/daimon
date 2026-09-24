@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import time
 import uuid
@@ -9,7 +11,9 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+import pytest
 import stripe
+from daimon.adapters.mcp import webhooks
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.billing import BillingConfig
 from daimon.core.config import (
@@ -18,7 +22,7 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
-from daimon.core.stores import payment_events, tenant_ledger
+from daimon.core.stores import payment_events, pending_clawbacks, tenant_ledger
 from daimon.testing.factories import make_tenant
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -208,6 +212,108 @@ async def test_replay_is_idempotent_returns_200_no_new_row(
     assert row is not None, "replay must not create a second row"
 
 
+async def test_distinct_completion_events_for_one_payment_credit_once(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    first = _checkout_session_completed_payload("evt_completion_one", tenant_id=str(tenant))
+    second = _checkout_session_completed_payload("evt_completion_two", tenant_id=str(tenant))
+    second["data"]["object"]["payment_intent"] = first["data"]["object"]["payment_intent"]
+
+    assert (await _post_signed(app, first)).status_code == 200
+    assert (await _post_signed(app, second)).status_code == 200
+
+    async with committing_sessionmaker() as session:
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant)
+        entries = await tenant_ledger.list_for_tenant(session, tenant_id=tenant)
+    assert balance == Decimal("10")
+    assert len([row for row in entries if row.reason == "topup"]) == 1
+
+
+@pytest.mark.parametrize("mismatch", ["tenant", "amount"])
+async def test_conflicting_completion_event_rolls_back_claim_and_credit(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    mismatch: str,
+) -> None:
+    original_tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    other_tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    first = _checkout_session_completed_payload(
+        "evt_conflict_original", tenant_id=str(original_tenant)
+    )
+    conflicting = _checkout_session_completed_payload(
+        "evt_conflict_duplicate",
+        tenant_id=str(other_tenant if mismatch == "tenant" else original_tenant),
+        amount_total=1200 if mismatch == "amount" else 1000,
+    )
+    payment_intent = first["data"]["object"]["payment_intent"]
+    conflicting["data"]["object"]["payment_intent"] = payment_intent
+
+    assert (await _post_signed(app, first)).status_code == 200
+    response = await _post_signed(app, conflicting)
+    assert response.status_code == 500
+
+    async with committing_sessionmaker() as session:
+        duplicate_event = await payment_events.get(session, "evt_conflict_duplicate")
+        original_balance = await tenant_ledger.get_balance(session, tenant_id=original_tenant)
+        other_balance = await tenant_ledger.get_balance(session, tenant_id=other_tenant)
+        entries = await tenant_ledger.list_for_tenant(session, tenant_id=original_tenant)
+    assert duplicate_event is None, "conflict must roll back the dedup row and credit claim"
+    assert original_balance == Decimal("10")
+    assert other_balance == Decimal("0"), "conflict must not credit another tenant"
+    assert len([row for row in entries if row.reason == "topup"]) == 1
+
+
+async def test_concurrent_completion_events_for_one_payment_credit_once(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    first = _checkout_session_completed_payload("evt_parallel_one", tenant_id=str(tenant))
+    second = _checkout_session_completed_payload("evt_parallel_two", tenant_id=str(tenant))
+    second["data"]["object"]["payment_intent"] = first["data"]["object"]["payment_intent"]
+
+    responses = await asyncio.gather(_post_signed(app, first), _post_signed(app, second))
+    assert all(response.status_code == 200 for response in responses)
+
+    async with committing_sessionmaker() as session:
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant)
+    assert balance == Decimal("10")
+
+
+async def test_distinct_completion_event_reuses_legacy_credit(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    payment_intent = "pi_legacy_payment"
+    async with committing_sessionmaker() as session, session.begin():
+        await payment_events.upsert_for_dedup(
+            session,
+            event_id="evt_legacy_original",
+            amount_usd=Decimal("10"),
+            source="stripe",
+            tenant_id=tenant,
+        )
+        await payment_events.try_claim_credit(session, "evt_legacy_original")
+        await tenant_ledger.insert_entry(
+            session,
+            tenant_id=tenant,
+            delta_usd=Decimal("10"),
+            reason="topup",
+            idempotency_key="topup:evt_legacy_original",
+            payment_event_id="evt_legacy_original",
+            payment_intent=payment_intent,
+        )
+    duplicate = _checkout_session_completed_payload("evt_legacy_duplicate", tenant_id=str(tenant))
+    duplicate["data"]["object"]["payment_intent"] = payment_intent
+
+    assert (await _post_signed(_build_app(committing_sessionmaker), duplicate)).status_code == 200
+    async with committing_sessionmaker() as session:
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant)
+    assert balance == Decimal("10")
+
+
 async def test_unhandled_event_type_returns_200_noop(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -391,6 +497,145 @@ async def test_clawback_charge_dispute_writes_negative_ledger_row(
     )
 
 
+async def test_refund_before_completion_is_applied_when_credit_arrives(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A valid refund delivered before Checkout completion must be retained."""
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    payment_intent = "pi_refund_before_completion"
+
+    refund = await _post_signed(
+        app,
+        _charge_refunded_payload(
+            "evt_refund_before_completion_4",
+            payment_intent=payment_intent,
+            amount_refunded=400,
+        ),
+    )
+    assert refund.status_code == 200
+    later_refund = await _post_signed(
+        app,
+        _charge_refunded_payload(
+            "evt_refund_before_completion_7",
+            payment_intent=payment_intent,
+            amount_refunded=700,
+        ),
+    )
+    assert later_refund.status_code == 200
+
+    async with committing_sessionmaker() as session:
+        pending = await pending_clawbacks.list_for_payment_intent(
+            session, payment_intent=payment_intent
+        )
+    assert {row.target_amount_usd for row in pending} == {Decimal("4"), Decimal("7")}
+
+    completion = _checkout_session_completed_payload(
+        "evt_completion_after_refund", tenant_id=str(tenant), amount_total=1000
+    )
+    completion["data"]["object"]["payment_intent"] = payment_intent
+    credited = await _post_signed(app, completion)
+    assert credited.status_code == 200
+
+    async with committing_sessionmaker() as session:
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant)
+        pending = await pending_clawbacks.list_for_payment_intent(
+            session, payment_intent=payment_intent
+        )
+    assert balance == Decimal("3"), "cumulative early refunds must leave $3 of the $10 topup"
+    assert pending == []
+
+
+async def test_absent_credit_clawback_and_completion_concurrent_delivery(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent arrival of a completion and early refund retains the clawback."""
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    payment_intent = "pi_absent_credit_race"
+    original_lock = pending_clawbacks.lock_payment_intent
+    both_arrived = asyncio.Event()
+    arrived = 0
+
+    async def synchronize_before_lock(session: AsyncSession, *, payment_intent: str) -> None:
+        nonlocal arrived
+        arrived += 1
+        if arrived == 2:
+            both_arrived.set()
+        await asyncio.wait_for(both_arrived.wait(), timeout=5)
+        await original_lock(session, payment_intent=payment_intent)
+
+    monkeypatch.setattr(pending_clawbacks, "lock_payment_intent", synchronize_before_lock)
+    completion = _checkout_session_completed_payload(
+        "evt_completion_racing_refund", tenant_id=str(tenant), amount_total=1000
+    )
+    completion["data"]["object"]["payment_intent"] = payment_intent
+    refund = _charge_refunded_payload(
+        "evt_refund_racing_completion", payment_intent=payment_intent, amount_refunded=400
+    )
+
+    completed, refunded = await asyncio.gather(
+        _post_signed(app, completion), _post_signed(app, refund)
+    )
+    assert completed.status_code == refunded.status_code == 200
+    async with committing_sessionmaker() as session:
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant)
+        pending = await pending_clawbacks.list_for_payment_intent(
+            session, payment_intent=payment_intent
+        )
+    assert balance == Decimal("6")
+    assert pending == []
+
+
+async def test_pending_drain_failure_rolls_back_credit_and_keeps_event(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed completion transaction preserves pending event for safe retry."""
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    payment_intent = "pi_pending_drain_rollback"
+    await _post_signed(
+        app,
+        _charge_refunded_payload(
+            "evt_pending_drain_rollback", payment_intent=payment_intent, amount_refunded=400
+        ),
+    )
+    completion = _checkout_session_completed_payload(
+        "evt_completion_pending_drain_rollback", tenant_id=str(tenant), amount_total=1000
+    )
+    completion["data"]["object"]["payment_intent"] = payment_intent
+    original_drain = webhooks._drain_pending_clawbacks
+
+    async def fail_after_drain(*args: Any, **kwargs: Any) -> None:
+        await original_drain(*args, **kwargs)
+        raise RuntimeError("injected failure after pending clawback drain")
+
+    monkeypatch.setattr(webhooks, "_drain_pending_clawbacks", fail_after_drain)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        await _post_signed(app, completion)
+
+    async with committing_sessionmaker() as session:
+        balance_after_rollback = await tenant_ledger.get_balance(session, tenant_id=tenant)
+        pending_after_rollback = await pending_clawbacks.list_for_payment_intent(
+            session, payment_intent=payment_intent
+        )
+    assert balance_after_rollback == Decimal("0")
+    assert len(pending_after_rollback) == 1
+
+    monkeypatch.setattr(webhooks, "_drain_pending_clawbacks", original_drain)
+    retried = await _post_signed(app, completion)
+    assert retried.status_code == 200
+    async with committing_sessionmaker() as session:
+        balance_after_retry = await tenant_ledger.get_balance(session, tenant_id=tenant)
+        pending_after_retry = await pending_clawbacks.list_for_payment_intent(
+            session, payment_intent=payment_intent
+        )
+    assert balance_after_retry == Decimal("6")
+    assert pending_after_retry == []
+
+
 async def test_clawback_idempotent_no_double_clawback(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -455,6 +700,46 @@ async def test_cr01_clawback_idempotent_across_refund_and_dispute(
         f"refund + dispute on same payment_intent must produce exactly one reversal; "
         f"balance={balance} (expected 0)"
     )
+
+
+async def test_concurrent_clawbacks_cannot_exceed_original_credit(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinct callbacks reading the same total must serialize their debits."""
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    payment_intent = "pi_evt_concurrent_original"
+    credit = _checkout_session_completed_payload("evt_concurrent_original", tenant_id=str(tenant))
+    assert (await _post_signed(app, credit)).status_code == 200
+
+    original_get_total = tenant_ledger.get_clawed_back_total
+    both_read = asyncio.Event()
+    read_count = 0
+
+    async def synchronized_get_total(session: AsyncSession, *, payment_intent: str) -> Decimal:
+        nonlocal read_count
+        total = await original_get_total(session, payment_intent=payment_intent)
+        read_count += 1
+        if read_count == 2:
+            both_read.set()
+        # Hold the first callback briefly to expose a stale concurrent read.
+        # With a row lock, the second callback waits before reaching this read.
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(both_read.wait(), timeout=1)
+        return total
+
+    monkeypatch.setattr(tenant_ledger, "get_clawed_back_total", synchronized_get_total)
+    refund = _charge_refunded_payload("evt_concurrent_refund", payment_intent)
+    dispute = _charge_dispute_payload("evt_concurrent_dispute", payment_intent)
+    responses = await asyncio.gather(_post_signed(app, refund), _post_signed(app, dispute))
+    assert all(response.status_code == 200 for response in responses)
+
+    async with committing_sessionmaker() as session:
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant)
+        clawed_back = await original_get_total(session, payment_intent=payment_intent)
+    assert balance == Decimal("0")
+    assert clawed_back == Decimal("10")
 
 
 # ---------------------------------------------------------------------------

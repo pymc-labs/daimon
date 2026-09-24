@@ -11,11 +11,10 @@ import asyncio
 import contextlib
 import signal
 import sys
-from datetime import UTC, datetime
 
 import structlog
 from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.boot_sweep import retire_orphaned_turns, run_boot_sweep
+from daimon.adapters.slack.boot_sweep import run_boot_sweep
 from daimon.adapters.slack.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.health import start_liveness_responder
@@ -81,27 +80,10 @@ async def main() -> None:
         health_server = await start_liveness_responder(settings.slack.health_port)
         log.info("starting_slack_listener", health_port=settings.slack.health_port)
         try:
+            # Recovery must take its marker snapshot before any turn can
+            # register a new active card. Event handlers wait on this task.
+            app.start_orphan_recovery()
             await client.connect()
-            # Orphan-turn retirement, created BEFORE the reconcile sweep below.
-            # asyncio.create_task schedules in creation order, and this sweep
-            # does far less work than a per-tenant reconcile at concurrency 2,
-            # so it finishes first in practice — the "a user reading the
-            # thread sees the truth before anything else happens" posture
-            # Discord gets by running its sweep first in on_ready, delivered
-            # here without a second control-flow shape in main(). Crash is
-            # logged, never raised — the listener must outlive its sweep.
-            orphan_sweep_task: asyncio.Task[None] = asyncio.create_task(
-                retire_orphaned_turns(runtime, now=datetime.now(UTC))
-            )
-            _bg_tasks.add(orphan_sweep_task)
-
-            def _on_orphan_sweep_done(task: asyncio.Task[None]) -> None:
-                _bg_tasks.discard(task)
-                if not task.cancelled() and task.exception() is not None:
-                    log.error("slack.orphan_sweep_crashed", exc_info=task.exception())
-
-            orphan_sweep_task.add_done_callback(_on_orphan_sweep_done)
-
             # Boot-time reconcile sweep, in the background so a slow provider
             # cannot delay mention handling. A crash is logged, never raised —
             # the listener must outlive its sweep.

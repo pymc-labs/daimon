@@ -695,6 +695,28 @@ class PaymentEvent(Base):
     )
 
 
+class PendingPaymentClawback(Base):
+    """A verified refund/dispute awaiting its Checkout credit row.
+
+    These rows deliberately have no tenant foreign key: the tenant can only be
+    resolved after the matching payment intent's topup has committed.
+    """
+
+    __tablename__ = "pending_payment_clawbacks"
+    __table_args__ = (
+        Index("pending_payment_clawbacks_intent_idx", "payment_intent", "received_at"),
+        Index("pending_payment_clawbacks_received_idx", "received_at"),
+    )
+
+    event_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    payment_intent: Mapped[str] = mapped_column(Text, nullable=False)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    target_amount_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class TenantLedger(Base):
     """Append-only per-tenant USD ledger. Balance = SUM(delta_usd).
 
