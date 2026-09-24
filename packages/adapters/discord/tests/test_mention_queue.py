@@ -968,3 +968,61 @@ async def test_mention_queued_during_a_continuation_dispatch_gets_its_own_turn(
     )
     assert 789 not in queued_bot._pending  # pyright: ignore[reportPrivateUsage]
     assert 789 not in queued_bot._processing  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_mention_queued_during_a_raising_continuation_dispatch_still_gets_its_turn(
+    queued_bot: DaimonBot,
+) -> None:
+    """A dispatch that raises still drains the mention queued behind it.
+
+    `dispatch_pending_continuations` can raise (a DB error, say), and the
+    spawned dispatch task only logs it. The mention that queued (⌛) during the
+    dispatch must still get its own turn -- the same drain-always contract the
+    mention path keeps when its originating turn fails -- rather than sitting
+    under ⌛ until some later mention in the thread. The dispatch's error
+    still propagates to the caller.
+    """
+    calls: list[tuple[discord.Message, str | None]] = []
+
+    async def stub(
+        message: discord.Message,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        *,
+        content_override: str | None = None,
+        created_thread_ids: list[int] | None = None,
+        attachments_override: list[discord.Attachment] | None = None,
+    ) -> None:
+        calls.append((message, content_override))
+
+    queued_bot._handle_mention = stub  # type: ignore[method-assign]
+    q1 = _make_thread_message(content="and the chart too?")
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = 789
+
+    async def _mention_arrives_then_dispatch_fails(**_kwargs: object) -> None:
+        await queued_bot.on_message(q1)
+        assert queued_bot._pending.get(789) == [q1]  # pyright: ignore[reportPrivateUsage]
+        raise RuntimeError("continuation dispatch failed")
+
+    with (
+        patch.object(
+            queued_bot,
+            "_dispatch_continuations",
+            side_effect=_mention_arrives_then_dispatch_fails,
+        ),
+        pytest.raises(RuntimeError, match="continuation dispatch failed"),
+    ):
+        await queued_bot.dispatch_continuations_in_thread(
+            tenant_id=derive_tenant_uuid(platform="discord", workspace_id="123456"),
+            thread=thread,
+            guild_id="123456",
+        )
+
+    q1.add_reaction.assert_awaited_once_with("⌛")  # type: ignore[attr-defined]
+    assert calls == [(q1, "and the chart too?")], (
+        f"the queued mention must get its own turn even when the dispatch raises, got {calls}"
+    )
+    assert 789 not in queued_bot._pending  # pyright: ignore[reportPrivateUsage]
+    assert 789 not in queued_bot._processing  # pyright: ignore[reportPrivateUsage]
