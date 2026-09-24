@@ -34,6 +34,7 @@ Init ==
   /\ finished = FALSE
 
 FoldMessage(id) ==
+  /\ ~finished
   /\ id \in {"m1", "m2"}
   /\ id \notin seen
   /\ seen' = seen \cup {id}
@@ -43,6 +44,7 @@ FoldMessage(id) ==
                  renderFailure, renderCancelled, finished>>
 
 FoldToolUse ==
+  /\ ~finished
   /\ "tu" \notin seen
   /\ seen' = seen \cup {"tu"}
   /\ tool' = <<"tu", "pending">>
@@ -51,6 +53,7 @@ FoldToolUse ==
                  renderFailure, renderCancelled, finished>>
 
 FoldToolResult ==
+  /\ ~finished
   /\ "r" \notin seen
   /\ seen' = seen \cup {"r"}
   /\ tool' = IF tool # NoEvent THEN <<"tu", "complete">> ELSE NoEvent
@@ -59,15 +62,18 @@ FoldToolResult ==
                  renderFailure, renderCancelled, finished>>
 
 FoldIdle ==
+  /\ (AllowConflictingTerminalEvents \/ ~finished)
   /\ "idle" \notin seen
   /\ AllowConflictingTerminalEvents \/ ~turnError
   /\ seen' = seen \cup {"idle"}
   /\ stopReason' = TRUE
   /\ revision' = revision + 1
+  /\ finished' = TRUE
   /\ UNCHANGED <<messages, tool, turnError, anchor, delivered,
-                 renderFailure, renderCancelled, finished>>
+                 renderFailure, renderCancelled>>
 
 FoldTerminated ==
+  /\ (AllowConflictingTerminalEvents \/ ~finished)
   /\ "term" \notin seen
   /\ AllowConflictingTerminalEvents \/ ~stopReason
   /\ seen' = seen \cup {"term"}
@@ -78,6 +84,7 @@ FoldTerminated ==
                  renderFailure, renderCancelled>>
 
 FoldError ==
+  /\ (AllowConflictingTerminalEvents \/ ~finished)
   /\ "err" \notin seen
   /\ AllowConflictingTerminalEvents \/ ~stopReason
   /\ seen' = seen \cup {"err"}
@@ -113,20 +120,14 @@ CancelRender ==
   /\ UNCHANGED <<seen, messages, tool, stopReason, turnError, revision, anchor,
                  delivered, renderFailure, finished>>
 
-\* Reconnect replay reconstructs TurnState from a fresh fold and replaces
-\* state_cell (driver.py around replay_events). A truncated/stale replay is
-\* an environment possibility under this abstraction; source correctness
-\* relies on MA replay returning the full current-turn history.
+\* Reconnect replay folds history onto the current state (driver.py around
+\* replay_events). If the paginated history omits an event already folded
+\* live, the reducer's seen-ID dedup keeps that state intact. This action
+\* represents a stale replay that contributes no new events.
 ReplayStalePrefix ==
   /\ AllowStaleReplay
   /\ revision > 0
-  /\ messages' = 0
-  /\ tool' = NoEvent
-  /\ stopReason' = FALSE
-  /\ turnError' = FALSE
-  /\ seen' = {}
-  /\ revision' = 0
-  /\ UNCHANGED <<anchor, delivered, renderFailure, renderCancelled, finished>>
+  /\ UNCHANGED vars
 
 Finalize ==
   /\ finished

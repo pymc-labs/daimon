@@ -19,6 +19,7 @@ from daimon.core.turn import run_turn
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TextBlock
 from daimon.testing.turn_fakes import (
+    DelayThenYield,
     FakeAnthropic,
     RecordingLifecycle,
     YieldEvent,
@@ -342,6 +343,40 @@ async def test_replay_after_eventless_cycle_does_not_duplicate_already_folded_co
     assert final.content == [TextBlock(kind="text", text="hello ")], (
         "redelivered event must dedup, not duplicate"
     )
+
+
+async def test_incomplete_replay_does_not_erase_already_folded_content() -> None:
+    """A paginated replay that omits an already-folded event must not move
+    the state behind the append-only render anchor."""
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello ")
+    rendered_before_reconnect = make_agent_message(event_id="sevt_2", text="world")
+    done = make_status_idle(event_id="sevt_3", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pre), DelayThenYield(0.01, rendered_before_reconnect)],
+        [YieldEvent(done)],
+    ]
+    # Inject an incomplete history page. The SDK paginator has no documented
+    # snapshot-completeness guarantee, so replay must not erase live state.
+    fa.beta.sessions.events.replay_events = []
+    fa.beta.sessions.retrieve_statuses = ["running"]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert any(render.content == [TextBlock(kind="text", text="hello ")] for render in lc.renders)
+    assert final.content == [TextBlock(kind="text", text="hello world")]
+    assert final.stop_reason is not None
+    assert final.stop_reason.type == "end_turn"
 
 
 async def test_eventless_cycle_closes_the_abandoned_stream() -> None:

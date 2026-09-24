@@ -8,9 +8,10 @@ set -eu
 : "${TLA2TOOLS_JAR:?Set TLA2TOOLS_JAR to the path of tla2tools.jar}"
 TLC_META_DIR="${TMPDIR:-/tmp}/daimon-turn-tlc"
 mkdir -p "$TLC_META_DIR/terminal" "$TLC_META_DIR/replay" "$TLC_META_DIR/bounded" "$TLC_META_DIR/progress"
-# These two configurations intentionally find counterexamples (TLC exit 12).
+# The terminal configuration intentionally allows impossible post-terminal
+# delivery (TLC exit 12); the replay model includes the merge fix.
 java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/terminal" -config formal/turn/TurnLifecycle.cfg formal/turn/TurnLifecycle.tla || test "$?" -eq 12
-java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/replay" -config formal/turn/TurnLifecycleReplay.cfg formal/turn/TurnLifecycle.tla || test "$?" -eq 12
+java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/replay" -config formal/turn/TurnLifecycleReplay.cfg formal/turn/TurnLifecycle.tla
 java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/bounded" -config formal/turn/TurnLifecycleBounded.cfg formal/turn/TurnLifecycle.tla
 java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/progress" -config formal/turn/TurnProgress.cfg formal/turn/TurnProgress.tla
 ```
@@ -35,46 +36,58 @@ unchanged for retry, and cancellation stops further ticks.
 | Timed render task and cancellation | [`driver.py`](../../packages/core/daimon/core/turn/driver.py:420) |
 | Guarded final render and terminal callback | [`driver.py`](../../packages/core/daimon/core/turn/driver.py:997) |
 | Snapshot diff append-only assumption | [`render.py`](../../packages/core/daimon/core/turn/render.py:84) |
-| Reconnect replay replaces folded state | [`driver.py`](../../packages/core/daimon/core/turn/driver.py:759) |
+| Reconnect replay folds the current-turn suffix onto accumulated state, using reducer event-ID dedup | [`driver.py`](../../packages/core/daimon/core/turn/driver.py:769) |
 | Replay boundary scan skips final event and applies posture-specific idle boundary | [`driver.py`](../../packages/core/daimon/core/turn/driver.py:650) |
 | SSE lifecycle hook is deduplicated across reconnects before invocation | [`driver.py`](../../packages/core/daimon/core/turn/driver.py:842) |
 
 ## TLC checks and interpretation
 
-`TurnLifecycle.cfg` checks `TypeOK`, `TerminalExclusive`, and `RenderAnchorBound`.
-TLC fails `TerminalExclusive` with this trace:
+`TurnLifecycle.cfg` keeps the original adversarial terminal ordering enabled.
+It checks `TypeOK`, `TerminalExclusive`, and `RenderAnchorBound`; TLC fails
+`TerminalExclusive` with this trace:
 
 1. `FoldIdle`: `stopReason=TRUE`, `turnError=FALSE`.
 2. `FoldTerminated`: `stopReason=TRUE`, `turnError=TRUE`.
 
-The reducer does permit those independent field assignments if both event kinds
-occur in one fold. This does not establish a production defect: the model makes
-all event kinds arbitrarily reorderable, while Managed Agents may guarantee one
-terminal event for a turn. Verify that upstream contract before treating the
-trace as reachable. The current model deliberately leaves this safety property
-failing so the assumption stays visible.
+This ordering is unreachable through the turn driver's live consume loop:
+`_consume_with_reconnect` returns as soon as it folds either a
+`session.status_idle` event or a `session.status_terminated` event, so it cannot
+fold the second terminal event from that stream. Replay also scopes the fetched
+history to the suffix after the last prior idle boundary before folding it.
+This is a source-level guarantee, not an asserted Managed Agents guarantee.
+The model's adversarial switch explicitly permits the driver's terminal guard
+to be bypassed so the original counterexample remains reproducible. The model
+does not claim that `TurnState.error` and `stop_reason` are universally
+exclusive: a nonterminal `session.error` can be followed by an idle event.
 
-`TurnLifecycleReplay.cfg` checks `TypeOK` and `RenderAnchorBound`. TLC fails the
-anchor bound with this trace:
+`TurnLifecycleReplay.cfg` keeps the stale-replay environment enabled. Before
+the fix, TLC failed the anchor bound with this trace:
 
 1. `FoldMessage`: revision 1.
 2. `RenderTick`: anchor 1.
 3. `ReplayStalePrefix`: revision resets to 0 while anchor remains 1.
 
-The source does replace `state_cell` with a fresh fold on reconnect, while the
-render anchor is separate. This trace requires replay to omit an already-seen
-event. The driver expects `replay_events` to return authoritative history, so
-stale replay is an environment assumption that this model cannot validate. If
-that assumption fails, `diff` has no deletion/truncation representation and
-can fail to reconcile the adapter's previously rendered output with the replayed
-state.
+The replay helper walks the SDK's paginated events-list endpoint, but neither
+the SDK's list documentation nor the paginator contract promises a consistent
+snapshot across pages. Fault injection therefore treats omission of an already
+folded event as possible. The driver now folds replay events onto the current
+`TurnState`, using `seen_event_ids` to deduplicate overlap, instead of replacing
+that state with a fresh fold. This preserves already-rendered content if a
+replay page is incomplete. The executable regression
+`test_incomplete_replay_does_not_erase_already_folded_content` injects an empty
+replay after live content and verifies the later terminal result retains it.
+The model's stale replay action now represents this merge behavior and preserves
+the existing fold state.
 
-For each expected counterexample configuration, `AllowConflictingTerminalEvents`
-and `AllowStaleReplay` are enabled so TLC can explore the behavior in question.
-`TurnLifecycleBounded.cfg` disables both environment actions. Under those
-assumptions, TLC checks `TypeOK`, `TerminalExclusive`, and `RenderAnchorBound`
-over 3,042 distinct states and reports no error. This is conditional evidence:
-the bounds exclude conflicting terminal events and stale reconnect replay.
+For the historical counterexample configurations,
+`AllowConflictingTerminalEvents` and `AllowStaleReplay` are enabled so TLC can
+explore the behaviors in question. `TurnLifecycleBounded.cfg` disables both
+adversarial conditions. After the merge fix, stale replay preserves the state
+even when enabled; terminal exclusivity still depends on the source guarantee
+that consumption stops at the first terminal status event. TLC checks
+`TypeOK`, `TerminalExclusive`, and `RenderAnchorBound` under these finite bounds.
+These checks do not establish completeness of every possible SDK response or
+prove the Python implementation correct.
 
 `TurnProgress.tla` checks a separate liveness abstraction. It has exactly two
 data deliveries followed by one terminal delivery. A single cancellation window

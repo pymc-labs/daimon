@@ -515,7 +515,12 @@ async def _pump(
                     current_turn_events = _events_since_last_turn_boundary(
                         replayed, tool_confirmation=tool_confirmation
                     )
-                    state_cell[0] = functools.reduce(apply, current_turn_events, TurnState())
+                    # Replay can add events the stream missed, but it must not
+                    # discard events already folded and possibly rendered. A
+                    # replay response is fetched through multiple pages and
+                    # the SDK does not promise a snapshot; fold its current-turn
+                    # suffix onto the monotonic in-memory state instead.
+                    state_cell[0] = functools.reduce(apply, current_turn_events, state_cell[0])
                     if session.status == "idle":
                         match tool_confirmation:
                             case AutoApprove():
@@ -761,7 +766,11 @@ async def _consume_with_reconnect(
             current_turn_events = _events_since_last_turn_boundary(
                 replayed, tool_confirmation=tool_confirmation
             )
-            state_cell[0] = functools.reduce(apply, current_turn_events, TurnState())
+            # Preserve events already delivered by the previous stream. The
+            # list endpoint is paginated and does not document snapshot
+            # completeness, so rebuilding from empty could regress behind the
+            # adapter's append-only render anchor if a page omits old history.
+            state_cell[0] = functools.reduce(apply, current_turn_events, state_cell[0])
             log.info(
                 "turn.reconnect.completed",
                 session_id=session_id,
