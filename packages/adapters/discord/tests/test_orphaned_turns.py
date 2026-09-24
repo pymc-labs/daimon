@@ -21,6 +21,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
@@ -65,6 +66,7 @@ async def _make_orphan(
     thread_id: str = "555",
     message_id: str = "777",
     ma_session_id: str = "sesn_test",
+    mark_active: bool = True,
 ) -> uuid.UUID:
     tenant = await make_tenant(session)
     row = await create_thread_session(
@@ -75,14 +77,49 @@ async def _make_orphan(
         account_id=uuid.uuid4(),
         ma_session_id=ma_session_id,
     )
-    await mark_turn_active(
-        session,
-        id=row.id,
-        active_turn_message_id=message_id,
-        now=datetime.now(UTC),
-    )
+    if mark_active:
+        await mark_turn_active(
+            session,
+            id=row.id,
+            active_turn_message_id=message_id,
+            now=datetime.now(UTC),
+        )
     await session.commit()
     return row.id
+
+
+async def test_initial_card_without_marker_survives_restart_and_next_turn_posts_again(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A process loss before marker commit leaves the posted card undiscoverable."""
+    await _make_orphan(db_session, mark_active=False)
+    first_message = MagicMock(spec=discord.Message)
+    first_message.edit = AsyncMock()
+    second_message = MagicMock(spec=discord.Message)
+    send = AsyncMock(side_effect=[first_message, second_message])
+
+    def make_lifecycle() -> DiscordTurnLifecycle:
+        return DiscordTurnLifecycle(
+            send=send,
+            edit=AsyncMock(),
+            agent_name="test-agent",
+            model_id="claude-sonnet-4-6",
+        )
+
+    await make_lifecycle().post_initial()
+    restarted_bot = _make_bot(db_session_factory)
+    restarted_thread = MagicMock(spec=discord.Thread)
+    restarted_thread.fetch_message = AsyncMock(return_value=first_message)
+    restarted_bot.get_channel = MagicMock(return_value=restarted_thread)  # pyright: ignore[reportAttributeAccessIssue]
+    await restarted_bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]
+    await make_lifecycle().post_initial()
+
+    assert send.await_count == 2, "the retry posts a second initial card"
+    restarted_thread.fetch_message.assert_not_awaited()
+    assert await list_orphaned_turns(db_session, platform="discord") == [], (
+        "the boot sweep cannot find a card whose id was never persisted"
+    )
 
 
 _EVENTS_PATH = re.compile(r"^/v1/sessions/(?P<sid>[^/]+)/events$")

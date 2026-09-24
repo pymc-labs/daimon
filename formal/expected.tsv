@@ -25,6 +25,8 @@ continuation	ContinuationDispatch	ContinuationRecovery	violates:AtMostOneExterna
 adapter_recovery	AdapterRecovery	AdapterRecovery	clean	4	-	compare-and-clear + recovery before admission
 adapter_recovery	AdapterRecovery	DiscordUnsafe	violates:LiveTurnHasMarker	8	-	pre-fix Discord: blind clear + turn admitted before recovery
 adapter_recovery	AdapterRecovery	SlackUnsafe	violates:LiveTurnHasMarker	8	-	pre-fix Slack: turn admitted before recovery
+adapter_recovery	InitialCardCrash	InitialCardCrash	violates:NoFrozenCardAfterRecovery	8	-	initial card posted before active-marker commit remains frozen after restart sweep
+adapter_recovery	InitialCardCrash	InitialCardDuplicate	violates:NoDuplicateVisibleCards	10	-	unmarked initial card remains beside the next turn's card
 # ---- recovery commit boundary ----
 recovery_commit	RecoveryCommit	RecoveryCommit	clean	9	-	replacement row, dead mark and lineage link commit atomically; cancellation before commit leaves no row
 recovery_commit	RecoveryCommit	UnsafeInnerCommit	violates:NoOrphanAfterRecovery	9	-	pre-fix: separately committed replacement survives recovery rollback unlinked

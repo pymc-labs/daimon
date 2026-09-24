@@ -201,3 +201,51 @@ Two processes (the old one can only die, the new one can only start), two
 turns, up to four rows, at most one session death. DB transactions and MA calls
 are atomic steps; platform card edits, cancel registration and reconnects are
 omitted.
+
+## Initial card posted before its durable marker
+
+`InitialCardCrash.tla` models the gap between a remote initial-card post and the
+database commit that records its message ID. It checks two failure outcomes:
+the restart sweep leaves the unmarked card frozen, and a later turn posts a
+second initial card beside it.
+
+```sh
+set -eu
+: "${TLA2TOOLS_JAR:?Set TLA2TOOLS_JAR to the path of tla2tools.jar}"
+MODEL_DIR="${TMPDIR:-/tmp}/daimon-initial-card-crash-tlc"
+mkdir -p "$MODEL_DIR/frozen" "$MODEL_DIR/duplicate"
+java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -metadir "$MODEL_DIR/frozen" -config formal/adapter_recovery/InitialCardCrash.cfg formal/adapter_recovery/InitialCardCrash.tla || test "$?" -eq 12
+java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -metadir "$MODEL_DIR/duplicate" -config formal/adapter_recovery/InitialCardDuplicate.cfg formal/adapter_recovery/InitialCardCrash.tla || test "$?" -eq 12
+```
+
+The configs disable deadlock checking because this finite crash abstraction
+has terminal states outside the two counterexample traces.
+
+| Model action | Implementation |
+| --- | --- |
+| `PostInitialCard` | Discord `DiscordTurnLifecycle.post_initial()` called in [`bot.py`](../../packages/adapters/discord/daimon/adapters/discord/bot.py) before `bind_session()`; Slack `SlackTurnLifecycle.post_initial()` called in [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py) before `bind_session()` |
+| `PersistActiveMarker` | Discord and Slack `mark_turn_active()` plus transaction commit after the post response and `bind_session()` in those same turn entrypoints |
+| `ProcessDies` | Abrupt adapter process exit after the platform accepted the post and before the marker transaction commits |
+| `BootSweep` | Discord `_retire_orphaned_turns_once()` and Slack `retire_orphaned_turns()` enumerate only rows with a persisted active message ID |
+| `PostNextInitialCard` | A later mention posts the next turn's initial card through the same lifecycle methods |
+
+`NoFrozenCardAfterRecovery` fails on `PostInitialCard` → `ProcessDies` →
+`BootSweep`: the database still has `NoMarker`, so the sweep has no remote
+message ID to edit. `NoDuplicateVisibleCards` fails when the next turn posts
+beside that first card. The adapter tests in
+[`test_orphaned_turns.py`](../../packages/adapters/discord/tests/test_orphaned_turns.py)
+and [`test_orphaned_turns.py`](../../packages/adapters/slack/tests/test_orphaned_turns.py)
+exercise the same ordering through each real lifecycle and boot-sweep path.
+
+The Slack pre-response Cancel key is process-local. It allows a click to route
+before `chat.postMessage` returns, but it does not give a restarted process a
+durable way to find the card. A durable recovery needs a stable turn token
+written before the post and attached to the platform message, then a boot-time
+thread-history lookup that can recover its message ID. This requires
+platform-specific metadata/search behavior and history permissions.
+Alternatively, the initial card can be delayed until session binding finishes;
+that accepts slower feedback during session setup and still leaves the smaller
+post-response/marker-commit crash window. This model makes no fairness or
+progress claim. It bounds the trace to one mapping, one initial card, one
+process death, one restart sweep, and one subsequent card post; it abstracts
+remote edits and database commits as atomic model actions.
