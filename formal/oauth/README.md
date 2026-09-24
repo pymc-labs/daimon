@@ -22,7 +22,7 @@ for c in VaultLocked MirrorGrantSkip MirrorRotate GrantRetry GrantLocked; do run
 for c in DiscordRejoinShape SlackReinstallFixed; do run SlackInstall $c; done
 # counterexample configs exit 12 with a trace
 for c in McpOAuthFlowPreClientCAS McpOAuthFlowPreCompletion McpOAuthFlowNoConsumeCAS; do run McpOAuthFlow $c || test $? -eq 12; done
-for c in VaultPreLock MirrorPreGrantSkip MirrorPreRotate GrantVsMirror GrantVsStaleMirror; do run VaultSlot $c || test $? -eq 12; done
+for c in VaultPreLock MirrorPreGrantSkip MirrorPreRotate GrantVsMirror GrantVsStaleMirror GrantRetryThreeMirrors; do run VaultSlot $c || test $? -eq 12; done
 for c in SlackReinstallPre231 SlackLateTeardown SlackGuardWrongOrder; do run SlackInstall $c || test $? -eq 12; done
 ```
 
@@ -88,11 +88,26 @@ above.
   violates `MirrorNever404`). The mirror lists a stale static credential, the
   grant write deletes it, and the mirror's in-place update 404s, which
   `mirror_credentials_into_vault` propagates and fails the turn.
-  Both are fixed by retrying against a fresh read (`GrantRetry`: the grant write
-  tolerates a 404 on delete and re-reads on a 409, three attempts; the mirror
-  re-reads once on a 404). Holding the vault lock in both writers
-  (`GrantLocked`) is also clean, but every other unlocked writer of the same URL
-  would need it too. Fixed on main by pymc-labs/daimon#230.
+  Both are fixed on main by pymc-labs/daimon#230, which retries against a
+  fresh read (`GrantRetry`: the grant write tolerates a 404 on delete and
+  re-reads on a 409, three attempts in total, `MaxTries = 2` retries; the
+  mirror re-reads on a 404). `GrantRetry` is clean with two concurrent mirrors
+  only; see the next section for three.
+
+## Open bug on main (fix in #239)
+
+- **Three concurrent mirrors exhaust #230's retry** (`GrantRetryThreeMirrors`,
+  violates `SignInNeverLost`; fix proposed in pymc-labs/daimon#239, open). Each
+  retry of the grant write can be undone by one more turn mirroring the same
+  (account, agent) vault. Trace (16 states): the grant write lists and deletes
+  the static credential → mirror 1 lists the empty slot and creates the static
+  credential → the grant's create 409s (retry 1) → it lists and deletes again →
+  mirror 2 does the same → 409 (retry 2) → mirror 3 → the third 409 exhausts the
+  attempts and the consumed sign-in is lost. With `MaxTries = 3` the same three
+  mirrors are clean, so the result depends on the retry budget.
+  `GrantLocked` (#239's shape: the grant write and the mirror hold the vault's
+  advisory lock, and #230's retries stay for writers outside the lock) is clean
+  with three mirrors.
 - **Reinstall left the tenant archived** (`SlackReinstallPre231`; fixed on main
   by #231). Before #231 the Slack callback's `provision_tenant` was
   `ON CONFLICT DO NOTHING`, so a reinstall never cleared `archived_at`; hub login and the boot defaults sweep then treat the
@@ -114,7 +129,8 @@ above.
   to reach only the requester; a leaked link lets another person's provider
   identity land in the requester's vault, which is a property of bearer links,
   not of these state machines.
-- VaultSlot: one vault slot (one URL), up to two concurrent mirrors, one grant
+- VaultSlot: one vault slot (one URL), two concurrent mirrors (three in
+  `GrantRetryThreeMirrors` and `GrantLocked`), one grant
   write, and (for the vault configs) two concurrent session creates. Each MA
   call is atomic; list results are snapshots. `add_external_mcp_credential`
   (holds the lock), the Copilot writer and the operator credential sweep write

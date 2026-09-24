@@ -20,6 +20,7 @@ CONSTANTS
     PartitionByAuthor,      \* 997b3d8: the drain runs one turn per author
     ClearBeforeDispatch,    \* 090ecc1: the tail clears its marker before dispatching
     RedispatchAfterRelease, \* #233 (merged): a dispatch skipped while processing reruns at release
+    DrainAfterDispatch,     \* #237 (open): an out-of-turn dispatch drains _pending before releasing
     WithHandoff,            \* the first turn may queue a handoff continuation
     WithForm                \* a credential form may record + dispatch a continuation
 
@@ -40,7 +41,7 @@ VARIABLES
     handledBy,   \* [m -> principal of the turn that answered m]
     marker,      \* active-turn marker on the thread's session row
     handoff,     \* none | pending | ran_src | ran_dst
-    formPc,      \* none | recorded | done
+    formPc,      \* none | recorded | dispatching | done
     formCont,    \* none | pending | done
     redispatch   \* a dispatch was skipped because the thread was processing
 
@@ -152,19 +153,22 @@ DrainOrRelease ==
     /\ IF groups # <<>>
           THEN /\ phase' = "turn" /\ batch' = Head(groups).msgs /\ principal' = Head(groups).who
                /\ groups' = Tail(groups) /\ marker' = TRUE
-               /\ UNCHANGED <<pending, processing, handoff, formCont, redispatch>>
+               /\ UNCHANGED <<pending, processing, handoff, formCont, redispatch, formPc>>
           ELSE IF pending # <<>>
              THEN LET gs == Partition(pending) IN
                   /\ phase' = "turn" /\ batch' = Head(gs).msgs /\ principal' = Head(gs).who
                   /\ groups' = Tail(gs) /\ pending' = <<>> /\ marker' = TRUE
-                  /\ UNCHANGED <<processing, handoff, formCont, redispatch>>
+                  /\ UNCHANGED <<processing, handoff, formCont, redispatch, formPc>>
              ELSE \* finally: discard the slot and drop anything left in _pending
                   /\ processing' = FALSE /\ phase' = "idle" /\ batch' = {} /\ principal' = None
+                  \* #233: re-run a skipped dispatch. _release_thread spawns
+                  \* dispatch_continuations_in_thread, which claims the thread
+                  \* again (FormDispatch) only after an await.
                   /\ IF RedispatchAfterRelease /\ redispatch
-                        THEN /\ DispatchAll(FALSE) /\ redispatch' = FALSE
-                        ELSE UNCHANGED <<handoff, formCont, redispatch>>
-                  /\ UNCHANGED <<pending, groups, marker>>
-    /\ UNCHANGED <<reacting, arrived, handledBy, formPc>>
+                        THEN /\ formPc' = "recorded" /\ redispatch' = FALSE
+                        ELSE UNCHANGED <<formPc, redispatch>>
+                  /\ UNCHANGED <<pending, groups, marker, handoff, formCont>>
+    /\ UNCHANGED <<reacting, arrived, handledBy>>
 
 (* ---- a credential form submission for this thread ---- *)
 FormRecord ==
@@ -174,16 +178,40 @@ FormRecord ==
     /\ UNCHANGED <<processing, pending, reacting, arrived, phase, batch, principal, groups,
                    handledBy, marker, handoff, redispatch>>
 
-\* dispatch_continuations_in_thread: skipped outright while processing.
+\* dispatch_continuations_in_thread, claim step: skipped (and, with #233,
+\* remembered) while the thread is processing; otherwise it adds the thread to
+\* _processing and runs the continuation turn. A mention arriving while the
+\* continuation turn runs is queued in _pending like one behind a mention turn.
 FormDispatch ==
     /\ formPc = "recorded"
     /\ IF processing
           THEN /\ redispatch' = (redispatch \/ RedispatchAfterRelease)
-               /\ UNCHANGED <<formCont, handoff>>
-          ELSE /\ DispatchAll(FALSE) /\ UNCHANGED redispatch
-    /\ formPc' = "done"
-    /\ UNCHANGED <<processing, pending, reacting, arrived, phase, batch, principal, groups,
+               /\ formPc' = "done"
+               /\ UNCHANGED <<processing, formCont, handoff>>
+          ELSE /\ processing' = TRUE
+               /\ DispatchAll(FALSE)
+               /\ formPc' = "dispatching"
+               /\ UNCHANGED redispatch
+    /\ UNCHANGED <<pending, reacting, arrived, phase, batch, principal, groups,
                    handledBy, marker>>
+
+\* Release step, the dispatch's `finally`. On main it only calls _release_thread,
+\* which never looks at _pending. With #237 it first drains the queued mentions
+\* one turn per author, the same drain a mention turn runs (here: hand the queue
+\* to the drain loop, which releases the thread when it is empty).
+FormRelease ==
+    /\ formPc = "dispatching"
+    /\ formPc' = "done"
+    /\ IF DrainAfterDispatch /\ pending # <<>>
+          THEN LET gs == Partition(pending) IN
+               /\ phase' = "turn" /\ batch' = Head(gs).msgs /\ principal' = Head(gs).who
+               /\ groups' = Tail(gs) /\ pending' = <<>> /\ marker' = TRUE
+               /\ UNCHANGED <<processing, redispatch>>
+          ELSE /\ processing' = FALSE
+               \* nothing to re-run: a dispatch cannot be skipped while this one
+               \* holds the thread, because there is only one form
+               /\ UNCHANGED <<pending, phase, batch, principal, groups, marker, redispatch>>
+    /\ UNCHANGED <<reacting, arrived, handledBy, handoff, formCont>>
 
 Quiescent == phase = "idle" /\ reacting = {} /\ formPc = "done" /\ NextMsg = None
 
@@ -192,7 +220,7 @@ Stutter == Quiescent /\ UNCHANGED vars
 Next ==
     \/ Arrive \/ (\E m \in MsgSet : ReactDone(m))
     \/ QueueHandoff \/ TurnEnd \/ Tail1 \/ Tail2 \/ DrainOrRelease
-    \/ FormRecord \/ FormDispatch
+    \/ FormRecord \/ FormDispatch \/ FormRelease
     \/ Stutter
 
 Spec == Init /\ [][Next]_vars
@@ -202,6 +230,7 @@ TypeOK ==
     /\ phase \in {"idle", "turn", "tail1", "tail2", "posttail"}
     /\ handoff \in {"none", "pending", "ran_src", "ran_dst"}
     /\ formCont \in {"none", "pending", "done"}
+    /\ formPc \in {"none", "recorded", "dispatching", "done"}
 
 \* Each answered message was answered in its own author's turn (997b3d8).
 PrincipalIsAuthor == \A m \in MsgSet : handledBy[m] \in {None, Author[m]}

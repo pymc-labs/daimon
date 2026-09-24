@@ -11,8 +11,9 @@
 (* Bind (per-thread advisory lock; reuse the newest live row or create one) *)
 (* -> Mark (marker written after the lock is released) -> Send (open        *)
 (* stream, send user.message) -> MA runs -> Observe -> Finish (clear the    *)
-(* marker). A dead session is recovered outside the lock: mark_dead ->      *)
-(* create_fresh_session -> link_replacement.                                *)
+(* marker). Dead-session recovery: mark_dead -> create_fresh_session ->     *)
+(* link_replacement, outside the lock before #238 and, since #238, under    *)
+(* the bind lock, adopting a live replacement when one exists.              *)
 (*                                                                         *)
 (* Sources: packages/adapters/slack/daimon/adapters/slack/app.py,           *)
 (* slack/boot_sweep.py (retire_orphaned_turns), discord/bot.py              *)
@@ -29,8 +30,8 @@ CONSTANTS
     SweepInterrupts,       \* #232 (merged): the sweep interrupts the orphan's MA session
     SendWaitsForIdle,      \* proposed alternative: never send user.message into a running session
     WizardBypass,          \* Discord wizard turns skip the per-thread _processing guard
-    RecoveryUnderLock,     \* alternative: dead-session recovery holds the bind lock ...
-    RecoveryAdopts,        \* ... and adopts a replacement another turn already made
+    RecoveryUnderLock,     \* #238 (merged): dead-session recovery holds the bind lock ...
+    RecoveryAdopts,        \* ... and adopts the thread's live row when another turn made one
     OldCanDie,             \* the old process can stop with a turn in flight
     MaxTurns, MaxRows, MaxDeaths
 
@@ -204,17 +205,19 @@ Observe(t) ==
                    marker, replacedBy, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear, staleClear>>
 
 \* run_prepared_turn recovery: mark_dead, create_fresh_session, link_replacement.
+\* With RecoveryAdopts (#238 _replace_dead_session): read the thread's newest
+\* live row, mark the dead row dead, and move onto that live row when it is
+\* another one instead of creating a second replacement.
 Rec1(t) ==
-    LET r == trow[t] IN
+    LET r == trow[t] others == LiveRows \ {r} IN
     /\ pc[t] = "rec1" /\ alive[tproc[t]]
     /\ RecoveryUnderLock => lock = 0
     /\ lock' = IF RecoveryUnderLock THEN t ELSE lock
-    /\ IF RecoveryAdopts /\ replacedBy[r] # 0
-          THEN /\ trow' = [trow EXCEPT ![t] = replacedBy[r]]
+    /\ rows' = [rows EXCEPT ![r] = "dead"]
+    /\ IF RecoveryAdopts /\ others # {}
+          THEN /\ trow' = [trow EXCEPT ![t] = Newest(others)]
                /\ pc' = [pc EXCEPT ![t] = "rec3"]
-               /\ UNCHANGED rows
-          ELSE /\ rows' = [rows EXCEPT ![r] = "dead"]
-               /\ pc' = [pc EXCEPT ![t] = "rec2"]
+          ELSE /\ pc' = [pc EXCEPT ![t] = "rec2"]
                /\ UNCHANGED trow
     /\ UNCHANGED <<alive, started, recovered, processing, sweepPc, sweepSnap, ma, marker,
                    replacedBy, tproc, tsrc, deaths, sentIntoRunning, stolenClear, staleClear>>

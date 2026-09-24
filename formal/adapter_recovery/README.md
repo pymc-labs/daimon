@@ -75,7 +75,8 @@ live). The fixed config generates 5 states / 4 distinct states and passes
 `AdapterOverlap.tla` adds the pieces its bounds leave out: an old and a new
 adapter process, thread_sessions rows with their markers, each row's MA session
 status (idle / running / dead), the bind lock released before the marker is
-written, dead-session recovery outside that lock, and the Discord wizard turn
+written, dead-session recovery outside that lock (before #238) or under it,
+and the Discord wizard turn
 that skips `_processing`.
 
 ```sh
@@ -95,7 +96,7 @@ for c in OverlapPreCAS OverlapCASOnly OrphanedTurnReuse RollingOverlap WizardByp
 | `Bind` | `prepare_session_for_turn` under `pg_advisory_xact_lock`; a plain reuse reads neither the marker nor MA's session status |
 | `Mark` | the adapter writes the active-turn marker after bind returns |
 | `Send`, `Observe` | driver opens the stream and sends `user.message`; MA answers 200 to a `user.*` event sent into a running session and ignores it ([`driver.py`](../../packages/core/daimon/core/turn/driver.py), measured 2026-08-26) |
-| `Rec1`–`Rec3` | [`run.py`](../../packages/core/daimon/core/turn/run.py) `mark_dead` → `create_fresh_session` → `link_replacement`, outside the bind lock |
+| `Rec1`–`Rec3` | [`run.py`](../../packages/core/daimon/core/turn/run.py) `mark_dead` → `create_fresh_session` → `link_replacement`; outside the bind lock before #238, and since #238 (`_replace_dead_session`) under it, adopting the thread's live row when another turn already replaced the session (`RecoveryUnderLock`, `RecoveryAdopts`) |
 | `Finish` | unconditional `clear_active_turn` on the turn's own row |
 
 Invariants: `AtMostOneLiveRow` (≤1 live thread_sessions row for the thread),
@@ -138,8 +139,8 @@ What does overlap without a second process:
 | Fix | Config | Verdict |
 | --- | --- | --- |
 | `287b719` base marker, unconditional sweep clear, turns admitted before the sweep (Slack until `2d3a002`, Discord until `c923083`) | `OverlapPreCAS` | violates `NoStaleClear` |
-| `0bc1b14`/`2d3a002` compare-and-clear | `OverlapCASNoStale` | clean (`NoStaleClear`) |
-| compare-and-clear alone, still admitted before the sweep (before `c923083`) | `OverlapCASOnly` | violates `NoStolenClear` |
+| `0bc1b14`/`2d3a002` compare-and-clear | `OverlapCASNoStale` | clean (`NoStaleClear`), by construction |
+| compare-and-clear alone, still admitted before the sweep (Slack from `2d3a002` until `c923083`; Discord's nearest state is `c923083` until #232, with the `is_ready()`-only gate) | `OverlapCASOnly` | violates `NoStolenClear` |
 | turn admission waits for orphan recovery: `c923083` for Slack; for Discord `c923083` gated only once the gateway was ready, and the full gate is pymc-labs/daimon#232 (sweep armed in `setup_hook`, every turn entry point awaits it) | `OverlapGated` | clean (`NoStolenClear`, `AtMostOneLiveRow`) |
 
 The two violating traces differ. `OverlapPreCAS` (11 steps, the race
@@ -147,7 +148,12 @@ The two violating traces differ. `OverlapPreCAS` (11 steps, the race
 new process starts and its sweep snapshots the orphan's marker → a mention is
 admitted before recovery, reuses the row and writes its own marker → the sweep
 clears unconditionally and wipes the live marker. With `SweepCAS = TRUE` the
-same configuration is clean (`OverlapCASNoStale`). `OverlapCASOnly` (8 steps,
+same configuration is clean (`OverlapCASNoStale`). That row is clean by
+construction: with `SweepCAS = TRUE`, `SweepClear` clears a row only when its
+marker equals the snapshot, and `staleClear` needs a cleared row whose marker
+differs from it, so `NoStaleClear` holds at any bound. It checks that the
+model's compare-and-clear is one, not that the code's is sufficient; the
+load-bearing row of the pair is `OverlapPreCAS`. `OverlapCASOnly` (8 steps,
 the case `c923083`'s README gives for Slack): the new process admits a turn and
 writes its marker before the sweep's snapshot, so the snapshot holds the live
 marker and the compare-and-clear still matches.
@@ -155,7 +161,7 @@ marker and the compare-and-clear still matches.
 `8282714` (retry a failed sweep) is a liveness repair; this safety model does not
 cover it.
 
-### Regression row (fixed on main) and accepted limitations
+### Regression rows (fixed on main) and accepted limitation
 
 - **A message sent after a restart was ignored by the still-running orphan**
   (`OrphanedTurnReuse`, violates `NoMessageIntoRunning`; fixed on main by
@@ -171,15 +177,20 @@ cover it.
   MA reaches idle can still meet a running session, and main's interrupt is
   best-effort with a 10 s timeout. `OrphanSweepInterrupts` matches main after
   #232.
+- **Two live session rows after a session death beside a wizard turn**
+  (`WizardBypassRows`, violates `AtMostOneLiveRow`; fixed on main by
+  pymc-labs/daimon#238). Before #238, if the session died while a wizard turn
+  and a mention turn were both in flight, one turn's lock-free recovery marked
+  the row dead while the other bound and created a row, then the first created
+  another, which left two live rows (reads pick the newest; the other MA session
+  is orphaned). `WizardBypassRowsLocked` is #238's shape: recovery takes the
+  per-thread bind lock, marks the row dead, and adopts the thread's live row if
+  another turn already made one, otherwise creates and links the replacement,
+  all in one critical section. It is clean and matches main.
 - **Discord wizard turn and mention turn on one session** (`WizardBypassMessage`,
-  violates `NoMessageIntoRunning`): the second `user.message` is ignored rather
-  than run concurrently. `WizardBypassRows` (violates `AtMostOneLiveRow`): if the
-  session dies while both are in flight, one turn's recovery marks the row dead
-  while the other binds and creates a row, then the first creates another, which
-  leaves two live rows (reads pick the newest; the other MA session is orphaned).
-  `wizard_submit.py` documents the bypass as an accepted limitation; this is its
-  cost. Recovery under the bind lock that adopts an existing replacement
-  (`WizardBypassRowsLocked`) is clean. Not changed: product decision.
+  violates `NoMessageIntoRunning`; accepted limitation): the second
+  `user.message` is ignored rather than run concurrently. `wizard_submit.py`
+  documents the bypass as an accepted limitation, and #238 does not change it.
 - `SingleProcessRecovery` (one process, one session death, sweep interrupt) is
   clean: without overlap or the wizard bypass, the in-process guard makes
   lock-free recovery safe.
