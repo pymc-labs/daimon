@@ -35,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replacement session behind that the next mention silently continues on
   without being told the previous work was lost.
 
+- Slack now keeps a substantive answer when the agent uses a tool after writing
+  it, including turns that end without a further reply.
 - When two turns in one thread (for example a Discord form submit and a
   mention) both find the thread's session gone, they now continue on one
   replacement session. Previously each created its own, leaving the thread
