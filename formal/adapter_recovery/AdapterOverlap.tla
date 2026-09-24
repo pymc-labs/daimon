@@ -26,10 +26,10 @@ CONSTANTS
     Overlap,               \* the new process may start while the old one is alive
     AdmitBeforeRecovery,   \* turns admitted before this process's orphan sweep finished
     SweepCAS,              \* sweep clears a marker only if unchanged since its snapshot
-    SweepInterrupts,       \* proposed: the sweep interrupts the orphan's MA session
+    SweepInterrupts,       \* #232 (merged): the sweep interrupts the orphan's MA session
     SendWaitsForIdle,      \* proposed alternative: never send user.message into a running session
     WizardBypass,          \* Discord wizard turns skip the per-thread _processing guard
-    RecoveryUnderLock,     \* proposed: dead-session recovery holds the bind lock ...
+    RecoveryUnderLock,     \* alternative: dead-session recovery holds the bind lock ...
     RecoveryAdopts,        \* ... and adopts a replacement another turn already made
     OldCanDie,             \* the old process can stop with a turn in flight
     MaxTurns, MaxRows, MaxDeaths
@@ -47,11 +47,11 @@ VARIABLES
     lock,
     rows, ma, marker, replacedBy,
     pc, tproc, tsrc, trow,
-    deaths, sentIntoRunning, stolenClear
+    deaths, sentIntoRunning, stolenClear, staleClear
 
 vars == <<alive, started, recovered, processing, sweepPc, sweepSnap, lock,
           rows, ma, marker, replacedBy, pc, tproc, tsrc, trow,
-          deaths, sentIntoRunning, stolenClear>>
+          deaths, sentIntoRunning, stolenClear, staleClear>>
 
 Init ==
     /\ alive = [p \in Procs |-> p = "old"]
@@ -72,6 +72,7 @@ Init ==
     /\ deaths = 0
     /\ sentIntoRunning = FALSE
     /\ stolenClear = FALSE
+    /\ staleClear = FALSE
 
 LiveRows == {r \in Rows : rows[r] = "live"}
 Newest(S) == CHOOSE r \in S : \A s \in S : s <= r
@@ -88,7 +89,7 @@ StartNew ==
     /\ started' = [started EXCEPT !["new"] = TRUE]
     /\ alive' = [alive EXCEPT !["new"] = TRUE]
     /\ UNCHANGED <<recovered, processing, sweepPc, sweepSnap, lock, rows, ma, marker,
-                   replacedBy, pc, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear>>
+                   replacedBy, pc, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear, staleClear>>
 
 \* Stop/crash of the old process: its in-memory state is gone; MA keeps running.
 OldDies ==
@@ -99,7 +100,7 @@ OldDies ==
                                 THEN "orphaned" ELSE pc[t]]
     /\ lock' = IF lock # 0 /\ tproc[lock] = "old" THEN 0 ELSE lock
     /\ UNCHANGED <<started, recovered, sweepPc, sweepSnap, rows, ma, marker, replacedBy,
-                   tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear>>
+                   tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear, staleClear>>
 
 \* Orphan sweep: list rows with a marker, then retire each card and clear.
 SweepSnap(p) ==
@@ -107,7 +108,7 @@ SweepSnap(p) ==
     /\ sweepSnap' = [sweepSnap EXCEPT ![p] = marker]
     /\ sweepPc' = [sweepPc EXCEPT ![p] = "snap"]
     /\ UNCHANGED <<alive, started, recovered, processing, lock, rows, ma, marker, replacedBy,
-                   pc, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear>>
+                   pc, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear, staleClear>>
 
 SweepClear(p) ==
     LET snap == sweepSnap[p]
@@ -116,6 +117,9 @@ SweepClear(p) ==
     /\ alive[p] /\ sweepPc[p] = "snap"
     /\ marker' = [r \in Rows |-> IF r \in cleared THEN 0 ELSE marker[r]]
     /\ stolenClear' = (stolenClear \/ \E r \in cleared : LiveOwner(marker[r]))
+    \* The narrower loss compare-and-clear prevents: the marker was written after
+    \* this sweep's snapshot (it no longer names what the sweep read).
+    /\ staleClear' = (staleClear \/ \E r \in cleared : marker[r] # snap[r] /\ LiveOwner(marker[r]))
     /\ ma' = [r \in Rows |-> IF SweepInterrupts /\ r \in cleared /\ ma[r] = "running"
                                 THEN "idle" ELSE ma[r]]
     /\ sweepPc' = [sweepPc EXCEPT ![p] = "done"]
@@ -133,7 +137,7 @@ Admit(t, p, src) ==
     /\ tproc' = [tproc EXCEPT ![t] = p]
     /\ tsrc' = [tsrc EXCEPT ![t] = src]
     /\ UNCHANGED <<alive, started, recovered, sweepPc, sweepSnap, lock, rows, ma, marker,
-                   replacedBy, trow, deaths, sentIntoRunning, stolenClear>>
+                   replacedBy, trow, deaths, sentIntoRunning, stolenClear, staleClear>>
 
 \* prepare_session_for_turn under the advisory lock (one atomic step). A plain
 \* reuse does not look at the marker or at MA's session status.
@@ -148,7 +152,7 @@ Bind(t) ==
                /\ trow' = [trow EXCEPT ![t] = FreeRow]
     /\ pc' = [pc EXCEPT ![t] = "bound"]
     /\ UNCHANGED <<alive, started, recovered, processing, sweepPc, sweepSnap, lock, marker,
-                   replacedBy, tproc, tsrc, deaths, sentIntoRunning, stolenClear>>
+                   replacedBy, tproc, tsrc, deaths, sentIntoRunning, stolenClear, staleClear>>
 
 \* The active-turn marker is written after the bind lock was released.
 Mark(t) ==
@@ -156,7 +160,7 @@ Mark(t) ==
     /\ marker' = [marker EXCEPT ![trow[t]] = t]
     /\ pc' = [pc EXCEPT ![t] = "marked"]
     /\ UNCHANGED <<alive, started, recovered, processing, sweepPc, sweepSnap, lock, rows, ma,
-                   replacedBy, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear>>
+                   replacedBy, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear, staleClear>>
 
 \* Open the stream and send user.message. MA answers 200 to a user.* event sent
 \* into a running session and ignores it (driver.py, measured 2026-08-26).
@@ -176,20 +180,20 @@ Send(t) ==
               /\ pc' = [pc EXCEPT ![t] = "sent"]
               /\ UNCHANGED sentIntoRunning
     /\ UNCHANGED <<alive, started, recovered, processing, sweepPc, sweepSnap, lock, rows,
-                   marker, replacedBy, tproc, tsrc, trow, deaths, stolenClear>>
+                   marker, replacedBy, tproc, tsrc, trow, deaths, stolenClear, staleClear>>
 
 MAFinish(r) ==
     /\ ma[r] = "running"
     /\ ma' = [ma EXCEPT ![r] = "idle"]
     /\ UNCHANGED <<alive, started, recovered, processing, sweepPc, sweepSnap, lock, rows,
-                   marker, replacedBy, pc, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear>>
+                   marker, replacedBy, pc, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear, staleClear>>
 
 MADies(r) ==
     /\ deaths < MaxDeaths /\ rows[r] = "live" /\ ma[r] \in {"idle", "running"}
     /\ ma' = [ma EXCEPT ![r] = "dead"]
     /\ deaths' = deaths + 1
     /\ UNCHANGED <<alive, started, recovered, processing, sweepPc, sweepSnap, lock, rows,
-                   marker, replacedBy, pc, tproc, tsrc, trow, sentIntoRunning, stolenClear>>
+                   marker, replacedBy, pc, tproc, tsrc, trow, sentIntoRunning, stolenClear, staleClear>>
 
 Observe(t) ==
     LET r == trow[t] IN
@@ -197,7 +201,7 @@ Observe(t) ==
     /\ ma[r] \in {"idle", "dead"}
     /\ pc' = [pc EXCEPT ![t] = IF ma[r] = "idle" THEN "ending" ELSE "rec1"]
     /\ UNCHANGED <<alive, started, recovered, processing, sweepPc, sweepSnap, lock, rows, ma,
-                   marker, replacedBy, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear>>
+                   marker, replacedBy, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear, staleClear>>
 
 \* run_prepared_turn recovery: mark_dead, create_fresh_session, link_replacement.
 Rec1(t) ==
@@ -213,7 +217,7 @@ Rec1(t) ==
                /\ pc' = [pc EXCEPT ![t] = "rec2"]
                /\ UNCHANGED trow
     /\ UNCHANGED <<alive, started, recovered, processing, sweepPc, sweepSnap, ma, marker,
-                   replacedBy, tproc, tsrc, deaths, sentIntoRunning, stolenClear>>
+                   replacedBy, tproc, tsrc, deaths, sentIntoRunning, stolenClear, staleClear>>
 
 Rec2(t) ==
     LET r == trow[t] n == FreeRow IN
@@ -224,7 +228,7 @@ Rec2(t) ==
     /\ trow' = [trow EXCEPT ![t] = n]
     /\ pc' = [pc EXCEPT ![t] = "rec3"]
     /\ UNCHANGED <<alive, started, recovered, processing, sweepPc, sweepSnap, lock, marker,
-                   tproc, tsrc, deaths, sentIntoRunning, stolenClear>>
+                   tproc, tsrc, deaths, sentIntoRunning, stolenClear, staleClear>>
 
 Rec3(t) ==
     /\ pc[t] = "rec3" /\ alive[tproc[t]]
@@ -232,7 +236,7 @@ Rec3(t) ==
     /\ marker' = [marker EXCEPT ![trow[t]] = t]
     /\ pc' = [pc EXCEPT ![t] = "marked"]
     /\ UNCHANGED <<alive, started, recovered, processing, sweepPc, sweepSnap, rows, ma,
-                   replacedBy, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear>>
+                   replacedBy, tproc, tsrc, trow, deaths, sentIntoRunning, stolenClear, staleClear>>
 
 \* Finish: clear_active_turn is unconditional on the turn's own row.
 Finish(t) ==
@@ -243,7 +247,7 @@ Finish(t) ==
     /\ processing' = IF tsrc[t] = "mention" THEN [processing EXCEPT ![p] = FALSE] ELSE processing
     /\ pc' = [pc EXCEPT ![t] = "done"]
     /\ UNCHANGED <<alive, started, recovered, sweepPc, sweepSnap, lock, rows, ma, replacedBy,
-                   tproc, tsrc, trow, deaths, sentIntoRunning>>
+                   tproc, tsrc, trow, deaths, sentIntoRunning, staleClear>>
 
 Idle ==
     /\ \A t \in Turns : pc[t] \in {"done", "orphaned", "idle"}
@@ -273,4 +277,8 @@ AtMostOneLiveRow == Cardinality(LiveRows) <= 1
 NoMessageIntoRunning == ~sentIntoRunning
 \* A marker is cleared only by the turn that set it (or once its owner is gone).
 NoStolenClear == ~stolenClear
+\* The sweep never clears a live turn's marker written after the sweep's own
+\* snapshot. Compare-and-clear alone guarantees this; it does not guarantee
+\* NoStolenClear, because a marker written before the snapshot still matches.
+NoStaleClear == ~staleClear
 =============================================================================

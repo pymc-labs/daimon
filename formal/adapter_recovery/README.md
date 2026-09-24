@@ -83,7 +83,7 @@ set -eu
 : "${TLA2TOOLS_JAR:?Set TLA2TOOLS_JAR to the path of tla2tools.jar}"
 cd formal/adapter_recovery
 run() { java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -metadir "${TMPDIR:-/tmp}/daimon-adapter-overlap-tlc/$1" -config "$1.cfg" AdapterOverlap.tla; }
-for c in OverlapGated OrphanSweepInterrupts OrphanSendWaits WizardBypassRowsLocked SingleProcessRecovery; do run $c; done
+for c in OverlapCASNoStale OverlapGated OrphanSweepInterrupts OrphanSendWaits WizardBypassRowsLocked SingleProcessRecovery; do run $c; done
 for c in OverlapPreCAS OverlapCASOnly OrphanedTurnReuse RollingOverlap WizardBypassMessage WizardBypassRows; do run $c || test $? -eq 12; done
 ```
 
@@ -101,7 +101,11 @@ for c in OverlapPreCAS OverlapCASOnly OrphanedTurnReuse RollingOverlap WizardByp
 Invariants: `AtMostOneLiveRow` (≤1 live thread_sessions row for the thread),
 `NoMessageIntoRunning` (no `user.message` into a session still running a turn),
 `NoStolenClear` (a marker is cleared only by the turn that set it, or once that
-turn's process is gone).
+turn's process is gone), and `NoStaleClear` (the sweep never clears a live
+turn's marker written after the sweep's own snapshot). `NoStaleClear` is the
+narrower property: compare-and-clear alone guarantees it, but not
+`NoStolenClear`, because a live marker written before the snapshot still
+matches.
 
 ### Can adapter processes overlap in the hosted deploy?
 
@@ -133,17 +137,29 @@ What does overlap without a second process:
 
 | Fix | Config | Verdict |
 | --- | --- | --- |
-| `287b719` base marker, unconditional sweep clear, turns admitted before the sweep | `OverlapPreCAS` | violates `NoStolenClear` |
-| `0bc1b14`/`2d3a002` compare-and-clear alone (still admitted before the sweep) | `OverlapCASOnly` | violates `NoStolenClear` |
-| `c923083` turn admission waits for orphan recovery | `OverlapGated` | clean (`NoStolenClear`, `AtMostOneLiveRow`) |
+| `287b719` base marker, unconditional sweep clear, turns admitted before the sweep (Slack until `2d3a002`, Discord until `c923083`) | `OverlapPreCAS` | violates `NoStaleClear` |
+| `0bc1b14`/`2d3a002` compare-and-clear | `OverlapCASNoStale` | clean (`NoStaleClear`) |
+| compare-and-clear alone, still admitted before the sweep (before `c923083`) | `OverlapCASOnly` | violates `NoStolenClear` |
+| turn admission waits for orphan recovery: `c923083` for Slack; for Discord `c923083` gated only once the gateway was ready, and the full gate is pymc-labs/daimon#232 (sweep armed in `setup_hook`, every turn entry point awaits it) | `OverlapGated` | clean (`NoStolenClear`, `AtMostOneLiveRow`) |
+
+The two violating traces differ. `OverlapPreCAS` (11 steps, the race
+`2d3a002`'s docstring describes): the old process marks a turn and dies → the
+new process starts and its sweep snapshots the orphan's marker → a mention is
+admitted before recovery, reuses the row and writes its own marker → the sweep
+clears unconditionally and wipes the live marker. With `SweepCAS = TRUE` the
+same configuration is clean (`OverlapCASNoStale`). `OverlapCASOnly` (8 steps,
+the case `c923083`'s README gives for Slack): the new process admits a turn and
+writes its marker before the sweep's snapshot, so the snapshot holds the live
+marker and the compare-and-clear still matches.
 
 `8282714` (retry a failed sweep) is a liveness repair; this safety model does not
 cover it.
 
-### Findings (current code)
+### Regression row (fixed on main) and accepted limitations
 
-- **A message sent after a restart is ignored by the still-running orphan**
-  (`OrphanedTurnReuse`, violates `NoMessageIntoRunning`). Trace: the old process
+- **A message sent after a restart was ignored by the still-running orphan**
+  (`OrphanedTurnReuse`, violates `NoMessageIntoRunning`; fixed on main by
+  pymc-labs/daimon#232). Trace before #232: the old process
   starts a turn → the container stops (MA keeps running the turn) → the new
   process boots → its sweep retires the card as interrupted and clears the
   marker, without interrupting MA → a new mention is admitted, reuses the row and
@@ -152,7 +168,9 @@ cover it.
   billing. Interrupting the orphan's session in the sweep (`OrphanSweepInterrupts`)
   or never sending into a running session (`OrphanSendWaits`) is clean. The model
   treats the interrupt as immediate; in the code a mention in the seconds before
-  MA reaches idle can still meet a running session. Fix: pymc-labs/daimon#232.
+  MA reaches idle can still meet a running session, and main's interrupt is
+  best-effort with a 10 s timeout. `OrphanSweepInterrupts` matches main after
+  #232.
 - **Discord wizard turn and mention turn on one session** (`WizardBypassMessage`,
   violates `NoMessageIntoRunning`): the second `user.message` is ignored rather
   than run concurrently. `WizardBypassRows` (violates `AtMostOneLiveRow`): if the
