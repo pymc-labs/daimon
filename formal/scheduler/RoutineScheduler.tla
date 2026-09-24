@@ -39,6 +39,17 @@ Release(p) ==
     /\ lockOwner' = NoProcess
     /\ UNCHANGED <<status, nextFire, claimedBy, dispatches, result, slot>>
 
+(* The scheduler holds a session-scoped PostgreSQL advisory lock. If it dies
+   after the claim transaction commits, PostgreSQL releases that lock, but
+   nextFire already points at the next occurrence. This occurrence is skipped
+   and is not reclaimed by the next process. *)
+ProcessDiesAfterClaim(p) ==
+    /\ lockOwner = p
+    /\ status = Pending
+    /\ lockOwner' = NoProcess
+    /\ status' = Done
+    /\ UNCHANGED <<nextFire, claimedBy, dispatches, result, slot>>
+
 Claim(p, recomputeOk) ==
     /\ lockOwner = p
     /\ status = Due
@@ -103,6 +114,7 @@ NextOccurrence ==
 Next ==
     \/ \E p \in Processes : Acquire(p)
     \/ \E p \in Processes : Release(p)
+    \/ \E p \in Processes : ProcessDiesAfterClaim(p)
     \/ \E p \in Processes : \E ok \in BOOLEAN : Claim(p, ok)
     \/ \E p \in Processes : DispatchSuccess(p)
     \/ \E p \in Processes : DispatchError(p)
