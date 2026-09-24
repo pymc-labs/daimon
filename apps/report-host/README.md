@@ -80,6 +80,10 @@ than one.
   run by daimon's own scheduler process. An operator who does not run that
   scheduler will accumulate uploaded archives indefinitely — this host has no
   cleanup path of its own for them.
+- **Local upload archives remain available for recovery.** The host keeps the
+  archive referenced by the current bundle and retains replaced or failed
+  upload archives for at least 24 hours and the configured turn timeout. A
+  later publish removes older unreferenced archives and interrupted temp files.
 - **Every reader thread is a live upstream session until it is archived.**
   The idle sweep (`thread_idle_archive_hours`) does this automatically, but a
   host that is stopped for longer than that window before the sweep runs

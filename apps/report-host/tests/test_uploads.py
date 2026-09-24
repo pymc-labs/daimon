@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import io
 import json
+import os
 import sqlite3
 import tarfile
 from collections.abc import Callable
@@ -558,7 +559,9 @@ async def test_publish_happy_path_writes_pdf_archive_and_returns_recipient_links
     assert report.current_pdf == "v1.pdf"
     assert (settings.data_dir / "acme" / "v1.pdf").read_bytes() == REPORT_PDF_BYTES
 
-    archive_path = settings.data_dir / "acme" / "bundle.tar.gz"
+    archive_path = (
+        settings.data_dir / "acme" / (f"bundle-{hashlib.sha256(b'jti-1').hexdigest()}.tar.gz")
+    )
     assert archive_path.read_bytes() == archive
     assert report.archive_path == str(archive_path)
     assert report.bundle_handle == "bundle-handle-1"
@@ -589,22 +592,63 @@ async def test_second_publish_of_same_slug_replaces_archive_bytes_with_no_leftov
     assert first.status_code == 200
     assert second.status_code == 200
 
-    archive_path = settings.data_dir / "acme" / "bundle.tar.gz"
-    assert archive_path.read_bytes() == second_archive, "the second publish's bytes must win"
+    first_archive_path = (
+        settings.data_dir / "acme" / (f"bundle-{hashlib.sha256(b'pub-1').hexdigest()}.tar.gz")
+    )
+    second_archive_path = (
+        settings.data_dir / "acme" / (f"bundle-{hashlib.sha256(b'pub-2').hexdigest()}.tar.gz")
+    )
+    assert first_archive_path.read_bytes() == first_archive
+    assert second_archive_path.read_bytes() == second_archive
+    report = reports_store.load_report(conn, slug="acme")
+    assert report is not None
+    assert report.archive_path == str(second_archive_path)
 
     leftovers = [p for p in (settings.data_dir / "acme").iterdir() if p.name.startswith(".")]
     assert leftovers == [], "no temporary file should survive a completed publish"
 
 
+@pytest.mark.parametrize("failure", ["http_status", "timeout"])
 async def test_publish_archive_survives_a_seam_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch)
     conn = reports_store.connect(settings.data_dir)
     _seed_report(conn)
+    reports_store.add_revision(
+        conn,
+        slug="acme",
+        name="v1.pdf",
+        by_thread=None,
+        note="published",
+        now=NOW,
+    )
+    reports_store.set_current_pdf(conn, slug="acme", name="v1.pdf")
+    reports_store.save_bundle_reference(
+        conn,
+        slug="acme",
+        handle="old-bundle-handle",
+        sha256="b" * 64,
+        expires_at=NOW + timedelta(days=90),
+        archive_path=str(settings.data_dir / "acme" / "bundle.tar.gz"),
+    )
+    old_pdf = b"%PDF old published report"
+    report_dir = settings.data_dir / "acme"
+    report_dir.mkdir(parents=True)
+    (report_dir / "v1.pdf").write_bytes(old_pdf)
+    (report_dir / "bundle.tar.gz").write_bytes(b"old archive")
+    stale_archive = report_dir / "bundle-stale.tar.gz"
+    stale_archive.write_bytes(b"stale unreferenced archive")
+    stale_tmp = report_dir / ".bundle-crashed.tar.gz.tmp"
+    stale_tmp.write_bytes(b"stale interrupted write")
+    stale_timestamp = (datetime.now(UTC) - timedelta(days=2)).timestamp()
+    os.utime(stale_archive, (stale_timestamp, stale_timestamp))
+    os.utime(stale_tmp, (stale_timestamp, stale_timestamp))
     token = _capability_token()
 
     def failing_handler(request: httpx.Request) -> httpx.Response:
+        if failure == "timeout":
+            raise httpx.ReadTimeout("seam response timed out", request=request)
         return httpx.Response(500, json={"error": "seam is down"})
 
     requests: list[httpx.Request] = []
@@ -615,9 +659,27 @@ async def test_publish_archive_survives_a_seam_error(
         resp = await client.put(f"/publish/{token}", content=archive)
 
     assert resp.status_code == 502
-    archive_path = settings.data_dir / "acme" / "bundle.tar.gz"
-    assert archive_path.exists(), "a failed push must not take the only copy of the archive with it"
-    assert archive_path.read_bytes() == archive
+    old_archive_path = report_dir / "bundle.tar.gz"
+    failed_archive_path = report_dir / (f"bundle-{hashlib.sha256(b'jti-1').hexdigest()}.tar.gz")
+    assert failed_archive_path.exists(), "a failed push must retain its uploaded archive"
+    assert failed_archive_path.read_bytes() == archive
+    report = reports_store.load_report(conn, slug="acme")
+    assert report is not None
+    assert report.current_pdf == "v1.pdf", (
+        "a failed publish must keep the readable revision current"
+    )
+    assert report.bundle_handle == "old-bundle-handle", "a failed push must keep the prior bundle"
+    assert report.bundle_sha256 == "b" * 64, "the bundle digest must match the prior handle"
+    assert report.archive_path == str(old_archive_path), "the old handle must keep its old archive"
+    assert old_archive_path.read_bytes() == b"old archive"
+    assert not stale_archive.exists(), "old unreferenced archives should be pruned"
+    assert not stale_tmp.exists(), "old interrupted archive writes should be pruned"
+    assert (report_dir / "v1.pdf").read_bytes() == old_pdf
+    assert reports_store.list_revisions(conn, slug="acme") == [
+        reports_store.RevisionRow(
+            slug="acme", name="v1.pdf", created_at=NOW, by_thread=None, note="published"
+        )
+    ], "a failed publish must not record its PDF as a completed revision"
 
 
 async def test_publish_seam_unauthorized_marks_report_and_asks_for_republish(

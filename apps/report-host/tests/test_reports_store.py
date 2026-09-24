@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from report_host import reports_store
 
 NOW = datetime(2026, 9, 8, 12, 0, 0, tzinfo=UTC)
@@ -112,6 +114,69 @@ def test_save_bundle_reference_round_trips_archive_path(tmp_path: Path) -> None:
     assert loaded.bundle_handle == "bundle-handle-1"
     assert loaded.bundle_sha256 == "b" * 64
     assert loaded.bundle_expires_at == NOW + timedelta(days=90)
+
+
+def test_record_published_revision_rolls_back_all_fields_on_database_error(
+    tmp_path: Path,
+) -> None:
+    conn = _connect(tmp_path)
+    reports_store.save_report(
+        conn,
+        slug="acme-q3",
+        title="Acme Q3",
+        tenant_id="tenant-1",
+        agent_name="analyst",
+        cap_usd=Decimal("5.00"),
+        agent_token="seam-token-1",
+        now=NOW,
+    )
+    reports_store.add_revision(
+        conn,
+        slug="acme-q3",
+        name="v1.pdf",
+        by_thread=None,
+        note="published",
+        now=NOW,
+    )
+    reports_store.set_current_pdf(conn, slug="acme-q3", name="v1.pdf")
+    reports_store.save_bundle_reference(
+        conn,
+        slug="acme-q3",
+        handle="old-handle",
+        sha256="a" * 64,
+        expires_at=NOW + timedelta(days=90),
+        archive_path="/data/reports/acme-q3/old.tar.gz",
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER fail_bundle_update BEFORE UPDATE OF bundle_handle ON reports
+        BEGIN
+            SELECT RAISE(ABORT, 'injected bundle update failure');
+        END
+        """
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected bundle update failure"):
+        reports_store.record_published_revision(
+            conn,
+            slug="acme-q3",
+            name="v2.pdf",
+            handle="new-handle",
+            sha256="b" * 64,
+            expires_at=NOW + timedelta(days=91),
+            archive_path="/data/reports/acme-q3/new.tar.gz",
+            now=NOW + timedelta(days=1),
+        )
+
+    loaded = reports_store.load_report(conn, slug="acme-q3")
+    assert loaded is not None
+    assert loaded.current_pdf == "v1.pdf"
+    assert loaded.bundle_handle == "old-handle"
+    assert loaded.bundle_sha256 == "a" * 64
+    assert loaded.archive_path == "/data/reports/acme-q3/old.tar.gz"
+    assert [revision.name for revision in reports_store.list_revisions(conn, slug="acme-q3")] == [
+        "v1.pdf"
+    ]
 
 
 def test_delete_report_returns_true_once_then_false(tmp_path: Path) -> None:
