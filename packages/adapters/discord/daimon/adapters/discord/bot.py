@@ -1085,8 +1085,7 @@ class DaimonBot(commands.Bot):
             # so that queued mentions never consume a slot they won't use.
             thread_id = message.channel.id
             if thread_id in self._processing:
-                await message.add_reaction("⌛")
-                self._pending.setdefault(thread_id, []).append(message)
+                await self._queue_behind_inflight_turn(thread_id, message)
                 return
 
             # --- Per-tenant concurrency cap (SCALE-01) ---
@@ -1163,8 +1162,7 @@ class DaimonBot(commands.Bot):
 
             thread_id = message.channel.id
             if thread_id in self._processing:
-                await message.add_reaction("⌛")
-                self._pending.setdefault(thread_id, []).append(message)
+                await self._queue_behind_inflight_turn(thread_id, message)
                 # This coroutine won't run a turn; the slot was claimed for the
                 # already-processing path which will do the work.
                 self._release_inflight(tenant_id)
@@ -1182,6 +1180,31 @@ class DaimonBot(commands.Bot):
             await self._handle_prologue_failure(message, exc, guild_id)
         except Exception as exc:  # on_message event-handler boundary
             await self._handle_prologue_failure(message, exc, guild_id)
+
+    async def _queue_behind_inflight_turn(self, thread_id: int, message: discord.Message) -> None:
+        """Queue ``message`` behind the thread's in-flight turn, then mark it ⌛.
+
+        The append happens before the first await. The in-flight turn's drain
+        loop and ``finally`` can run while this coroutine is suspended in
+        ``add_reaction``; a message appended only after the reaction would land
+        in ``_pending`` after the last drain, stranded until some later mention
+        in the thread. Slack fixed the same ordering as WR-05.
+
+        The reaction is a cosmetic hint, so its failure (missing Add Reactions
+        permission, rate limit, a connection error surviving discord.py's
+        retry) is logged and swallowed rather than dropping the queued message
+        into the prologue error path.
+        """
+        self._pending.setdefault(thread_id, []).append(message)
+        try:
+            await message.add_reaction("⌛")
+        except Exception as exc:
+            # best-effort queue marker after the message is already queued; see docstring
+            log.warning(
+                "mention_queue.reaction_failed",
+                thread_id=str(thread_id),
+                err_type=type(exc).__name__,
+            )
 
     async def _handle_prologue_failure(
         self, message: discord.Message, exc: Exception, guild_id: str

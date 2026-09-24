@@ -806,3 +806,105 @@ async def test_drain_merges_attachments_from_all_of_authors_queued_messages(
         "attachments from ALL of the author's queued messages must reach the "
         "composite drain turn, not just the first message's"
     )
+
+
+# ---------------------------------------------------------------------------
+# Queue-before-reaction ordering (Discord twin of Slack WR-05).
+# ---------------------------------------------------------------------------
+
+
+def _recording_stub(
+    calls: list[tuple[discord.Message, str | None]],
+    entered: asyncio.Event,
+    release: asyncio.Event,
+):
+    async def stub(
+        message: discord.Message,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        *,
+        content_override: str | None = None,
+        created_thread_ids: list[int] | None = None,
+        attachments_override: list[discord.Attachment] | None = None,
+    ) -> None:
+        calls.append((message, content_override))
+        entered.set()
+        await release.wait()
+
+    return stub
+
+
+@pytest.mark.asyncio
+async def test_queued_mention_survives_turn_ending_during_reaction(
+    queued_bot: DaimonBot,
+) -> None:
+    """A mention queued while the ⌛ reaction is in flight must still be drained.
+
+    If the in-flight turn finishes its drain loop and ``finally`` while the
+    queued mention's ``add_reaction`` await is suspended, appending to
+    ``_pending`` only after the reaction strands the mention: nothing drains
+    that thread until an unrelated later mention arrives.
+    """
+    calls: list[tuple[discord.Message, str | None]] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    queued_bot._handle_mention = _recording_stub(calls, entered, release)  # type: ignore[method-assign]
+
+    m1 = _make_thread_message(content="first")
+    q1 = _make_thread_message(content="queued")
+    reaction_started = asyncio.Event()
+    reaction_release = asyncio.Event()
+
+    async def slow_reaction(_emoji: str) -> None:
+        reaction_started.set()
+        await reaction_release.wait()
+
+    q1.add_reaction = AsyncMock(side_effect=slow_reaction)
+
+    turn = asyncio.create_task(queued_bot.on_message(m1))
+    await entered.wait()
+    entered.clear()
+
+    queued = asyncio.create_task(queued_bot.on_message(q1))
+    await reaction_started.wait()  # q1 is suspended inside add_reaction
+
+    release.set()  # turn 1 finishes: drain loop + finally run now
+    done, _ = await asyncio.wait({turn}, timeout=5)
+    assert turn in done
+
+    reaction_release.set()
+    await queued
+
+    assert [c[0] for c in calls] == [m1, q1], "queued mention was stranded, not drained"
+    assert calls[1][1] == "queued"
+    assert 789 not in queued_bot._pending  # pyright: ignore[reportPrivateUsage]
+    assert 789 not in queued_bot._processing  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_queued_mention_survives_reaction_failure(queued_bot: DaimonBot) -> None:
+    """A failed ⌛ reaction (e.g. missing Add Reactions permission) is cosmetic.
+
+    The mention must still be queued and drained, and no error message posted.
+    """
+    calls: list[tuple[discord.Message, str | None]] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    queued_bot._handle_mention = _recording_stub(calls, entered, release)  # type: ignore[method-assign]
+
+    m1 = _make_thread_message(content="first")
+    q1 = _make_thread_message(content="queued")
+    response = MagicMock(status=403, reason="Forbidden")
+    q1.add_reaction = AsyncMock(side_effect=discord.Forbidden(response, "Missing Permissions"))
+
+    turn = asyncio.create_task(queued_bot.on_message(m1))
+    await entered.wait()
+    entered.clear()
+
+    await queued_bot.on_message(q1)
+
+    release.set()
+    await turn
+
+    assert [c[0] for c in calls] == [m1, q1]
+    q1.channel.send.assert_not_called()  # type: ignore[attr-defined]

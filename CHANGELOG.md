@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Discord mention sent into a thread while its turn is finishing is no
+  longer left unanswered until the next mention, and a failed ⌛ reaction
+  (for example, a missing Add Reactions permission) no longer drops the
+  queued mention.
 - Reconnect replay keeps the current turn's answer and rendered content when
   the event history is incomplete or ends with a session termination; repeated
   SSE events no longer repeat adapter callbacks.
