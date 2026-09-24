@@ -95,8 +95,10 @@ async def complete_mcp_oauth_flow(
         now=now,
         session_factory=session_factory,
     )
-    # Locked like every other writer of this vault, so a turn mirroring the
-    # agent's shared token cannot recreate it between the delete and the create.
+    # Locked like the mirror, the Copilot PAT and the pasted-token writers
+    # (see hold_agent_vault_lock for the two that are not), so a turn
+    # mirroring the agent's shared token cannot recreate it between the
+    # delete and the create.
     async with hold_agent_vault_lock(
         session_factory, account_id=flow.account_id, agent_id=flow.agent_id
     ):

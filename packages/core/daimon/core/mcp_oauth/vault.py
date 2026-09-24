@@ -98,10 +98,13 @@ async def put_mcp_oauth_credential(
     """Replace whatever credential the vault holds for the URL; return the new id.
 
     The caller holds the per-(account, agent) vault lock
-    (`mcp_vault.hold_agent_vault_lock`), as every writer that replaces a
-    URL's credential does. A turn's `mirror_credentials_into_vault` therefore
-    either finished before this lists the slot or waits and then sees the
-    grant and leaves the URL alone, however many turns are mirroring.
+    (`mcp_vault.hold_agent_vault_lock`), as do the other writers that list
+    and replace a URL a grant can hold: the per-turn mirror, the Copilot PAT
+    and the pasted token. The two writers that do not hold it never write
+    such a URL (see `hold_agent_vault_lock`). A turn's
+    `mirror_credentials_into_vault` therefore either finished before this
+    lists the slot or waits and then sees the grant and leaves the URL
+    alone, however many turns are mirroring.
 
     A writer outside the lock could still land between the list and the
     create (the create is then a 409) or delete a listed credential first

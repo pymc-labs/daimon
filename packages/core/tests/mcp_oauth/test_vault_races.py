@@ -27,7 +27,7 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
-from daimon.core import agent_mcp_credentials
+from daimon.core import agent_mcp_credentials, sessions
 from daimon.core.agent_mcp_credentials import (
     METADATA_VERSION_KEY,
     ResolvedMcpCredential,
@@ -36,18 +36,23 @@ from daimon.core.agent_mcp_credentials import (
     save_agent_mcp_credential,
     sync_agent_mcp_credentials,
 )
+from daimon.core.config import McpSettings
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.complete import McpOAuthCompletion, complete_mcp_oauth_flow
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenResponse
 from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
+from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL
+from daimon.core.mcp_vault import ensure_agent_mcp_vault as real_ensure_agent_mcp_vault
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.domain import McpOAuthFlowRow
 from daimon.testing.crypto import make_fernet
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import list_response
+from daimon.testing.ma import list_response, session_response
+from daimon.testing.ma_models import ma_agent, ma_environment
+from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -252,6 +257,8 @@ class SlowVault(FakeVault):
             )
         if request.method == "GET" and path == "/v1/agents":
             return list_response([])
+        if request.method == "POST" and path == "/v1/sessions":
+            return session_response(session_id=f"sesn_{uuid.uuid4().hex[:8]}")
         response = await super().handler(request)
         if request.method == "DELETE" and response.status_code == 200:
             deleted = asyncio.Event()
@@ -262,7 +269,7 @@ class SlowVault(FakeVault):
 
 
 async def _seed_flow_and_shared_token(
-    sessionmaker: async_sessionmaker[AsyncSession], fernet: MultiFernet
+    sessionmaker: async_sessionmaker[AsyncSession], fernet: MultiFernet, *, url: str
 ) -> McpOAuthFlowRow:
     async with sessionmaker() as session, session.begin():
         tenant = await make_tenant(session)
@@ -276,7 +283,7 @@ async def _seed_flow_and_shared_token(
             agent_id=agent_id,
             account_id=account.id,
             target="notion",
-            mcp_server_url=_URL,
+            mcp_server_url=url,
             requester_platform_user_id="requester-1",
             channel_id="chan-1",
             expires_at=_NOW + dt.timedelta(minutes=30),
@@ -293,7 +300,7 @@ async def _seed_flow_and_shared_token(
             account_id=account.id,
             agent_id=agent_id,
             server_name="notion",
-            mcp_server_url=_URL,
+            mcp_server_url=url,
             redirect_uri="https://daimon.example/oauth/mcp/callback",
             code_verifier="v" * 64,
             expires_at=_NOW + dt.timedelta(minutes=10),
@@ -310,50 +317,72 @@ async def _seed_flow_and_shared_token(
             scope="default",
         )
         assert saved is not None
+    if url == GITHUB_COPILOT_MCP_URL:
+        # The agent's GitHub PAT is what every fresh session writes there.
+        return saved
     # The agent's shared token for the same server: what every turn mirrors.
     await save_agent_mcp_credential(
         sessionmaker=sessionmaker,
         fernet=fernet,
         tenant_id=saved.tenant_id,
         agent_id=saved.agent_id,
-        mcp_server_url=_URL,
+        mcp_server_url=url,
         plaintext_token="agent-tok",
     )
     return saved
 
 
+# How each racing turn reaches the vault, and the URL the person signs in to:
+#   remirror       - a reused session's `sync_agent_mcp_credentials` mirrors the
+#                    agent's shared token for the server the grant replaces.
+#   fresh_session  - a new session's `create_session` mirrors that same token.
+#   copilot        - a new session's `create_session` writes the agent's GitHub
+#                    PAT while the person signs in to the GitHub Copilot server.
+_RACER_PATHS = ("remirror", "fresh_session", "copilot")
+
+
+@pytest.mark.parametrize("path", _RACER_PATHS)
 async def test_a_sign_in_survives_three_turns_mirroring_while_the_grant_is_written(
-    db_clean: None, db_schema: str, monkeypatch: pytest.MonkeyPatch
+    db_clean: None, db_schema: str, monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
-    """Three turns for the same (account, agent) remirror the shared token
-    while the OAuth callback replaces it with the person's grant. Each turn
-    lands in the grant's delete→create window; without the per-(account,
-    agent) vault lock each recreates the shared token there, the grant's
-    create is a 409 every time, and the sign-in (flow already spent) is lost.
+    """Three turns for the same (account, agent) write the URL the OAuth
+    callback is replacing with the person's grant. Each turn lands in the
+    grant's delete→create window; without the per-(account, agent) vault lock
+    each recreates the agent's credential there, the grant's create is a 409
+    every time, and the sign-in (flow already spent) is lost.
 
     Each turn has already been through `ensure_agent_mcp_vault` when it
-    reaches its mirror, so the grant and the mirror must both hold the lock:
-    either one alone leaves the window open.
+    reaches its write, so the grant and that write must both hold the lock:
+    either one alone leaves the window open. Every racer takes the same
+    path, so each lock the paths hold (the remirror's, `create_session`'s
+    mirror, `create_session`'s Copilot write) is the only thing between one
+    parametrization and the 409.
 
     Separate engines, committed rows: the advisory lock is connection-scoped,
     so the shared single-connection fixture would hide it.
     """
+    url = GITHUB_COPILOT_MCP_URL if path == "copilot" else _URL
     dsn = os.environ["DAIMON_DATABASE__TEST_URL"]
     engines = [build_test_engine(dsn, db_schema, poolclass=NullPool) for _ in range(4)]
     factories = [async_sessionmaker(bind=e, expire_on_commit=False) for e in engines]
     fernet = make_fernet()
     try:
-        flow = await _seed_flow_and_shared_token(factories[0], fernet)
+        flow = await _seed_flow_and_shared_token(factories[0], fernet, url=url)
         display = f"daimon-mcp:{flow.account_id}:{flow.agent_id}"
         jwt_cred = _static("vcrd_jwt", "v0")
         jwt_cred["auth"] = {"type": "static_bearer", "mcp_server_url": _PUBLIC_URL}
-        (stored,) = await resolve_agent_mcp_credentials(
-            sessionmaker=factories[0],
-            fernet=fernet,
-            tenant_id=flow.tenant_id,
-            agent_id=flow.agent_id,
-        )
-        vault = SlowVault([jwt_cred, _static("vcrd_shared", stored.version)], display_name=display)
+        agent_cred = _static("vcrd_shared", "v0")
+        if path == "copilot":
+            agent_cred["auth"] = {"type": "static_bearer", "mcp_server_url": url}
+        else:
+            (stored,) = await resolve_agent_mcp_credentials(
+                sessionmaker=factories[0],
+                fernet=fernet,
+                tenant_id=flow.tenant_id,
+                agent_id=flow.agent_id,
+            )
+            agent_cred = _static("vcrd_shared", stored.version)
+        vault = SlowVault([jwt_cred, agent_cred], display_name=display)
         client = vault.client()
         grant_done = asyncio.Event()
 
@@ -384,33 +413,56 @@ async def test_a_sign_in_survives_three_turns_mirroring_while_the_grant_is_writt
                 grant_done.set()
 
         gates: dict[asyncio.Task[Any] | None, int] = {}
-        real_ensure = agent_mcp_credentials.ensure_agent_mcp_vault
 
         async def ensure_then_wait(*args: Any, **kwargs: Any) -> str:
             # The turn has its vault id (the ensure's own lock is released) and
-            # reaches the mirror during the grant's n-th delete→create window,
+            # reaches its write during the grant's n-th delete→create window,
             # or once the grant is done if there is no n-th window.
-            vault_id = await real_ensure(*args, **kwargs)
+            vault_id = await real_ensure_agent_mcp_vault(*args, **kwargs)
             nth = gates[asyncio.current_task()]
             ensured.append(nth)
             while len(vault.deletes) < nth and not grant_done.is_set():
                 await asyncio.sleep(0.005)
             return vault_id
 
+        async def agent_pat(**_kwargs: Any) -> str | None:
+            return "ghp_agent" if path == "copilot" else None
+
+        async def memory_mount(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+            return {"type": "memory_store", "memory_store_id": "memstore_test"}
+
         monkeypatch.setattr(agent_mcp_credentials, "ensure_agent_mcp_vault", ensure_then_wait)
+        monkeypatch.setattr(sessions, "ensure_agent_mcp_vault", ensure_then_wait)
+        monkeypatch.setattr(sessions, "get_pat", agent_pat)
+        monkeypatch.setattr(sessions, "ensure_memory_store_and_mount", memory_mount)
 
         async def turn(nth: int) -> None:
             gates[asyncio.current_task()] = nth
-            await sync_agent_mcp_credentials(
+            if path == "remirror":
+                await sync_agent_mcp_credentials(
+                    client,
+                    sessionmaker=factories[nth],
+                    fernet=fernet,
+                    tenant_id=flow.tenant_id,
+                    agent_id=flow.agent_id,
+                    account_id=flow.account_id,
+                    jwt_secret=b"x" * 32,
+                    public_url=_PUBLIC_URL,
+                    now=_NOW,
+                )
+                return
+            await sessions.create_session(
                 client,
-                sessionmaker=factories[nth],
-                fernet=fernet,
-                tenant_id=flow.tenant_id,
-                agent_id=flow.agent_id,
+                agent=ma_agent(id="ag_oauth"),
+                environment=ma_environment(),
+                mcp_settings=McpSettings(
+                    jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(_PUBLIC_URL)
+                ),
                 account_id=flow.account_id,
-                jwt_secret=b"x" * 32,
-                public_url=_PUBLIC_URL,
-                now=_NOW,
+                tenant_id=flow.tenant_id,
+                agent_uuid=flow.agent_id,
+                session_factory=factories[nth],
+                fernet=fernet,
             )
 
         grant_result, *turn_results = await asyncio.gather(
@@ -421,12 +473,12 @@ async def test_a_sign_in_survives_three_turns_mirroring_while_the_grant_is_writt
             await engine.dispose()
 
     assert not isinstance(grant_result, BaseException), (
-        f"the sign-in must be stored however many turns mirror meanwhile; got {grant_result!r}"
+        f"the sign-in must be stored however many turns write meanwhile; got {grant_result!r}"
     )
     assert [r for r in turn_results if isinstance(r, BaseException)] == [], (
-        "no turn may fail on the grant replacing the shared token"
+        "no turn may fail on the grant replacing the agent's credential"
     )
-    holder = vault._holder(_URL)  # pyright: ignore[reportPrivateUsage]
+    holder = vault._holder(url)  # pyright: ignore[reportPrivateUsage]
     assert holder is not None and holder["auth"]["type"] == "mcp_oauth", (
         "the person's grant must hold the URL once the sign-in finishes"
     )
