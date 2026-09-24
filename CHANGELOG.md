@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   share a Managed Agents workspace.
 - A bounded model and signed PostgreSQL tests capture out-of-order GitHub App
   installation repository events and the unresolved need for reconciliation.
+- A bounded TLA+ model for notebook upload capability replay, restart persistence,
+  and the loss window after a token is burned but before its body is read.
 
 ### Changed
 

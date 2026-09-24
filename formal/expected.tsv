@@ -124,3 +124,7 @@ slack_dedupe	SlackDedupe	SlackShortRetention	violates:AtMostOneTurn	850886	-	ret
 slack_dedupe	SlackDedupe	SlackExitSafety	clean	1826463	-	crashes and SIGTERM drains keep at-most-once: the committed dedupe row outlives the process
 slack_dedupe	SlackDedupe	SlackCrashLoss	violates:NoSilentLoss	48	-	documented residual: a crash any time after the ack (before or after the dedupe commit) loses the mention
 slack_dedupe	SlackDedupe	SlackDrainWindow	violates:NoUndocumentedLoss	974	-	residual: a mention past the draining check but not yet in _processing is lost when the drain exits
+# ---- notebook upload capability ----
+notebook_upload	NotebookUpload	UploadSafe	clean	29	-	two concurrent attempts; atomic burn before body; restart persistence; no duplicate accepted upload
+notebook_upload	NotebookUpload	CrashLoss	violates:CrashEventuallyUploads	29	-	retained gap: process death after burn and before body makes a retry fail after restart
+notebook_upload	NotebookUpload	LateBurnMutation	violates:NoDuplicateSuccessfulUpload	11	-	mutation: moving the burn after the body await permits two successes
