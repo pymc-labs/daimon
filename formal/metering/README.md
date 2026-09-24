@@ -247,9 +247,13 @@ is owed. Neither model states a combined bound.
     `ON CONFLICT DO NOTHING` behaviour under `READ COMMITTED` (a concurrent
     second insert waits, then does nothing).
   - Not modelled: interrupts and turn ceilings, DB failures (the recorder is
-    fail-closed and aborts the turn), malformed session metadata (S2, draft PR
-    #150), and the replay heuristic's fallback when `user.message` events are
-    missing.
+    fail-closed and aborts the turn), and the replay heuristic's fallback when
+    `user.message` events are missing. Malformed sweep metadata is covered by
+    executable regressions in
+    [`test_usage_sweep.py`](../../packages/core/tests/test_usage_sweep.py): an
+    invalid tenant tag skips that session, while an invalid optional account
+    tag preserves tenant billing with no member attribution. The TLA+ model
+    still abstracts metadata parsing and does not verify this handling.
 - `BalanceGate`:
   - Integers stand in for dollars. Every call costs the same, and there is one
     tenant.
