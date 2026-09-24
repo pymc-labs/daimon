@@ -102,6 +102,8 @@ metering	BalanceGate	BalanceGateHeadless	violates:OverdraftBound	192	-	documente
 github_installation	InstallationUpdates	InstallationUpdatesStaleWrite	violates:EachCompletedDeltaIsPresent	27	-	pre-fix: overlapping read/modify/write operations replace concurrent repo deltas
 github_installation	InstallationUpdates	InstallationUpdatesSafe	clean	93	-	atomic row updates preserve concurrent repo additions and removals
 # ---- slack dedupe ----
+slack_cancel	CancelRegistration	CancelRegistrationSafe	clean	6	-	register the per-turn action key before Slack can expose the card
+slack_cancel	CancelRegistration	CancelRegistrationUnsafe	violates:VisibleAuthorClickCancels	4	-	pre-fix: a click can arrive after card visibility and before ts registration
 slack_dedupe	SlackDedupe	SlackDedupe	clean	953059	-	dedupe + per-author drain + 7-day prune vs redelivery window: at most one turn, one caller, no silent loss
 slack_dedupe	SlackDedupe	SlackPre997b3d8	violates:TurnPrincipal	268977	-	pre-997b3d8: the drain loop merged every queued author into one turn
 slack_dedupe	SlackDedupe	SlackPre0cda77e	violates:NoSilentLoss	595	-	pre-0cda77e: a failed turn logged and returned with nothing posted

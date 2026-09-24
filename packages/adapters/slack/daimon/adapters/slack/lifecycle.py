@@ -42,6 +42,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, cast
+from uuid import uuid4
 
 import aiohttp
 import structlog
@@ -137,6 +138,8 @@ class SlackTurnLifecycle:
         model_id: str,
         register: Callable[[str, asyncio.Event, str], None],
         deregister: Callable[[str], None],
+        register_pending: Callable[[str, asyncio.Event, str], None] | None = None,
+        deregister_pending: Callable[[str], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         adopt_status_ts: str | None = None,
     ) -> None:
@@ -148,6 +151,10 @@ class SlackTurnLifecycle:
         self._model_id = model_id
         self._register = register
         self._deregister = deregister
+        self._register_pending = register_pending
+        self._deregister_pending = deregister_pending
+        self._cancel_key = uuid4().hex
+        self._pending_registered = False
         self._clock = clock
         self._state: State = State(
             phase=TurnPhase.THINKING,
@@ -199,9 +206,10 @@ class SlackTurnLifecycle:
         follow can hold for minutes. Runs before the turn starts (and
         therefore before any render tick exists), so this is the one place
         that deliberately flushes directly instead of waiting on an SSE
-        event. The cancel registration rides this first post via
-        _maybe_flush's first-post branch, so Cancel is live before the first
-        SSE event rather than after it.
+        event. _maybe_flush registers a per-turn action key before awaiting
+        chat.postMessage, so a click is routable as soon as Slack exposes the
+        card, before its response supplies the message ts. Once the response
+        returns, the ts is registered as a recovery and legacy lookup key.
         """
         await self._maybe_flush()
 
@@ -221,19 +229,36 @@ class SlackTurnLifecycle:
         if self._terminal:
             return
         now = self._clock()
-        blocks = to_blocks(self._state, now=now)
+        cancel_key = self._cancel_key if self._status_ts is None else self._status_ts
+        blocks = to_blocks(self._state, now=now, cancel_key=cancel_key)
         text = f"{self._state.phase.value} …"
 
         if self._status_ts is None:
             # First flush — immediate, no debounce.
-            resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                channel=self._channel,
-                thread_ts=self._thread_ts,
-                blocks=blocks,
-                text=text,
-            )
+            # Slack may expose the card before returning its ts. Register the
+            # per-turn button value first so a click in that window is routable.
+            if self._register_pending is not None:
+                self._register_pending(self._cancel_key, self._cancel, self._author_id)
+                self._pending_registered = True
+            try:
+                resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=self._channel,
+                    thread_ts=self._thread_ts,
+                    blocks=blocks,
+                    text=text,
+                )
+            except BaseException:
+                if self._pending_registered and self._deregister_pending is not None:
+                    self._deregister_pending(self._cancel_key)
+                    self._pending_registered = False
+                raise
             self._status_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
             self._register(self._status_ts, self._cancel, self._author_id)
+            # The card is now routable by its message ts. Remove the temporary
+            # key promptly so later clicks follow any recovery rebind of that ts.
+            if self._pending_registered and self._deregister_pending is not None:
+                self._deregister_pending(self._cancel_key)
+                self._pending_registered = False
             self._last_flush = now
         elif now - self._last_flush >= _DEBOUNCE_S:
             # Debounce elapsed — update the status message in place.
@@ -302,7 +327,7 @@ class SlackTurnLifecycle:
         (done/error) so to_blocks emits the collapsed footer with no cancel button.
         """
         self._terminal = True
-        blocks = to_blocks(self._state, now=self._clock())
+        blocks = to_blocks(self._state, now=self._clock(), cancel_key=self._cancel_key)
         await self._post_or_update(blocks, f"{self._state.phase.value} …")
 
     async def _flush_cancelled(self) -> None:
@@ -454,6 +479,9 @@ class SlackTurnLifecycle:
         finally:
             if self._status_ts is not None:
                 self._deregister(self._status_ts)
+            if self._pending_registered and self._deregister_pending is not None:
+                self._deregister_pending(self._cancel_key)
+                self._pending_registered = False
 
     async def prepend_revealed_answer(self, notice: str) -> bool:
         """Edit `notice` in above an answer already on screen; False if it cannot go there.
@@ -505,6 +533,9 @@ class SlackTurnLifecycle:
         finally:
             if self._status_ts is not None:
                 self._deregister(self._status_ts)
+            if self._pending_registered and self._deregister_pending is not None:
+                self._deregister_pending(self._cancel_key)
+                self._pending_registered = False
 
     async def on_render(self, state: TurnState) -> None:
         """Sole delivery path. `state` is unused: Slack's card is

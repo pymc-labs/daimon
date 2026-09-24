@@ -800,13 +800,15 @@ class SlackApp:
     async def _handle_block_action(self, payload: dict[str, Any]) -> None:
         """Author-gated cancel handler for block_actions interactive payloads.
 
-        Looks up the action's status_ts in _cancel_registry; if the clicker is
-        the turn's original author, sets the cancel Event so the driver
-        cancel-race loop picks it up.  A refused click — non-author, or a
-        status_ts no longer in the registry — is answered with an ephemeral,
-        because a button that does nothing is indistinguishable from a dead
-        bot. The missing-entry case is the same symptom as a turn orphaned by
-        a deploy, so the notice is what lets the user tell the two apart.
+        Looks up the action's per-turn key first, which is registered before
+        the initial post response returns; then falls back to status_ts for
+        recovered and legacy cards. If the clicker is the turn's original
+        author, sets the cancel Event so the driver cancel-race loop picks it
+        up. A refused click — non-author, or no matching registry entry — is
+        answered with an ephemeral, because a button that does nothing is
+        indistinguishable from a dead bot. The missing-entry case is the same
+        symptom as a turn orphaned by a deploy, so the notice is what lets the
+        user tell the two apart.
         """
         actions: list[dict[str, Any]] = payload.get("actions") or []
         if not actions or actions[0].get("action_id") != "cancel_turn":
@@ -815,7 +817,8 @@ class SlackApp:
         status_ts: str = (container.get("message_ts") if container is not None else "") or ""
         user_info: dict[str, Any] | None = payload.get("user")
         clicker: str = (user_info.get("id") if user_info is not None else "") or ""
-        entry = self._cancel_registry.get(status_ts)
+        action_key = str(actions[0].get("value") or "")
+        entry = self._cancel_registry.get(action_key) or self._cancel_registry.get(status_ts)
         if entry is None:
             await self._refuse_cancel(payload, clicker=clicker, text=_CANCEL_TURN_ENDED)
             return
@@ -1430,6 +1433,8 @@ class SlackApp:
             model_id=_lc_model_id,
             register=self._register_cancel,
             deregister=self._deregister_cancel,
+            register_pending=self._register_cancel,
+            deregister_pending=self._deregister_cancel,
         )
         lifecycle_holder: list[SlackTurnLifecycle] = [lifecycle]
 
@@ -1823,6 +1828,8 @@ class SlackApp:
                     model_id=_lc_model_id,
                     register=self._register_cancel,
                     deregister=self._deregister_cancel,
+                    register_pending=self._register_cancel,
+                    deregister_pending=self._deregister_cancel,
                     # Take over the failed attempt's card so it is edited into
                     # this turn's answer rather than left standing beside a
                     # second, successful card.
@@ -2108,6 +2115,8 @@ class SlackApp:
             model_id=follow_admission.agent.model.id,
             register=self._register_cancel,
             deregister=self._deregister_cancel,
+            register_pending=self._register_cancel,
+            deregister_pending=self._deregister_cancel,
         )
         await follow_lifecycle.post_initial()
         if follow_prepared.mapping_id is not None and follow_lifecycle.status_ts is not None:
@@ -2179,6 +2188,8 @@ class SlackApp:
                 model_id=follow_admission.agent.model.id,
                 register=self._register_cancel,
                 deregister=self._deregister_cancel,
+                register_pending=self._register_cancel,
+                deregister_pending=self._deregister_cancel,
                 adopt_status_ts=follow_lifecycle.status_ts,
             )
             if follow_lifecycle.status_ts is not None:

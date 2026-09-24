@@ -27,10 +27,12 @@ import aiohttp
 import httpx
 import pytest
 import structlog.testing
+from aioresponses import CallbackResult
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.app import SlackApp
+from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.continuity.messages import render_unexpected_loss
 from daimon.core.defaults.provisioning import provision_tenant
@@ -4049,6 +4051,101 @@ async def test_handle_block_action_when_author_clicks_cancel_sets_event() -> Non
     await app._handle_block_action(payload)  # pyright: ignore[reportPrivateUsage]
 
     assert cancel.is_set(), "cancel Event must be set when the turn author clicks cancel"
+
+
+async def test_cancel_is_registered_while_visible_card_post_response_is_pending(
+    fake_slack_web_client: Any,
+) -> None:
+    """A cancel click delivered while Slack's post response is pending reaches its turn."""
+    app = _make_app()
+    cancel = asyncio.Event()
+    visible_click_completed = asyncio.Event()
+    status_ts = "1000000000.000001"
+    observed_cancel_keys: list[str] = []
+
+    async def hold_visible_post(url: URL, **kwargs: Any) -> CallbackResult:
+        del url
+        request_body: dict[str, Any] = kwargs["json"]
+        actions = [
+            element
+            for block in request_body["blocks"]
+            if block.get("type") == "actions"
+            for element in block.get("elements", [])
+        ]
+        action = actions[0]
+        observed_cancel_keys.append(str(action.get("value") or ""))
+        payload = _make_block_actions_payload(message_ts=status_ts)
+        payload["actions"] = [action]
+        assert action.get("value") in app._cancel_registry, (  # pyright: ignore[reportPrivateUsage]
+            "the turn must be registered before the visible card's post response returns"
+        )
+        await app._handle_block_action(payload)  # pyright: ignore[reportPrivateUsage]
+        visible_click_completed.set()
+        return CallbackResult(payload={"ok": True, "ts": status_ts, "channel": "C_TEST"})
+
+    fake_slack_web_client.mock.clear()
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/chat.postMessage",
+        callback=hold_visible_post,
+    )
+    lifecycle = SlackTurnLifecycle(
+        client=fake_slack_web_client.client,
+        channel="C_TEST",
+        thread_ts="1700000000.000000",
+        cancel=cancel,
+        author_id="U_AUTHOR",
+        agent_name="test-agent",
+        model_id="claude-sonnet-4-6",
+        register=app._register_cancel,  # pyright: ignore[reportPrivateUsage]
+        deregister=app._deregister_cancel,  # pyright: ignore[reportPrivateUsage]
+        register_pending=app._register_cancel,  # pyright: ignore[reportPrivateUsage]
+        deregister_pending=app._deregister_cancel,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    await lifecycle.post_initial()
+
+    assert visible_click_completed.is_set(), "the click must be delivered before the post response"
+    assert cancel.is_set(), "the visible card's author click must cancel its in-flight turn"
+    assert observed_cancel_keys[0] not in app._cancel_registry, (  # pyright: ignore[reportPrivateUsage]
+        "once Slack returns the message ts, clicks must route through its current registry entry"
+    )
+    assert status_ts in app._cancel_registry, "the returned status ts must remain registered"
+    await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
+    assert app._cancel_registry == {}, (  # pyright: ignore[reportPrivateUsage]
+        "terminal cleanup must remove the status ts so a stale action cannot cancel later work"
+    )
+
+
+async def test_failed_initial_post_cleans_pending_cancel_registration(
+    fake_slack_web_client: Any,
+) -> None:
+    """A rejected first post must not leave its turn-scoped cancel key active."""
+    app = _make_app()
+    fake_slack_web_client.mock.clear()
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/chat.postMessage",
+        payload={"ok": False, "error": "channel_not_found"},
+    )
+    lifecycle = SlackTurnLifecycle(
+        client=fake_slack_web_client.client,
+        channel="C_TEST",
+        thread_ts="1700000000.000000",
+        cancel=asyncio.Event(),
+        author_id="U_AUTHOR",
+        agent_name="test-agent",
+        model_id="claude-sonnet-4-6",
+        register=app._register_cancel,  # pyright: ignore[reportPrivateUsage]
+        deregister=app._deregister_cancel,  # pyright: ignore[reportPrivateUsage]
+        register_pending=app._register_cancel,  # pyright: ignore[reportPrivateUsage]
+        deregister_pending=app._deregister_cancel,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    with pytest.raises(SlackApiError):
+        await lifecycle.post_initial()
+
+    assert app._cancel_registry == {}, (  # pyright: ignore[reportPrivateUsage]
+        "a post that Slack rejected must deregister its pending action key"
+    )
 
 
 async def test_handle_block_action_when_non_author_clicks_cancel_event_unset(

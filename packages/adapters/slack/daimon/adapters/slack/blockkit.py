@@ -221,13 +221,16 @@ def _fmt_elapsed(total_seconds: int) -> str:
     return f"{minutes}m {seconds}s"
 
 
-def to_blocks(state: State, *, now: float | None) -> list[dict[str, Any]]:
+def to_blocks(
+    state: State, *, now: float | None, cancel_key: str | None = None
+) -> list[dict[str, Any]]:
     """Render State into a list of Slack Block Kit block dicts.
 
     Args:
         state: Current turn State.
         now: Current monotonic time from the caller (``time.monotonic()``).
              Pass ``None`` to omit the elapsed line.
+        cancel_key: Optional per-turn routing key for the live Cancel button.
 
     Returns:
         A list of raw block dicts safe to pass directly to Slack's ``blocks=``
@@ -297,18 +300,20 @@ def to_blocks(state: State, *, now: float | None) -> list[dict[str, Any]]:
         )
 
     # Cancel button — present only while the turn is running (non-terminal).
-    # action_id="cancel_turn"; no `value` field.
+    # A per-turn value lets the listener route clicks before Slack returns the
+    # message ts from chat.postMessage.
+    cancel_button: dict[str, Any] = {
+        "type": "button",
+        "action_id": "cancel_turn",
+        "text": {"type": "plain_text", "text": "Cancel"},
+        "style": "danger",
+    }
+    if cancel_key is not None:
+        cancel_button["value"] = cancel_key
     blocks.append(
         {
             "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "action_id": "cancel_turn",
-                    "text": {"type": "plain_text", "text": "Cancel"},
-                    "style": "danger",
-                }
-            ],
+            "elements": [cancel_button],
         }
     )
 
