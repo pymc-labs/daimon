@@ -110,6 +110,7 @@ source_modules = [
     "daimon.core.errors",
     "daimon.core.github_app_auth",
     "daimon.core.github_credentials",
+    "daimon.core.github_installation_reconcile",
     "daimon.core.github_repo_auth",
     "daimon.core.github_visibility",
     "daimon.core.handoff_context",

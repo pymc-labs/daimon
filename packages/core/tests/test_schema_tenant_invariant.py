@@ -44,6 +44,12 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # at execution time from the canonical repository/ref.
     "github_push_deliveries": "global GitHub delivery IDs; no tenant or credential payload",
     "github_push_resyncs": "global canonical repo/ref work; bindings and credentials are tenant-scoped at execution",
+    # An installation and its repository listing belong to the GitHub App
+    # installation, before any Daimon tenant binds a repository. Refresh jobs
+    # and webhook receipts contain only deployment-wide identifiers; tenant
+    # clone authorization still requires the tenant-local recorded proof.
+    "github_installation_reconciliations": "deployment-wide installation refresh state; tenant clone authorization remains proof-gated",
+    "github_installation_deliveries": "deployment-wide GitHub delivery receipts; no tenant-owned payload",
     # Slack-native tables keyed by team_id, which is 1:1 with a tenant's
     # external_id (tenant = uuid5('slack', team_id)).
     "slack_bot_tokens": "keyed by team_id (1:1 with tenant external_id)",

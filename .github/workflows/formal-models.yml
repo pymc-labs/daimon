@@ -47,6 +47,10 @@ on:
       - "apps/report-host/tests/test_reports_store.py"
       - "packages/adapters/mcp/daimon/adapters/mcp/webhooks.py"
       - "packages/core/daimon/core/stores/github_app_installations.py"
+      - "packages/core/daimon/core/stores/github_installation_reconciliation.py"
+      - "packages/core/daimon/core/github_installation_reconcile.py"
+      - "packages/core/daimon/core/github_app_auth.py"
+      - "packages/core/alembic/versions/0026_github_installation_reconciliation.py"
       - "packages/core/daimon/core/skill_sync/resync_queue.py"
       - "packages/core/daimon/core/stores/github_push_resync.py"
       - "packages/core/daimon/core/skill_sync/resync.py"
@@ -197,6 +201,10 @@ on:
       - "packages/core/daimon/core/sessions.py"
       # github_installation/
       - "packages/core/daimon/core/stores/github_app_installations.py"
+      - "packages/core/daimon/core/stores/github_installation_reconciliation.py"
+      - "packages/core/daimon/core/github_installation_reconcile.py"
+      - "packages/core/daimon/core/github_app_auth.py"
+      - "packages/core/alembic/versions/0026_github_installation_reconciliation.py"
       # thread queue / adapter overlap
       - "packages/core/daimon/core/turn/run.py"
       - "packages/core/daimon/core/stores/thread_sessions.py"

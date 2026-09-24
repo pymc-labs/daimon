@@ -26,11 +26,7 @@ async def upsert(
     account_login: str,
     repo_full_names: list[str],
 ) -> GitHubAppInstallationRow:
-    """Upsert the installation record (full-set write).
-
-    Used by the `installation.created` event. Replaces the cached repo list
-    with the event's full installation snapshot.
-    """
+    """Replace the cached repository set with a complete trusted snapshot."""
     stmt = (
         pg_insert(GitHubAppInstallation)
         .values(
@@ -60,8 +56,10 @@ async def add_repos(
     installation_id: int,
     repos: list[str],
 ) -> GitHubAppInstallationRow:
-    """Union-add repos to an existing installation (repositories_added event).
+    """Union-add repos to an existing installation.
 
+    This low-level delta operation is not used by webhook delivery handling;
+    unordered deliveries are reconciled from GitHub's complete set instead.
     Raises StoreError when no installation row exists (no row to extend).
     """
     repo_rows = (
@@ -97,8 +95,10 @@ async def remove_repos(
     installation_id: int,
     repos: list[str],
 ) -> GitHubAppInstallationRow:
-    """Drop repos from an existing installation (repositories_removed event).
+    """Drop repos from an existing installation.
 
+    This low-level delta operation is not used by webhook delivery handling;
+    unordered deliveries are reconciled from GitHub's complete set instead.
     Raises StoreError when no installation row exists.
     """
     repo_rows = (

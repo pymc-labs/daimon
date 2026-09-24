@@ -8,6 +8,7 @@ authors = [{ name = "PyMC Labs" }]
 dependencies = [
     "daimon-core",
     "anthropic>=0.96",
+    "httpx>=0.27",
     "sqlalchemy[asyncio]>=2",
     "asyncpg>=0.29",
     "pydantic>=2.7",

@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import anthropic
+import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
@@ -41,6 +42,9 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.github_installation_reconcile import (
+    drain_github_installation_reconciliations,
+)
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
@@ -479,6 +483,7 @@ async def run(
                 settings=settings,
                 fernet=push_resync_fernet,
             )
+            await _drain_github_installation_reconciliations(sm=sm, settings=settings)
             return 0
 
         while not stop_event.is_set():
@@ -503,6 +508,7 @@ async def run(
                 settings=settings,
                 fernet=push_resync_fernet,
             )
+            await _drain_github_installation_reconciliations(sm=sm, settings=settings)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
                     stop_event.wait(), timeout=scheduler_settings.tick_interval_s
@@ -544,6 +550,21 @@ async def _drain_github_push_resync(
         )
     except Exception:
         log.exception("scheduler.github_push_resync.failed")
+
+
+async def _drain_github_installation_reconciliations(
+    *, sm: async_sessionmaker[AsyncSession], settings: Settings
+) -> None:
+    """Keep GitHub API failures inside a scheduler boundary; later ticks retry."""
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as http_client:
+            await drain_github_installation_reconciliations(
+                sessionmaker=sm,
+                http_client=http_client,
+                github_settings=settings.github,
+            )
+    except Exception:
+        log.exception("scheduler.github_installation_reconciliation.failed")
 
 
 def run_sync() -> None:
