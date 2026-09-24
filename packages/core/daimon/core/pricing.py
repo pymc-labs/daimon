@@ -27,8 +27,10 @@ class ModelRates:
 
 
 # Agent models — what an agent's `model` may be set to. USD per 1M tokens,
-# sourced from https://www.anthropic.com/pricing (2026-04-19).
+# Opus 5.5 checked against https://platform.claude.com/docs/en/models/opus-5-5/overview
+# on 2026-09-24. Existing model rates are unchanged.
 AGENT_MODEL_PRICING: dict[str, ModelRates] = {
+    "claude-opus-5-5": ModelRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.20),
     "claude-opus-5": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
     "claude-opus-4-8": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
     "claude-opus-4-7": ModelRates(input=15.0, output=75.0, cache_write=18.75, cache_read=1.50),
