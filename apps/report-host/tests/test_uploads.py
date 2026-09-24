@@ -11,6 +11,7 @@ identical HMAC wire format `report_host.capability.verify_token` checks.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -23,13 +24,16 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import IO
 
 import httpx
 import pytest
 from fastapi import FastAPI
 from report_host import reports_store, threads_store
+from report_host import uploads as uploads_module
 from report_host.config import Settings, load_settings
-from report_host.mcp_client import SeamClient
+from report_host.mcp_client import BundlePushed, SeamClient
+from report_host.routes import build_reader_router
 from report_host.uploads import (
     _PUBLISH_INVALID_MESSAGE,  # pyright: ignore[reportPrivateUsage]
     _UPLOAD_INVALID_MESSAGE,  # pyright: ignore[reportPrivateUsage]
@@ -606,6 +610,113 @@ async def test_second_publish_of_same_slug_replaces_archive_bytes_with_no_leftov
 
     leftovers = [p for p in (settings.data_dir / "acme").iterdir() if p.name.startswith(".")]
     assert leftovers == [], "no temporary file should survive a completed publish"
+
+
+async def test_slow_accepted_publish_archive_is_protected_from_concurrent_pruning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    conn = reports_store.connect(settings.data_dir)
+    _seed_report(conn)
+    _seed_recipient(conn)
+    report_dir = settings.data_dir / "acme"
+    report_dir.mkdir(parents=True)
+    old_pdf = b"%PDF previously published"
+    (report_dir / "v1.pdf").write_bytes(old_pdf)
+    old_archive = report_dir / "bundle-old.tar.gz"
+    old_archive.write_bytes(b"previous archive")
+    reports_store.add_revision(
+        conn, slug="acme", name="v1.pdf", by_thread=None, note="published", now=NOW
+    )
+    reports_store.set_current_pdf(conn, slug="acme", name="v1.pdf")
+    reports_store.save_bundle_reference(
+        conn,
+        slug="acme",
+        handle="old-handle",
+        sha256="a" * 64,
+        expires_at=NOW + timedelta(days=90),
+        archive_path=str(old_archive),
+    )
+
+    first_push_started = asyncio.Event()
+    release_first_push = asyncio.Event()
+    push_number = 0
+
+    async def controlled_push(*, token: str, archive: bytes, size_bytes: int) -> BundlePushed:
+        nonlocal push_number
+        del token
+        del archive
+        push_number += 1
+        if push_number == 1:
+            first_push_started.set()
+            await release_first_push.wait()
+            return BundlePushed(
+                handle="slow-handle",
+                sha256="c" * 64,
+                size_bytes=size_bytes,
+                expires_at="2026-12-01T00:00:00Z",
+            )
+        return BundlePushed(
+            handle="fast-handle",
+            sha256="d" * 64,
+            size_bytes=size_bytes,
+            expires_at="2026-12-01T00:00:00Z",
+        )
+
+    seam = _seam(requests=[])
+    monkeypatch.setattr(seam, "push_bundle", controlled_push)
+    persist_archive = uploads_module._persist_archive_for_publish
+
+    def persist_and_age_slow_upload(*, spool: IO[bytes], archive_path: Path) -> None:
+        persist_archive(spool=spool, archive_path=archive_path)
+        if archive_path.name == f"bundle-{hashlib.sha256(b'slow-jti').hexdigest()}.tar.gz":
+            old_timestamp = datetime.now(UTC).timestamp() - timedelta(hours=25).total_seconds()
+            os.utime(archive_path, (old_timestamp, old_timestamp))
+
+    monkeypatch.setattr(uploads_module, "_persist_archive_for_publish", persist_and_age_slow_upload)
+
+    app = _make_app(settings=settings, conn=conn, seam=seam)
+    app.include_router(build_reader_router(settings=settings, conn_factory=lambda: conn, seam=seam))
+    slow_archive = _valid_archive(b"%PDF slow first publish")
+    fast_archive = _valid_archive(b"%PDF fast second publish")
+    async with await _client(app) as client:
+        slow_task = asyncio.create_task(
+            client.put("/publish/" + _capability_token(jti="slow-jti"), content=slow_archive)
+        )
+        await asyncio.wait_for(first_push_started.wait(), timeout=2)
+
+        # A concurrent reader continues to see a complete prior publication
+        # while the first seam push has not returned.
+        old_state = await client.get("/api/acme/state?k=tok-Jane")
+        assert old_state.status_code == 200
+        assert old_state.json()["current_pdf"] == "v1.pdf"
+        old_file = await client.get("/files/acme/v1.pdf?k=tok-Jane")
+        assert old_file.content == old_pdf
+
+        fast_response = await client.put(
+            "/publish/" + _capability_token(jti="fast-jti"), content=fast_archive
+        )
+        assert fast_response.status_code == 200, fast_response.text
+        mid_state = await client.get("/api/acme/state?k=tok-Jane")
+        assert mid_state.status_code == 200
+        assert mid_state.json()["current_pdf"] == "v2.pdf"
+        mid_file = await client.get("/files/acme/v2.pdf?k=tok-Jane")
+        assert mid_file.content == b"%PDF fast second publish"
+
+        release_first_push.set()
+        slow_response = await slow_task
+        assert slow_response.status_code == 200, slow_response.text
+
+        report = reports_store.load_report(conn, slug="acme")
+        assert report is not None
+        assert report.current_pdf == "v3.pdf"
+        assert (report_dir / report.current_pdf).read_bytes() == b"%PDF slow first publish"
+        assert report.bundle_handle == "slow-handle"
+        assert report.bundle_sha256 == "c" * 64
+        assert report.archive_path is not None
+        current_archive = Path(report.archive_path)
+        assert current_archive.name == f"bundle-{hashlib.sha256(b'slow-jti').hexdigest()}.tar.gz"
+        assert current_archive.read_bytes() == slow_archive
 
 
 @pytest.mark.parametrize("failure", ["http_status", "timeout"])

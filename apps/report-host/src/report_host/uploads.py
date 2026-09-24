@@ -247,12 +247,20 @@ def _persist_archive_for_publish(*, spool: IO[bytes], archive_path: Path) -> Non
     spool.seek(0)
 
 
-def _prune_old_archives(*, report_dir: Path, current_archive: str | None, cutoff: datetime) -> None:
+def _prune_old_archives(
+    *,
+    report_dir: Path,
+    current_archive: str | None,
+    in_flight_archives: set[Path],
+    cutoff: datetime,
+) -> None:
     """Remove unreferenced upload archives older than the retry grace period."""
     current_path = Path(current_archive).resolve() if current_archive is not None else None
+    protected_paths = {path.resolve() for path in in_flight_archives}
     for pattern in ("bundle.tar.gz", "bundle-*.tar.gz", ".bundle-*.tar.gz.tmp"):
         for path in report_dir.glob(pattern):
-            if current_path is not None and path.resolve() == current_path:
+            resolved = path.resolve()
+            if resolved == current_path or resolved in protected_paths:
                 continue
             try:
                 if path.stat().st_mtime < cutoff.timestamp():
@@ -290,6 +298,10 @@ def build_uploads_router(
     """
     conn = conn_factory()
     consumed_file = settings.data_dir / "consumed.json"
+    # A single Uvicorn process owns this router and the shared SQLite
+    # connection. Keep archives that have been persisted for an outstanding
+    # seam push out of pruning until that handler commits or fails.
+    in_flight_archives: set[Path] = set()
     router = APIRouter()
 
     @router.put("/publish/{capability_token}")
@@ -324,6 +336,7 @@ def build_uploads_router(
 
         ceiling = min(claims.max_bytes, settings.max_bundle_bytes)
         spool, size_bytes = await _spool_body(request, max_bytes=ceiling)
+        resolved_archive_path: Path | None = None
         try:
             _check_gzip_magic(spool)
             try:
@@ -339,6 +352,7 @@ def build_uploads_router(
             _prune_old_archives(
                 report_dir=report_dir,
                 current_archive=report.archive_path,
+                in_flight_archives=in_flight_archives,
                 cutoff=datetime.now(UTC) - archive_retention,
             )
             # Persist this upload separately so a failed push cannot overwrite
@@ -346,6 +360,8 @@ def build_uploads_router(
             # A later turn re-pushes the path recorded with that bundle.
             archive_id = hashlib.sha256(claims.jti.encode()).hexdigest()
             archive_path = report_dir / f"bundle-{archive_id}.tar.gz"
+            resolved_archive_path = archive_path.resolve()
+            in_flight_archives.add(resolved_archive_path)
             _persist_archive_for_publish(spool=spool, archive_path=archive_path)
 
             # Read into bytes rather than handing httpx the still-open spooled
@@ -402,6 +418,8 @@ def build_uploads_router(
                 now=datetime.now(UTC),
             )
         finally:
+            if resolved_archive_path is not None:
+                in_flight_archives.discard(resolved_archive_path)
             spool.close()
 
         links = [
