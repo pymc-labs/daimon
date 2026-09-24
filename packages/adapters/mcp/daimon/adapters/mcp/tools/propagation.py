@@ -297,24 +297,24 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expected_ma_agent_id: str | None = None,
     ) -> SetDefaultResult:
         """Make an agent answer in a channel or become the whole server/workspace default.
-        For example, make churn-explorer answer in #growth. Changes the agent that answers;
+        For example, make churn-explorer answer in #growth, or replace the current
+        agent in this channel with the built-in daimon agent. Changes who answers;
         use ``clear_agent_default`` to stop that routing.
 
-        When ``channel_id`` is provided the default is scoped to that channel;
-        omit it to set the workspace-wide default.  Any existing default at the
-        chosen scope is replaced (last-write-wins; an audit stamp is recorded by
-        core).  Requires Manage Server (admin).
+        Resolve the requested agent with ``list_agents`` and pass its current id as
+        ``expected_ma_agent_id``. A name matching the shared bot handle can still
+        identify a different agent. Use ``hand_off_task`` for a responder switch
+        limited to the current thread. Channel routing does not replace
+        a setup or handoff thread's bound responder.
 
-        Discord: ``channel_id`` MUST be the parent channel's id — the one
-        your context gives as
+        Provide ``channel_id`` to replace that channel's default; omit it for the
+        whole server/workspace. Requires Manage Server (admin).
+
+        Discord: ``channel_id`` MUST be the parent channel's id from
         ``<channel platform="discord" id="..." role="parent_channel">``.
         Never pass the current thread's id here. Slack: use the id from
-        ``<channel platform="slack" id="...">`` — Slack's context always
-        names the parent channel. A channel default is resolved from the parent;
-        setup threads keep their bound responder. A default
-        written against a thread id is a scope nothing ever reads: the write
-        succeeds, this tool reports success, and the channel keeps answering
-        with the old agent.
+        ``<channel platform="slack" id="...">``. Defaults written against a
+        thread id do not change the parent channel's routing.
         """
         return await _set_agent_default_impl(
             runtime, await _auth(ctx), agent_name, channel_id, expected_ma_agent_id
@@ -347,30 +347,25 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel_id: str,
         thread_id: str | None = None,
     ) -> AgentResolutionExplanation:
-        """Who answers in this channel, for example #growth? Report who answers and
-        which routing tier decided it.
+        """Who answers in #growth? Does this channel still use that agent?
+        Report which agent answers in a channel or thread and why.
 
-        Supply thread_id to include its setup binding. Thread responder wins, else
+        Pass both the parent channel_id and current thread_id when asking about
+        this conversation. The shared bot display name does not identify its agent.
+        Supply thread_id to include its setup or handoff binding. Thread responder wins, else
         the channel's own default, else the workspace default, else the deployment
-        default. This reports the winner
-        AND every tier's setting, so "why that agent" is answerable without
-        starting a turn and reading its footer.
+        default. Returns the winner and every tier's setting.
 
         Use it when someone asks which agent is configured here, when an agent
-        answers that seems wrong for the channel, or before changing a default —
-        the tier that currently wins is the tier worth changing.
+        answers that seems wrong for the channel, or before changing a default.
 
-        Not admin-gated: this is a read of routing any member can already infer
-        from a reply's footer.
+        Any member can inspect this routing without changing it.
 
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
         never the current thread's id. Slack: use the id from
-        ``<channel platform="slack" id="...">``. Asking about a thread id
-        reports that thread's own (almost always empty) scope, which reads
-        as a confident answer about the channel and is not one — and if the
-        same wrong id was just passed to ``set_agent_default``, this tool
-        will agree with it.
+        ``<channel platform="slack" id="...">``. A thread id belongs in
+        ``thread_id``; using it as ``channel_id`` inspects the wrong routing scope.
         """
         return await _explain_agent_resolution_impl(
             runtime, await _auth(ctx), channel_id, thread_id

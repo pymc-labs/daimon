@@ -146,19 +146,21 @@ def test_reply_shape_covers_the_waiting_task_path() -> None:
         )
 
 
-def test_guidance_states_the_mention_handle_is_the_answering_agent() -> None:
-    """D24-QA-01: a bot display name differing from the agent name is not ambiguity."""
+def test_guidance_resolves_named_agents_independently_of_the_shared_bot_handle() -> None:
+    """The bot's display name must not override a requested roster identity."""
     for label, text in (
         ("daimon.yaml", _daimon_system()),
         ("workspace-setup", _workspace_setup_body()),
     ):
-        assert "responder.handle" in text, (
-            f"{label} must name responder.handle, the platform handle in <turn_controls>"
+        assert "responder.handle" in text, f"{label} must identify the shared bot handle"
+        assert "Multiple agents use the same bot handle" in text, (
+            f"{label} must distinguish the bot from its roster agents"
         )
-        assert "Never ask whether they are the same agent" in text, (
-            f"{label} must forbid asking whether the mention handle and the responder name "
-            "are the same agent"
+        assert "`list_agents` and `get_agent`" in text, (
+            f"{label} must resolve explicit agent choices against the roster"
         )
+        assert "`list_agent_keys`" in text, f"{label} must use stored-key metadata"
+        assert "are one agent" not in text, f"{label} must not collapse distinct identities"
 
 
 def test_reply_shape_posts_the_card_before_any_clarifying_question() -> None:

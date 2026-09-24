@@ -165,11 +165,19 @@ def register_setup_target_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str,
         agent_id: str,
     ) -> TurnOriginRow:
-        """Switch this setup conversation to an explicitly selected MA agent identity.
+        """Select which agent to configure in an existing setup conversation.
 
-        Pass the current turn's origin_context_id and a current agent's MA id.
-        State the target switch briefly. Other running turns keep their own target.
-        This changes no routing or editing permissions.
+        Pass the current turn's origin_context_id and the selected agent's current
+        id from list_agents. The responder stays the same: this changes only the
+        configuration target, not who answers or whose keys the session can use.
+        Setup conversations keep Daimon as their responder. In ordinary task
+        threads, use hand_off_task to change the responder. Use set_agent_default
+        to change a channel's default responder.
+
+        Ordinary threads have no setup target to switch. Configure a named agent
+        there by passing its name and current id directly to the relevant tool.
+        State a successful target switch briefly. Other running turns keep their
+        own target. This changes no editing permissions.
         """
         return await _set_setup_target_impl(
             runtime, await _auth(ctx), origin_context_id=origin_context_id, agent_id=agent_id

@@ -1713,30 +1713,25 @@
     }),
     'explain_agent_resolution': dict({
       'description': '''
-        Who answers in this channel, for example #growth? Report who answers and
-        which routing tier decided it.
+        Who answers in #growth? Does this channel still use that agent?
+        Report which agent answers in a channel or thread and why.
         
-        Supply thread_id to include its setup binding. Thread responder wins, else
+        Pass both the parent channel_id and current thread_id when asking about
+        this conversation. The shared bot display name does not identify its agent.
+        Supply thread_id to include its setup or handoff binding. Thread responder wins, else
         the channel's own default, else the workspace default, else the deployment
-        default. This reports the winner
-        AND every tier's setting, so "why that agent" is answerable without
-        starting a turn and reading its footer.
+        default. Returns the winner and every tier's setting.
         
         Use it when someone asks which agent is configured here, when an agent
-        answers that seems wrong for the channel, or before changing a default —
-        the tier that currently wins is the tier worth changing.
+        answers that seems wrong for the channel, or before changing a default.
         
-        Not admin-gated: this is a read of routing any member can already infer
-        from a reply's footer.
+        Any member can inspect this routing without changing it.
         
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
         never the current thread's id. Slack: use the id from
-        ``<channel platform="slack" id="...">``. Asking about a thread id
-        reports that thread's own (almost always empty) scope, which reads
-        as a confident answer about the channel and is not one — and if the
-        same wrong id was just passed to ``set_agent_default``, this tool
-        will agree with it.
+        ``<channel platform="slack" id="...">``. A thread id belongs in
+        ``thread_id``; using it as ``channel_id`` inspects the wrong routing scope.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1844,10 +1839,14 @@
     }),
     'get_agent': dict({
       'description': '''
-        Show what an agent can access: attached MCP servers and skills.
+        Show a named agent's configured MCP servers and skills.
         
-        Use ``list_agent_keys`` for stored key names. Configuration does not prove
-        the answering session's access. Returns server names/URLs and skills; custom
+        Resolve the requested name with ``list_agents`` and pass its current id as
+        ``expected_ma_agent_id``. The requested agent can differ from the responder;
+        the bot's display name does not make them the same agent.
+        
+        Use ``list_agent_keys`` for that agent's stored key names. Configuration does
+        not prove the answering session's access. Returns server names/URLs and skills; custom
         skills have a display name (null if deleted), Anthropic skills have a readable id.
       ''',
       'parameters': dict({
@@ -2089,7 +2088,12 @@
     }),
     'hand_off_task': dict({
       'description': '''
-        Hand this task over to another agent in the same conversation: "have that one take over", "let churn-explorer finish this".
+        Switch which agent answers in this thread: "have daimon answer here instead", "have that one take over", "let churn-explorer finish this".
+        
+        Resolve the requested agent with `list_agents`, even if its name matches
+        the shared bot handle. Compare agent IDs with the current responder;
+        a shared Discord/Slack display name does not mean they are the same agent.
+        Pass this turn's `origin_context_id`.
         
         `set_setup_target` changes your configuration target; `set_agent_default`
         changes who answers a channel; neither does this. The destination must
@@ -2103,7 +2107,7 @@
         `agent_id`: the destination's current id from `list_agents`; a recreated
         namesake is refused. `continuation` is null unless the person asked the
         destination to continue or finish NAMED work ("let it finish the chart").
-        "Take over" alone is switch-only — null. Never restate finished work. A
+        "Take over" or "answer here instead" alone is switch-only: null. Never restate finished work. A
         too-short, empty, or name-only value is auto-nulled — get the wording
         right regardless.
       ''',
@@ -2157,14 +2161,16 @@
       'description': '''
         What keys does an agent have? List its stored API key names, never values.
         
-        Use ``get_agent`` for skills and MCP access, ``request_agent_key`` to add
-        keys or ``remove_agent_key`` to remove them. Stored names on this target
-        are not proof that the answering agent can use those keys.
+        Pass the named agent, even when another agent is answering. The current
+        session's .env cannot establish that agent's keys. Use ``get_agent`` to
+        resolve its identity or inspect MCP access. Stored keys do not prove
+        availability in this session. Use ``request_agent_key`` to add keys.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'agent_name': dict({
+            'description': 'Exact name of the agent whose stored keys were requested.',
             'type': 'string',
           }),
           'expected_ma_agent_id': dict({
@@ -2177,6 +2183,7 @@
               }),
             ]),
             'default': None,
+            'description': 'ID returned by get_agent for that same named agent, when known.',
           }),
         }),
         'required': list([
@@ -2187,8 +2194,16 @@
     }),
     'list_agents': dict({
       'description': '''
-        List agents in the tenant pool, including each agent's attached
-        ``mcp_servers`` and ``skills``. ``page`` is reserved for future pagination.
+        Find named agents in this server/workspace and their current IDs.
+        
+        Resolve a requested agent here before inspecting its keys or changing who
+        answers. Several distinct agents can share the same Discord/Slack bot
+        handle; the handle does not identify the responding agent. A named agent
+        such as daimon can differ from the current responder.
+        
+        Returns each agent's name, id, model, attached ``mcp_servers`` and ``skills``.
+        Use the returned name and id for tools that require ``expected_ma_agent_id``.
+        ``page`` is reserved for future pagination.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2218,7 +2233,14 @@
       }),
     }),
     'list_credentials': dict({
-      'description': "List credentials in the caller's MCP vault (safe projection — no secrets).",
+      'description': '''
+        List MCP connection credential metadata for the calling agent and account.
+        
+        Returns no secret values. This only inspects the caller's MCP vault, not
+        another named agent or stored environment/API keys. For "what keys does
+        <agent> have?", use ``list_agent_keys(agent_name=...)``. An empty MCP vault
+        does not mean the agent has no API keys.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3025,6 +3047,10 @@
         Give an agent an API key or token for any service: Toggl, OpenAI,
         Higgsfield, or a platform that just launched. Unknown services work too.
         
+        For an inventory question, use ``list_agent_keys`` with the requested agent's
+        name. This tool posts an input form; it does not inspect existing keys.
+        Target the agent the user named, which may differ from the answering agent.
+        
         Never accept secret values in chat; ask for rotation if pasted. One named key
         → pass `key`. To load, upload or import a whole `.env` file of several keys at
         once, omit it. For MCP credentials use ``request_mcp_token``; GitHub access
@@ -3485,7 +3511,12 @@
       }),
     }),
     'self_list_files': dict({
-      'description': 'List all keys + metadata for files in your private agent_files namespace.',
+      'description': '''
+        List file keys and metadata in the calling agent's private namespace.
+        
+        These keys identify stored files, not API credentials. For a named agent's
+        stored API key names, use list_agent_keys with its name and current id.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3494,7 +3525,14 @@
       }),
     }),
     'self_read_file': dict({
-      'description': 'Read a per-agent file by `key`. Returns null if no file exists at that key.',
+      'description': '''
+        Read a stored file belonging to the calling agent by `key`.
+        
+        Always uses the authenticated calling agent, even when a different agent
+        is selected for setup or named by the user. To list a named agent's API
+        keys, use list_agent_keys with that agent's name and current id instead.
+        Returns null if no file exists at that key.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3618,24 +3656,24 @@
     'set_agent_default': dict({
       'description': '''
         Make an agent answer in a channel or become the whole server/workspace default.
-        For example, make churn-explorer answer in #growth. Changes the agent that answers;
+        For example, make churn-explorer answer in #growth, or replace the current
+        agent in this channel with the built-in daimon agent. Changes who answers;
         use ``clear_agent_default`` to stop that routing.
         
-        When ``channel_id`` is provided the default is scoped to that channel;
-        omit it to set the workspace-wide default.  Any existing default at the
-        chosen scope is replaced (last-write-wins; an audit stamp is recorded by
-        core).  Requires Manage Server (admin).
+        Resolve the requested agent with ``list_agents`` and pass its current id as
+        ``expected_ma_agent_id``. A name matching the shared bot handle can still
+        identify a different agent. Use ``hand_off_task`` for a responder switch
+        limited to the current thread. Channel routing does not replace
+        a setup or handoff thread's bound responder.
         
-        Discord: ``channel_id`` MUST be the parent channel's id — the one
-        your context gives as
+        Provide ``channel_id`` to replace that channel's default; omit it for the
+        whole server/workspace. Requires Manage Server (admin).
+        
+        Discord: ``channel_id`` MUST be the parent channel's id from
         ``<channel platform="discord" id="..." role="parent_channel">``.
         Never pass the current thread's id here. Slack: use the id from
-        ``<channel platform="slack" id="...">`` — Slack's context always
-        names the parent channel. A channel default is resolved from the parent;
-        setup threads keep their bound responder. A default
-        written against a thread id is a scope nothing ever reads: the write
-        succeeds, this tool reports success, and the channel keeps answering
-        with the old agent.
+        ``<channel platform="slack" id="...">``. Defaults written against a
+        thread id do not change the parent channel's routing.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3674,8 +3712,11 @@
     }),
     'set_display_identity': dict({
       'description': '''
-        Change how daimon appears in this Discord server: its display name,
-        its avatar, or both.
+        Change the shared Discord bot's display name, avatar, or both.
+        
+        All agents in the server use this bot handle. Changing it does not select,
+        rename, or replace a named agent. Use hand_off_task to have another agent
+        answer in this thread, or set_agent_default for channel routing.
         
         Use when the user asks you to rename yourself or change your profile
         picture. ``display_name`` is the new nickname (1-32 characters).
@@ -3747,11 +3788,19 @@
     }),
     'set_setup_target': dict({
       'description': '''
-        Switch this setup conversation to an explicitly selected MA agent identity.
+        Select which agent to configure in an existing setup conversation.
         
-        Pass the current turn's origin_context_id and a current agent's MA id.
-        State the target switch briefly. Other running turns keep their own target.
-        This changes no routing or editing permissions.
+        Pass the current turn's origin_context_id and the selected agent's current
+        id from list_agents. The responder stays the same: this changes only the
+        configuration target, not who answers or whose keys the session can use.
+        Setup conversations keep Daimon as their responder. In ordinary task
+        threads, use hand_off_task to change the responder. Use set_agent_default
+        to change a channel's default responder.
+        
+        Ordinary threads have no setup target to switch. Configure a named agent
+        there by passing its name and current id directly to the relevant tool.
+        State a successful target switch briefly. Other running turns keep their
+        own target. This changes no editing permissions.
       ''',
       'parameters': dict({
         'additionalProperties': False,

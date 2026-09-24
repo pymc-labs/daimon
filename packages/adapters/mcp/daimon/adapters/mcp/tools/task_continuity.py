@@ -337,7 +337,12 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             Field(description="Only after the person answers the uncommitted-work question."),
         ] = None,
     ) -> TaskHandoffResult:
-        """Hand this task over to another agent in the same conversation: "have that one take over", "let churn-explorer finish this".
+        """Switch which agent answers in this thread: "have daimon answer here instead", "have that one take over", "let churn-explorer finish this".
+
+        Resolve the requested agent with `list_agents`, even if its name matches
+        the shared bot handle. Compare agent IDs with the current responder;
+        a shared Discord/Slack display name does not mean they are the same agent.
+        Pass this turn's `origin_context_id`.
 
         `set_setup_target` changes your configuration target; `set_agent_default`
         changes who answers a channel; neither does this. The destination must
@@ -351,7 +356,7 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         `agent_id`: the destination's current id from `list_agents`; a recreated
         namesake is refused. `continuation` is null unless the person asked the
         destination to continue or finish NAMED work ("let it finish the chart").
-        "Take over" alone is switch-only — null. Never restate finished work. A
+        "Take over" or "answer here instead" alone is switch-only: null. Never restate finished work. A
         too-short, empty, or name-only value is auto-nulled — get the wording
         right regardless.
         """  # noqa: E501
