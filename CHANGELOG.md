@@ -50,6 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `list_events`, `continue_turn`, `ask`, `cancel_turn`, `archive_my_session`,
   `get_turn_cost` and `deliver_turn_charts` no longer see other workspace
   members' sessions of the same agent.
+- A model call made while a turn's event stream was disconnected or stalled
+  is metered by that turn when it replays the session history, under the
+  turn's own member and ledger reason, instead of waiting for the usage sweep
+  (or going unmetered where no scheduler runs).
 
 ## [0.2.0] - 2026-09-21
 

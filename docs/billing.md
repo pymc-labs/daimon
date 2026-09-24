@@ -19,6 +19,15 @@ the recorder bound to that turn. This is the one piece of I/O permitted inline
 in the consume loop, because an unmetered event is revenue lost and the
 recorder is fail-closed — an exception propagates rather than being swallowed.
 
+A call MA makes while no stream is attached — after a dropped connection, a
+server-side close or a read stall — reaches the driver only through the
+history replay it runs before reconnecting or finalizing. The driver bills
+the model calls in that replayed suffix through the same recorder, and a
+per-turn set of billed event ids keeps every call to one recorder invocation
+whether it arrives live, in a replay, or both. Calls made after an interrupt
+or a turn ceiling, or while the adapter process is down, are not seen by the
+driver at all; those are left to [the sweep](#the-tables).
+
 The posture is a union in `packages/core/daimon/core/turn/posture.py`:
 `Billed(record=...)` or `BillingExempt(reason=...)`. There is deliberately no
 no-op recorder, so a caller must say in the type which one it is.
