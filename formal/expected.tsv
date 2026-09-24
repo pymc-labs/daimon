@@ -139,3 +139,8 @@ notebook_upload	NotebookUpload	LateBurnMutation	violates:NoDuplicateSuccessfulUp
 setup_panel	SetupPanel	SetupPanelPreFix	violates:SetupTargetMatchesCard	24	-	pre-fix selection shared across concurrent Details reads misroutes setup target
 setup_panel	SetupPanel	SetupPanelPreFixCoding	violates:CodingTargetMatchesCard	25	-	pre-fix selection shared across concurrent Details reads mints coding-tools access for the wrong agent
 setup_panel	SetupPanel	SetupPanelSafe	clean	44	-	latest click owns rendering; captured target stays paired; stale reads after panel advance are dropped
+setup_panel	CodingTokenIdentity	CodingTokenIdentityNameSubstitution	violates:CardIdentityMatches	5	-	card A renders, newer same-name B appears, and name-based mint selects B
+setup_panel	CodingTokenIdentity	CodingTokenIdentitySafe	clean	5	-	card A remains the mint target after newer same-name B appears
+setup_panel	CodingTokenIdentity	CodingTokenIdentitySafeUnavailable	clean	7	-	card A becomes foreign-tenant after render and is refused without minting
+setup_panel	CodingTokenIdentity	CodingTokenIdentitySafeArchived	clean	7	-	card A is archived after render and is refused without minting
+setup_panel	CodingTokenIdentity	CodingTokenIdentitySafeMissing	clean	7	-	card A disappears after render and is refused without minting

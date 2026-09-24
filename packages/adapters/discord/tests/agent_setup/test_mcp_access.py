@@ -16,6 +16,7 @@ an SDK model is expected.
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -30,13 +31,19 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
+from daimon.core.roster import RosterAgent
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
 from daimon.core.stores.domain import AccountRow, TenantRow
-from daimon.core.stores.mcp_tokens import get_mcp_token
-from daimon.testing import ma_agent
+from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
+from daimon.testing import FIXED_TS, ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.ma import (
+    MARouter,
+    build_fake_anthropic,
+    build_stub_anthropic,
+    not_found_response,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PUBLIC_URL = "https://mcp.example.com"
@@ -193,6 +200,158 @@ async def test_on_coding_tools_writes_row_and_replies_with_config_block(
         f"got {row.agent_id!r} expected {str(agent_id)!r}"
     )
     assert row.tenant_id == tenant_id, "token row tenant_id must be the guild's tenant"
+
+
+@pytest.mark.asyncio
+async def test_on_coding_tools_mints_for_card_agent_when_newer_same_name_exists(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    """A newer duplicate must not replace the exact agent represented by the card."""
+    await _setup_tenant_and_account(
+        db_session,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        external_id="test-guild-coding-tools-identity",
+    )
+
+    card_agent = ma_agent(
+        id="agent_card_snapshot",
+        name="expert-bot",
+        tenant_id=tenant_id,
+        created_at=FIXED_TS,
+    )
+    newer_same_name = ma_agent(
+        id="agent_newer_duplicate",
+        name="expert-bot",
+        tenant_id=tenant_id,
+        created_at=FIXED_TS + timedelta(seconds=1),
+    )
+    router = MARouter()
+    router.add_agent_list(card_agent, newer_same_name)
+    router.add_agent(card_agent)
+    runtime = DiscordRuntime(
+        settings=_make_settings(),
+        anthropic=build_fake_anthropic(router.dispatch),
+        sessionmaker=db_session_factory,
+        notebook_rate_limiter=RateLimiter(max_requests=999),
+        billing_config=None,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+    )
+    monkeypatch.setattr(
+        mcp_access_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant_id)
+    )
+    selected = RosterAgent(
+        name="expert-bot",
+        ma_agent_id=card_agent.id,
+        model_id="claude-sonnet-4-6",
+        is_built_in=False,
+    )
+    state = PanelState(roster=[], selected=None, account_id=account_id)
+    interaction = _make_interaction()
+
+    await send_coding_tools_access(
+        interaction,
+        runtime=runtime,
+        state=state,
+        allowed_user_id=42,
+        agent=selected,
+    )
+
+    content: str = interaction.response.send_message.call_args.kwargs["content"]
+    bearer_idx = content.index("Bearer ") + len("Bearer ")
+    jwt_token = content[bearer_idx:].split()[0].strip("`\"'")
+    claims = pyjwt.decode(jwt_token, _JWT_SECRET_BYTES, algorithms=["HS256"])
+    expected_agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=card_agent.id)
+    assert claims["agent_id"] == str(expected_agent_id), (
+        "coding-tools token must use the exact MA identity stored on the Details card"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unavailable_kind", ["archived", "foreign", "missing"])
+async def test_on_coding_tools_refuses_unavailable_card_agent_without_minting(
+    unavailable_kind: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    """Never substitute a current same-name agent for an unavailable card identity."""
+    await _setup_tenant_and_account(
+        db_session,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        external_id=f"test-guild-coding-tools-{unavailable_kind}",
+    )
+    card_tenant_id = uuid.uuid4() if unavailable_kind == "foreign" else tenant_id
+    card_agent = ma_agent(
+        id="agent_card_snapshot",
+        name="expert-bot",
+        tenant_id=card_tenant_id,
+        archived_at=FIXED_TS if unavailable_kind == "archived" else None,
+    )
+    newer_same_name = ma_agent(
+        id="agent_newer_duplicate",
+        name="expert-bot",
+        tenant_id=tenant_id,
+        created_at=FIXED_TS + timedelta(seconds=1),
+    )
+    router = MARouter()
+    router.add_agent_list(card_agent, newer_same_name)
+    if unavailable_kind == "missing":
+        router.add(
+            "GET",
+            r"/v1/agents/agent_card_snapshot",
+            lambda _request, _match: not_found_response("missing agent"),
+        )
+    else:
+        router.add_agent(card_agent)
+    runtime = DiscordRuntime(
+        settings=_make_settings(),
+        anthropic=build_fake_anthropic(router.dispatch),
+        sessionmaker=db_session_factory,
+        notebook_rate_limiter=RateLimiter(max_requests=999),
+        billing_config=None,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+    )
+    monkeypatch.setattr(
+        mcp_access_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant_id)
+    )
+    selected = RosterAgent(
+        name="expert-bot",
+        ma_agent_id=card_agent.id,
+        model_id="claude-sonnet-4-6",
+        is_built_in=False,
+    )
+    interaction = _make_interaction()
+
+    await send_coding_tools_access(
+        interaction,
+        runtime=runtime,
+        state=PanelState(roster=[], selected=None, account_id=account_id),
+        allowed_user_id=42,
+        agent=selected,
+    )
+
+    kwargs = interaction.response.send_message.call_args.kwargs
+    refusal = interaction.response.send_message.call_args.args[0]
+    assert kwargs["ephemeral"] is True, "unavailable card target errors must remain private"
+    assert "no longer available" in refusal, (
+        "unavailable exact identity should explain that Details must be reopened"
+    )
+    assert "Bearer " not in refusal, "refused card identity must expose no token"
+    assert await count_tokens_for_account(db_session, account_id=account_id) == 0, (
+        "refused card identity must create no token registry row"
+    )
 
 
 # ---------------------------------------------------------------------------

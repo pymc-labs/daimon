@@ -344,6 +344,9 @@ surfaces below.
 
 ### Fixed
 
+- The Discord Details card's coding-tools token now stays scoped to its exact
+  MA agent ID and refuses archived, missing, or foreign-tenant identities
+  instead of substituting a newer agent with the same name.
 - Threads no longer freeze. Dead sessions are recovered, a dropped
   mid-stream connection reconnects, turns orphaned by a restart are retired,
   and liveness is tracked across processes rather than per worker.
