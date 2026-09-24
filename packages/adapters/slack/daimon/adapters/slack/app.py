@@ -390,6 +390,7 @@ class SlackApp:
             cast(dict[str, Any], raw_event) if isinstance(raw_event, dict) else {}
         )
         is_app_mention = req.type == "events_api" and event_for_ack.get("type") == "app_mention"
+        received_before_drain = is_app_mention and not self.draining
 
         # view_submission acks WITH the computed response_action payload (Pattern 2).
         # evaluate_delete_submission is PURE (no I/O), safe to call before the ack.
@@ -707,7 +708,13 @@ class SlackApp:
             team_id: str = str(team_id_raw) if team_id_raw is not None else ""
             etype: str | None = event.get("type")
             if etype == "app_mention":
-                task = self._spawn(self._handle_app_mention(event, team_id=team_id))
+                task = self._spawn(
+                    self._handle_app_mention(
+                        event,
+                        team_id=team_id,
+                        received_before_drain=received_before_drain,
+                    )
+                )
                 self._mention_tasks.add(task)
                 task.add_done_callback(self._mention_tasks.discard)
             elif etype in {
@@ -883,6 +890,7 @@ class SlackApp:
         event: dict[str, Any],
         *,
         team_id: str,
+        received_before_drain: bool = False,
     ) -> None:
         """Pre-turn safety gates → orchestration seam (turn body injected).
 
@@ -899,7 +907,7 @@ class SlackApp:
         (DaimonError | anthropic.APIError | SlackApiError).  Core helpers
         are try/except-free — exceptions propagate to this boundary.
         """
-        if self.draining:
+        if self.draining and not received_before_drain:
             # Mentions that arrive during the drain window are acked by on_request
             # (ack-first is unconditional) but dropped here before the dedup insert.
             # Slack considers them delivered; they will not be redelivered to the

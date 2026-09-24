@@ -19,8 +19,11 @@ three distinct user messages: A, then B, then A again. Steps:
    logical event with a fresh envelope id (`Redeliver`: a lost ack, a
    reconnect, or another Socket Mode connection), but only within `Window`
    ticks of the first delivery.
-2. `on_request` acks before any work and spawns one handler task per delivery.
-3. The handler checks the draining flag (`CheckDraining`).
+2. `on_request` snapshots whether the event arrived before drain, acks, then
+   spawns one handler task per delivery.
+3. The handler uses that callback-time snapshot in `CheckDraining`: a mention
+   received before drain proceeds even if its ack was suspended while drain
+   began; a mention first received during drain is rejected.
 4. The handler inserts and commits the `(team_id, channel, event_ts)` dedupe row
    (`Dedupe`). On a conflict the delivery is dropped.
 5. The handler either takes the thread or queues behind the running turn
@@ -50,7 +53,8 @@ Invariants:
 - `NoSilentLoss`: once the adapter is idle, every delivered mention got a turn
   or an error notice.
 - `NoUndocumentedLoss`: the same as `NoSilentLoss`, but it exempts a mention the
-  draining check rejected. That is the documented IN-02 drop.
+  draining check rejected only when its delivery began during drain. A
+  pre-drain delivery cannot be excused as a drain-window drop.
 
 | Config | Toggles vs `SlackDedupe.cfg` | Verdict | Distinct states |
 | --- | --- | --- | --- |
@@ -58,9 +62,10 @@ Invariants:
 | `SlackPre997b3d8` | `PartitionByAuthor = FALSE` | violates `TurnPrincipal` | 268,977, trace 16 |
 | `SlackPre0cda77e` | `NotifyOnFailure = FALSE` | violates `NoSilentLoss` | 595, trace 6 |
 | `SlackShortRetention` | `Retention = 1 < Window` | violates `AtMostOneTurn` | 850,886, trace 18 |
-| `SlackExitSafety` | `AllowExit`, `AllowDrain`, `MaxClock = 1`; checks `AtMostOneTurn`, `TurnPrincipal` | clean | 728,529 (depth 27) |
+| `SlackExitSafety` | `AllowExit`, `AllowDrain`, `MaxClock = 1`; checks `AtMostOneTurn`, `TurnPrincipal` | clean | 735,303 (depth 27) |
 | `SlackCrashLoss` | `AllowExit` (plain crash, any time after the ack) | violates `NoSilentLoss` | 48, trace 4 |
-| `SlackDrainWindow` | `AllowExit`, `AllowDrain`; checks `NoUndocumentedLoss` | clean | 3,877,947 (depth 31) |
+| `SlackDrainWindow` | `AllowExit`, `AllowDrain`; checks `NoUndocumentedLoss` | clean | 3,833,637 (depth 32) |
+| `SlackPreDrainAckLoss` | `HonorPreDrainAck = FALSE`; checks `NoUndocumentedLoss` | violates `NoUndocumentedLoss` | 64, trace 4 |
 
 ## Calibration
 
@@ -95,11 +100,15 @@ establishes:
   committed row anyway. The same holds
   for queued mentions and a drain whose 50 s grace expires.
 - **Graceful drain now waits for acked mention handlers as well as
-  `_processing`** (`SlackDrainWindow`). This closes the pre-orchestration window
-  when a handler is waiting on orphan recovery, dedupe, token lookup, or setup
-  binding. The wait shares the existing 50-second grace bound; a handler still
-  active when that bound expires can still be lost. The model's successful
-  drain path assumes the grace window has not expired.
+  `_processing`** (`SlackDrainWindow`). It also preserves callback-time
+  admission across an ack-to-handler handoff: the pre-fix trace in
+  `SlackPreDrainAckLoss` delivers a mention, starts drain while its ack is
+  suspended, then drops it when the handler checks the now-true drain flag.
+  The listener now passes its pre-drain snapshot into the handler, so that
+  already-accepted mention reaches orchestration; new callbacks during drain
+  remain rejected. The wait shares the existing 50-second grace bound; a
+  handler still active when that bound expires can still be lost. The model's
+  successful drain path assumes the grace window has not expired.
 - **Hard-crash residual: process death after the ack can lose a mention**
   (`SlackCrashLoss`), before or after the dedupe commit. Slack retries failed,
   unacked Socket Mode events, but an acked event is considered received.

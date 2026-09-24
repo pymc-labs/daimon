@@ -192,7 +192,9 @@ async def test_on_request_ack_first_when_events_api_request_sends_ack_before_spa
     # Replace _handle_app_mention with a sentinel that records when it STARTS.
     handle_started: list[str] = []
 
-    async def _sentinel_handle(event: dict[str, Any], *, team_id: str) -> None:
+    async def _sentinel_handle(
+        event: dict[str, Any], *, team_id: str, received_before_drain: bool = False
+    ) -> None:
         handle_started.append("handle_app_mention_started")
 
     app._handle_app_mention = _sentinel_handle  # type: ignore[method-assign]
@@ -442,7 +444,9 @@ async def test_drain_and_close_waits_for_acked_mention_before_thread_registratio
     handler_started = asyncio.Event()
     release_handler = asyncio.Event()
 
-    async def _paused_handle(event: dict[str, Any], *, team_id: str) -> None:
+    async def _paused_handle(
+        event: dict[str, Any], *, team_id: str, received_before_drain: bool = False
+    ) -> None:
         handler_started.set()
         await release_handler.wait()
 
@@ -485,13 +489,96 @@ async def test_drain_and_close_waits_for_mention_ack_to_handler_handoff() -> Non
     )
     await ack_started.wait()
     drain = asyncio.create_task(app.drain_and_close(fake_client))  # type: ignore[arg-type]
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0)
+    assert app.draining
     assert "close" not in fake_client.call_log, "drain must account for an in-flight mention ack"
 
     release_ack.set()
     await request
     await drain
     assert "close" in fake_client.call_log, "client must close after ack dispatch completes"
+
+
+async def test_drain_started_during_ack_keeps_pre_drain_mention_admitted(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A pre-drain mention must survive a drain that starts during its ack."""
+    team_id = "T_DRAIN_ACK_OWNER"
+    crypto_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((crypto_key,))
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(fernet, "xoxb-drain-ack-test"),
+    )
+    await db_session.flush()
+    await db_session.commit()
+
+    app = _make_app(db_session_factory, crypto_key=crypto_key)
+    fake_client = _FakeSocketClient()
+    ack_started = asyncio.Event()
+    release_ack = asyncio.Event()
+    orchestration_started = asyncio.Event()
+    release_orchestration = asyncio.Event()
+    orchestrated_events: list[str] = []
+
+    async def _paused_ack(response: SocketModeResponse) -> None:
+        fake_client.call_log.append("send_socket_mode_response")
+        fake_client.sent_responses.append(response)
+        ack_started.set()
+        await release_ack.wait()
+
+    async def _record_orchestrate(
+        event: dict[str, Any],
+        *,
+        team_id: str,
+        channel: str,
+        event_ts: str,
+        web_client: Any,
+        tenant_id: uuid.UUID,
+    ) -> None:
+        orchestrated_events.append(event_ts)
+        orchestration_started.set()
+        await release_orchestration.wait()
+
+    fake_client.send_socket_mode_response = _paused_ack  # type: ignore[method-assign]
+    app._orchestrate = _record_orchestrate  # type: ignore[method-assign]
+    request = asyncio.create_task(
+        app.on_request(
+            fake_client,
+            _make_events_api_request(event_type="app_mention", team_id=team_id),
+        )  # type: ignore[arg-type]
+    )
+    await ack_started.wait()
+    drain = asyncio.create_task(app.drain_and_close(fake_client))  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+    assert app.draining
+    release_ack.set()
+
+    await request
+    await asyncio.wait_for(orchestration_started.wait(), timeout=1)
+
+    await app.on_request(
+        fake_client,
+        _make_events_api_request(
+            event_type="app_mention",
+            team_id=team_id,
+            event_ts="1000000000.000002",
+        ),
+    )  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+    assert orchestrated_events == ["1000000000.000001"], (
+        "a mention first received during drain must not reach orchestration"
+    )
+
+    release_orchestration.set()
+    await drain
+
+    assert orchestrated_events == ["1000000000.000001"], (
+        "a mention whose ack began before drain must continue to orchestration"
+    )
 
 
 # ---------------------------------------------------------------------------
