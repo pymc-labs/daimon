@@ -228,6 +228,9 @@ async def _handle_installation(
         account_login = ""
 
     repos_raw = _get(payload, "repositories")
+    if action == "created" and "repositories" in payload and not isinstance(repos_raw, list):
+        log.warning("github.webhook.malformed_installation_repositories", delivery_id=delivery_id)
+        return Response(status_code=200)
     repos_list: list[Any] = list(repos_raw) if isinstance(repos_raw, list) else []  # pyright: ignore[reportExplicitAny,reportUnknownArgumentType]
     repo_names: list[str] = [
         str(r.get("full_name", ""))  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]

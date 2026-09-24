@@ -159,6 +159,18 @@ def _installation_repositories_added_payload(
     }
 
 
+def _installation_repositories_removed_payload(
+    installation_id: int = 1234,
+    repositories_removed: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "action": "removed",
+        "installation": {"id": installation_id},
+        "repositories_added": [],
+        "repositories_removed": repositories_removed or [{"full_name": "owner/changed-repo"}],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -289,6 +301,121 @@ async def test_github_webhook_ignores_non_lifecycle_installation_actions(
     assert row is not None, "suspend event must preserve the installation row"
     assert list(row.repo_full_names) == ["test-owner/kept-repo"], (
         "suspend event must not replace the created-event repository snapshot"
+    )
+
+
+async def test_repository_delta_delivered_before_created_snapshot_is_lost(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A delayed created snapshot can overwrite a repository delta delivered first."""
+    app = _build_app(sessionmaker)
+    async with sessionmaker.begin() as session:
+        await install_store.upsert(
+            session,
+            installation_id=9901,
+            account_login="test-owner",
+            repo_full_names=["test-owner/initial"],
+        )
+    delta = _installation_repositories_added_payload(
+        installation_id=9901,
+        repositories_added=[{"full_name": "test-owner/added-later"}],
+    )
+    created = _installation_created_payload(
+        installation_id=9901,
+        account_login="test-owner",
+        repos=[{"full_name": "test-owner/initial"}],
+    )
+
+    delta_response = await _post_github(
+        app, payload_dict=delta, event="installation_repositories", delivery_id="delta-first"
+    )
+    created_response = await _post_github(
+        app, payload_dict=created, event="installation", delivery_id="created-late"
+    )
+
+    assert delta_response.status_code == created_response.status_code == 200
+    async with db_session_factory() as check_session:
+        row = await install_store.get(check_session, installation_id=9901)
+    assert row is not None
+    assert set(row.repo_full_names) == {"test-owner/initial"}, (
+        "the stale created snapshot replaces the earlier delta; current cache misses "
+        "test-owner/added-later even though that repository was added after creation"
+    )
+
+
+async def test_out_of_order_opposite_repository_deltas_leave_stale_membership(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Delivering a later removal before its earlier addition leaves the repo cached."""
+    app = _build_app(sessionmaker)
+    async with sessionmaker.begin() as session:
+        await install_store.upsert(
+            session,
+            installation_id=9902,
+            account_login="test-owner",
+            repo_full_names=["test-owner/initial"],
+        )
+
+    removed = _installation_repositories_removed_payload(
+        installation_id=9902,
+        repositories_removed=[{"full_name": "test-owner/changed-repo"}],
+    )
+    added = _installation_repositories_added_payload(
+        installation_id=9902,
+        repositories_added=[{"full_name": "test-owner/changed-repo"}],
+    )
+    remove_response = await _post_github(
+        app,
+        payload_dict=removed,
+        event="installation_repositories",
+        delivery_id="remove-first",
+    )
+    add_response = await _post_github(
+        app,
+        payload_dict=added,
+        event="installation_repositories",
+        delivery_id="add-late",
+    )
+
+    assert remove_response.status_code == add_response.status_code == 200
+    async with db_session_factory() as check_session:
+        row = await install_store.get(check_session, installation_id=9902)
+    assert row is not None
+    assert "test-owner/changed-repo" in row.repo_full_names, (
+        "the cache reflects delivery order (remove then add), although the actual "
+        "event order was add then remove"
+    )
+
+
+async def test_malformed_created_snapshot_does_not_clear_cached_repositories(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A malformed repositories field must not replace a valid cached repo list."""
+    app = _build_app(sessionmaker)
+    async with sessionmaker.begin() as session:
+        await install_store.upsert(
+            session,
+            installation_id=9903,
+            account_login="test-owner",
+            repo_full_names=["test-owner/known-good"],
+        )
+
+    malformed = {
+        "action": "created",
+        "installation": {"id": 9903, "account": {"login": "test-owner"}},
+        "repositories": "not-an-array",
+    }
+    response = await _post_github(app, payload_dict=malformed, event="installation")
+
+    assert response.status_code == 200
+    async with db_session_factory() as check_session:
+        row = await install_store.get(check_session, installation_id=9903)
+    assert row is not None
+    assert set(row.repo_full_names) == {"test-owner/known-good"}, (
+        "malformed snapshot data must not be interpreted as an authoritative empty set"
     )
 
 
