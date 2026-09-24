@@ -429,3 +429,79 @@ async def test_sweep_bills_valid_tenant_with_malformed_account_and_retry_is_idem
     assert all("not-a-uuid" not in repr(entry) for entry in account_warnings), (
         "warnings must not include raw malformed metadata"
     )
+
+
+async def test_sweep_omits_platform_user_from_account_owned_by_another_tenant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A valid foreign account UUID must not cross tenant attribution boundaries."""
+    account_a = await make_account(db_session)
+    account_b = await make_account(db_session)
+    principal_b = await make_platform_principal(
+        db_session,
+        platform="discord",
+        external_id="discord-user-tenant-b",
+        account=account_b,
+    )
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions",
+        lambda req, m: list_response(
+            [
+                _session_dict(
+                    session_id="sesn_tenant_a_foreign_account",
+                    tenant_id=account_a.tenant_id,
+                    account_id=account_b.id,
+                )
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+/events",
+        lambda req, m: list_response(
+            [_model_request_end_dict(event_id="evt_tenant_a", input_tokens=7, output_tokens=3)]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+
+    with structlog.testing.capture_logs() as logs:
+        recorded = await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.0"))
+
+    rows = (await db_session.execute(select(UsageEvent))).scalars().all()
+    debits = (await db_session.execute(select(TenantLedger))).scalars().all()
+    assert recorded == 1, "foreign account attribution must not suppress valid tenant billing"
+    assert len(rows) == 1, "the valid tenant session should produce one usage row"
+    assert rows[0].tenant_id == account_a.tenant_id, (
+        "usage must remain attributed to session tenant A"
+    )
+    assert rows[0].platform_user_id is None, (
+        "a principal owned by tenant B must not be attributed to tenant A's session"
+    )
+    assert len(debits) == 1, "the session should create exactly one matching debit"
+    assert debits[0].tenant_id == account_a.tenant_id, "the debit must remain on session tenant A"
+    assert debits[0].tenant_id != account_b.tenant_id, (
+        "the foreign account tenant must not be debited"
+    )
+    assert debits[0].delta_usd == Decimal("-0.000066"), (
+        "the debit must match the session's 7 input and 3 output tokens"
+    )
+    assert principal_b.external_id == "discord-user-tenant-b", (
+        "the test's foreign account resolves to a real tenant B principal"
+    )
+    warnings = [
+        entry for entry in logs if entry.get("event") == "usage_sweep.member_attribution_omitted"
+    ]
+    assert len(warnings) == 1, "cross-tenant account metadata should emit one structured warning"
+    assert warnings[0]["log_level"] == "warning", "cross-tenant attribution should warn"
+    assert warnings[0]["session_id"] == "sesn_tenant_a_foreign_account", (
+        "cross-tenant warning should identify the session"
+    )
+    assert warnings[0]["reason"] == "account_tenant_mismatch", (
+        "cross-tenant warning should give a stable reason"
+    )
+    assert account_b.id.hex not in repr(warnings[0]), (
+        "cross-tenant warning must not expose raw account metadata"
+    )

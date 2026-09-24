@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A malformed tenant tag in one Managed Agents session no longer aborts the
   usage sweep; malformed optional account metadata drops member attribution
   while preserving tenant usage and its debit.
+- The usage sweep no longer attributes a session to a platform user from a
+  different tenant when its account metadata points across tenant boundaries.
 
 - A session recovery that is rolled back (by the turn time limit or a
   cancel) after creating its replacement session now archives that session
