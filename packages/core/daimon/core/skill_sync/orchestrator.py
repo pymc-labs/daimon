@@ -145,6 +145,19 @@ class SyncReport:
     # (agent_name, reason) — attach step refused by MA (e.g. per-agent skill cap).
     # Uploads succeeded; only the agents.update binding failed.
     attach_failures: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    retryable_failure: bool = False
+
+
+def _is_retryable_error(err: Exception) -> bool:
+    """Return whether a sync error may clear on a later provider attempt."""
+    if isinstance(err, (httpx.TransportError, anthropic.APIConnectionError, TimeoutError)):
+        return True
+    if isinstance(err, httpx.HTTPStatusError):
+        status_code = err.response.status_code
+        return status_code == 429 or status_code >= 500
+    if isinstance(err, anthropic.APIStatusError):
+        return err.status_code == 429 or err.status_code >= 500
+    return False
 
 
 class SyncRepoFailure(BaseModel):
@@ -400,10 +413,12 @@ async def _upload_all(
                     report.failed_uploads.append(
                         (pending.name, f"timeout after {_PER_SKILL_TIMEOUT_S:.0f}s")
                     )
+                    report.retryable_failure = True
             except Exception as err:  # orchestrator IS the named boundary
                 _log.warning("skill_sync.skill_failed", name=pending.name, error=str(err))
                 async with report_lock:
                     report.failed_uploads.append((pending.name, str(err)))
+                    report.retryable_failure |= _is_retryable_error(err)
 
     await asyncio.gather(*(_one(p) for p in pending_skills))
 
@@ -597,6 +612,7 @@ async def sync_agent_skills(
             except Exception as err:  # boundary
                 _log.warning("skill_sync.repo_fetch_failed", url=repo.url, error=str(err))
                 report.skipped_repos.append((repo.url, str(err)))
+                report.retryable_failure |= _is_retryable_error(err)
                 continue
 
             extract_root = tmp_root_path / hashlib.sha256(repo.url.encode()).hexdigest()
@@ -710,6 +726,7 @@ async def sync_agent_skills(
                     )
                     async with report_lock:
                         report.failed_uploads.append((row.name, str(err)))
+                        report.retryable_failure |= _is_retryable_error(err)
                     continue
         async with sessionmaker() as session, session.begin():
             await delete_user_skill(
@@ -741,11 +758,15 @@ async def sync_agent_skills(
 
     agent = await find_agent_by_daimon_tag(anthropic_client, tenant_id=tenant_id, name=agent_name)
     if agent is None:
+        reason = "agent disappeared from Managed Agents before skills could be attached"
         _log.warning(
             "skill_sync.attach_skipped_no_agent",
             agent_name=agent_name,
             tenant_id=str(tenant_id),
+            error=reason,
         )
+        async with report_lock:
+            report.attach_failures.append((agent_name, reason))
         return report
 
     # Pre-check using the initially-fetched agent for a cheap no-op early return.

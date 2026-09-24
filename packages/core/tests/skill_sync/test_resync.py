@@ -180,8 +180,17 @@ async def test_resync_persists_last_sync_on_success(
     )
     await db_session.commit()
 
+    async with db_session_factory.begin() as session:
+        await binding_store.update_last_sync(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            last_sync_at=datetime.now(UTC),
+            last_sync_error="earlier sync failed",
+        )
+
     before = datetime.now(UTC)
-    await resync_bound_repo(
+    report = await resync_bound_repo(
         repo_full_name=repo_url,
         ref="refs/heads/main",
         sessionmaker=db_session_factory,
@@ -197,6 +206,8 @@ async def test_resync_persists_last_sync_on_success(
     assert row.last_sync_at is not None, "last_sync_at must be set after successful resync"
     assert row.last_sync_at >= before, "last_sync_at must be after resync started"
     assert row.last_sync_error is None, "last_sync_error must be None on success"
+    assert report.failed_bindings == 0, "a later successful run must clear the failed status"
+    assert report.retryable_bindings == 0, "a clean run must not remain retryable"
 
 
 async def test_resync_records_error_on_failure(
@@ -230,7 +241,7 @@ async def test_resync_records_error_on_failure(
     )
 
     # Should NOT raise — resync catches and persists error
-    await resync_bound_repo(
+    report = await resync_bound_repo(
         repo_full_name=repo_url,
         ref="refs/heads/main",
         sessionmaker=db_session_factory,
@@ -245,6 +256,8 @@ async def test_resync_records_error_on_failure(
     assert row.last_sync_error is not None, (
         "last_sync_error must be set when the resync fails at the named boundary"
     )
+    assert report.failed_bindings == 1, "the Managed Agents outage must remain a binding failure"
+    assert report.retryable_bindings == 1, "a connection outage must be retried after backoff"
 
 
 async def test_resync_cancellation_does_not_clear_existing_error(
@@ -636,7 +649,7 @@ async def test_resync_refuses_binding_with_no_recorded_proof_and_records_last_sy
         fallback_pat="ghp_operator_fallback_should_not_be_used",  # type: ignore[arg-type]
     )
 
-    await resync_bound_repo(
+    report = await resync_bound_repo(
         repo_full_name=repo_url,
         ref="refs/heads/main",
         sessionmaker=db_session_factory,
@@ -659,6 +672,10 @@ async def test_resync_refuses_binding_with_no_recorded_proof_and_records_last_sy
     )
     assert "proof" in row.last_sync_error.lower(), (
         f"last_sync_error must name the missing proof as the reason; got {row.last_sync_error!r}"
+    )
+    assert report.failed_bindings == 1, "the authorization refusal must remain a binding failure"
+    assert report.retryable_bindings == 0, (
+        "credential proof needs correction before another attempt"
     )
 
 
@@ -1242,7 +1259,7 @@ async def test_resync_honors_github_settings_max_tarball_bytes_cap(
 
     github_settings = GithubSettings(max_tarball_bytes=64)
 
-    await resync_bound_repo(
+    report = await resync_bound_repo(
         repo_full_name=repo_url,
         ref="refs/heads/main",
         sessionmaker=db_session_factory,
@@ -1255,13 +1272,14 @@ async def test_resync_honors_github_settings_max_tarball_bytes_cap(
     async with db_session_factory() as check_session:
         row = await binding_store.get_binding(check_session, tenant_id=tenant_id, agent_id=agent_id)
     assert row is not None, "binding row must still exist after the capped resync"
-    assert row.last_sync_at is not None, (
-        "resync must still complete (last_sync_at set) even though the repo was skipped"
+    assert report.failed_bindings == 1, (
+        "an over-cap tarball must remain visible as a binding failure"
     )
-    assert row.last_sync_error is None, (
-        "sync_agent_skills records an over-cap tarball as a skipped_repos entry, not a "
-        "raised exception — the resync itself succeeds with the repo skipped, proving "
-        "github_settings.max_tarball_bytes reached the fetcher on this edge"
+    assert report.retryable_bindings == 0, "an over-cap tarball is a permanent configuration error"
+    assert row.last_sync_at is not None, "resync attempt time must be persisted after the skip"
+    assert row.last_sync_error is not None, (
+        "sync_agent_skills records an over-cap tarball in skipped_repos; resync must surface "
+        "the actionable error so the operator can correct the configured cap or repository"
     )
 
 
@@ -1348,4 +1366,188 @@ async def test_resync_persists_non_none_last_sync_error_on_partial_failure(
     )
     assert "doomed_orphan" in row.last_sync_error, (
         f"last_sync_error must name the failed skill; got {row.last_sync_error!r}"
+    )
+
+
+async def test_resync_marks_failed_fetch_for_durable_retry(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fetch failure is a binding failure even though the sync report has no failed_uploads."""
+    cli = await make_cli_principal(db_session, os_user="resync-fetch-fail")
+    tenant_id = cli.tenant_id
+    repo_url = "owner/fetch-fail-repo"
+
+    ma_handler = make_fake_ma_handler()
+    anthropic_client = build_fake_anthropic(ma_handler)
+    ma_agent_id = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant_id,
+        agent_name="resync-fetch-fail",
+    )
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+    await _setup_binding(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_url=repo_url,
+        proof_kind="public",
+    )
+    await db_session.commit()
+
+    def github_unavailable(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="temporarily unavailable")
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(github_unavailable))
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=make_fernet(),
+        http_client=http_client,
+        anthropic_client=anthropic_client,
+    )
+
+    async with db_session_factory() as check_session:
+        row = await binding_store.get_binding(check_session, tenant_id=tenant_id, agent_id=agent_id)
+    assert report.failed_bindings == 1, (
+        "a skipped repository fetch must keep the queue job retryable"
+    )
+    assert report.retryable_bindings == 1, "a GitHub 503 must be retried after queue backoff"
+    assert row is not None, "the binding should remain available after fetch failure"
+    assert row.last_sync_error is not None, "the fetch failure must be persisted on the binding"
+
+
+async def test_resync_keeps_attach_cap_error_visible_without_retrying_forever(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cli = await make_cli_principal(db_session, os_user="resync-attach-cap")
+    tenant_id = cli.tenant_id
+    repo_url = "owner/attach-cap-repo"
+    ma_handler = make_fake_ma_handler()
+
+    def ma_attach_cap(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.startswith("/v1/agents/"):
+            return httpx.Response(
+                400,
+                json={
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "Agent skills: 21 exceeds maximum of 20 for this organization",
+                    },
+                },
+            )
+        raise NotHandled
+
+    anthropic_client = build_fake_anthropic(
+        combine_handlers(ma_attach_cap, _make_skills_handler(), ma_handler)
+    )
+    ma_agent_id = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant_id,
+        agent_name="resync-attach-cap",
+    )
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+    await _setup_binding(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_url=repo_url,
+        proof_kind="public",
+    )
+    await db_session.commit()
+
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, content=tarball))
+    )
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=make_fernet(),
+        http_client=http_client,
+        anthropic_client=anthropic_client,
+    )
+
+    async with db_session_factory() as check_session:
+        row = await binding_store.get_binding(check_session, tenant_id=tenant_id, agent_id=agent_id)
+    assert report.failed_bindings == 1, (
+        "MA attach rejection must remain visible as a binding failure"
+    )
+    assert report.retryable_bindings == 0, (
+        "an MA skill-cap rejection needs operator action, not retries"
+    )
+    assert row is not None and row.last_sync_error is not None, (
+        "the permanent attach failure must remain actionable on the binding"
+    )
+    assert "exceeds maximum" in row.last_sync_error, "the binding error should preserve MA's reason"
+
+
+async def test_resync_keeps_missing_attach_agent_error_visible(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    cli = await make_cli_principal(db_session, os_user="resync-attach-agent-missing")
+    tenant_id = cli.tenant_id
+    repo_url = "owner/attach-agent-missing-repo"
+    ma_handler = make_fake_ma_handler()
+    agent_list_calls = 0
+
+    def agent_disappears_before_attach(request: httpx.Request) -> httpx.Response:
+        nonlocal agent_list_calls
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            agent_list_calls += 1
+            if agent_list_calls == 3:
+                return httpx.Response(
+                    200,
+                    json={"data": [], "has_more": False, "next_page": None},
+                )
+        raise NotHandled
+
+    anthropic_client = build_fake_anthropic(
+        combine_handlers(agent_disappears_before_attach, _make_skills_handler(), ma_handler)
+    )
+    ma_agent_id = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant_id,
+        agent_name="resync-attach-agent-missing",
+    )
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+    await _setup_binding(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_url=repo_url,
+        proof_kind="public",
+    )
+    await db_session.commit()
+
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, content=tarball))
+    )
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=make_fernet(),
+        http_client=http_client,
+        anthropic_client=anthropic_client,
+    )
+
+    async with db_session_factory() as check_session:
+        row = await binding_store.get_binding(check_session, tenant_id=tenant_id, agent_id=agent_id)
+    assert agent_list_calls >= 3, "agent disappearance must occur on the post-upload attach lookup"
+    assert report.failed_bindings == 1, (
+        "uploaded but unattached skills must remain a binding failure"
+    )
+    assert report.retryable_bindings == 0, "a missing MA agent is permanent until operator action"
+    assert row is not None and row.last_sync_error is not None, (
+        "the missing-agent attach failure must remain actionable on the binding"
     )
