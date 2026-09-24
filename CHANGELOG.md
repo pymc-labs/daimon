@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When two turns in one thread (for example a Discord form submit and a
+  mention) both find the thread's session gone, they now continue on one
+  replacement session. Previously each created its own, leaving the thread
+  with two active sessions and one turn's work in a session later messages
+  never reached.
 - A Discord mention sent into a thread while its turn is finishing is no
   longer left unanswered until the next mention, and a failed ⌛ reaction
   (for example, a missing Add Reactions permission) no longer drops the

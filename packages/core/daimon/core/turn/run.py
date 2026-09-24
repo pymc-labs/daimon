@@ -20,6 +20,9 @@ from datetime import UTC, datetime
 import anthropic as _anthropic
 import structlog
 from anthropic.types import RawMessageStreamEvent
+from anthropic.types.beta.beta_managed_agents_system_content_block_param import (
+    BetaManagedAgentsSystemContentBlockParam,
+)
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.errors import TurnError
 from daimon.core.handoff_context import (
@@ -28,9 +31,14 @@ from daimon.core.handoff_context import (
     select_recent_turns,
 )
 from daimon.core.ma import replay_events
+from daimon.core.session_preparation_stages import lock_preparation
 from daimon.core.stores.domain import TransferKind
 from daimon.core.stores.thread_session_lineage import link_replacement
-from daimon.core.stores.thread_sessions import get_thread_session_by_id, mark_dead
+from daimon.core.stores.thread_sessions import (
+    get_live_thread_session,
+    get_thread_session_by_id,
+    mark_dead,
+)
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn
@@ -234,6 +242,116 @@ def _with_prefix(prefix: str, message: str) -> str:
     return f"{prefix}\n{message}" if prefix else message
 
 
+@dataclass(frozen=True, slots=True)
+class _Replacement:
+    """The session a recovering turn moves onto after its own died."""
+
+    ma_session_id: str
+    mapping_id: uuid.UUID
+    model_id: str
+    transfer_kind: TransferKind
+    previous_session: str | None
+    adopted: bool
+    """True when another turn had already replaced the dead session."""
+
+
+async def _replace_dead_session(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    dead_session_id: str,
+    dead_mapping_id: uuid.UUID,
+) -> _Replacement:
+    """Mark the dead mapping dead and move onto one live replacement.
+
+    Runs under the same per-(tenant, platform, thread, account) advisory lock
+    as `prepare_session_for_turn`. Two turns can be running on one mapping
+    (a Discord wizard submit does not queue behind a mention), and both see
+    the session die. Without the lock each marked the row dead and created
+    its own replacement, leaving two live rows for one thread; a bind landing
+    between the mark and the create did the same. Under the lock the second
+    recovery finds the first one's replacement live and adopts it, and a bind
+    sees either the old row or the replacement, never neither.
+    """
+    admission = prepared.admission
+    session_account_id = prepared.session_account_id
+    async with deps.sessionmaker() as db, db.begin():
+        await lock_preparation(
+            db,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            account_id=session_account_id,
+        )
+        dead_row = await get_thread_session_by_id(db, id=dead_mapping_id)
+        live = await get_live_thread_session(
+            db,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            account_id=session_account_id,
+        )
+        await mark_dead(db, id=dead_mapping_id)
+
+        if live is not None and live.id != dead_mapping_id:
+            snapshot = live.effective_config
+            return _Replacement(
+                ma_session_id=live.ma_session_id,
+                mapping_id=live.id,
+                model_id=(snapshot.model_id if snapshot is not None else admission.agent.model.id),
+                transfer_kind=live.transfer_kind or "history",
+                previous_session=None,
+                adopted=True,
+            )
+
+        # Whose conversation it was, for the quoted block's `from` attribute:
+        # the snapshot the dead session actually froze, or the responder
+        # resolved for this turn on a row written before snapshots existed.
+        dead_snapshot = dead_row.effective_config if dead_row is not None else None
+        from_agent_name = (
+            dead_snapshot.agent_name if dead_snapshot is not None else admission.agent.name
+        )
+        previous_session = await _replay_previous_session(
+            deps.anthropic,
+            session_id=dead_session_id,
+            from_agent_name=from_agent_name,
+        )
+
+        # What the successor actually inherited, recorded on its row as the
+        # rung it came in on: `transcript` when the archived log read,
+        # `history` when nothing of the old session was left to read.
+        loss_transfer_kind: TransferKind = (
+            "transcript" if previous_session is not None else "history"
+        )
+        fresh = await create_fresh_session(
+            deps,
+            admission,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            session_account_id=session_account_id,
+            predecessor_id=dead_mapping_id,
+            transfer_kind=loss_transfer_kind,
+        )
+
+        # Close the chain from the other end. The dead row keeps
+        # `status="dead"` -- it says how this session ended, which a supersede
+        # would overwrite -- and gains only the pointer forward.
+        await link_replacement(db, id=dead_mapping_id, replaced_by_id=fresh.mapping_id)
+
+    return _Replacement(
+        ma_session_id=fresh.ma_session_id,
+        mapping_id=fresh.mapping_id,
+        model_id=fresh.snapshot.model_id,
+        transfer_kind=loss_transfer_kind,
+        previous_session=previous_session,
+        adopted=False,
+    )
+
+
 async def run_prepared_turn(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -356,52 +474,19 @@ async def run_prepared_turn(
         # forever, which is the exact failure mode this module exists to
         # prevent. Re-raise: the caller still needs to know recovery broke.
         try:
-            async with deps.sessionmaker() as session:
-                dead_row = await get_thread_session_by_id(session, id=mapping_id)
-                await mark_dead(session, id=mapping_id)
-                await session.commit()
-
-            # Whose conversation it was, for the quoted block's `from`
-            # attribute: the snapshot the dead session actually froze, or the
-            # responder resolved for this turn on a row written before
-            # snapshots existed.
-            dead_snapshot = dead_row.effective_config if dead_row is not None else None
-            from_agent_name = (
-                dead_snapshot.agent_name
-                if dead_snapshot is not None
-                else prepared.admission.agent.name
-            )
-            previous_session = await _replay_previous_session(
-                deps.anthropic,
-                session_id=ma_session_id,
-                from_agent_name=from_agent_name,
-            )
-
-            # What the successor actually inherited, recorded on its row as
-            # the rung it came in on: `transcript` when the archived log read,
-            # `history` when nothing of the old session was left to read.
-            loss_transfer_kind: TransferKind = (
-                "transcript" if previous_session is not None else "history"
-            )
-            fresh = await create_fresh_session(
+            recovery = await _replace_dead_session(
                 deps,
-                prepared.admission,
+                prepared,
                 tenant_id=tenant_id,
                 platform=platform,
                 thread_id=thread_id,
-                session_account_id=prepared.session_account_id,
-                predecessor_id=mapping_id,
-                transfer_kind=loss_transfer_kind,
+                dead_session_id=ma_session_id,
+                dead_mapping_id=mapping_id,
             )
-            new_session_id = fresh.ma_session_id
-            new_mapping_id = fresh.mapping_id
-
-            # Close the chain from the other end. The dead row keeps
-            # `status="dead"` -- it says how this session ended, which a
-            # supersede would overwrite -- and gains only the pointer forward.
-            async with deps.sessionmaker() as session:
-                await link_replacement(session, id=mapping_id, replaced_by_id=new_mapping_id)
-                await session.commit()
+            new_session_id = recovery.ma_session_id
+            new_mapping_id = recovery.mapping_id
+            loss_transfer_kind = recovery.transfer_kind
+            previous_session = recovery.previous_session
 
             active_session_id_cell[0] = new_session_id
             active_mapping_id_cell[0] = new_mapping_id
@@ -415,18 +500,27 @@ async def run_prepared_turn(
             # `transcript` when that read worked, `history` when it did not --
             # the same two rungs `workspace_transfer` walks, so the copy means
             # the same thing on both paths.
-            loss_framing = render_lost_workspace_framing(
-                model_id=fresh.snapshot.model_id,
-                previous_session=previous_session,
-            )
-            loss_system_blocks = (
-                loss_framing.system.blocks if loss_framing.system is not None else ()
-            )
+            #
+            # An adopted replacement was framed by the turn that created it;
+            # telling it about the same loss a second time would only repeat
+            # the quoted conversation, so this turn sends its message bare.
+            if recovery.adopted:
+                loss_user_prefix = ""
+                loss_system_blocks: tuple[BetaManagedAgentsSystemContentBlockParam, ...] = ()
+            else:
+                loss_framing = render_lost_workspace_framing(
+                    model_id=recovery.model_id,
+                    previous_session=previous_session,
+                )
+                loss_user_prefix = loss_framing.user_prefix
+                loss_system_blocks = (
+                    loss_framing.system.blocks if loss_framing.system is not None else ()
+                )
             continuity_cell[0] = replace(
                 prepared.continuity,
                 state="replaced_after_loss",
                 transfer_kind=loss_transfer_kind,
-                user_prefix=loss_framing.user_prefix,
+                user_prefix=loss_user_prefix,
                 system_blocks=loss_system_blocks,
             )
 
@@ -437,7 +531,7 @@ async def run_prepared_turn(
                 tenant_id=tenant_id,
                 external_user_id=external_user_id,
                 ma_session_id=new_session_id,
-                model_id=fresh.snapshot.model_id,
+                model_id=recovery.model_id,
             )
 
             log.info(
@@ -446,6 +540,7 @@ async def run_prepared_turn(
                 new_session_id=new_session_id,
                 old_mapping_id=str(mapping_id),
                 new_mapping_id=str(new_mapping_id),
+                adopted=recovery.adopted,
                 thread_id=thread_id,
             )
 
@@ -455,7 +550,7 @@ async def run_prepared_turn(
             # died. What goes instead is this loss's own framing -- daimon's
             # words on the privileged channel where the replacement's model
             # takes one, the quoted conversation always in the user message.
-            reseeded_message = _with_prefix(loss_framing.user_prefix, await reseed_user_message())
+            reseeded_message = _with_prefix(loss_user_prefix, await reseed_user_message())
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
 
