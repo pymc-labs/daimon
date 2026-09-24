@@ -20,12 +20,17 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+import structlog
 import structlog.testing
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from daimon.core._models import TenantLedger, UsageEvent
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_BILLING_EXEMPT,
+    MA_METADATA_KEY_TENANT,
+)
 from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.testing.factories import make_account, make_platform_principal
 from daimon.testing.ma import (
@@ -46,16 +51,20 @@ def _session_dict(
     tenant_id: uuid.UUID | str,
     account_id: uuid.UUID | str,
     model: str = "claude-sonnet-4-6",
+    billing_exempt: str | None = None,
 ) -> dict[str, Any]:
     """A headless MA session tagged the way create_session tags it."""
+    metadata = {
+        MA_METADATA_KEY_TENANT: str(tenant_id),
+        MA_METADATA_KEY_ACCOUNT: str(account_id),
+    }
+    if billing_exempt is not None:
+        metadata[MA_METADATA_KEY_BILLING_EXEMPT] = billing_exempt
     s = ma_session(
         id=session_id,
         agent=ma_session_agent(id="agent_headless1", name="headless-agent", model=model),
         environment_id="env_headless1",
-        metadata={
-            MA_METADATA_KEY_TENANT: str(tenant_id),
-            MA_METADATA_KEY_ACCOUNT: str(account_id),
-        },
+        metadata=metadata,
         created_at=NOW,
     )
     return s.model_dump(mode="json")
@@ -505,3 +514,160 @@ async def test_sweep_omits_platform_user_from_account_owned_by_another_tenant(
     assert account_b.id.hex not in repr(warnings[0]), (
         "cross-tenant warning must not expose raw account metadata"
     )
+
+
+def _two_session_router(*, tenant_id: uuid.UUID, account_id: uuid.UUID) -> MARouter:
+    """One exempt session and one billed session of the same tenant.
+
+    The exempt one has two model calls priced at claude-sonnet-4-6
+    ($3/M input, $15/M output): 1M in + 100k out ($4.50) and 200k in + 20k out
+    ($0.90), so its would-be cost is exactly $5.40.
+    """
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions",
+        lambda req, m: list_response(
+            [
+                _session_dict(
+                    session_id="sesn_exempt",
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    billing_exempt="mcp-internal-caller",
+                ),
+                _session_dict(
+                    session_id="sesn_billed",
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                ),
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/sesn_exempt/events",
+        lambda req, m: list_response(
+            [
+                _model_request_end_dict(
+                    event_id="evt_ex1", input_tokens=1_000_000, output_tokens=100_000
+                ),
+                _model_request_end_dict(
+                    event_id="evt_ex2", input_tokens=200_000, output_tokens=20_000
+                ),
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/sesn_billed/events",
+        lambda req, m: list_response(
+            [_model_request_end_dict(event_id="evt_b1", input_tokens=10, output_tokens=5)]
+        ),
+    )
+    return router
+
+
+async def test_sweep_does_not_debit_billing_exempt_session(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A session stamped daimon_billing_exempt (created for a BillingExempt
+    caller) is not replayed: no usage row and no tenant_ledger debit. The
+    operator absorbs that usage (docs/billing.md)."""
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="discord-user-exempt"
+    )
+    client = build_fake_anthropic(
+        _two_session_router(tenant_id=principal.tenant_id, account_id=principal.account_id).dispatch
+    )
+
+    await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.0"))
+
+    exempt_usage = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(UsageEvent)
+            .where(UsageEvent.managed_session_id == "sesn_exempt")
+        )
+    ).scalar_one()
+    exempt_debits = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(TenantLedger)
+            .where(TenantLedger.idempotency_key.like("turn:sesn_exempt:%"))
+        )
+    ).scalar_one()
+    assert exempt_debits == 0, (
+        f"a BillingExempt session must not be debited to the tenant, got {exempt_debits} debits"
+    )
+    assert exempt_usage == 0, f"a BillingExempt session must not get usage rows, got {exempt_usage}"
+
+
+async def test_sweep_still_debits_billed_session_next_to_exempt_one(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The backstop is unchanged for billed sessions: skipping an exempt
+    session does not skip the tenant's other sessions."""
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="discord-user-billed"
+    )
+    client = build_fake_anthropic(
+        _two_session_router(tenant_id=principal.tenant_id, account_id=principal.account_id).dispatch
+    )
+
+    await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.0"))
+
+    keys = (
+        (
+            await db_session.execute(
+                select(TenantLedger.idempotency_key).where(
+                    TenantLedger.idempotency_key.like("turn:%")
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert keys == ["turn:sesn_billed:evt_b1"], (
+        f"only the billed session's call is debited, got {keys}"
+    )
+
+
+async def test_sweep_logs_absorbed_cost_of_exempt_session(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The skipped session's would-be spend is logged per session
+    (usage_sweep.exempt_skipped) and totalled in the pass summary
+    (usage_sweep.completed), so the absorbed cost stays visible."""
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="discord-user-log"
+    )
+    client = build_fake_anthropic(
+        _two_session_router(tenant_id=principal.tenant_id, account_id=principal.account_id).dispatch
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        recorded = await sweep_headless_usage(client, db_session_factory, markup=Decimal("1.5"))
+
+    assert recorded == 1, f"only the billed session's event is replayed, got {recorded}"
+    skipped = [e for e in logs if e["event"] == "usage_sweep.exempt_skipped"]
+    assert len(skipped) == 1, f"one skip line for the one exempt session, got {logs!r}"
+    line = skipped[0]
+    assert line["tenant_id"] == str(principal.tenant_id), "skip line names the tenant"
+    assert line["managed_session_id"] == "sesn_exempt", "skip line names the session"
+    assert line["reason"] == "mcp-internal-caller", "skip line carries the stamped reason"
+    assert line["model_id"] == "claude-sonnet-4-6", "skip line names the priced model"
+    assert line["model_calls"] == 2, "both model calls are counted"
+    assert line["input_tokens"] == 1_200_000, "input tokens are summed"
+    assert line["output_tokens"] == 120_000, "output tokens are summed"
+    assert line["cost_usd"] == "5.400000", "cost is the raw price of both calls"
+    assert line["would_be_debit_usd"] == "8.100000", "would-be debit applies the markup"
+
+    summary = [e for e in logs if e["event"] == "usage_sweep.completed"]
+    assert len(summary) == 1, f"one summary line per pass, got {logs!r}"
+    assert summary[0]["recorded"] == 1, "summary counts replayed events"
+    assert summary[0]["exempt_sessions"] == 1, "summary counts skipped exempt sessions"
+    assert summary[0]["exempt_model_calls"] == 2, "summary counts their model calls"
+    assert summary[0]["exempt_cost_usd"] == "5.400000", "summary totals the absorbed cost"

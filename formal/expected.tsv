@@ -88,7 +88,8 @@ metering	Metering	MeteringPre1c4df18	violates:PriceAgreement	28	-	pre-1c4df18: l
 metering	Metering	MeteringSharedTenant	violates:NoForeignDebit	57	-	documented precondition: two deployments sharing an MA workspace and a chat workspace debit each other's sessions
 metering	Metering	MeteringSharedTenantOwned	clean	8006	-	hypothetical deployment stamp: sweep skips sessions another deployment created
 metering	Metering	MeteringSweepRace	violates:AttributionPreserved	41	-	documented residual: the sweep can commit a live session's call first, with its own attribution
-metering	Metering	MeteringExemptSwept	violates:ExemptNotBilled	41	-	documented gap: the sweep debits a BillingExempt turn (daimon run, MCP operator token) on a tenant-stamped session
+metering	Metering	MeteringExemptSwept	violates:ExemptNotBilled	41	-	pre-fix calibration (fixed by SweepSkipsExempt): the sweep debits a BillingExempt session to its tenant
+metering	Metering	MeteringExemptSkipped	clean	232	-	fix: exempt sessions are stamped daimon_billing_exempt and the sweep skips them; every invariant incl. ExemptNotBilled
 metering	BalanceGate	BalanceGate	clean	969	-	gated chat turns and classifier: every spend gated and debited, overdraft within MaxInflight x C
 metering	BalanceGate	BalanceGatePre8192ff7	violates:GatedSpend	105	-	pre-8192ff7: a reused-session Slack turn starts on a zero balance (no gate) and spends
 metering	BalanceGate	BalanceGatePre8192ff7Overdraft	violates:OverdraftBound	3398	-	pre-8192ff7, overdraft only: an ungated reused turn takes the ledger below MaxInflight x C

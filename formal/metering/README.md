@@ -52,7 +52,8 @@ the turn's `platform_user_id` and ledger reason. The sweep row carries
 | `LivePrice`, `LiveFrozenPrice` | [`bind_recorder`](../../packages/core/daimon/core/turn/prepare.py) binds the session snapshot's model (1c4df18); the sweep uses `session.agent.model.id` |
 | `Write`, `rows` | [`record_turn_usage`](../../packages/core/daimon/core/usage_recording.py), [`usage_events.record`](../../packages/core/daimon/core/stores/usage_events.py), [`tenant_ledger.insert_entry`](../../packages/core/daimon/core/stores/tenant_ledger.py) |
 | `SweepStart`/`SweepStep`/`SweepEnd`, `Bills(d)` | [`sweep_headless_usage`](../../packages/core/daimon/core/usage_sweep.py) (`known_tenants` check), called every tick from [`scheduler/main.py`](../../packages/adapters/scheduler/daimon/adapters/scheduler/main.py) |
-| `LiveExempt` | `BillingExempt` in [`posture.py`](../../packages/core/daimon/core/turn/posture.py) (`daimon run`); MCP `_admit` with `platform_user_id is None` in [`tools/_ctx.py`](../../packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py) |
+| `LiveExempt` | a session created for a `BillingExempt` caller: [`headless_runner.run_turn`](../../packages/core/daimon/core/headless_runner.py) with no recorder, MCP `start_turn` with `platform_user_id is None` (admitted ungated by `_admit` in [`tools/_ctx.py`](../../packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py)) |
+| `SweepSkipsExempt` | `daimon_billing_exempt` stamp written by [`create_session`](../../packages/core/daimon/core/sessions.py) and skipped (after logging its would-be cost) by [`sweep_headless_usage`](../../packages/core/daimon/core/usage_sweep.py) |
 
 Invariants:
 
@@ -65,7 +66,8 @@ Invariants:
   call has a row, whatever happened to the driver.
 - `AttributionPreserved`: every row of a turn whose driver stayed alive was
   written by that driver.
-- `ExemptNotBilled`: a `BillingExempt` turn has no rows.
+- `ExemptNotBilled`: a session created for a `BillingExempt` caller has no
+  rows (its usage is absorbed by the operator).
 
 "At most one debit per (session, event) per deployment" holds by
 construction, because `rows` is a function. That is the unique idempotency key.
@@ -79,7 +81,8 @@ construction, because `rows` is a function. That is the unique idempotency key.
 | `MeteringSharedTenant` | `SharedTenant = TRUE` | violates `NoForeignDebit` | 57, trace 4 | deployment precondition (see below) |
 | `MeteringSharedTenantOwned` | `SharedTenant`, `SweepChecksOwner` | clean | 8,006 | hypothetical deployment stamp; clean by construction (see below) |
 | `MeteringSweepRace` | checks `AttributionPreserved` only | violates | 41, trace 4 | documented residual: the sweep lists a live turn's call before the driver commits it |
-| `MeteringExemptSwept` | `LiveExempt = TRUE` | violates `ExemptNotBilled` | 41, trace 4 | documented discrepancy (see below) |
+| `MeteringExemptSwept` | `LiveExempt = TRUE`, `SweepSkipsExempt = FALSE` | violates `ExemptNotBilled` | 41, trace 4 | **pre-fix; fixed by #259**: the sweep debits an exempt session to its tenant (see below) |
+| `MeteringExemptSkipped` | `LiveExempt = TRUE`; checks every invariant `Metering` checks plus `ExemptNotBilled` | clean | 232 (depth 9) | the fix: the exempt session is stamped and the sweep skips it |
 
 ### Calibration
 
@@ -87,6 +90,7 @@ construction, because `rows` is a function. That is the unique idempotency key.
 | --- | --- | --- | --- | --- |
 | 44528cb: delivery and billing hooks re-ran for events redelivered after a reconnect | `MeteringPre44528cb` | `HookOnce`, trace of 6 states: emit e1, deliver (hook), drop, reconnect re-emitting e1, deliver (hook again) | `Metering` | clean, 8,006 states |
 | 1c4df18 (#177): turns billed at the agent's live model, not the session's | `MeteringPre1c4df18` | `PriceAgreement`, 4 states: agent model changes, e1 emitted and delivered, row priced at `m1` | `Metering` | clean |
+| #259: the sweep debited `BillingExempt` sessions | `MeteringExemptSwept` | `ExemptNotBilled`, 4 states: e1 emitted, owner sweep starts, sweep writes e1's row | `MeteringExemptSkipped` | clean, 232 states |
 
 Both calibration configs set `BillReplayed = FALSE`, because the replay folds
 did not bill until #234, long after either fix; the post-fix column is today's
@@ -127,14 +131,23 @@ that side effect is what the invariant models.
    agree. The reason and platform user are the sweep's when it commits first.
    The window is the driver's per-event latency. I documented it and did not
    fix it.
-4. **Exempt turns are billed by the sweep** (`MeteringExemptSwept`). I confirmed
-   this in the code. `daimon run` runs `BillingExempt` on an existing session.
-   An MCP caller with no platform user skips the gates. Both still act on a
-   session stamped with `daimon_tenant`, which the sweep then debits to the
-   tenant. `docs/billing.md` said these callers get "no usage row and no
-   debit". DECISION: this is a product-semantics question (who pays for an
-   operator's turn on a tenant's session). I left the behaviour unchanged and
-   corrected the documentation to state what happens.
+4. **Exempt turns were billed by the sweep** (`MeteringExemptSwept`). I
+   confirmed this in the code. An MCP caller with no platform user skips the
+   gates, and a headless run with no recorder is `BillingExempt`, but both
+   created a session stamped with `daimon_tenant`, which the sweep then
+   debited to the tenant. DECISION (product ruling): `BillingExempt` usage is
+   absorbed by the operator, not debited to the tenant. Fixed in #259:
+   such a session is created with `daimon_billing_exempt=<reason>`, and the
+   sweep skips it and logs its would-be cost (`usage_sweep.exempt_skipped`,
+   totalled in `usage_sweep.completed`). `SweepSkipsExempt = TRUE` is the
+   fixed shape; `MeteringExemptSwept` keeps the pre-fix shape as calibration
+   and `MeteringExemptSkipped` is clean. The model has one session with one
+   posture. The code decides the posture once, from the session's creator, so
+   a later turn by a different kind of caller on the same session (possible:
+   one account can hold both token kinds and `continue_turn` checks only
+   agent and account; or `daimon run --session` on a chat session) follows
+   the creator's posture. That mixed case is not modelled; the unit tests in
+   `test_usage_sweep.py` and `test_agent_chat.py` pin the rule.
 
 ## `BalanceGate.tla`
 

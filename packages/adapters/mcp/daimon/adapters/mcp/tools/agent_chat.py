@@ -83,6 +83,7 @@ from daimon.core.scope import ScopeContext
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.turn.posture import ExemptReason
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
@@ -328,8 +329,17 @@ async def _start_turn_impl(
     (``create_isolated_session``) with the bundle mounted as its only
     resource, instead of the normal vault/repo/env-mounted ``create_session``
     path. See ``bundle_handle`` and SPEC §1.1 for the verification steps.
+
+    A caller with no platform user (an internal or CLI token, which ``_admit``
+    lets through ungated and unbilled) gets a session stamped
+    ``daimon_billing_exempt="mcp-internal-caller"``, so the usage sweep skips
+    it: the operator absorbs that usage. The stamp is the creator's posture
+    and covers the whole session, including later ``continue_turn`` calls.
     """
     ma_agent = await _resolve_ma_agent(runtime, auth)
+    billing_exempt: ExemptReason | None = (
+        "mcp-internal-caller" if auth.platform_user_id is None else None
+    )
 
     env_name = await _resolve_environment_name(runtime, auth)
     if env_name is None:
@@ -375,6 +385,7 @@ async def _start_turn_impl(
             account_id=auth.account_id,
             tenant_id=auth.tenant_id,
             resources=resources,
+            billing_exempt=billing_exempt,
         )
     else:
         github_fallback_pat: str | None = (
@@ -402,6 +413,7 @@ async def _start_turn_impl(
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
+            billing_exempt=billing_exempt,
         )
 
     turn_started_at = now()

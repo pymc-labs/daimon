@@ -62,7 +62,7 @@ from daimon.adapters.mcp.tools.agent_chat import (
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut
 from daimon.core import bundle_handle
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_BILLING_EXEMPT
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import DeploymentDefault
@@ -1787,6 +1787,138 @@ async def test_start_turn_with_bundle_mounts_the_single_resource_on_an_isolated_
     assert "vault_ids" not in body, "an isolated bundle session must never carry a vault_ids key"
 
 
+def _boundary_send_response(_r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+    return send_events_response(
+        data=[
+            BetaManagedAgentsUserMessageEvent(
+                id="sevt_exempt_boundary",
+                content=[BetaManagedAgentsTextBlock(type="text", text="hi")],
+                type="user.message",
+                processed_at=dt.datetime(2026, 9, 24, 10, 0, tzinfo=dt.UTC),
+            ).model_dump(mode="json")
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("platform_user_id", "expected"),
+    [(None, "mcp-internal-caller"), ("discord-user-7", None)],
+    ids=["no-platform-user-is-exempt", "platform-user-is-billed"],
+)
+async def test_start_turn_stamps_billing_exempt_only_for_a_caller_without_platform_user(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    platform_user_id: str | None,
+    expected: str | None,
+) -> None:
+    """``_admit`` lets a caller with no platform user through unbilled, so its
+    session is stamped exempt and the usage sweep skips it. A caller with a
+    platform user gets an unstamped, sweepable session."""
+    router = _agent_and_env_router()
+    router.add("POST", r"/v1/sessions/([^/]+)/events", _boundary_send_response)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    auth = AuthIdentity(
+        account_id=_ACCOUNT_ID,
+        tenant_id=_TENANT_ID,
+        role=Role.USER,
+        agent_id=_AGENT_UUID,
+        platform_user_id=platform_user_id,
+    )
+    create = AsyncMock(
+        return_value=ma_session(
+            id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID, status="running"
+        )
+    )
+
+    with patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create):
+        await _start_turn_impl(runtime, auth, "hi")
+
+    assert create.await_count == 1, "start_turn creates exactly one session"
+    assert create.await_args is not None
+    assert create.await_args.kwargs["billing_exempt"] == expected, (
+        f"platform_user_id={platform_user_id!r} must stamp billing_exempt={expected!r}"
+    )
+
+
+async def test_start_turn_with_bundle_stamps_billing_exempt_for_caller_without_platform_user(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The isolated (bundle) path stamps the same exempt marker on the session
+    metadata MA receives."""
+    create_bodies: list[dict[str, Any]] = []
+
+    def on_create(request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        create_bodies.append(json_body(request))
+        return httpx.Response(200, json=_session_json(status="running"))
+
+    router = _isolated_agent_and_env_router()
+    router.add("POST", r"/v1/sessions", on_create)
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)",
+        lambda _r, m: httpx.Response(200, json=_file_metadata_payload(m.group(1))),
+    )
+    router.add("POST", r"/v1/sessions/([^/]+)/events", _boundary_send_response)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    runtime.settings.mcp.jwt_secret = SecretStr(_BUNDLE_SECRET)
+
+    await _start_turn_impl(runtime, _auth(), "hi", _mint_bundle(file_id="file_bundle_ex"))
+
+    assert len(create_bodies) == 1, "exactly one session-create call should reach MA"
+    assert create_bodies[0]["metadata"][MA_METADATA_KEY_BILLING_EXEMPT] == (
+        "mcp-internal-caller"
+    ), f"the isolated session must carry the exempt stamp; got {create_bodies[0]!r}"
+
+
+async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place() -> None:
+    """Mixed posture on one session: the same account can hold an internal
+    token (no platform user) and a platform token, and ``continue_turn`` checks
+    only agent + account. A billed caller continuing an exempt session sends
+    its message and touches nothing else, so the creator's exempt stamp still
+    governs the whole session and the sweep keeps skipping it (documented rule:
+    the session creator's posture covers every turn on it)."""
+    requests: list[tuple[str, str]] = []
+    exempt_session = ma_session(
+        id="ses_exempt",
+        agent_id=_MA_AGENT_ID,
+        environment_id=_ENV_ID,
+        status="idle",
+        metadata={
+            MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID),
+            MA_METADATA_KEY_BILLING_EXEMPT: "mcp-internal-caller",
+        },
+    ).model_dump(mode="json")
+
+    def on_retrieve(request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        return httpx.Response(200, json=exempt_session)
+
+    def on_send(request: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        return _boundary_send_response(request, m)
+
+    router = MARouter()
+    router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
+    router.add("GET", r"/v1/sessions/([^/]+)", on_retrieve)
+    client = build_fake_anthropic(router.dispatch)
+    billed_caller = AuthIdentity(
+        account_id=_ACCOUNT_ID,
+        tenant_id=_TENANT_ID,
+        role=Role.USER,
+        agent_id=_AGENT_UUID,
+        platform_user_id="discord-user-7",
+    )
+
+    result = await _continue_turn_impl(_runtime(client), billed_caller, "ses_exempt", "more")
+
+    assert result["handle"] == "ses_exempt", "a same-account billed caller may continue"
+    assert requests == [
+        ("GET", "/v1/sessions/ses_exempt"),
+        ("POST", "/v1/sessions/ses_exempt/events"),
+    ], f"continue_turn must not rewrite session metadata; saw {requests!r}"
+
+
 async def test_start_turn_with_bundle_preserves_the_boundary_return_shape(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -2093,6 +2225,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "github_fallback_pat",
         "github_app_id",
         "github_app_private_key",
+        "billing_exempt",
     }, f"the non-bundle path must keep passing its full argument set; got {sorted(call_kwargs)!r}"
 
 

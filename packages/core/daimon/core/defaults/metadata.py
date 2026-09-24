@@ -18,6 +18,11 @@ MA_METADATA_KEY_ISOLATED = "daimon_isolated"
 # can tell "unchanged source, reuse the variant" from "source moved, update
 # it" without re-deriving the whole spec first.
 MA_METADATA_KEY_READER_OF = "daimon_reader_of"
+# Stamped on an MA session created for a `BillingExempt` caller, with the
+# `ExemptReason` as its value (see `daimon.core.turn.posture`). The usage sweep
+# skips a session carrying it: the operator absorbs that usage, it is never
+# debited to the tenant named by `daimon_tenant`. Absent on a billed session.
+MA_METADATA_KEY_BILLING_EXEMPT = "daimon_billing_exempt"
 
 # Marks a whole MA workspace as a throwaway one that the test-only workspace
 # nuke is allowed to empty. Stamped on a single sentinel agent, never on a

@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import McpSettings
 from daimon.core.credential_requests import mint_request_token
+from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from daimon.core.sessions import create_session
@@ -29,6 +30,7 @@ from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import RepoAccessProof
+from daimon.core.turn.posture import ExemptReason
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
     FakeMemoryStoreState,
@@ -529,6 +531,44 @@ async def test_create_session_tags_metadata_with_account_and_tenant_when_both_pr
     )
     assert metadata["daimon_tenant"] == str(tenant_id), (
         "metadata must tag daimon_tenant with the tenant UUID string"
+    )
+
+
+@pytest.mark.parametrize(
+    ("billing_exempt", "expected"),
+    [(None, None), ("mcp-internal-caller", "mcp-internal-caller")],
+    ids=["billed-caller-unstamped", "exempt-caller-stamped"],
+)
+async def test_create_session_stamps_billing_exempt_reason_only_when_given(
+    billing_exempt: ExemptReason | None, expected: str | None
+) -> None:
+    """``billing_exempt`` becomes ``daimon_billing_exempt=<reason>``, the marker
+    the usage sweep skips; a billed caller's session has no such key."""
+    captured_bodies: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured_bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_exempt",
+                agent_id=body["agent"],
+                environment_id=body["environment_id"],
+            ),
+        )
+
+    await create_session(
+        build_fake_anthropic_http(_handler),
+        agent=_make_agent(anthropic_id="ag_ex"),
+        environment=_make_env(anthropic_id="env_ex"),
+        tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000022"),
+        billing_exempt=billing_exempt,
+    )
+
+    metadata = captured_bodies[0]["metadata"]
+    assert metadata.get(MA_METADATA_KEY_BILLING_EXEMPT) == expected, (
+        f"billing_exempt={billing_exempt!r} must stamp {expected!r}; got {metadata!r}"
     )
 
 
