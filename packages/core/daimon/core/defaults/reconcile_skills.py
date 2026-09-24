@@ -49,6 +49,7 @@ async def reconcile_skill(
     *,
     tenant_id: uuid.UUID,
     dry_run: bool,
+    db_session: AsyncSession | None = None,
 ) -> ResourceOutcome:
     spec, _body = load_skill_spec(skill_dir)
     display_title = tenant_scoped_display_title(tenant_id=tenant_id, name=spec.name)
@@ -82,8 +83,16 @@ async def reconcile_skill(
     pkg = build_skill_zip(skill_dir)
     try:
         if ma_match is not None:
-            async with session_factory() as session:
-                recorded = await load_seeded_skill(session, tenant_id=tenant_id, name=spec.name)
+            if db_session is None:
+                async with session_factory() as seed_session:
+                    recorded = await load_seeded_skill(
+                        seed_session, tenant_id=tenant_id, name=spec.name
+                    )
+            else:
+                async with db_session.begin_nested():
+                    recorded = await load_seeded_skill(
+                        db_session, tenant_id=tenant_id, name=spec.name
+                    )
             # A recorded hash for a DIFFERENT skill id describes content we can
             # no longer vouch for on this one, so it does not count as a match.
             if (
@@ -109,15 +118,25 @@ async def reconcile_skill(
                 await client.beta.skills.versions.create(
                     ma_match.id, files=[("SKILL.zip", fh, "application/zip")]
                 )
-            async with session_factory() as session:
-                await record_seeded_skill(
-                    session,
-                    tenant_id=tenant_id,
-                    name=spec.name,
-                    content_hash=pkg.content_hash,
-                    anthropic_id=ma_match.id,
-                )
-                await session.commit()
+            if db_session is None:
+                async with session_factory() as seed_session:
+                    await record_seeded_skill(
+                        seed_session,
+                        tenant_id=tenant_id,
+                        name=spec.name,
+                        content_hash=pkg.content_hash,
+                        anthropic_id=ma_match.id,
+                    )
+                    await seed_session.commit()
+            else:
+                async with db_session.begin_nested():
+                    await record_seeded_skill(
+                        db_session,
+                        tenant_id=tenant_id,
+                        name=spec.name,
+                        content_hash=pkg.content_hash,
+                        anthropic_id=ma_match.id,
+                    )
             return ResourceOutcome(
                 kind="skill", name=spec.name, action=Action.UPDATED, anthropic_id=ma_match.id
             )
@@ -128,15 +147,25 @@ async def reconcile_skill(
             created = await client.beta.skills.create(
                 display_title=display_title, files=[("SKILL.zip", fh, "application/zip")]
             )
-        async with session_factory() as session:
-            await record_seeded_skill(
-                session,
-                tenant_id=tenant_id,
-                name=spec.name,
-                content_hash=pkg.content_hash,
-                anthropic_id=created.id,
-            )
-            await session.commit()
+        if db_session is None:
+            async with session_factory() as seed_session:
+                await record_seeded_skill(
+                    seed_session,
+                    tenant_id=tenant_id,
+                    name=spec.name,
+                    content_hash=pkg.content_hash,
+                    anthropic_id=created.id,
+                )
+                await seed_session.commit()
+        else:
+            async with db_session.begin_nested():
+                await record_seeded_skill(
+                    db_session,
+                    tenant_id=tenant_id,
+                    name=spec.name,
+                    content_hash=pkg.content_hash,
+                    anthropic_id=created.id,
+                )
     finally:
         pkg.path.unlink(missing_ok=True)
     return ResourceOutcome(
