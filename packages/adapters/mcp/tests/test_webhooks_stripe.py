@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 import stripe
+from daimon.adapters.mcp import webhooks
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.billing import BillingConfig
 from daimon.core.config import (
@@ -21,7 +22,7 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
-from daimon.core.stores import payment_events, tenant_ledger
+from daimon.core.stores import payment_events, pending_clawbacks, tenant_ledger
 from daimon.testing.factories import make_tenant
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -460,6 +461,145 @@ async def test_clawback_charge_dispute_writes_negative_ledger_row(
     assert balance == Decimal("0"), (
         "after credit + dispute clawback of equal amount, balance must be zero"
     )
+
+
+async def test_refund_before_completion_is_applied_when_credit_arrives(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A valid refund delivered before Checkout completion must be retained."""
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    payment_intent = "pi_refund_before_completion"
+
+    refund = await _post_signed(
+        app,
+        _charge_refunded_payload(
+            "evt_refund_before_completion_4",
+            payment_intent=payment_intent,
+            amount_refunded=400,
+        ),
+    )
+    assert refund.status_code == 200
+    later_refund = await _post_signed(
+        app,
+        _charge_refunded_payload(
+            "evt_refund_before_completion_7",
+            payment_intent=payment_intent,
+            amount_refunded=700,
+        ),
+    )
+    assert later_refund.status_code == 200
+
+    async with committing_sessionmaker() as session:
+        pending = await pending_clawbacks.list_for_payment_intent(
+            session, payment_intent=payment_intent
+        )
+    assert {row.target_amount_usd for row in pending} == {Decimal("4"), Decimal("7")}
+
+    completion = _checkout_session_completed_payload(
+        "evt_completion_after_refund", tenant_id=str(tenant), amount_total=1000
+    )
+    completion["data"]["object"]["payment_intent"] = payment_intent
+    credited = await _post_signed(app, completion)
+    assert credited.status_code == 200
+
+    async with committing_sessionmaker() as session:
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant)
+        pending = await pending_clawbacks.list_for_payment_intent(
+            session, payment_intent=payment_intent
+        )
+    assert balance == Decimal("3"), "cumulative early refunds must leave $3 of the $10 topup"
+    assert pending == []
+
+
+async def test_absent_credit_clawback_and_completion_concurrent_delivery(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent arrival of a completion and early refund retains the clawback."""
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    payment_intent = "pi_absent_credit_race"
+    original_lock = pending_clawbacks.lock_payment_intent
+    both_arrived = asyncio.Event()
+    arrived = 0
+
+    async def synchronize_before_lock(session: AsyncSession, *, payment_intent: str) -> None:
+        nonlocal arrived
+        arrived += 1
+        if arrived == 2:
+            both_arrived.set()
+        await asyncio.wait_for(both_arrived.wait(), timeout=5)
+        await original_lock(session, payment_intent=payment_intent)
+
+    monkeypatch.setattr(pending_clawbacks, "lock_payment_intent", synchronize_before_lock)
+    completion = _checkout_session_completed_payload(
+        "evt_completion_racing_refund", tenant_id=str(tenant), amount_total=1000
+    )
+    completion["data"]["object"]["payment_intent"] = payment_intent
+    refund = _charge_refunded_payload(
+        "evt_refund_racing_completion", payment_intent=payment_intent, amount_refunded=400
+    )
+
+    completed, refunded = await asyncio.gather(
+        _post_signed(app, completion), _post_signed(app, refund)
+    )
+    assert completed.status_code == refunded.status_code == 200
+    async with committing_sessionmaker() as session:
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant)
+        pending = await pending_clawbacks.list_for_payment_intent(
+            session, payment_intent=payment_intent
+        )
+    assert balance == Decimal("6")
+    assert pending == []
+
+
+async def test_pending_drain_failure_rolls_back_credit_and_keeps_event(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed completion transaction preserves pending event for safe retry."""
+    tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    payment_intent = "pi_pending_drain_rollback"
+    await _post_signed(
+        app,
+        _charge_refunded_payload(
+            "evt_pending_drain_rollback", payment_intent=payment_intent, amount_refunded=400
+        ),
+    )
+    completion = _checkout_session_completed_payload(
+        "evt_completion_pending_drain_rollback", tenant_id=str(tenant), amount_total=1000
+    )
+    completion["data"]["object"]["payment_intent"] = payment_intent
+    original_drain = webhooks._drain_pending_clawbacks
+
+    async def fail_after_drain(*args: Any, **kwargs: Any) -> None:
+        await original_drain(*args, **kwargs)
+        raise RuntimeError("injected failure after pending clawback drain")
+
+    monkeypatch.setattr(webhooks, "_drain_pending_clawbacks", fail_after_drain)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        await _post_signed(app, completion)
+
+    async with committing_sessionmaker() as session:
+        balance_after_rollback = await tenant_ledger.get_balance(session, tenant_id=tenant)
+        pending_after_rollback = await pending_clawbacks.list_for_payment_intent(
+            session, payment_intent=payment_intent
+        )
+    assert balance_after_rollback == Decimal("0")
+    assert len(pending_after_rollback) == 1
+
+    monkeypatch.setattr(webhooks, "_drain_pending_clawbacks", original_drain)
+    retried = await _post_signed(app, completion)
+    assert retried.status_code == 200
+    async with committing_sessionmaker() as session:
+        balance_after_retry = await tenant_ledger.get_balance(session, tenant_id=tenant)
+        pending_after_retry = await pending_clawbacks.list_for_payment_intent(
+            session, payment_intent=payment_intent
+        )
+    assert balance_after_retry == Decimal("6")
+    assert pending_after_retry == []
 
 
 async def test_clawback_idempotent_no_double_clawback(

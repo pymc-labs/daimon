@@ -383,6 +383,18 @@ class PaymentEventRow(BaseModel):
     occurred_at: datetime
 
 
+class PendingPaymentClawbackRow(BaseModel):
+    """Verified Stripe clawback waiting for its original payment credit."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    event_id: str
+    payment_intent: str
+    event_type: str
+    target_amount_usd: Decimal | None
+    received_at: datetime
+
+
 class TenantLedgerRow(BaseModel):
     """Append-only ledger row. Balance = SUM(delta_usd). TOPUP-01."""
 
