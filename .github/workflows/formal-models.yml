@@ -31,6 +31,10 @@ on:
       - "packages/adapters/discord/daimon/adapters/discord/bot.py"
       - "packages/adapters/slack/daimon/adapters/slack/app.py"
       - "packages/adapters/slack/daimon/adapters/slack/boot_sweep.py"
+      - "packages/adapters/slack/daimon/adapters/slack/__main__.py"
+      # the stop-before-start deploy that RollingOverlap assumes
+      - ".github/workflows/deploy.yml"
+      - "docker-compose.yml"
       # billing/
       - "packages/adapters/mcp/daimon/adapters/mcp/webhooks.py"
       - "packages/core/daimon/core/_models.py"
@@ -43,6 +47,26 @@ on:
       - "packages/core/daimon/core/stores/wizard_session.py"
       - "packages/core/daimon/core/wizard/state.py"
       - "packages/core/daimon/core/wizard_sweep.py"
+      # oauth callbacks, vault slot, slack install
+      - "packages/core/daimon/core/mcp_oauth/**"
+      - "packages/core/daimon/core/stores/mcp_oauth_flows.py"
+      - "packages/core/daimon/core/agent_mcp_credentials.py"
+      - "packages/core/daimon/core/stores/agent_mcp_credentials.py"
+      - "packages/core/daimon/core/mcp_vault.py"
+      - "packages/core/daimon/core/mcp_credential_sweep.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/oauth_mcp.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/oauth_slack.py"
+      - "packages/core/daimon/core/slack_oauth.py"
+      - "packages/core/daimon/core/defaults/provisioning.py"
+      - "packages/core/daimon/core/stores/slack_bot_tokens.py"
+      - "packages/core/daimon/core/stores/tenants.py"
+      - "packages/core/daimon/core/sessions.py"
+      # thread queue / adapter overlap
+      - "packages/core/daimon/core/turn/run.py"
+      - "packages/core/daimon/core/stores/thread_sessions.py"
+      - "packages/core/daimon/core/ma.py"
+      - "packages/adapters/slack/daimon/adapters/slack/credential_submissions.py"
+      - "packages/adapters/discord/daimon/adapters/discord/credential_modals.py"
   workflow_dispatch:
 
 permissions:
