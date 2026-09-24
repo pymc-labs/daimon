@@ -94,10 +94,10 @@ above.
   mirror re-reads on a 404). `GrantRetry` is clean with two concurrent mirrors
   only; see the next section for three.
 
-## Open bug on main (fix in #239)
+## Pre-#239 counterexample
 
-- **Three concurrent mirrors exhaust #230's retry** (`GrantRetryThreeMirrors`,
-  violates `SignInNeverLost`; fix proposed in pymc-labs/daimon#239, open). Each
+- **Three concurrent mirrors exhausted #230's retry** (`GrantRetryThreeMirrors`,
+  violates `SignInNeverLost`; fixed in pymc-labs/daimon#239). Before that fix, each
   retry of the grant write can be undone by one more turn mirroring the same
   (account, agent) vault. Trace (16 states): the grant write lists and deletes
   the static credential → mirror 1 lists the empty slot and creates the static

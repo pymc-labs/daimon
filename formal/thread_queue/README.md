@@ -68,23 +68,24 @@ recoverable past commit.
   clean. Fixed on main by pymc-labs/daimon#233. As in the code, the re-run is
   spawned at release and claims the thread again after an await
   (`FormDispatch`), so it can defer again if a mention claimed the thread first.
-  `FormRedispatch` matches main and does not check `NoStrandedMention`, because
-  main still strands a mention queued behind the dispatch (next section).
+  `FormRedispatch` isolates the #233 fix and does not check
+  `NoStrandedMention`; that property is checked by the #237 configurations
+  below.
 
-## Open bug on main (fix in #237)
+## Pre-#237 counterexample
 
-- **A mention queued behind an out-of-turn dispatch is stranded**
-  (`FormDispatchNoDrain`, violates `NoStrandedMention`; fix proposed in
-  pymc-labs/daimon#237, open). `dispatch_continuations_in_thread` (Slack
-  `app.py`, Discord `bot.py`) adds the thread to `_processing` for the whole
-  continuation turn, so a mention arriving then is appended to `_pending` and
-  gets ⌛. Its `finally` only calls `_release_thread`, which discards the slot
-  and re-runs a deferred dispatch but never reads `_pending`, so the mention
-  waits for the next mention in that thread. Trace (7 states): form records its
+- **A mention queued behind an out-of-turn dispatch was stranded**
+  (`FormDispatchNoDrain`, violates `NoStrandedMention`; fixed in
+  pymc-labs/daimon#237). Before that fix, `dispatch_continuations_in_thread` (Slack
+  `app.py`, Discord `bot.py`) added the thread to `_processing` for the whole
+  continuation turn, so a mention arriving then was appended to `_pending` and
+  got ⌛. Its `finally` only called `_release_thread`, which discarded the slot
+  and re-ran a deferred dispatch but never read `_pending`, so the mention
+  waited for the next mention in that thread. Trace (7 states): form records its
   continuation → dispatch claims the thread → three mentions arrive and queue →
   dispatch releases the thread with all three still queued. The same holds for
   the #233 re-run, which goes through the same function.
-  `FormDispatchDrain` (drain `_pending` before releasing, #237's shape) is
+  `FormDispatchDrain` (drain `_pending` before releasing, now on main) is
   clean with all four invariants. The config differs from `FormDispatchNoDrain`
   only in `DrainAfterDispatch`. #237's Discord path leaves the queue for the
   next turn when the dispatch raises; a raising dispatch is not modelled.
