@@ -44,13 +44,6 @@ async def enqueue(
     if inserted is None:
         return False
 
-    if deleted:
-        await session.execute(
-            delete(GitHubAppInstallation).where(
-                GitHubAppInstallation.installation_id == installation_id
-            )
-        )
-
     stmt = (
         pg_insert(GitHubInstallationReconciliation)
         .values(
@@ -82,6 +75,14 @@ async def enqueue(
         )
     )
     await session.execute(stmt)
+    if deleted:
+        # Lock the queue row before the cache row, matching finish()'s lock
+        # order so a deletion cannot deadlock an in-flight snapshot write.
+        await session.execute(
+            delete(GitHubAppInstallation).where(
+                GitHubAppInstallation.installation_id == installation_id
+            )
+        )
     return True
 
 

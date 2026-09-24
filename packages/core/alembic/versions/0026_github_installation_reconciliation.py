@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0026_github_installation_reconciliation"
+revision: str = "0026_gh_install_reconcile"
 down_revision: str | None = "0025_github_push_resync_queue"
 branch_labels: str | None = None
 depends_on: str | None = None
@@ -60,6 +60,17 @@ def upgrade() -> None:
         "ix_github_installation_deliveries_received_at",
         "github_installation_deliveries",
         ["received_at"],
+    )
+    op.execute(
+        sa.text(
+            """
+            INSERT INTO github_installation_reconciliations
+                (installation_id, generation, state, attempts, available_at)
+            SELECT installation_id, 1, 'pending', 0, CURRENT_TIMESTAMP
+            FROM github_app_installations
+            ON CONFLICT (installation_id) DO NOTHING
+            """
+        )
     )
 
 

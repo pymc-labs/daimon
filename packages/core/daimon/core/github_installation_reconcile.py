@@ -26,7 +26,8 @@ _MAX_RETRY_DELAY = timedelta(minutes=5)
 
 
 def _retry_delay(attempts: int) -> timedelta:
-    return min(timedelta(seconds=5 * 2 ** max(0, attempts - 1)), _MAX_RETRY_DELAY)
+    seconds = min(5 * 2 ** min(max(attempts - 1, 0), 16), int(_MAX_RETRY_DELAY.total_seconds()))
+    return timedelta(seconds=seconds)
 
 
 async def drain_github_installation_reconciliations(

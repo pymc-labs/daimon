@@ -31,7 +31,7 @@ java -cp "$TLA2TOOLS_JAR" tlc2.TLC \
 | `DeliverCreated` / `DeliverAdded` / `DeliverRemoved` | [`InstallationDeliveryOrder.tla`](InstallationDeliveryOrder.tla) records the webhook-only behavior that produced the original stale states. Current webhooks enqueue refresh work instead of applying these event payloads to the cache. |
 | `Notify` / `FetchComplete` / `CommitCurrent` / `DiscardStale` | [`github_installation_reconciliation.py`](../../packages/core/daimon/core/stores/github_installation_reconciliation.py) coalesces event generations and only writes a complete repository snapshot for the current lease and generation. |
 | Authoritative `FetchComplete` | [`github_app_auth.py`](../../packages/core/daimon/core/github_app_auth.py) uses a metadata-only installation token and reads every page from `GET /installation/repositories`; an API or payload failure leaves the last complete cache unchanged and the job retryable. |
-| Delete fence | The `installation.deleted` webhook clears the cache and advances the same durable generation. A result already in flight cannot write across that generation change. |
+| Delete fence | The `installation.deleted` webhook clears the cache and advances the same durable generation. A result already in flight cannot write across that generation change. The TLA+ model checks the generation fence only; immediate cache deletion is covered by executable tests, not modeled. |
 | `CompletedSnapshotIsCurrent` | Signed webhook tests in [`test_webhooks_github.py`](../../packages/adapters/mcp/tests/test_webhooks_github.py) run both reported delivery orders through PostgreSQL and a deterministic GitHub API fake, then compare the cache with the fake's authoritative set. |
 
 GitHub [documents that webhook deliveries can arrive out of order](https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/troubleshooting-webhooks#webhooks-deliveries-are-out-of-order)
@@ -82,6 +82,14 @@ retries do not make API availability or webhook delivery a strong freshness
 guarantee. Normal clone requests still use a one-repository token, and the
 tenant-local recorded access proof remains the authorization gate; the
 installation-wide metadata listing only refreshes the deployment cache.
+
+Migration `0026` queues every installation already in the cache, so a
+previously stale row gets an initial refresh after rollout without waiting for
+another webhook. The page-count check detects missing, repeated, or inconsistent
+results, but the REST API does not provide an atomic multi-page snapshot. The
+listing therefore assumes repository membership stays stable while its pages
+are read; a changed count or malformed page is retried, and freshness remains
+eventual rather than immediate or strongly guaranteed.
 
 The delivery-order model uses one installation and distinct valid repository
 names. The reconciliation-fence model checks that an older fetch cannot

@@ -246,6 +246,8 @@ async def list_installation_repositories(
     }
     repos: list[str] = []
     seen: set[str] = set()
+    seen_next_links: set[str] = set()
+    total_count: int | None = None
     page = 1
     while True:
         response = await http_client.get(
@@ -256,9 +258,17 @@ async def list_installation_repositories(
         if not isinstance(body, dict):
             raise ValueError("GitHub installation-repositories response is malformed")
         body_object = cast(dict[str, object], body)
+        page_total = body_object.get("total_count")
+        if not isinstance(page_total, int) or isinstance(page_total, bool) or page_total < 0:
+            raise ValueError("GitHub installation-repositories response has invalid total_count")
+        if total_count is None:
+            total_count = page_total
+        elif page_total != total_count:
+            raise ValueError("GitHub installation-repositories total_count changed between pages")
         repository_list = body_object.get("repositories")
         if not isinstance(repository_list, list):
             raise ValueError("GitHub installation-repositories response is malformed")
+        seen_before_page = len(seen)
         for repository in cast(list[object], repository_list):
             if not isinstance(repository, dict):
                 raise ValueError("GitHub installation-repositories page has a malformed repository")
@@ -271,8 +281,28 @@ async def list_installation_repositories(
             if full_name not in seen:
                 repos.append(full_name)
                 seen.add(full_name)
+        if len(seen) > total_count:
+            raise ValueError(
+                "GitHub installation-repositories returned more repositories than total_count"
+            )
         if "next" not in response.links:
+            if len(seen) != total_count:
+                raise ValueError(
+                    "GitHub installation-repositories page count does not match total_count"
+                )
             return repos
+        if not repository_list:
+            raise ValueError(
+                "GitHub installation-repositories returned an empty page with a next link"
+            )
+        if len(seen) == seen_before_page or len(seen) >= total_count:
+            raise ValueError(
+                "GitHub installation-repositories page cannot make progress toward total_count"
+            )
+        next_url = response.links["next"].get("url")
+        if not isinstance(next_url, str) or next_url in seen_next_links:
+            raise ValueError("GitHub installation-repositories repeated or malformed next link")
+        seen_next_links.add(next_url)
         page += 1
 
 

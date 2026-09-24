@@ -114,6 +114,7 @@ github_installation	InstallationUpdates	InstallationUpdatesStaleWrite	violates:E
 github_installation	InstallationUpdates	InstallationUpdatesSafe	clean	93	-	atomic row updates preserve concurrent repo additions and removals
 github_installation	InstallationDeliveryOrder	InstallationDeliveryOrderCreated	violates:FinalSetMatchesGitHub	5	-	delayed creation snapshot overwrites a repository delta delivered first
 github_installation	InstallationDeliveryOrder	InstallationDeliveryOrderDeltas	violates:FinalSetMatchesGitHub	11	-	opposite repository deltas delivered out of occurrence order leave stale membership
+github_installation	InstallationReconciliation	InstallationReconciliation	clean	27	-	current-generation fence prevents stale snapshots after notification; bounded to three generations
 # ---- slack dedupe ----
 slack_cancel	CancelRegistration	CancelRegistrationSafe	clean	6	-	register the per-turn action key before Slack can expose the card
 slack_cancel	CancelRegistration	CancelRegistrationUnsafe	violates:VisibleAuthorClickCancels	4	-	pre-fix: a click can arrive after card visibility and before ts registration
