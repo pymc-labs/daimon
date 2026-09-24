@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A private form submitted in Slack or Discord just as the thread's turn was
   finishing now resumes the task that was waiting on it, instead of waiting
   for the next message in the thread.
+- After a restart cuts off a turn in Slack or Discord, the next message in that
+  thread gets its own reply instead of the cut-off turn's answer: the boot
+  sweep that marks the turn as interrupted now also stops it on Managed
+  Agents, so it no longer keeps running and billing after its card says it
+  was interrupted.
 - Reconnect replay keeps the current turn's answer and rendered content when
   the event history is incomplete or ends with a session termination; repeated
   SSE events no longer repeat adapter callbacks.

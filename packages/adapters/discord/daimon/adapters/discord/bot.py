@@ -51,6 +51,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError
+from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow
@@ -678,7 +679,15 @@ class DaimonBot(commands.Bot):
                     session, id=row.id, expected_message_id=row.active_turn_message_id
                 )
                 await session.commit()
-            if not cleared:
+            if cleared:
+                # Stop the turn MA is still running for this orphan, so it
+                # stops billing and the next mention's message is not sent
+                # into a running session (which MA ignores). A moved marker
+                # belongs to a live turn and is never interrupted.
+                await interrupt_orphaned_session(
+                    self.runtime.anthropic, session_id=row.ma_session_id
+                )
+            else:
                 log.info(
                     "turn.orphan_marker_moved",
                     thread_id=row.thread_id,

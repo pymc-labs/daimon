@@ -52,6 +52,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError
+from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.tenants import list_tenants_by_platform, set_provision_status
@@ -351,7 +352,13 @@ async def retire_orphaned_turns(runtime: SlackRuntime, *, now: datetime) -> None
                     session, id=row.id, expected_message_id=message_id
                 )
                 await session.commit()
-            if not cleared:
+            if cleared:
+                # The row really was orphaned: stop the turn MA is still
+                # running for it, so it stops billing and the next mention's
+                # message is not sent into a running session (and ignored).
+                # Only a cleared row -- a moved marker belongs to a live turn.
+                await interrupt_orphaned_session(runtime.anthropic, session_id=row.ma_session_id)
+            else:
                 # The marker moved between this sweep's read and this row's
                 # clear -- a live process wrote it after the read, so it owns
                 # the row now and will clear it on its own terminal path, or

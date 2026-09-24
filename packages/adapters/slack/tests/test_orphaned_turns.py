@@ -14,10 +14,13 @@ admitted while the sweep was still running, must survive it.
 
 from __future__ import annotations
 
+import json
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import yarl
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.boot_sweep import retire_orphaned_turns
@@ -30,6 +33,7 @@ from daimon.core.stores.thread_sessions import (
     list_orphaned_turns,
     mark_turn_active,
 )
+from daimon.testing import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import CHAT_OK_PAYLOAD
@@ -49,6 +53,7 @@ async def _seed_orphan(
     channel_id: str | None = "C_TEST",
     message_id: str = "1000000000.000001",
     with_token: bool = True,
+    ma_session_id: str = "sesn_test",
 ) -> uuid.UUID:
     """Seed one tenant with a mid-flight thread_sessions row.
 
@@ -72,7 +77,7 @@ async def _seed_orphan(
             platform="slack",
             thread_id=thread_id,
             account_id=uuid.uuid4(),
-            ma_session_id="sesn_test",
+            ma_session_id=ma_session_id,
         )
         await mark_turn_active(
             s,
@@ -83,6 +88,105 @@ async def _seed_orphan(
         )
         await s.commit()
     return row.id
+
+
+_EVENTS_PATH = re.compile(r"^/v1/sessions/(?P<sid>[^/]+)/events$")
+
+
+class _InterruptRecorder:
+    """An MA transport that records every event sent to a session.
+
+    Sessions named in ``failing`` answer 404, the way MA answers for a session
+    that no longer exists. Anything other than an event send is a 404 too: the
+    sweep has no business calling any other MA endpoint.
+    """
+
+    def __init__(self, *, failing: frozenset[str] = frozenset()) -> None:
+        self.sent: list[tuple[str, str]] = []
+        self._failing = failing
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        match = _EVENTS_PATH.match(request.url.path)
+        if request.method != "POST" or match is None:
+            return httpx.Response(
+                404,
+                json={"type": "error", "error": {"type": "not_found_error", "message": "no route"}},
+            )
+        sid = match["sid"]
+        for event in json.loads(request.content)["events"]:
+            self.sent.append((sid, event["type"]))
+        if sid in self._failing:
+            return httpx.Response(
+                404,
+                json={
+                    "type": "error",
+                    "error": {"type": "not_found_error", "message": "session not found"},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "sevt_1", "type": "user.interrupt", "processed_at": None}]},
+        )
+
+
+async def test_sweep_interrupts_the_orphaned_turns_ma_session(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The card says the turn was interrupted; the MA session must stop too.
+
+    MA keeps running a turn whose process died. Left running, it goes on
+    billing, and the next mention in the thread reuses the session and sends
+    its user.message into a session that is still running, which MA answers
+    with 200 and ignores -- the new turn then renders the dead turn's answer.
+    """
+    fernet_key = Fernet.generate_key().decode()
+    await _seed_orphan(
+        db_session_factory, fernet_key, team_id="T_RUNNING", ma_session_id="sesn_orphan"
+    )
+    recorder = _InterruptRecorder()
+    runtime = build_slack_runtime(
+        fernet_key, db_session_factory, anthropic=build_fake_anthropic(recorder)
+    )
+
+    await retire_orphaned_turns(runtime, now=_NOW)
+
+    assert recorder.sent == [("sesn_orphan", "user.interrupt")], (
+        "the orphaned turn's MA session must be interrupted exactly once"
+    )
+    assert await list_orphaned_turns(db_session, platform="slack") == []
+
+
+async def test_a_failed_interrupt_does_not_stop_the_sweep(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    fernet_key = Fernet.generate_key().decode()
+    await _seed_orphan(db_session_factory, fernet_key, team_id="T_GONE", ma_session_id="sesn_gone")
+    await _seed_orphan(
+        db_session_factory,
+        fernet_key,
+        team_id="T_ALIVE",
+        channel_id="C_ALIVE",
+        message_id="5555.5",
+        ma_session_id="sesn_alive",
+    )
+    recorder = _InterruptRecorder(failing=frozenset({"sesn_gone"}))
+    runtime = build_slack_runtime(
+        fernet_key, db_session_factory, anthropic=build_fake_anthropic(recorder)
+    )
+
+    await retire_orphaned_turns(runtime, now=_NOW)  # must not raise
+
+    assert sorted(recorder.sent) == [
+        ("sesn_alive", "user.interrupt"),
+        ("sesn_gone", "user.interrupt"),
+    ], "one session's failed interrupt must not skip the other's"
+    assert await list_orphaned_turns(db_session, platform="slack") == [], (
+        "a failed interrupt must not leave the marker set"
+    )
 
 
 async def test_sweep_edits_the_frozen_card_and_clears_the_marker(
@@ -251,10 +355,16 @@ async def test_sweep_leaves_a_marker_that_moved_while_the_sweep_was_running(
         callback=_admit_a_fresh_turn_mid_sweep,
         repeat=True,
     )
-    runtime = build_slack_runtime(fernet_key, db_session_factory)
+    recorder = _InterruptRecorder()
+    runtime = build_slack_runtime(
+        fernet_key, db_session_factory, anthropic=build_fake_anthropic(recorder)
+    )
 
     await retire_orphaned_turns(runtime, now=_NOW)
 
+    assert recorder.sent == [], (
+        "a session whose marker moved is running a live turn and must not be interrupted"
+    )
     update_calls = fake_slack_web_client.mock.requests.get(("POST", _UPDATE_URL), [])
     assert len(update_calls) == 1, "exactly one chat.update for the one seeded orphan"
     assert update_calls[0].kwargs["json"]["ts"] == "3333.3", (
