@@ -56,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes from another delivery.
 - GitHub App suspension, unsuspension, and permission-change events no longer
   clear the cached repository list. Only installation creation replaces it.
+- A pending report publish keeps its archive while another publish prunes old
+  uploads, so a delayed seam response cannot commit a missing archive reference.
 - A session loss recovered right at a turn's time limit no longer leaves a
   replacement session behind that the next mention silently continues on
   without being told the previous work was lost.

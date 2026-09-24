@@ -80,6 +80,8 @@ adapter_recovery	AdapterOverlap	SingleProcessRecovery	clean	672	-	one process: l
 # ---- report publishing ----
 report_publish	ReportPublish	PublishSafe	clean	12	-	archive, seam result, PDF, and SQLite commit preserve visible artifact coherence
 report_publish	ReportPublish	PublishPreFix	violates:VisibleArtifactsCoherent	2	-	pre-fix: current PDF/revision exposed before the accepted bundle changes
+report_publish	PublishOverlap	PublishOverlapUnsafe	violates:VisibleArtifactsCoherent	138	-	mutation: a second publish prunes an aged archive while its seam response is pending
+report_publish	PublishOverlap	PublishOverlapSafe	clean	399	-	process-local in-flight archive protection preserves accepted concurrent publish tuples and reader snapshots
 # ---- metering ----
 metering	Metering	Metering	clean	8006	-	live recorder + usage sweep + per-deployment ledger with the replay-billing fix: all safety invariants
 metering	Metering	MeteringReplayGap	violates:LiveMetersWholeTurn	160	-	pre-#234: a model call seen only in the reconnect/finalize replay is never billed by the turn
