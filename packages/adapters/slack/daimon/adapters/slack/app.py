@@ -264,6 +264,11 @@ class SlackApp:
         # Per-thread concurrency state (keys are Slack thread_ts strings).
         self._processing: set[str] = set()
         self._pending: dict[str, list[dict[str, Any]]] = {}
+        # Continuation dispatches skipped because the thread was processing,
+        # keyed by thread_ts: re-run when the thread is released (see
+        # `_release_thread`). Last writer wins; a dispatch reads every pending
+        # row for the thread, so one entry is enough.
+        self._deferred_dispatch: dict[str, dict[str, Any]] = {}
         # Per-tenant in-flight cap.
         self._inflight: dict[uuid.UUID, int] = {}
         # Background task references (prevent GC before done-callbacks fire).
@@ -1213,7 +1218,7 @@ class SlackApp:
                                 thread_ts=thread_id,
                             )
         finally:
-            self._processing.discard(thread_id)
+            self._release_thread(thread_id)
             still_pending = self._pending.pop(thread_id, [])
             self._release_inflight(tenant_id)
             # Notify any mentions that were queued (⌛) but never drained because
@@ -2261,6 +2266,15 @@ class SlackApp:
         """
         await self._wait_for_orphan_recovery()
         if thread_id in self._processing:
+            # The turn running here may already be past its own tail
+            # dispatch, so remember the call and re-run it on release.
+            self._deferred_dispatch[thread_id] = {
+                "web_client": web_client,
+                "tenant_id": tenant_id,
+                "channel": channel,
+                "thread_id": thread_id,
+                "account_id": account_id,
+            }
             return
         self._processing.add(thread_id)
         try:
@@ -2272,7 +2286,22 @@ class SlackApp:
                 account_id=account_id,
             )
         finally:
-            self._processing.discard(thread_id)
+            self._release_thread(thread_id)
+
+    def _release_thread(self, thread_id: str) -> None:
+        """Free the thread's `_processing` slot; re-run a dispatch it skipped.
+
+        `dispatch_continuations_in_thread` skips a processing thread, trusting
+        the running turn's tail dispatch. A continuation recorded after that
+        tail already ran (a form submitted as the turn was finishing) would
+        otherwise wait for the next completed turn in the thread. Spawned, so
+        the caller's `finally` never blocks; not while draining, when no new
+        turn may start (the row stays pending for the next turn).
+        """
+        self._processing.discard(thread_id)
+        deferred = self._deferred_dispatch.pop(thread_id, None)
+        if deferred is not None and not self.draining:
+            self._spawn(self.dispatch_continuations_in_thread(**deferred))
 
     async def drain_and_close(self, client: AsyncBaseSocketModeClient) -> None:
         """Graceful shutdown drain.

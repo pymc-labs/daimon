@@ -300,6 +300,11 @@ class DaimonBot(commands.Bot):
         # turn so the user doesn't lose messages they fired while the bot was busy.
         self._processing: set[int] = set()
         self._pending: dict[int, list[discord.Message]] = {}
+        # Continuation dispatches skipped because the thread was processing,
+        # keyed by thread id: re-run when the thread is released (see
+        # `_release_thread`). Last writer wins; a dispatch reads every pending
+        # row for the thread, so one entry is enough.
+        self._deferred_dispatch: dict[int, tuple[uuid.UUID, discord.Thread, str]] = {}
         # Per-tenant concurrency cap (SCALE-01): active turn count keyed by tenant_id.
         # Incremented before the turn starts; decremented in a finally that brackets
         # the whole drain loop so the slot is always released.
@@ -990,7 +995,7 @@ class DaimonBot(commands.Bot):
             await self._handle_mention(trigger, guild_id, tenant_id, unprompted=True)
             await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
         finally:
-            self._processing.discard(thread_id)
+            self._release_thread(thread_id)
             self._pending.pop(thread_id, None)
             self._release_inflight(tenant_id)
 
@@ -1155,7 +1160,7 @@ class DaimonBot(commands.Bot):
                     # the final drain iteration, the same residual window the
                     # thread branch below has.
                     for created_id in created_thread_ids:
-                        self._processing.discard(created_id)
+                        self._release_thread(created_id)
                         self._pending.pop(created_id, None)
                     self._release_inflight(tenant_id)
                 return
@@ -1173,7 +1178,7 @@ class DaimonBot(commands.Bot):
                 await self._handle_mention(message, guild_id, tenant_id)
                 await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
             finally:
-                self._processing.discard(thread_id)
+                self._release_thread(thread_id)
                 self._pending.pop(thread_id, None)
                 self._release_inflight(tenant_id)
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
@@ -1370,6 +1375,9 @@ class DaimonBot(commands.Bot):
         if self.is_ready():
             await self._retire_orphaned_turns()
         if thread.id in self._processing:
+            # The turn running there may already be past its own tail
+            # dispatch, so remember the call and re-run it on release.
+            self._deferred_dispatch[thread.id] = (tenant_id, thread, guild_id)
             return
         self._processing.add(thread.id)
         try:
@@ -1377,7 +1385,27 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id, thread=thread, guild_id=guild_id
             )
         finally:
-            self._processing.discard(thread.id)
+            self._release_thread(thread.id)
+
+    def _release_thread(self, thread_id: int) -> None:
+        """Free the thread's `_processing` slot; re-run a dispatch it skipped.
+
+        `dispatch_continuations_in_thread` skips a processing thread, trusting
+        the running turn's tail dispatch. A continuation recorded after that
+        tail already ran (a form submitted as the turn was finishing) would
+        otherwise wait for the next completed turn in the thread. Spawned, so
+        the caller's `finally` never blocks; not while draining, when no new
+        turn may start (the row stays pending for the next turn).
+        """
+        self._processing.discard(thread_id)
+        deferred = self._deferred_dispatch.pop(thread_id, None)
+        if deferred is not None and not self.draining:
+            tenant_id, thread, guild_id = deferred
+            self._spawn(
+                self.dispatch_continuations_in_thread(
+                    tenant_id=tenant_id, thread=thread, guild_id=guild_id
+                )
+            )
 
     async def _run_continuation_turn(
         self,

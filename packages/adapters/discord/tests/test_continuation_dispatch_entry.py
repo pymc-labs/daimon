@@ -365,3 +365,49 @@ async def test_continuation_turn_omits_handoff_notice_for_private_input(
     assert '"handoff"' in handoff_controls, (
         f"a task handoff must still carry the one-time notice, got {handoff_controls}"
     )
+
+
+async def test_dispatch_skipped_while_processing_runs_when_the_thread_is_released(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A form submitted after the owner's own dispatch is not stranded.
+
+    An owner holds the thread's `_processing` slot and has already run its
+    dispatch (the turn tail) when the credential modal's dispatch arrives, so
+    that call is skipped. When the owner releases the thread, the skipped
+    dispatch must run (formal/thread_queue `FormDuringTail`), not wait for
+    the next message in the thread.
+    """
+    tenant_id, key = await _seed_pending_row(
+        db_session_factory, workspace_id="710000006", requested_work=None
+    )
+    bot = make_bot(_make_runtime(db_session_factory))
+    thread = _make_thread()
+    real_dispatch = bot._dispatch_continuations  # pyright: ignore[reportPrivateUsage]
+    calls = 0
+
+    async def _owner_tail_then_form(**kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # The owner's tail dispatch has run; the form lands now.
+            await bot.dispatch_continuations_in_thread(
+                tenant_id=tenant_id, thread=thread, guild_id="710000006"
+            )
+            return
+        await real_dispatch(**kwargs)  # pyright: ignore[reportArgumentType]
+
+    with patch.object(bot, "_dispatch_continuations", side_effect=_owner_tail_then_form):
+        await bot.dispatch_continuations_in_thread(
+            tenant_id=tenant_id, thread=thread, guild_id="710000006"
+        )
+        for task in list(bot._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+            await task
+
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None
+    assert row.status == "skipped" and row.skip_reason == "skip_save_only", (
+        f"the skipped dispatch must run once the thread is released, got {row.status}"
+    )
+    assert thread.id not in bot._processing  # pyright: ignore[reportPrivateUsage]
