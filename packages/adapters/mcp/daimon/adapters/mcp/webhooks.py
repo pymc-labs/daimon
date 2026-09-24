@@ -202,6 +202,14 @@ async def _handle_installation(
 ) -> Response:
     """Handle installation created / deleted events."""
     action = _get(payload, "action")
+    if action not in ("created", "deleted"):
+        log.info(
+            "github.webhook.installation_action_ignored",
+            action=action,
+            delivery_id=delivery_id,
+        )
+        return Response(status_code=200)
+
     install_info = _get(payload, "installation")
     if not isinstance(install_info, dict):
         log.warning("github.webhook.malformed_installation", delivery_id=delivery_id)
@@ -240,7 +248,7 @@ async def _handle_installation(
             delivery_id=delivery_id,
             installation_id=installation_id,
         )
-    else:
+    elif action == "created":
         async with sessionmaker.begin() as session:
             await install_store.upsert(
                 session,
