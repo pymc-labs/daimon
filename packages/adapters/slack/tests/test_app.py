@@ -122,6 +122,7 @@ def _make_events_api_request(
     user: str = "U_TEST",
     user_team: str | None = None,
     extra_event: dict[str, Any] | None = None,
+    event_time: int | None = None,
 ) -> SocketModeRequest:
     """Build a minimal events_api SocketModeRequest."""
     event: dict[str, Any] = {
@@ -136,11 +137,10 @@ def _make_events_api_request(
         event["user_team"] = user_team
     if extra_event:
         event.update(extra_event)
-    return SocketModeRequest(
-        type="events_api",
-        envelope_id="env_test_001",
-        payload={"team_id": team_id, "event": event},
-    )
+    payload: dict[str, Any] = {"team_id": team_id, "event": event}
+    if event_time is not None:
+        payload["event_time"] = event_time
+    return SocketModeRequest(type="events_api", envelope_id="env_test_001", payload=payload)
 
 
 def _make_app(
@@ -287,7 +287,7 @@ async def test_on_request_when_tokens_revoked_carries_only_oauth_does_not_tear_d
 
     torn_down: list[str] = []
 
-    async def _spy_teardown(*, team_id: str) -> None:
+    async def _spy_teardown(*, team_id: str, event_time: datetime | None = None) -> None:
         torn_down.append(team_id)
 
     app._handle_teardown = _spy_teardown  # type: ignore[method-assign]
@@ -315,7 +315,7 @@ async def test_on_request_when_tokens_revoked_carries_bot_tears_down() -> None:
 
     torn_down: list[str] = []
 
-    async def _spy_teardown(*, team_id: str) -> None:
+    async def _spy_teardown(*, team_id: str, event_time: datetime | None = None) -> None:
         torn_down.append(team_id)
 
     app._handle_teardown = _spy_teardown  # type: ignore[method-assign]
@@ -336,6 +336,30 @@ async def test_on_request_when_tokens_revoked_carries_bot_tears_down() -> None:
     )
 
 
+async def test_on_request_passes_the_envelope_event_time_to_teardown() -> None:
+    """Teardown gets Slack's event_time so a stale delivery cannot undo a reinstall."""
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+
+    seen: list[datetime | None] = []
+
+    async def _spy_teardown(*, team_id: str, event_time: datetime | None = None) -> None:
+        seen.append(event_time)
+
+    app._handle_teardown = _spy_teardown  # type: ignore[method-assign]
+
+    req = _make_events_api_request(
+        event_type="app_uninstalled", team_id="T_UNINSTALLED", event_time=1_790_000_000
+    )
+    await app.on_request(fake_client, req)  # type: ignore[arg-type]
+
+    pending = list(app._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    assert seen == [datetime.fromtimestamp(1_790_000_000, tz=UTC)]
+
+
 async def test_on_request_when_app_uninstalled_tears_down() -> None:
     """The uninstall path is unchanged by the tokens_revoked split."""
     fake_client = _FakeSocketClient()
@@ -343,7 +367,7 @@ async def test_on_request_when_app_uninstalled_tears_down() -> None:
 
     torn_down: list[str] = []
 
-    async def _spy_teardown(*, team_id: str) -> None:
+    async def _spy_teardown(*, team_id: str, event_time: datetime | None = None) -> None:
         torn_down.append(team_id)
 
     app._handle_teardown = _spy_teardown  # type: ignore[method-assign]
@@ -1666,7 +1690,7 @@ async def test_on_request_when_tokens_revoked_carries_an_empty_bot_list_does_not
 
     torn_down: list[str] = []
 
-    async def _spy_teardown(*, team_id: str) -> None:
+    async def _spy_teardown(*, team_id: str, event_time: datetime | None = None) -> None:
         torn_down.append(team_id)
 
     app._handle_teardown = _spy_teardown  # type: ignore[method-assign]

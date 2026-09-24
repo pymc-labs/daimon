@@ -23,7 +23,7 @@ from daimon.core.defaults.report import ApplyReport
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import Platform
-from daimon.core.stores.slack_bot_tokens import delete_slack_bot_token
+from daimon.core.stores.slack_bot_tokens import delete_slack_bot_token, get_slack_bot_token
 from daimon.core.stores.slack_connect_prompts import delete_connect_prompts_for_team
 from daimon.core.stores.slack_event_dedup import delete_event_dedup_for_team
 from pydantic import BaseModel
@@ -229,21 +229,33 @@ async def teardown_slack_install(
     *,
     team_id: str,
     now: datetime,
+    event_time: datetime | None = None,
 ) -> None:
     """Soft-archive the Slack tenant and delete its workspace-scoped Slack rows.
 
-    1. Derives the tenant_id deterministically from (platform="slack", team_id).
-    2. Calls archive_tenant to set Tenant.archived_at = now (no-op if absent).
-    3. Deletes the slack_bot_tokens, slack_connect_prompts, and
-       slack_event_dedup rows via their idempotent per-team delete helpers
-       (0 rowcount when rows are already absent, never raise).
+    One transaction: lock the tenant row, then archive it and delete the
+    slack_bot_tokens, slack_connect_prompts and slack_event_dedup rows (0
+    rowcount when absent, never raises). Token-existence is the liveness
+    signal: after teardown, any event handler that reads the token row will
+    see None and drop the event.
 
-    Token-existence is the liveness signal: after teardown, any
-    event handler that reads the token row will see None and drop the event.
+    `event_time` is when Slack says the uninstall (or bot-token revocation)
+    happened. A bot token stored after that moment belongs to a reinstall, so
+    the event is stale — a delayed or retried delivery — and nothing is torn
+    down. The tenant lock serializes this with the reinstall's archive clear,
+    which the install callback runs after storing its token: whichever order
+    the two land in, a reinstalled workspace ends live with its token. Without
+    `event_time` the teardown is unconditional.
     """
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    await archive_tenant(session_factory, tenant_id=tenant_id, now=now)
     async with session_factory() as s, s.begin():
-        await delete_slack_bot_token(s, team_id=team_id)
+        await s.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
+        if event_time is not None:
+            stored = await get_slack_bot_token(s, team_id=team_id)
+            if stored is not None and stored.updated_at > event_time:
+                _log.info("slack.teardown_skipped_stale_event", team_id=team_id)
+                return
+        await s.execute(update(Tenant).where(Tenant.id == tenant_id).values(archived_at=now))
+        await delete_slack_bot_token(s, team_id=team_id, stored_at_or_before=event_time)
         await delete_connect_prompts_for_team(s, team_id=team_id)
         await delete_event_dedup_for_team(s, team_id=team_id)

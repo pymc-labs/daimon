@@ -39,6 +39,7 @@ from daimon.core.slack_oauth import (
 )
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
+from daimon.core.stores.tenants import set_provision_status
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -650,7 +651,7 @@ def build_oauth_slack_routes(
             # This branch is unreachable in normal flow; guards the type narrowing.
             return _enterprise_rejection_html()
 
-        await provision_tenant(
+        tenant = await provision_tenant(
             sessionmaker,
             platform="slack",
             workspace_id=team_id,
@@ -677,6 +678,12 @@ def build_oauth_slack_routes(
                 expires_at=expires_at,
                 refresh_token=encrypted_refresh,
             )
+        # A reinstall after an uninstall finds its tenant soft-archived, and
+        # provision_tenant leaves an existing row alone. Clear it only after
+        # the token is stored: teardown locks the tenant row and skips when
+        # the stored token postdates its event, so a stale teardown landing
+        # on either side of this clear cannot leave the workspace archived.
+        await set_provision_status(sessionmaker, tenant_id=tenant.tenant_id, clear_archive=True)
 
         return _success_html(
             workspace=result.team_name or team_id,
