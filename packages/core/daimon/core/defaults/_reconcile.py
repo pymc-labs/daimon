@@ -33,9 +33,11 @@ from daimon.core.defaults.sweep import (
     sweep_removed_skills,
 )
 from daimon.core.errors import DaimonError, DefaultsError
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
+_RECONCILE_LOCK_NAMESPACE = "defaults_reconcile"
 
 __all__ = ["_reconcile_core", "_run_per_resource", "_run_sweep"]
 
@@ -112,8 +114,9 @@ async def _reconcile_core(
     and `reconcile_tenant_defaults` (account_id=_derive_account_uuid(tenant_id),
     dry_run=False, run_preflight=True).
 
-    `session_factory` is here for the skill pass alone: MA has no carrier for
-    skill content idempotence, so the fingerprint lives in `seeded_skills`.
+    `session_factory` provides the per-tenant advisory lock and the skill pass
+    session: MA has no carrier for skill content idempotence, so the fingerprint
+    lives in `seeded_skills`.
     """
     report = ApplyReport()
 
@@ -147,60 +150,88 @@ async def _reconcile_core(
                 f"aborting before any writes. Rejections: {failed}"
             )
 
-    # Skill pass.
-    for skill_dir in skill_dirs:
-        await _run_per_resource(
-            report,
-            lambda skill_dir=skill_dir: reconcile_skill(
-                client, session_factory, skill_dir, tenant_id=tenant_id, dry_run=dry_run
-            ),
-            kind="skill",
-            name=skill_dir.name,
+    async def _run_passes(skill_session: AsyncSession | None) -> ApplyReport:
+        # Skill pass.
+        for skill_dir in skill_dirs:
+            await _run_per_resource(
+                report,
+                lambda skill_dir=skill_dir: reconcile_skill(
+                    client,
+                    session_factory,
+                    skill_dir,
+                    tenant_id=tenant_id,
+                    dry_run=dry_run,
+                    db_session=skill_session,
+                ),
+                kind="skill",
+                name=skill_dir.name,
+            )
+
+        # Environment pass.
+        for spec in env_specs:
+            await _run_per_resource(
+                report,
+                lambda spec=spec: reconcile_environment(
+                    client, spec, tenant_id=tenant_id, dry_run=dry_run
+                ),
+                kind="environment",
+                name=spec.name,
+            )
+
+        # Agent pass — account_id threads the guild ownership axis.
+        for spec in agent_specs:
+            await _run_per_resource(
+                report,
+                lambda spec=spec: reconcile_agent(
+                    client,
+                    spec,
+                    tenant_id=tenant_id,
+                    dry_run=dry_run,
+                    account_id=account_id,
+                    public_url=public_url,
+                ),
+                kind="agent",
+                name=spec.name,
+            )
+
+        # Sweep in reverse order. Skills sweep compares canonical tenant-scoped
+        # display_titles, so map the bare authoring names through the shared title
+        # function (seeded shape: agent_name=None).
+        present_agents = {s.name for s in agent_specs}
+        present_envs = {s.name for s in env_specs}
+        present_skills = {
+            tenant_scoped_display_title(tenant_id=tenant_id, name=name)
+            for name in skill_names_present
+        }
+        await _run_sweep(
+            report, sweep_removed_agents, "agent", client, present_agents, tenant_id, dry_run
         )
-
-    # Environment pass.
-    for spec in env_specs:
-        await _run_per_resource(
+        await _run_sweep(
             report,
-            lambda spec=spec: reconcile_environment(
-                client, spec, tenant_id=tenant_id, dry_run=dry_run
-            ),
-            kind="environment",
-            name=spec.name,
+            sweep_removed_environments,
+            "environment",
+            client,
+            present_envs,
+            tenant_id,
+            dry_run,
         )
-
-    # Agent pass — account_id threads the guild ownership axis.
-    for spec in agent_specs:
-        await _run_per_resource(
-            report,
-            lambda spec=spec: reconcile_agent(
-                client,
-                spec,
-                tenant_id=tenant_id,
-                dry_run=dry_run,
-                account_id=account_id,
-                public_url=public_url,
-            ),
-            kind="agent",
-            name=spec.name,
+        await _run_sweep(
+            report, sweep_removed_skills, "skill", client, present_skills, tenant_id, dry_run
         )
+        return report
 
-    # Sweep in reverse order. Skills sweep compares canonical tenant-scoped
-    # display_titles, so map the bare authoring names through the shared title
-    # function (seeded shape: agent_name=None).
-    present_agents = {s.name for s in agent_specs}
-    present_envs = {s.name for s in env_specs}
-    present_skills = {
-        tenant_scoped_display_title(tenant_id=tenant_id, name=name) for name in skill_names_present
-    }
-    await _run_sweep(
-        report, sweep_removed_agents, "agent", client, present_agents, tenant_id, dry_run
-    )
-    await _run_sweep(
-        report, sweep_removed_environments, "environment", client, present_envs, tenant_id, dry_run
-    )
-    await _run_sweep(
-        report, sweep_removed_skills, "skill", client, present_skills, tenant_id, dry_run
-    )
+    if dry_run:
+        # Verification is read-only and must not acquire a DB lock transaction.
+        return await _run_passes(skill_session=None)
 
-    return report
+    # Advisory lock covers every provider list/write through the final sweep.
+    # The transaction context releases it on success, exception, or cancellation.
+    # Share this session with the skill pass to avoid nested pool checkout while
+    # holding a lock connection (some test and operator pools have one connection).
+    lock_key = f"{_RECONCILE_LOCK_NAMESPACE}:{tenant_id}"
+    async with session_factory() as lock_session, lock_session.begin():
+        await lock_session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": lock_key},
+        )
+        return await _run_passes(skill_session=lock_session)
