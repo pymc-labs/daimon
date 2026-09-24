@@ -13,6 +13,9 @@ scheduler	RoutineScheduler	RoutineSchedulerProgress	clean	110	-	liveness under f
 # ---- session preparation ----
 session_preparation	SessionPreparation	SessionPreparation	clean	3532	-	per-thread advisory lock, reuse/replace/handoff safety
 session_preparation	SessionPreparation	SessionPreparationProgress	clean	3532	-	liveness: every started caller returns
+# ---- defaults reconciliation ----
+defaults_reconcile	DefaultsReconcile	DefaultsReconcileConcurrent	violates:CachedIdLive	31	-	pre-lock: two empty-list observations create duplicates; resolver caches the older ID that a later dedup archives
+defaults_reconcile	DefaultsReconcile	DefaultsReconcileLocked	clean	12	-	tenant advisory lock serializes same-tenant reconcile list/create and preserves cached-ID liveness
 # ---- continuation ----
 continuation	ContinuationDispatch	ContinuationDispatch	clean	9	-	at-most-once claim, terminal implies external effect
 continuation	ContinuationDispatch	ContinuationCrashProgress	violates:PendingEventuallySettles	9	-	documented gap: process death after claim strands the continuation
