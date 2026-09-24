@@ -267,23 +267,62 @@ async def _archive_orphaned_session(
 ) -> None:
     """Best-effort archive of an upstream session no mapping row names.
 
-    Shielded so a second cancel does not abandon the call mid-flight, and
-    bounded so it cannot hold up the unwinding turn. A failure is logged and
+    Shielded from caller cancellation so it can wait for the request up to a
+    fixed deadline. If that deadline expires, the request continues in the
+    background and its result is logged when it finishes. A failure is
     swallowed: the error being unwound is the one the caller must see.
     """
+    archive_task = asyncio.create_task(
+        anthropic.beta.sessions.archive(session_id), name="turn.orphan_session_archive"
+    )
+    deadline = asyncio.get_running_loop().time() + _ORPHAN_ARCHIVE_TIMEOUT_S
+
+    def log_late_result(task: asyncio.Task[object]) -> None:
+        if task.cancelled():
+            return
+        err = task.exception()
+        if err is not None:
+            log.warning(
+                "turn.recovery_orphan_archive_failed",
+                session_id=session_id,
+                error=str(err)[:200],
+            )
+        else:
+            log.info("turn.recovery_orphan_archived", session_id=session_id)
+
     try:
-        await asyncio.wait_for(
-            asyncio.shield(anthropic.beta.sessions.archive(session_id)),
-            timeout=_ORPHAN_ARCHIVE_TIMEOUT_S,
-        )
+        while True:
+            remaining_s = deadline - asyncio.get_running_loop().time()
+            try:
+                done, _ = await asyncio.wait((archive_task,), timeout=max(remaining_s, 0))
+            except asyncio.CancelledError:
+                # Keep the original unwind error authoritative, and keep
+                # waiting for the archive until the fixed deadline.
+                continue
+            if not done:
+                archive_task.add_done_callback(log_late_result)
+                log.warning(
+                    "turn.recovery_orphan_archive_failed",
+                    session_id=session_id,
+                    error="archive wait timed out",
+                )
+                return
+            if archive_task.cancelled():
+                log.warning(
+                    "turn.recovery_orphan_archive_failed",
+                    session_id=session_id,
+                    error="archive request cancelled",
+                )
+                return
+            archive_task.result()
+            log.info("turn.recovery_orphan_archived", session_id=session_id)
+            return
     except Exception as err:
         log.warning(
             "turn.recovery_orphan_archive_failed",
             session_id=session_id,
             error=str(err)[:200],
         )
-    else:
-        log.info("turn.recovery_orphan_archived", session_id=session_id)
 
 
 async def _replace_dead_session(
