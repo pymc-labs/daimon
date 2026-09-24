@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A private form submitted in Slack or Discord just as the thread's turn was
   finishing now resumes the task that was waiting on it, instead of waiting
   for the next message in the thread.
+- A Slack or Discord mention sent into a thread while a task resumed by a
+  private form is running there now gets its own reply once that task
+  finishes, even when resuming the task fails (Slack posts an apology in that
+  case). It used to keep its ⌛ reaction and wait for the next mention in the
+  thread.
 - After a restart cuts off a turn in Slack or Discord, the next message in that
   thread gets its own reply instead of the cut-off turn's answer: the boot
   sweep that marks the turn as interrupted now also stops it on Managed
