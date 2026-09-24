@@ -206,9 +206,10 @@ class SlackTurnLifecycle:
         follow can hold for minutes. Runs before the turn starts (and
         therefore before any render tick exists), so this is the one place
         that deliberately flushes directly instead of waiting on an SSE
-        event. The cancel registration rides this first post via
-        _maybe_flush's first-post branch, so Cancel is live before the first
-        SSE event rather than after it.
+        event. _maybe_flush registers a per-turn action key before awaiting
+        chat.postMessage, so a click is routable as soon as Slack exposes the
+        card, before its response supplies the message ts. Once the response
+        returns, the ts is registered as a recovery and legacy lookup key.
         """
         await self._maybe_flush()
 
@@ -228,7 +229,8 @@ class SlackTurnLifecycle:
         if self._terminal:
             return
         now = self._clock()
-        blocks = to_blocks(self._state, now=now, cancel_key=self._cancel_key)
+        cancel_key = self._cancel_key if self._status_ts is None else self._status_ts
+        blocks = to_blocks(self._state, now=now, cancel_key=cancel_key)
         text = f"{self._state.phase.value} …"
 
         if self._status_ts is None:
@@ -252,6 +254,11 @@ class SlackTurnLifecycle:
                 raise
             self._status_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
             self._register(self._status_ts, self._cancel, self._author_id)
+            # The card is now routable by its message ts. Remove the temporary
+            # key promptly so later clicks follow any recovery rebind of that ts.
+            if self._pending_registered and self._deregister_pending is not None:
+                self._deregister_pending(self._cancel_key)
+                self._pending_registered = False
             self._last_flush = now
         elif now - self._last_flush >= _DEBOUNCE_S:
             # Debounce elapsed — update the status message in place.

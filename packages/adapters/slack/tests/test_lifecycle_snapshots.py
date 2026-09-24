@@ -14,6 +14,7 @@ then review the diff in `__snapshots__/` before committing.
 from __future__ import annotations
 
 import asyncio
+import copy
 import types
 from typing import Any
 
@@ -64,10 +65,18 @@ def _make_lifecycle(fake: Any, clock: Any) -> SlackTurnLifecycle:
 
 def _calls_snapshot(fake: Any, url: yarl.URL) -> list[dict[str, Any]]:
     calls = fake.mock.requests.get(("POST", url), [])
-    return [
-        {"blocks": call.kwargs["json"].get("blocks"), "text": call.kwargs["json"].get("text")}
-        for call in calls
-    ]
+    snapshots: list[dict[str, Any]] = []
+    for call in calls:
+        body: dict[str, Any] = call.kwargs["json"]
+        blocks = copy.deepcopy(body.get("blocks"))
+        for block in blocks or []:
+            if block.get("type") != "actions":
+                continue
+            for element in block.get("elements", []):
+                if element.get("action_id") == "cancel_turn" and "value" in element:
+                    element["value"] = "<turn-key>"
+        snapshots.append({"blocks": blocks, "text": body.get("text")})
+    return snapshots
 
 
 async def test_thinking_tool_then_success_sequence(

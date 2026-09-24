@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Cancel click on a newly posted Slack status card is routed while Slack's
+  `chat.postMessage` response is still pending; after the response, routing
+  follows the message timestamp so recovery can rebind the active turn.
 - A malformed tenant tag in one Managed Agents session no longer aborts the
   usage sweep; malformed optional account metadata drops member attribution
   while preserving tenant usage and its debit.

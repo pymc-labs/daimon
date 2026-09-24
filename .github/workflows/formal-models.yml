@@ -58,6 +58,9 @@ on:
       # slack_dedupe/
       - "packages/core/daimon/core/slack_event_dedup_sweep.py"
       - "packages/core/daimon/core/stores/slack_event_dedup.py"
+      # slack_cancel/
+      - "packages/adapters/slack/daimon/adapters/slack/lifecycle.py"
+      - "packages/adapters/slack/daimon/adapters/slack/blockkit.py"
       # report_publish/
       - "apps/report-host/src/report_host/uploads.py"
       - "apps/report-host/src/report_host/reports_store.py"

@@ -4106,9 +4106,13 @@ async def test_cancel_is_registered_while_visible_card_post_response_is_pending(
 
     assert visible_click_completed.is_set(), "the click must be delivered before the post response"
     assert cancel.is_set(), "the visible card's author click must cancel its in-flight turn"
-    await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
     assert observed_cancel_keys[0] not in app._cancel_registry, (  # pyright: ignore[reportPrivateUsage]
-        "terminal cleanup must remove the turn-scoped key so a stale action cannot cancel later work"
+        "once Slack returns the message ts, clicks must route through its current registry entry"
+    )
+    assert status_ts in app._cancel_registry, "the returned status ts must remain registered"
+    await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
+    assert app._cancel_registry == {}, (  # pyright: ignore[reportPrivateUsage]
+        "terminal cleanup must remove the status ts so a stale action cannot cancel later work"
     )
 
 

@@ -800,13 +800,15 @@ class SlackApp:
     async def _handle_block_action(self, payload: dict[str, Any]) -> None:
         """Author-gated cancel handler for block_actions interactive payloads.
 
-        Looks up the action's status_ts in _cancel_registry; if the clicker is
-        the turn's original author, sets the cancel Event so the driver
-        cancel-race loop picks it up.  A refused click — non-author, or a
-        status_ts no longer in the registry — is answered with an ephemeral,
-        because a button that does nothing is indistinguishable from a dead
-        bot. The missing-entry case is the same symptom as a turn orphaned by
-        a deploy, so the notice is what lets the user tell the two apart.
+        Looks up the action's per-turn key first, which is registered before
+        the initial post response returns; then falls back to status_ts for
+        recovered and legacy cards. If the clicker is the turn's original
+        author, sets the cancel Event so the driver cancel-race loop picks it
+        up. A refused click — non-author, or no matching registry entry — is
+        answered with an ephemeral, because a button that does nothing is
+        indistinguishable from a dead bot. The missing-entry case is the same
+        symptom as a turn orphaned by a deploy, so the notice is what lets the
+        user tell the two apart.
         """
         actions: list[dict[str, Any]] = payload.get("actions") or []
         if not actions or actions[0].get("action_id") != "cancel_turn":
