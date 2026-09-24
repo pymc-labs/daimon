@@ -108,8 +108,8 @@ that side effect is what the invariant models.
    only through the sweep: later, with the sweep's attribution, or never
    without a scheduler. Failing tests and the fix are in #234. The model's
    `BillReplayed = TRUE` is the fixed shape, and `Metering.cfg` is clean with it.
-   `Metering` being clean therefore describes the code only once #234 merges;
-   until then, main has the `MeteringReplayGap` shape.
+   `Metering` now describes the code on main. `MeteringReplayGap` retains the
+   pre-#234 counterexample.
 2. **Cross-deployment debit** (`MeteringSharedTenant`). I confirmed this in the
    code. The sweep bills every session whose `daimon_tenant` stamp names a
    tenant in its own database. Tenant ids are `uuid5(platform, workspace)`, so
