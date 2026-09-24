@@ -8,13 +8,14 @@ Plan 88-04: per-(thread,account) session keying (flag-gated) + unconditional rol
 from __future__ import annotations
 
 import uuid
+from contextlib import suppress
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
-from daimon.core.config import McpSettings, ThreadNamingSettings
+from daimon.core.config import BillingSettings, McpSettings, ThreadNamingSettings
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -2126,3 +2127,135 @@ class TestCredentialButtonRegistration:
             "CredentialRequestButton's compiled template must be registered as a "
             "dynamic item after setup_hook runs"
         )
+
+
+class TestGuildInstallLifecycle:
+    async def test_delayed_remove_cannot_archive_after_rejoin(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A remove DB write delayed across a join must not leave the tenant archived."""
+        import asyncio
+
+        from daimon.adapters.discord import bot as bot_module
+        from daimon.core.defaults.provisioning import provision_tenant
+        from daimon.core.ma_identity import derive_tenant_uuid
+        from daimon.core.stores.tenants import get_tenant, set_provision_status
+
+        guild_id = 900000111
+        guild = MagicMock(spec=discord.Guild)
+        guild.id = guild_id
+        guild.name = "Rejoined Guild"
+        runtime = _make_runtime(db_session_factory)
+        runtime.settings.billing = BillingSettings(signup_credit=Decimal("0"))
+        bot = make_bot(runtime)
+        await provision_tenant(db_session_factory, platform="discord", workspace_id=str(guild_id))
+
+        remove_entered = asyncio.Event()
+        release_remove = asyncio.Event()
+        join_unarchived = asyncio.Event()
+
+        async def delayed_status(
+            session_factory: async_sessionmaker[AsyncSession],
+            *,
+            tenant_id: uuid.UUID,
+            status: str | None = None,
+            archive: bool = False,
+            clear_archive: bool = False,
+            reason: str | None = None,
+            clear_reason: bool = False,
+        ) -> None:
+            if archive:
+                remove_entered.set()
+                await release_remove.wait()
+            await set_provision_status(
+                session_factory,
+                tenant_id=tenant_id,
+                status=status,
+                archive=archive,
+                clear_archive=clear_archive,
+                reason=reason,
+                clear_reason=clear_reason,
+            )
+            if clear_archive:
+                join_unarchived.set()
+
+        with (
+            patch.object(bot_module, "set_provision_status", delayed_status),
+            patch.object(bot, "_post_to_guild", new_callable=AsyncMock),
+            patch.object(bot, "_seed_tenant_defaults", new_callable=AsyncMock),
+            patch.object(bot.tree, "sync", new_callable=AsyncMock),
+        ):
+            # discord.py removes the old guild from its cache before dispatching
+            # guild_remove, so the old callback enters its archive write now.
+            remove_task = asyncio.create_task(bot.on_guild_remove(guild))
+            await remove_entered.wait()
+
+            # parse_guild_create adds the rejoined guild before dispatching join.
+            bot._connection._guilds[guild_id] = guild  # pyright: ignore[reportPrivateUsage]
+            join_task = asyncio.create_task(bot.on_guild_join(guild))
+            # Let an unguarded join finish its unarchive write while the older
+            # remove write is still paused. With the lifecycle lock, join waits
+            # until remove is released, so the bounded wait expires instead.
+            with suppress(TimeoutError):
+                await asyncio.wait_for(join_unarchived.wait(), timeout=2.0)
+            release_remove.set()
+            await asyncio.gather(remove_task, join_task)
+            for task in tuple(bot._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+                await task
+
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
+        async with db_session_factory() as session:
+            tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None and tenant.archived_at is None, (
+            "a completed rejoin must remain live after an earlier remove callback"
+        )
+
+    async def test_on_ready_revives_archived_known_guild_without_welcome_or_credit(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from daimon.core.defaults.provisioning import provision_tenant
+        from daimon.core.ma_identity import derive_tenant_uuid
+        from daimon.core.stores.tenant_ledger import list_for_tenant
+        from daimon.core.stores.tenants import get_tenant, set_provision_status
+
+        guild_id = "900000112"
+        provisioned = await provision_tenant(
+            db_session_factory,
+            platform="discord",
+            workspace_id=guild_id,
+            signup_credit=Decimal("1.00"),
+        )
+        await set_provision_status(
+            db_session_factory, tenant_id=provisioned.tenant_id, archive=True
+        )
+
+        runtime = _make_runtime(db_session_factory)
+        runtime.settings.billing = BillingSettings(signup_credit=Decimal("1.00"))
+        bot = make_bot(runtime)
+        guild = _make_sweep_guild(int(guild_id))
+        bot._connection._guilds[int(guild_id)] = guild  # pyright: ignore[reportPrivateUsage]
+
+        with (
+            patch.object(bot, "_post_to_guild", new_callable=AsyncMock) as post,
+            patch.object(bot, "_seed_tenant_defaults", new_callable=AsyncMock),
+            patch.object(bot.tree, "sync", new_callable=AsyncMock) as sync,
+            patch.object(bot.tree, "clear_commands", new_callable=MagicMock) as clear_commands,
+        ):
+            await bot.on_ready()
+            for task in tuple(bot._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+                await task
+
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+        async with db_session_factory() as session:
+            tenant = await get_tenant(session, tenant_id)
+            ledger = await list_for_tenant(session, tenant_id=tenant_id)
+        assert tenant is not None and tenant.archived_at is None, (
+            "on_ready must revive a known tenant when its guild is in the cache"
+        )
+        assert tenant.provision_status == "pending", "the recovered tenant must be reseeded"
+        assert len(ledger) == 1, "rejoin must not issue a second signup credit"
+        post.assert_not_awaited()
+        assert sync.await_count == 2, "recovery must preserve guild and global command sync"
+        clear_commands.assert_called_once(), "recovery must still clear guild-scoped commands"

@@ -318,6 +318,10 @@ class DaimonBot(commands.Bot):
         self._participant: ThreadParticipant | None = None
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
+        # Gateway lifecycle callbacks run as separate tasks. Serialize only the
+        # tenant provision/archive transitions so an earlier remove cannot
+        # overwrite a later join's archive clear.
+        self._guild_lifecycle_locks: dict[int, asyncio.Lock] = {}
         # Track spawned background tasks so they aren't GC'd; discard on done.
         self._bg_tasks: set[asyncio.Task[None]] = set()
         # Drain flag — set by _drain_and_close on SIGTERM/SIGINT.
@@ -586,24 +590,42 @@ class DaimonBot(commands.Bot):
         finally:
             self._seeding.discard(tenant_id)
 
+    def _guild_lifecycle_lock_for(self, guild_id: int) -> asyncio.Lock:
+        """Return the process-local lifecycle lock for one Discord guild."""
+        lock = self._guild_lifecycle_locks.get(guild_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._guild_lifecycle_locks[guild_id] = lock
+        return lock
+
+    async def _provision_joined_guild(self, guild: discord.Guild) -> uuid.UUID | None:
+        """Provision and unarchive a guild that is still present in the cache."""
+        guild_id = str(guild.id)
+        async with self._guild_lifecycle_lock_for(guild.id):
+            # Boot sweeps and hot-path recovery may carry a snapshot from before
+            # a remove callback updated the gateway cache. Do not revive it.
+            if self.get_guild(guild.id) is None:
+                return None
+            result = await provision_tenant(
+                self.runtime.sessionmaker,
+                platform="discord",
+                workspace_id=guild_id,
+                signup_credit=self.runtime.settings.billing.signup_credit,
+            )
+            await set_provision_status(
+                self.runtime.sessionmaker,
+                tenant_id=result.tenant_id,
+                status="pending",
+                clear_archive=True,
+            )
+        return result.tenant_id
+
     async def _ensure_provisioning(self, guild: discord.Guild) -> None:
         """Self-heal an unprovisioned/archived guild: provision + un-archive + bg seed."""
-        guild_id = str(guild.id)
-        result = await provision_tenant(
-            self.runtime.sessionmaker,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=self.runtime.settings.billing.signup_credit,
-        )
-        await set_provision_status(
-            self.runtime.sessionmaker,
-            tenant_id=result.tenant_id,
-            status="pending",
-            clear_archive=True,
-        )
-        self._spawn(
-            self._seed_tenant_defaults(tenant_id=result.tenant_id, guild=guild, was_ready=False)
-        )
+        tenant_id = await self._provision_joined_guild(guild)
+        if tenant_id is None:
+            return
+        self._spawn(self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False))
 
     def start_orphan_recovery(self) -> None:
         """Start the boot sweep before the gateway can deliver a turn.
@@ -735,7 +757,7 @@ class DaimonBot(commands.Bot):
         log.info("bot_ready", user=str(self.user))
         await self._retire_orphaned_turns()
         tenants = await list_tenants_by_platform(self.runtime.sessionmaker, platform="discord")
-        known_guild_ids = {tr.external_id for tr in tenants}
+        known_tenants = {tr.external_id: tr for tr in tenants}
         sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
 
         async def _bounded_seed(
@@ -746,27 +768,26 @@ class DaimonBot(commands.Bot):
                     tenant_id=tenant_id, guild=guild, was_ready=was_ready
                 )
 
-        # Provision guilds joined while the bot was down.
+        recovered_tenant_ids: set[uuid.UUID] = set()
+        # Provision guilds joined while the bot was down. A known archived tenant
+        # means the bot left and rejoined while this process was stopped: revive
+        # it and reseed without sending a second welcome or signup credit.
         for guild in self.guilds:
             ws_id = str(guild.id)
-            if ws_id in known_guild_ids:
+            known_tenant = known_tenants.get(ws_id)
+            if known_tenant is not None and known_tenant.archived_at is None:
                 continue
-            result = await provision_tenant(
-                self.runtime.sessionmaker,
-                platform="discord",
-                workspace_id=ws_id,
-                signup_credit=self.runtime.settings.billing.signup_credit,
-            )
-            await set_provision_status(
-                self.runtime.sessionmaker,
-                tenant_id=result.tenant_id,
-                status="pending",
-                clear_archive=True,  # #132: rejoined guilds must not stay archived
-            )
+            tenant_id = await self._provision_joined_guild(guild)
+            if tenant_id is None:
+                continue
+            if known_tenant is not None:
+                recovered_tenant_ids.add(tenant_id)
+                self._spawn(_bounded_seed(tenant_id=tenant_id, guild=guild, was_ready=False))
+                continue
             await self._post_to_guild(
                 guild, _build_welcome_embed(_resolve_bot_display_name(self.runtime.settings))
             )
-            self._spawn(_bounded_seed(tenant_id=result.tenant_id, guild=guild, was_ready=False))
+            self._spawn(_bounded_seed(tenant_id=tenant_id, guild=guild, was_ready=False))
 
         # Reconcile every registered, joined tenant against the shipped defaults on
         # every boot, not just the ones stuck in pending/failed. Because every
@@ -781,11 +802,12 @@ class DaimonBot(commands.Bot):
             if guild is None:
                 log.warning("registered_guild_not_joined", external_id=tr.external_id)
                 continue
-            self._spawn(
-                _bounded_seed(
-                    tenant_id=tr.id, guild=guild, was_ready=tr.provision_status == "ready"
+            if tr.id not in recovered_tenant_ids:
+                self._spawn(
+                    _bounded_seed(
+                        tenant_id=tr.id, guild=guild, was_ready=tr.provision_status == "ready"
+                    )
                 )
-            )
             missing = check_missing_permissions(guild.me.guild_permissions)
             if missing:
                 log.warning(
@@ -822,18 +844,9 @@ class DaimonBot(commands.Bot):
         per-guild tree sync → background seed that flips ready/failed + posts the follow-up."""
         guild_id = str(guild.id)
         try:
-            result = await provision_tenant(
-                self.runtime.sessionmaker,
-                platform="discord",
-                workspace_id=guild_id,
-                signup_credit=self.runtime.settings.billing.signup_credit,
-            )
-            await set_provision_status(
-                self.runtime.sessionmaker,
-                tenant_id=result.tenant_id,
-                status="pending",
-                clear_archive=True,  # #132: rejoined guilds must not stay archived
-            )
+            tenant_id = await self._provision_joined_guild(guild)
+            if tenant_id is None:
+                return
             await self._post_to_guild(
                 guild, _build_welcome_embed(_resolve_bot_display_name(self.runtime.settings))
             )
@@ -851,16 +864,20 @@ class DaimonBot(commands.Bot):
             log.warning("guild_join_failed", guild_id=guild_id, error=str(exc))
             return
         # Background seed → flips status + posts the ✅/⚠️ follow-up.
-        self._spawn(
-            self._seed_tenant_defaults(tenant_id=result.tenant_id, guild=guild, was_ready=False)
-        )
+        self._spawn(self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False))
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         """Soft-archive: stamp archived_at=now(). NO row delete."""
         guild_id = str(guild.id)
-        log.warning("guild_removed", guild_id=guild_id, guild_name=guild.name)
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
-        await set_provision_status(self.runtime.sessionmaker, tenant_id=tenant_id, archive=True)
+        async with self._guild_lifecycle_lock_for(guild.id):
+            # discord.py updates its guild cache before dispatching gateway
+            # callbacks. A delayed removal therefore sees a later rejoin here.
+            if self.get_guild(guild.id) is not None:
+                log.info("stale_guild_remove_skipped", guild_id=guild_id, guild_name=guild.name)
+                return
+            await set_provision_status(self.runtime.sessionmaker, tenant_id=tenant_id, archive=True)
+        log.warning("guild_removed", guild_id=guild_id, guild_name=guild.name)
 
     def _release_inflight(self, tenant_id: uuid.UUID) -> None:
         """Release one per-tenant in-flight slot, dropping the key at zero."""
