@@ -57,15 +57,21 @@ formal/check.sh    # about 30 s
 ```
 
 `check.sh` runs each row of [`expected.tsv`](expected.tsv) (model directory,
-spec, config, expected verdict, TLC flags) and fails unless TLC's verdict
-matches: `clean` for safe configurations, `violates:<Invariant>` or
-`violates:<Property>` for the deliberately unsafe configurations that keep a
-counterexample reproducible. The
+spec, config, expected verdict, distinct-state count, TLC flags) and fails
+unless TLC's verdict matches: `clean` for safe configurations,
+`violates:<Invariant>` or `violates:<Property>` for the deliberately unsafe
+configurations that keep a counterexample reproducible. It also fails unless
+the distinct-state count equals the pinned one, and whenever TLC explored 0
+states: an emptied `Init` or an over-constrained `Next` still ends in "No error
+has been found", so a verdict-only check would pass it as clean. TLC runs with
+one worker, so the counts are deterministic; when you change a model on
+purpose, copy the new count from the `check.sh` output into `expected.tsv`. The
 [`formal-models`](../.github/workflows/formal-models.yml) workflow runs it on
 pull requests that touch `formal/` or a source file a model describes. When
 you change that code, update the matching model action; when you close a gap,
 add a safe configuration expected `clean` and keep the unsafe one expected
-`violates:…`. Add every new configuration to `expected.tsv`.
+`violates:…`. Add every new configuration, with its state count, to
+`expected.tsv`.
 
 To run one configuration and read its trace, follow the sequential run
 commands in

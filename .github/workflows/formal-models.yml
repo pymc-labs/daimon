@@ -1,8 +1,9 @@
 name: Formal models
 
 # Model-checks every TLA+ config in formal/expected.tsv with TLC and compares
-# the verdict (formal/README.md): a deliberately unsafe config must still find
-# its counterexample, a safe config must stay clean. Runs when a model changes,
+# the verdict and the distinct-state count (formal/README.md): a deliberately
+# unsafe config must still find its counterexample, a safe config must stay
+# clean, and no config may explore 0 states. Runs when a model changes,
 # and when the code a model describes changes, as a reminder to keep the model
 # in step with it (the model does not read the code). About 30 s of TLC.
 on:
@@ -32,6 +33,8 @@ on:
       - "packages/adapters/slack/daimon/adapters/slack/boot_sweep.py"
       # billing/
       - "packages/adapters/mcp/daimon/adapters/mcp/webhooks.py"
+      - "packages/core/daimon/core/_models.py"
+      - "packages/core/alembic/versions/0024_pending_payment_clawbacks.py"
       - "packages/core/daimon/core/stores/pending_clawbacks.py"
       - "packages/core/daimon/core/stores/payment_events.py"
       - "packages/core/daimon/core/stores/tenant_ledger.py"

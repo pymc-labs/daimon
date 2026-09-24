@@ -8,12 +8,17 @@
 # Needs java (17+) and TLA2TOOLS_JAR (default: formal/tla2tools.jar), the
 # tla2tools v1.7.4 release pinned in formal/README.md.
 #
+# Each row also pins TLC's distinct-state count. A mismatch fails the run, and
+# so does a count of 0 or a missing count: a model whose Init is empty or whose
+# Next is over-constrained still reports "No error has been found", so the
+# verdict alone would pass it as clean without checking anything.
+#
 # Verdicts: clean | violates:<Invariant> | violates:<Property> | deadlock | error.
 # TLC reports a temporal violation without naming the property, so the name is
 # taken from the config's PROPERTY/PROPERTIES list, which must then hold exactly
 # one property; otherwise the verdict is violates:temporal(<p1>|<p2>...).
-# One worker keeps the state counts reproducible (and equal to the model
-# READMEs); a parallel run stops at a scheduling-dependent point on a violation.
+# One worker keeps the state counts reproducible, which is what lets them be
+# pinned; a parallel run stops at a scheduling-dependent point on a violation.
 set -uo pipefail
 cd "$(dirname "$0")"
 JAR=${TLA2TOOLS_JAR:-$PWD/tla2tools.jar}
@@ -35,12 +40,12 @@ properties() {
 
 fail=0
 total_start=$SECONDS
-while IFS=$'\t' read -r dir spec cfg expect flags _note; do
+while IFS=$'\t' read -r dir spec cfg expect expect_states flags _note; do
   [[ -z "${dir}" || "${dir}" == \#* ]] && continue
   [[ "$flags" == "-" ]] && flags=""
   start=$SECONDS
   # shellcheck disable=SC2086  # flags is a deliberately word-split list
-  out=$(cd "$dir" && java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers 1 ${flags} \
+  out=$(cd "$dir" && java -XX:+UseParallelGC -Djava.io.tmpdir="$META" -cp "$JAR" tlc2.TLC -workers 1 ${flags} \
           -metadir "$META/$dir-$cfg" -config "$cfg.cfg" "$spec.tla" 2>&1)
   code=$?
   secs=$((SECONDS - start))
@@ -60,11 +65,21 @@ while IFS=$'\t' read -r dir spec cfg expect flags _note; do
   else
     got="error(exit $code)"
   fi
-  states=$(grep -oE "[0-9,]+ distinct states found" <<<"$out" | tail -1 | awk '{print $1}')
-  if [[ "$got" == "$expect" ]]; then
-    printf 'ok    %-58s %-34s %8s distinct %4ss\n' "$dir/$cfg" "$got" "${states:-?}" "$secs"
+  states=$(grep -oE "[0-9,]+ distinct states found" <<<"$out" | tail -1 | awk '{print $1}' | tr -d ,)
+  problem=""
+  if [[ "$got" != "$expect" ]]; then
+    problem="expected $expect, got $got"
+  elif [[ -z "$states" ]]; then
+    problem="no distinct-state count in TLC output"
+  elif [[ "$states" == 0 ]]; then
+    problem="0 distinct states: nothing was checked"
+  elif [[ "$states" != "$expect_states" ]]; then
+    problem="expected $expect_states distinct states, got $states"
+  fi
+  if [[ -z "$problem" ]]; then
+    printf 'ok    %-58s %-34s %8s distinct %4ss\n' "$dir/$cfg" "$got" "$states" "$secs"
   else
-    printf 'FAIL  %-58s expected %s, got %s (%ss)\n' "$dir/$cfg" "$expect" "$got" "$secs"
+    printf 'FAIL  %-58s %s (%ss)\n' "$dir/$cfg" "$problem" "$secs"
     tail -30 <<<"$out"
     fail=1
   fi

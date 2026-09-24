@@ -1,34 +1,34 @@
 # One row per TLC run. Columns are tab-separated:
-# dir	spec	config	expected verdict	TLC flags (- = none)	what it pins
+# dir	spec	config	expected verdict	distinct states (TLC -workers 1)	TLC flags (- = none)	what it pins
 # A violates: row is a deliberately unsafe config: its counterexample is the
 # evidence that the model can still see the bug the safe config rules out.
 # ---- turn ----
-turn	TurnLifecycle	TurnLifecycle	violates:TerminalExclusive	-	adversarial terminal ordering (idle then terminated), unreachable via the live consume loop
-turn	TurnLifecycle	TurnLifecycleReplay	clean	-	stale replay with the merge fix: RenderAnchorBound holds
-turn	TurnLifecycle	TurnLifecycleBounded	clean	-	adversarial conditions off: all safety invariants
-turn	TurnProgress	TurnProgress	clean	-	liveness: turn finalizes, periodic render resolves (weak fairness)
+turn	TurnLifecycle	TurnLifecycle	violates:TerminalExclusive	39	-	adversarial terminal ordering (idle then terminated), unreachable via the live consume loop
+turn	TurnLifecycle	TurnLifecycleReplay	clean	6926	-	stale replay with the merge fix: RenderAnchorBound holds
+turn	TurnLifecycle	TurnLifecycleBounded	clean	2646	-	adversarial conditions off: all safety invariants
+turn	TurnProgress	TurnProgress	clean	57	-	liveness: turn finalizes, periodic render resolves (weak fairness)
 # ---- scheduler ----
-scheduler	RoutineScheduler	RoutineScheduler	clean	-	two schedulers, one lock: one dispatch per occurrence
-scheduler	RoutineScheduler	RoutineSchedulerProgress	clean	-	liveness under fairness: pending completes, first occurrence advances
+scheduler	RoutineScheduler	RoutineScheduler	clean	110	-	two schedulers, one lock: one dispatch per occurrence
+scheduler	RoutineScheduler	RoutineSchedulerProgress	clean	110	-	liveness under fairness: pending completes, first occurrence advances
 # ---- session preparation ----
-session_preparation	SessionPreparation	SessionPreparation	clean	-	per-thread advisory lock, reuse/replace/handoff safety
-session_preparation	SessionPreparation	SessionPreparationProgress	clean	-	liveness: every started caller returns
+session_preparation	SessionPreparation	SessionPreparation	clean	3532	-	per-thread advisory lock, reuse/replace/handoff safety
+session_preparation	SessionPreparation	SessionPreparationProgress	clean	3532	-	liveness: every started caller returns
 # ---- continuation ----
-continuation	ContinuationDispatch	ContinuationDispatch	clean	-	at-most-once claim, terminal implies external effect
-continuation	ContinuationDispatch	ContinuationCrashProgress	violates:PendingEventuallySettles	-	documented gap: process death after claim strands the continuation
-continuation	ContinuationDispatch	ContinuationProgress	clean	-	crash-free progress
-continuation	ContinuationDispatch	ContinuationRecovery	violates:AtMostOneExternalEffect	-	hypothetical blind stale-claim retry duplicates the turn
+continuation	ContinuationDispatch	ContinuationDispatch	clean	9	-	at-most-once claim, terminal implies external effect
+continuation	ContinuationDispatch	ContinuationCrashProgress	violates:PendingEventuallySettles	9	-	documented gap: process death after claim strands the continuation
+continuation	ContinuationDispatch	ContinuationProgress	clean	5	-	crash-free progress
+continuation	ContinuationDispatch	ContinuationRecovery	violates:AtMostOneExternalEffect	17	-	hypothetical blind stale-claim retry duplicates the turn
 # ---- adapter recovery ----
-adapter_recovery	AdapterRecovery	AdapterRecovery	clean	-	compare-and-clear + recovery before admission
-adapter_recovery	AdapterRecovery	DiscordUnsafe	violates:LiveTurnHasMarker	-	pre-fix Discord: blind clear + turn admitted before recovery
-adapter_recovery	AdapterRecovery	SlackUnsafe	violates:LiveTurnHasMarker	-	pre-fix Slack: turn admitted before recovery
+adapter_recovery	AdapterRecovery	AdapterRecovery	clean	4	-	compare-and-clear + recovery before admission
+adapter_recovery	AdapterRecovery	DiscordUnsafe	violates:LiveTurnHasMarker	8	-	pre-fix Discord: blind clear + turn admitted before recovery
+adapter_recovery	AdapterRecovery	SlackUnsafe	violates:LiveTurnHasMarker	8	-	pre-fix Slack: turn admitted before recovery
 # ---- billing ----
-billing	Clawback	ClawbackUnlocked	violates:NeverOverClawback	-	pre-lock: concurrent clawbacks both read zero and over-debit
-billing	Clawback	ClawbackLocked	clean	-	credit-row lock serializes clawbacks
-billing	OutOfOrder	OutOfOrderUnlocked	violates:NoOrphanPending	-	pre-lock: refund before credit leaves an orphan pending event
-billing	OutOfOrder	OutOfOrderLocked	clean	-	intent lock serializes checkout completion and clawback
+billing	Clawback	ClawbackUnlocked	violates:NeverOverClawback	11	-	pre-lock: concurrent clawbacks both read zero and over-debit
+billing	Clawback	ClawbackLocked	clean	13	-	credit-row lock serializes clawbacks
+billing	OutOfOrder	OutOfOrderUnlocked	violates:NoOrphanPending	12	-	pre-lock: refund before credit leaves an orphan pending event
+billing	OutOfOrder	OutOfOrderLocked	clean	13	-	intent lock serializes checkout completion and clawback
 # ---- wizard ----
-wizard	WizardLifecycle	WizardLifecycle	clean	-	guarded submit and sweep: safety
-wizard	WizardLifecycle	WizardLifecycleProgress	clean	-	liveness: submit settles, second submit loses, expiry settles
-wizard	WizardLifecycle	WizardStaleSubmit	violates:SubmittedUsesCurrentAnswers	-	pre-fix: stale submit overwrote a newer edit
-wizard	WizardLifecycle	WizardSweepRace	violates:SubmittedNeverDowngrades	-	pre-fix: expiry sweep downgraded an in-flight submit
+wizard	WizardLifecycle	WizardLifecycle	clean	92	-	guarded submit and sweep: safety
+wizard	WizardLifecycle	WizardLifecycleProgress	clean	92	-	liveness: submit settles, second submit loses, expiry settles
+wizard	WizardLifecycle	WizardStaleSubmit	violates:SubmittedUsesCurrentAnswers	37	-	pre-fix: stale submit overwrote a newer edit
+wizard	WizardLifecycle	WizardSweepRace	violates:SubmittedNeverDowngrades	67	-	pre-fix: expiry sweep downgraded an in-flight submit
