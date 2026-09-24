@@ -15,6 +15,8 @@ on:
       - "packages/core/daimon/core/turn/driver.py"
       - "packages/core/daimon/core/turn/reducers.py"
       - "packages/core/daimon/core/turn/render.py"
+      # recovery_commit/
+      - "packages/core/daimon/core/turn/prepare.py"
       # scheduler/
       - "packages/core/daimon/core/scheduler.py"
       - "packages/core/daimon/core/stores/routines.py"

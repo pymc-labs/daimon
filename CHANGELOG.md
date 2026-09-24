@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bounded TLA+ models and a source-linked coverage report for turn rendering,
   scheduling, session preparation, continuations, adapter recovery, billing,
-  and wizard submission.
+  wizard submission, and recovery transaction atomicity.
 - TLA+ models for usage metering (live recorder, usage sweep, balance gate)
   and Slack event dedupe and redelivery, each calibrated against earlier bug
   fixes. `docs/billing.md` now states the overdraft bound for concurrent and
