@@ -123,3 +123,10 @@ idempotency key, checks older event-keyed credit rows before inserting, and
 validates any conflicting credit's tenant and amount. Sequential, concurrent,
 and legacy-row regressions cover this fix. Duplicate completion is outside
 `Clawback.tla`; the model's one-credit assumption is enforced by those tests.
+The distinct-event mismatch regression also checks the failure path: if the
+same payment intent names a different tenant or amount, the transaction rolls
+back its event claim, logs the conflicting values, and returns HTTP 500 for
+retry and investigation. It does not credit either tenant a second time.
+Conflicting provider payloads and operator reconciliation remain outside the
+finite model; acknowledging such a conflict as a successful duplicate would
+hide a payment or tenant-integrity error.
