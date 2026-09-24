@@ -62,6 +62,7 @@ from daimon.core.stores.tenants import (
 from daimon.core.stores.thread_agent_bindings import update_lifecycle
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
+    clear_active_turn_if_message_id,
     get_live_thread_session,
     list_orphaned_turns,
     mark_turn_active,
@@ -320,6 +321,7 @@ class DaimonBot(commands.Bot):
         # full gateway reconnect, and a second run would reap the turns THIS
         # process is currently rendering.
         self._orphans_retired: bool = False
+        self._orphan_sweep_lock = asyncio.Lock()
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Fire-and-forget a background task, tracked so it isn't GC'd."""
@@ -592,6 +594,10 @@ class DaimonBot(commands.Bot):
         )
 
     async def _retire_orphaned_turns(self) -> None:
+        async with self._orphan_sweep_lock:
+            await self._retire_orphaned_turns_once()
+
+    async def _retire_orphaned_turns_once(self) -> None:
         """Lay to rest every embed whose turn died with the previous process.
 
         A turn's render loop lives in the process that started it, so a deploy
@@ -615,10 +621,10 @@ class DaimonBot(commands.Bot):
         """
         if self._orphans_retired:
             return
-        self._orphans_retired = True
         async with self.runtime.sessionmaker() as session:
             orphans = await list_orphaned_turns(session, platform="discord")
         if not orphans:
+            self._orphans_retired = True
             return
         log.info("turn.orphans_found", count=len(orphans))
 
@@ -663,8 +669,17 @@ class DaimonBot(commands.Bot):
                     error=str(err),
                 )
             async with self.runtime.sessionmaker() as session:
-                await clear_active_turn(session, id=row.id)
+                cleared = await clear_active_turn_if_message_id(
+                    session, id=row.id, expected_message_id=row.active_turn_message_id
+                )
                 await session.commit()
+            if not cleared:
+                log.info(
+                    "turn.orphan_marker_moved",
+                    thread_id=row.thread_id,
+                    message_id=row.active_turn_message_id,
+                )
+        self._orphans_retired = True
 
     async def on_ready(self) -> None:
         """Forward-only reconcile sweep: provision-if-missing, re-seed pending/failed,
@@ -1329,6 +1344,8 @@ class DaimonBot(commands.Bot):
         turn running there reaches `_dispatch_continuations` at its own tail
         anyway, and will pick up whatever this call would have.
         """
+        if self.is_ready():
+            await self._retire_orphaned_turns()
         if thread.id in self._processing:
             return
         self._processing.add(thread.id)
@@ -1639,6 +1656,11 @@ class DaimonBot(commands.Bot):
         ``unprompted`` marks the trigger as one nobody @mentioned; it reaches
         the agent as an attribute on the ``<user_query>`` element.
         """
+        if self.is_ready():
+            # on_ready and turn handlers can overlap after gateway reconnect.
+            # Serialize the first turn against the boot snapshot so a marker
+            # written by this process cannot be mistaken for an orphan.
+            await self._retire_orphaned_turns()
         if self.user is None:
             log.warning("orchestrate_called_before_ready")
             return
