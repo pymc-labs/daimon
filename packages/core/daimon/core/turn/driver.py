@@ -56,6 +56,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsEventParams,
     BetaManagedAgentsImageBlockParam,
     BetaManagedAgentsSessionStatusIdleEvent,
+    BetaManagedAgentsSpanModelRequestEndEvent,
     BetaManagedAgentsStreamSessionEvents,
     BetaManagedAgentsSystemMessageEventParams,
     BetaManagedAgentsTextBlockParam,
@@ -384,6 +385,10 @@ async def _pump(
     # reconnect must not be double-confirmed (T-19-08-B).
     confirmed_tool_use_ids: set[str] = set()
     delivered_event_ids: set[str] = set()
+    # Per-turn billing dedup, shared by the live consume loop and both replay
+    # folds: a model call MA emitted while no stream was attached exists only
+    # in the replay, and must be billed there, once, by this turn's recorder.
+    billed_event_ids: set[str] = set()
 
     from daimon.core.turn.render import diff as _diff  # local import to avoid cycles
 
@@ -484,6 +489,7 @@ async def _pump(
                                 tool_confirmation=tool_confirmation,
                                 confirmed_tool_use_ids=confirmed_tool_use_ids,
                                 delivered_event_ids=delivered_event_ids,
+                                billed_event_ids=billed_event_ids,
                                 stream_read_timeout_s=stream_read_timeout_s,
                             )
                     break  # a terminal event was found — exit the outer loop too
@@ -520,6 +526,7 @@ async def _pump(
                     # replay response is fetched through multiple pages and
                     # the SDK does not promise a snapshot; fold its current-turn
                     # suffix onto the monotonic in-memory state instead.
+                    await _bill_replayed(billing, current_turn_events, billed_event_ids)
                     state_cell[0] = functools.reduce(apply, current_turn_events, state_cell[0])
                     if session.status == "idle":
                         match tool_confirmation:
@@ -742,6 +749,44 @@ def _events_since_last_turn_boundary(
     return current_events
 
 
+async def _bill_once(billing: BillingPosture, event: object, billed_event_ids: set[str]) -> None:
+    """Meter one `span.model_request_end` through the turn's recorder, once.
+
+    `billed_event_ids` is per turn and shared across stream generations and
+    replays, so a call is billed exactly once whether the driver first sees
+    it live, in a replay, or both. The recorder is idempotent in the
+    database as well; the set keeps the recorder (and its attribution) from
+    running twice. Exceptions propagate (fail-closed).
+    """
+    if not isinstance(event, BetaManagedAgentsSpanModelRequestEndEvent):
+        return
+    if event.id in billed_event_ids:
+        return
+    match billing:
+        case Billed(record=record):
+            await record(event=event)
+        case BillingExempt():
+            pass
+    billed_event_ids.add(event.id)
+
+
+async def _bill_replayed(
+    billing: BillingPosture, events: Sequence[object], billed_event_ids: set[str]
+) -> None:
+    """Meter the model calls in a replayed current-turn suffix.
+
+    A call MA emitted while no stream was attached (between a dropped or
+    closed generation and the next, or after a stall when the session then
+    went idle) exists only in the replay. Folding it into the turn state
+    without billing it would leave it to the scheduler's usage sweep, which
+    records it later under the session's account stamp and a `turn_debit`
+    reason instead of this turn's attribution -- or never, where no
+    scheduler runs.
+    """
+    for event in events:
+        await _bill_once(billing, event, billed_event_ids)
+
+
 async def _consume_with_reconnect(
     *,
     anthropic: AsyncAnthropic,
@@ -757,6 +802,7 @@ async def _consume_with_reconnect(
     tool_confirmation: ToolConfirmation,
     confirmed_tool_use_ids: set[str],
     delivered_event_ids: set[str],
+    billed_event_ids: set[str],
     stream_read_timeout_s: float,
 ) -> None:
     """One attempt at the consume leg. On retry, replay + re-fold first."""
@@ -804,6 +850,7 @@ async def _consume_with_reconnect(
             # list endpoint is paginated and does not document snapshot
             # completeness, so rebuilding from empty could regress behind the
             # adapter's append-only render anchor if a page omits old history.
+            await _bill_replayed(billing, current_turn_events, billed_event_ids)
             state_cell[0] = functools.reduce(apply, current_turn_events, state_cell[0])
             log.info(
                 "turn.reconnect.completed",
@@ -887,12 +934,7 @@ async def _consume_with_reconnect(
                 # A local Postgres write, correctness not delivery -- unlike the
                 # chat-API flush I/O this hook contract forbids, an unmetered
                 # event is revenue lost. Exceptions propagate (fail-closed).
-                match billing:
-                    case Billed(record=record):
-                        if event.type == "span.model_request_end":
-                            await record(event=event)
-                    case BillingExempt():
-                        pass
+                await _bill_once(billing, event, billed_event_ids)
                 await lifecycle.on_sse_event(event)
                 delivered_event_ids.add(event.id)
             state_cell[0] = apply(state_cell[0], event)
