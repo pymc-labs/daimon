@@ -207,6 +207,35 @@ async def test_github_webhook_installation_event_upserts(
     )
 
 
+async def test_github_webhook_ignores_non_lifecycle_installation_actions(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A suspend event must not erase the repository snapshot from a created event."""
+    async with db_session_factory.begin() as seed_session:
+        await install_store.upsert(
+            seed_session,
+            installation_id=9998,
+            account_login="test-owner",
+            repo_full_names=["test-owner/kept-repo"],
+        )
+
+    app = _build_app(sessionmaker)
+    r = await _post_github(
+        app,
+        payload_dict={"action": "suspend", "installation": {"id": 9998}},
+        event="installation",
+    )
+    assert r.status_code == 200, "unrelated installation actions should be acknowledged"
+
+    async with db_session_factory() as check_session:
+        row = await install_store.get(check_session, installation_id=9998)
+    assert row is not None, "suspend event must preserve the installation row"
+    assert list(row.repo_full_names) == ["test-owner/kept-repo"], (
+        "suspend event must not replace the created-event repository snapshot"
+    )
+
+
 async def test_github_webhook_malformed_payload_is_200_noop(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
