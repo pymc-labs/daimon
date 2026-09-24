@@ -14,6 +14,7 @@ admitted while the sweep was still running, must survive it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -25,6 +26,7 @@ import pytest
 import yarl
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.boot_sweep import retire_orphaned_turns
+from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -55,6 +57,7 @@ async def _seed_orphan(
     message_id: str = "1000000000.000001",
     with_token: bool = True,
     ma_session_id: str = "sesn_test",
+    mark_active: bool = True,
 ) -> uuid.UUID:
     """Seed one tenant with a mid-flight thread_sessions row.
 
@@ -80,15 +83,57 @@ async def _seed_orphan(
             account_id=uuid.uuid4(),
             ma_session_id=ma_session_id,
         )
-        await mark_turn_active(
-            s,
-            id=row.id,
-            active_turn_message_id=message_id,
-            active_turn_channel_id=channel_id,
-            now=_NOW,
-        )
+        if mark_active:
+            await mark_turn_active(
+                s,
+                id=row.id,
+                active_turn_message_id=message_id,
+                active_turn_channel_id=channel_id,
+                now=_NOW,
+            )
         await s.commit()
     return row.id
+
+
+async def test_initial_card_without_marker_survives_restart_and_next_turn_posts_again(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A process loss before marker commit leaves the posted card undiscoverable."""
+    fernet_key = Fernet.generate_key().decode()
+    await _seed_orphan(
+        db_session_factory,
+        fernet_key,
+        team_id="T_UNMARKED",
+        mark_active=False,
+    )
+    runtime = build_slack_runtime(fernet_key, db_session_factory)
+
+    def make_lifecycle() -> SlackTurnLifecycle:
+        return SlackTurnLifecycle(
+            client=fake_slack_web_client.client,
+            channel="C_TEST",
+            thread_ts="1000.1",
+            cancel=asyncio.Event(),
+            author_id="U_AUTHOR",
+            agent_name="test-agent",
+            model_id="claude-sonnet-4-6",
+            register=lambda *_args: None,
+            deregister=lambda _status_ts: None,
+        )
+
+    await make_lifecycle().post_initial()
+    await retire_orphaned_turns(runtime, now=_NOW)
+    await make_lifecycle().post_initial()
+
+    post_calls = fake_slack_web_client.mock.requests.get(("POST", _POST_URL), [])
+    update_calls = fake_slack_web_client.mock.requests.get(("POST", _UPDATE_URL), [])
+    assert len(post_calls) == 2, "the retry posts a second initial card"
+    assert not update_calls, "the boot sweep cannot edit the unmarked first card"
+    assert await list_orphaned_turns(db_session, platform="slack") == [], (
+        "the boot sweep cannot find a card whose ts was never persisted"
+    )
 
 
 _EVENTS_PATH = re.compile(r"^/v1/sessions/(?P<sid>[^/]+)/events$")
