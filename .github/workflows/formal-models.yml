@@ -31,6 +31,10 @@ on:
       - "packages/adapters/discord/daimon/adapters/discord/bot.py"
       - "packages/adapters/slack/daimon/adapters/slack/app.py"
       - "packages/adapters/slack/daimon/adapters/slack/boot_sweep.py"
+      - "packages/adapters/slack/daimon/adapters/slack/__main__.py"
+      # the stop-before-start deploy that RollingOverlap assumes
+      - ".github/workflows/deploy.yml"
+      - "docker-compose.yml"
       # billing/
       - "packages/adapters/mcp/daimon/adapters/mcp/webhooks.py"
       - "packages/core/daimon/core/_models.py"
@@ -47,6 +51,7 @@ on:
       - "packages/core/daimon/core/mcp_oauth/**"
       - "packages/core/daimon/core/stores/mcp_oauth_flows.py"
       - "packages/core/daimon/core/agent_mcp_credentials.py"
+      - "packages/core/daimon/core/stores/agent_mcp_credentials.py"
       - "packages/core/daimon/core/mcp_vault.py"
       - "packages/core/daimon/core/mcp_credential_sweep.py"
       - "packages/adapters/mcp/daimon/adapters/mcp/oauth_mcp.py"
