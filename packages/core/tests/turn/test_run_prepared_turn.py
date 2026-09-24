@@ -7,8 +7,10 @@ recorder, and on an upstream 404 with a live mapping row, mark-dead + recreate
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
+import os
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -27,6 +29,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_text_block import BetaMan
 from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import (
     BetaManagedAgentsUserMessageEvent,
 )
+from daimon.core._models import ThreadSession
 from daimon.core.config import McpSettings
 from daimon.core.errors import TurnError
 from daimon.core.ma_resolver import new_resolver_cache
@@ -43,6 +46,7 @@ from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLif
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_recorder
 from daimon.core.turn.run import RunOutcome, _is_dead_session, run_prepared_turn
 from daimon.core.turn.state import TurnState
+from daimon.testing.db import build_test_engine
 from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
@@ -54,7 +58,9 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
 from daimon.testing.turn_fakes import RecordingLifecycle
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.pool import NullPool
 
 from .conftest import make_status_idle
 
@@ -2218,4 +2224,122 @@ async def test_recovery_records_the_history_rung_when_the_old_log_is_unreadable(
     assert successor.predecessor_id == dead_row.id
     assert successor.transfer_kind == "history", (
         "an unreadable log is the bottom rung and the row must say so"
+    )
+
+
+async def test_two_turns_recovering_one_dead_session_leave_one_live_row(
+    db_session: AsyncSession,
+    db_schema: str,
+) -> None:
+    """Two turns bound to one mapping (a Discord wizard submit does not queue
+    behind a mention) both see its session die and both recover. Each used to
+    mark the row dead and create its own replacement outside the bind lock,
+    leaving two live rows for one (tenant, platform, thread, account): one MA
+    session orphaned, and reads silently picking the newer one. Separate
+    engines, because the per-thread advisory lock is connection-scoped and the
+    shared-connection fixture would hide it."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-double-recovery",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    session_bodies: list[dict[str, object]] = []
+    router = _router(session_bodies=session_bodies, dead_session_ids={"sess_old"})
+    both_failed = asyncio.Event()
+    dead_streams = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal dead_streams
+        if request.method == "GET" and request.url.path == "/v1/sessions/sess_old/events/stream":
+            # Both first attempts fail together, so both recoveries overlap.
+            dead_streams += 1
+            if dead_streams == 2:
+                both_failed.set()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(both_failed.wait(), timeout=5)
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            # A slow sessions.create: the window a second recovery lands in.
+            await asyncio.sleep(0.2)
+        return router.dispatch(request)
+
+    url = os.environ["DAIMON_DATABASE__TEST_URL"]
+    engines = [build_test_engine(url, db_schema, poolclass=NullPool) for _ in range(2)]
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    admission = _admission(account_id=account.id, agent=agent, env=env)
+
+    async def one_turn(engine: AsyncEngine, user: str) -> RunOutcome:
+        deps = dataclasses.replace(
+            _deps(
+                sessionmaker=async_sessionmaker(bind=engine, expire_on_commit=False), router=router
+            ),
+            anthropic=anthropic.AsyncAnthropic(
+                api_key="test",
+                http_client=httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+                ),
+                max_retries=0,
+            ),
+        )
+        prepared = _prepared_turn(
+            deps=deps,
+            admission=admission,
+            tenant_id=tenant.id,
+            external_user_id=user,
+            ma_session_id="sess_old",
+            mapping_id=row.id,
+            session_account_id=account.id,
+        )
+        return await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-double-recovery",
+            external_user_id=user,
+            user_message=f"hello from {user}",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+        )
+
+    try:
+        mention, submit = await asyncio.gather(
+            one_turn(engines[0], "user-mention"), one_turn(engines[1], "user-submit")
+        )
+        async with async_sessionmaker(bind=engines[0])() as s:
+            live_rows = (
+                (
+                    await s.execute(
+                        select(ThreadSession).where(
+                            ThreadSession.tenant_id == tenant.id,
+                            ThreadSession.thread_id == "thread-double-recovery",
+                            ThreadSession.status == "live",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    finally:
+        for engine in engines:
+            await engine.dispose()
+
+    assert mention.recovered and submit.recovered, "both turns healed onto a live session"
+    assert len(live_rows) == 1, (
+        f"one thread must keep one live session row; got {len(live_rows)} "
+        f"({[r.ma_session_id for r in live_rows]})"
+    )
+    assert len(session_bodies) == 1, "the second recovery adopts the first one's replacement"
+    assert mention.mapping_id == submit.mapping_id == live_rows[0].id, (
+        "both turns report the one live replacement"
     )
