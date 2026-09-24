@@ -35,9 +35,11 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token
 from daimon.core.roster import RosterAgent
+from daimon.core.setup_conversations import get_setup_agent
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 
 import discord
@@ -65,7 +67,8 @@ async def send_coding_tools_access(
     legacy panel's field, read as a fallback so both entry points keep working
     while they coexist.
     """
-    selected = agent or state.selected_agent or state.selected
+    card_agent = agent or state.selected_agent
+    selected = card_agent or state.selected
     if selected is None:
         return
     log.info("agent_setup.coding_tools.click", agent_name=selected.name)
@@ -82,11 +85,27 @@ async def send_coding_tools_access(
     )
 
     tenant_id = await resolve_tenant_for_panel(runtime, interaction)
-    ma_agent = await find_agent_by_daimon_tag(
-        runtime.anthropic,
-        tenant_id=tenant_id,
-        name=selected.name,
-    )
+    if card_agent is not None:
+        try:
+            ma_agent = await get_setup_agent(
+                runtime.anthropic,
+                tenant_id=tenant_id,
+                ma_agent_id=card_agent.ma_agent_id,
+            )
+        except DaimonError:
+            await interaction.response.send_message(
+                f"Agent **{card_agent.name}** is no longer available. "
+                "Reopen Details and try again.",
+                ephemeral=True,
+            )
+            return
+    else:
+        # The legacy editor still passes only its name-based RosterEntry.
+        ma_agent = await find_agent_by_daimon_tag(
+            runtime.anthropic,
+            tenant_id=tenant_id,
+            name=selected.name,
+        )
     if ma_agent is None:
         log.info("agent_setup.coding_tools.agent_missing", agent_name=selected.name)
         await interaction.response.send_message(
