@@ -32,6 +32,17 @@ transition used only to test a blanket stale-claim retry policy.
 | Pending-only restart lookup | `list_pending_continuations` filters on `status == "pending"` in [`task_continuations.py`](../../packages/core/daimon/core/stores/task_continuations.py:135) |
 | `Crash` / `Restart` | Process failure/restart is an environment abstraction; no recovery transition for claimed rows exists in production code. |
 
+## Runtime regression coverage
+
+The real-Postgres dispatcher tests inject process death at the follow-up
+callback boundary, before or after recording an observable effect:
+[`Discord`](../../packages/adapters/discord/tests/test_continuation_dispatch.py)
+and [`Slack`](../../packages/adapters/slack/tests/test_continuation_dispatch.py).
+They assert that the committed claim remains `claimed` and a later dispatch
+does not retry it. The effect is deliberately injected; these tests verify
+the dispatcher/status boundary and do not establish atomic exactly-once
+behavior across MA, billing, or platform APIs.
+
 ## Bounds and assumptions
 
 - One continuation and one active dispatcher are enough to show permanent

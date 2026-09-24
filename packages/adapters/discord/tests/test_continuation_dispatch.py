@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import httpx
+import pytest
 from daimon.adapters.discord.continuation_dispatch import dispatch_pending_continuations
 from daimon.core.continuity.continuation import ContinuationDecision
 from daimon.core.stores.domain import TaskContinuationRow
@@ -29,6 +30,10 @@ from daimon.testing.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TENANT_UUID = uuid.uuid4()
+
+
+class _SimulatedProcessDeath(BaseException):
+    """Bypass dispatcher error handling to model abrupt process termination."""
 
 
 class _AsyncIter:
@@ -230,6 +235,68 @@ async def test_a_busy_session_settles_skipped_and_requeues_under_a_new_key(
     assert requeued.target_ma_agent_id == "ag_target"
     assert requeued.requester_account_id == account_id
     assert requeued.reason == "task_handoff"
+
+
+@pytest.mark.parametrize(
+    "effect_before_crash", [False, True], ids=["before-effect", "after-effect"]
+)
+async def test_process_death_strands_claim_without_automatic_retry(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    effect_before_crash: bool,
+) -> None:
+    """A new dispatcher ignores a committed claim, even if its effect is ambiguous."""
+    tenant_id, _account_id, _thread_id, key = await _seed_pending_row(
+        db_session_factory, requested_work="continue"
+    )
+    thread = _make_thread()
+    anthropic = build_stub_anthropic(_reachable_agent_handler(tenant_id, ma_agent_id="ag_target"))
+    visible_effects: list[str] = []
+
+    async def _die_during_follow_up(
+        row: TaskContinuationRow, decision: ContinuationDecision
+    ) -> None:
+        if effect_before_crash:
+            visible_effects.append(decision.seed_user_message or "")
+        raise _SimulatedProcessDeath
+
+    with pytest.raises(_SimulatedProcessDeath):
+        await dispatch_pending_continuations(
+            db_session_factory,
+            anthropic,
+            tenant_id=tenant_id,
+            thread=thread,
+            run_follow_up=_die_during_follow_up,
+        )
+
+    async with db_session_factory() as session:
+        claimed = await get_continuation(session, idempotency_key=key)
+    assert claimed is not None and claimed.status == "claimed", (
+        "process death must leave the committed continuation claim unsettled"
+    )
+    assert len(visible_effects) == int(effect_before_crash), (
+        "the injected effect must match the selected crash boundary"
+    )
+
+    run_follow_up = AsyncMock()
+    await dispatch_pending_continuations(
+        db_session_factory,
+        anthropic,
+        tenant_id=tenant_id,
+        thread=thread,
+        run_follow_up=run_follow_up,
+    )
+
+    assert run_follow_up.await_count == 0, (
+        "a new dispatcher must not retry an already-claimed continuation"
+    )
+    assert len(visible_effects) == int(effect_before_crash), (
+        "a later dispatch must not repeat the observable effect"
+    )
+    async with db_session_factory() as session:
+        still_claimed = await get_continuation(session, idempotency_key=key)
+    assert still_claimed is not None and still_claimed.status == "claimed", (
+        "a later dispatch must leave the stranded claim unchanged"
+    )
 
 
 def _reachable_agent_handler(
