@@ -82,6 +82,8 @@ on:
       - "packages/core/daimon/core/stores/slack_bot_tokens.py"
       - "packages/core/daimon/core/stores/tenants.py"
       - "packages/core/daimon/core/sessions.py"
+      # github_installation/
+      - "packages/core/daimon/core/stores/github_app_installations.py"
       # thread queue / adapter overlap
       - "packages/core/daimon/core/turn/run.py"
       - "packages/core/daimon/core/stores/thread_sessions.py"

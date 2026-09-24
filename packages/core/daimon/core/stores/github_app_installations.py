@@ -14,7 +14,7 @@ from typing import Any, cast
 from daimon.core._models import GitHubAppInstallation
 from daimon.core.errors import StoreError
 from daimon.core.stores.domain import GitHubAppInstallationRow
-from sqlalchemy import CursorResult, any_, delete, func, select
+from sqlalchemy import CursorResult, any_, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,8 +28,8 @@ async def upsert(
 ) -> GitHubAppInstallationRow:
     """Upsert the installation record (full-set write).
 
-    Used by `installation` (created) and `installation_repositories`
-    (full-set rewrite) events. Overwrites the repo list atomically.
+    Used by the `installation.created` event. Replaces the cached repo list
+    with the event's full installation snapshot.
     """
     stmt = (
         pg_insert(GitHubAppInstallation)
@@ -54,25 +54,6 @@ async def upsert(
     return GitHubAppInstallationRow.model_validate(orm)
 
 
-async def _load(
-    session: AsyncSession,
-    installation_id: int,
-) -> GitHubAppInstallation:
-    """Load the current row from DB, bypassing the identity-map cache.
-
-    Raises StoreError when not found.
-    """
-    result = await session.execute(
-        select(GitHubAppInstallation).where(
-            GitHubAppInstallation.installation_id == installation_id
-        )
-    )
-    orm = result.scalar_one_or_none()
-    if orm is None:
-        raise StoreError(f"no installation for id {installation_id}")
-    return orm
-
-
 async def add_repos(
     session: AsyncSession,
     *,
@@ -83,15 +64,31 @@ async def add_repos(
 
     Raises StoreError when no installation row exists (no row to extend).
     """
-    orm = await _load(session, installation_id)
-    existing = list(orm.repo_full_names)
-    merged = list(dict.fromkeys(existing + repos))  # dedup, preserve order
-    return await upsert(
-        session,
-        installation_id=installation_id,
-        account_login=orm.account_login,
-        repo_full_names=merged,
+    repo_rows = (
+        func.unnest(GitHubAppInstallation.repo_full_names.op("||")(repos))
+        .table_valued("repo", with_ordinality="ordinal")
+        .render_derived(name="repo_rows")
     )
+    unique_repos = (
+        select(repo_rows.c.repo, func.min(repo_rows.c.ordinal).label("ordinal"))
+        .group_by(repo_rows.c.repo)
+        .subquery()
+    )
+    ordered_repos = func.array(
+        select(unique_repos.c.repo).order_by(unique_repos.c.ordinal).scalar_subquery()
+    )
+    stmt = (
+        update(GitHubAppInstallation)
+        .where(GitHubAppInstallation.installation_id == installation_id)
+        .values(repo_full_names=ordered_repos, updated_at=func.now())
+        .returning(GitHubAppInstallation)
+    )
+    result = await session.execute(stmt.execution_options(populate_existing=True))
+    orm = result.scalar_one_or_none()
+    if orm is None:
+        raise StoreError(f"no installation for id {installation_id}")
+    await session.flush()
+    return GitHubAppInstallationRow.model_validate(orm)
 
 
 async def remove_repos(
@@ -104,15 +101,29 @@ async def remove_repos(
 
     Raises StoreError when no installation row exists.
     """
-    orm = await _load(session, installation_id)
-    to_remove = set(repos)
-    remaining = [r for r in orm.repo_full_names if r not in to_remove]
-    return await upsert(
-        session,
-        installation_id=installation_id,
-        account_login=orm.account_login,
-        repo_full_names=remaining,
+    repo_rows = (
+        func.unnest(GitHubAppInstallation.repo_full_names)
+        .table_valued("repo", with_ordinality="ordinal")
+        .render_derived(name="repo_rows")
     )
+    remaining_repos = func.array(
+        select(repo_rows.c.repo)
+        .where(repo_rows.c.repo.not_in(repos))
+        .order_by(repo_rows.c.ordinal)
+        .scalar_subquery()
+    )
+    stmt = (
+        update(GitHubAppInstallation)
+        .where(GitHubAppInstallation.installation_id == installation_id)
+        .values(repo_full_names=remaining_repos, updated_at=func.now())
+        .returning(GitHubAppInstallation)
+    )
+    result = await session.execute(stmt.execution_options(populate_existing=True))
+    orm = result.scalar_one_or_none()
+    if orm is None:
+        raise StoreError(f"no installation for id {installation_id}")
+    await session.flush()
+    return GitHubAppInstallationRow.model_validate(orm)
 
 
 async def delete_installation(

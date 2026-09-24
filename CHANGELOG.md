@@ -45,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot replace the archive used to recover that bundle. A later publish
   prunes unreferenced archives after at least 24 hours and the configured turn
   deadline.
+- Concurrent GitHub App repository add/remove updates no longer overwrite
+  changes from another delivery.
 - A session loss recovered right at a turn's time limit no longer leaves a
   replacement session behind that the next mention silently continues on
   without being told the previous work was lost.
