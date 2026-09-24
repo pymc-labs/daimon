@@ -231,6 +231,40 @@ async def test_distinct_completion_events_for_one_payment_credit_once(
     assert len([row for row in entries if row.reason == "topup"]) == 1
 
 
+@pytest.mark.parametrize("mismatch", ["tenant", "amount"])
+async def test_conflicting_completion_event_rolls_back_claim_and_credit(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    mismatch: str,
+) -> None:
+    original_tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    other_tenant = await _seed_tenant_via_sessionmaker(committing_sessionmaker)
+    app = _build_app(committing_sessionmaker)
+    first = _checkout_session_completed_payload(
+        "evt_conflict_original", tenant_id=str(original_tenant)
+    )
+    conflicting = _checkout_session_completed_payload(
+        "evt_conflict_duplicate",
+        tenant_id=str(other_tenant if mismatch == "tenant" else original_tenant),
+        amount_total=1200 if mismatch == "amount" else 1000,
+    )
+    payment_intent = first["data"]["object"]["payment_intent"]
+    conflicting["data"]["object"]["payment_intent"] = payment_intent
+
+    assert (await _post_signed(app, first)).status_code == 200
+    response = await _post_signed(app, conflicting)
+    assert response.status_code == 500
+
+    async with committing_sessionmaker() as session:
+        duplicate_event = await payment_events.get(session, "evt_conflict_duplicate")
+        original_balance = await tenant_ledger.get_balance(session, tenant_id=original_tenant)
+        other_balance = await tenant_ledger.get_balance(session, tenant_id=other_tenant)
+        entries = await tenant_ledger.list_for_tenant(session, tenant_id=original_tenant)
+    assert duplicate_event is None, "conflict must roll back the dedup row and credit claim"
+    assert original_balance == Decimal("10")
+    assert other_balance == Decimal("0"), "conflict must not credit another tenant"
+    assert len([row for row in entries if row.reason == "topup"]) == 1
+
+
 async def test_concurrent_completion_events_for_one_payment_credit_once(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

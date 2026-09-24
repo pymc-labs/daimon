@@ -43,6 +43,26 @@ log = structlog.get_logger(__name__)
 _PENDING_CLAWBACK_RETENTION = timedelta(days=90)
 
 
+class _PaymentCreditConflict(RuntimeError):
+    """A payment intent already has a credit that does not match this event."""
+
+    def __init__(
+        self,
+        *,
+        payment_intent: str | None,
+        tenant_id: str,
+        existing_tenant_id: str | None,
+        amount_usd: str,
+        existing_amount_usd: str | None,
+    ) -> None:
+        super().__init__("payment intent credit conflicts with completed event")
+        self.payment_intent = payment_intent
+        self.tenant_id = tenant_id
+        self.existing_tenant_id = existing_tenant_id
+        self.amount_usd = amount_usd
+        self.existing_amount_usd = existing_amount_usd
+
+
 def _get(d: dict[str, Any], key: str) -> object:
     """Type-safe dict.get wrapper for JSON payload dicts.
 
@@ -338,7 +358,22 @@ def build_stripe_webhook(
 
         # --- completed checkout: credit the tenant ledger ---
         if event_type == "checkout.session.completed":
-            return await _handle_completed(sessionmaker, event_id, event)
+            try:
+                return await _handle_completed(sessionmaker, event_id, event)
+            except _PaymentCreditConflict as err:
+                log.error(
+                    "stripe.webhook.payment_credit_conflict",
+                    event_id=event_id,
+                    payment_intent=err.payment_intent,
+                    tenant_id=err.tenant_id,
+                    existing_tenant_id=err.existing_tenant_id,
+                    amount_usd=err.amount_usd,
+                    existing_amount_usd=err.existing_amount_usd,
+                )
+                # Preserve Stripe retries so an operator can repair inconsistent
+                # ledger state and replay the event. The failed transaction rolls
+                # back the dedup row and claim, so no cross-tenant credit is recorded.
+                return Response(status_code=500)
 
         # --- refund / dispute: clawback ---
         if event_type in ("charge.refunded", "charge.dispute.created"):
@@ -454,9 +489,16 @@ async def _handle_completed(
                     or existing.tenant_id != tenant_id
                     or existing.delta_usd != amount_usd
                 ):
-                    raise RuntimeError(
-                        f"credit insert conflict for {event_id!r} "
-                        "without a matching original credit"
+                    raise _PaymentCreditConflict(
+                        payment_intent=payment_intent,
+                        tenant_id=str(tenant_id),
+                        existing_tenant_id=(
+                            str(existing.tenant_id) if existing is not None else None
+                        ),
+                        amount_usd=str(amount_usd),
+                        existing_amount_usd=(
+                            str(existing.delta_usd) if existing is not None else None
+                        ),
                     )
         if payment_intent:
             credit = await tenant_ledger.get_by_payment_intent(
