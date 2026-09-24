@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bounded TLA+ models and a source-linked coverage report for turn rendering,
   scheduling, session preparation, continuations, adapter recovery, billing,
   and wizard submission.
+- TLA+ models for usage metering (live recorder, usage sweep, balance gate)
+  and Slack event dedupe and redelivery, each calibrated against earlier bug
+  fixes. `docs/billing.md` now states the overdraft bound for concurrent and
+  MCP-started turns, the sweep's attribution and its debits of operator-run
+  turns, and why deployments must not share a Managed Agents workspace.
 
 ### Changed
 

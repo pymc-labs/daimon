@@ -42,6 +42,20 @@ on:
       - "packages/core/daimon/core/stores/pending_clawbacks.py"
       - "packages/core/daimon/core/stores/payment_events.py"
       - "packages/core/daimon/core/stores/tenant_ledger.py"
+      # metering/
+      - "packages/core/daimon/core/usage_sweep.py"
+      - "packages/core/daimon/core/usage_recording.py"
+      - "packages/core/daimon/core/stores/usage_events.py"
+      - "packages/core/daimon/core/tenant_balance.py"
+      - "packages/core/daimon/core/turn/admission.py"
+      - "packages/core/daimon/core/turn/prepare.py"
+      - "packages/core/daimon/core/turn/posture.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/tools/agent_chat.py"
+      - "packages/adapters/discord/daimon/adapters/discord/thread_participation.py"
+      # slack_dedupe/
+      - "packages/core/daimon/core/slack_event_dedup_sweep.py"
+      - "packages/core/daimon/core/stores/slack_event_dedup.py"
       # wizard/
       - "packages/adapters/discord/daimon/adapters/discord/wizard_submit.py"
       - "packages/core/daimon/core/stores/wizard_session.py"
