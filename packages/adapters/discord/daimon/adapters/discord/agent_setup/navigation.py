@@ -22,6 +22,7 @@ from daimon.core.roster import Page
 import discord
 
 INVOKER_ONLY_MESSAGE: Final = "Only the command invoker can use these buttons."
+STALE_PANEL_MESSAGE: Final = "This panel has moved on. Use the controls currently shown."
 
 PANEL_TIMEOUT_SECONDS: Final = 600
 
@@ -54,6 +55,9 @@ class PanelViewBase(ExpiringView, discord.ui.LayoutView):
         if interaction.user.id != self.allowed_user_id:
             await interaction.response.send_message(INVOKER_ONLY_MESSAGE, ephemeral=True)
             return False
+        if self._is_superseded():
+            await interaction.response.send_message(STALE_PANEL_MESSAGE, ephemeral=True)
+            return False
         return True
 
     async def swap_to(self, interaction: discord.Interaction, view: PanelViewBase) -> None:
@@ -65,6 +69,12 @@ class PanelViewBase(ExpiringView, discord.ui.LayoutView):
         spent the response, and ``edit_original_response`` reaches the same
         message afterwards.
         """
+        if self._is_superseded():
+            if interaction.response.is_done():
+                await interaction.followup.send(STALE_PANEL_MESSAGE, ephemeral=True)
+            else:
+                await interaction.response.send_message(STALE_PANEL_MESSAGE, ephemeral=True)
+            return
         if interaction.response.is_done():
             await interaction.edit_original_response(
                 view=view.bind_render_interaction(interaction, panel=self.state),

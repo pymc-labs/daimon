@@ -73,6 +73,7 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
         self.state = state
         self.runtime = runtime
         self.allowed_user_id = allowed_user_id
+        self._panel_render_seq = state.render_seq
         # Each TextInput's own `label=` is redundant with the wrapping Label's
         # `text=` (Discord's modern Label-wrapped modal fields), but is kept
         # so `scripts/lint_discord_modals.py`'s unconditional missing-label
@@ -163,8 +164,13 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                     thread_id=self.state.thread_id,
                     default=self.state.deployment_default,
                 )
-            self.state.roster_agents = roster.rows
-            self.state.answering = roster.answering
+            if self._panel_render_seq != self.state.render_seq:
+                await interaction.followup.send(
+                    f"Created **{new_name}**. The setup panel has moved on; run "
+                    "`/agent-setup` again to view it.",
+                    ephemeral=True,
+                )
+                return
             agent = next(
                 (row for row in roster.rows if row.ma_agent_id == created.anthropic_id), None
             )
@@ -173,13 +179,25 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                     f"**{new_name}** was created but is not listed yet. "
                     "Reopen `/agent-setup` to see it."
                 )
+            details = await load_details_for(self.runtime, state=self.state, agent=agent)
+            if self._panel_render_seq != self.state.render_seq:
+                await interaction.followup.send(
+                    f"Created **{new_name}**. The setup panel has moved on; run "
+                    "`/agent-setup` again to view it.",
+                    ephemeral=True,
+                )
+                return
+            self.state.roster_agents = roster.rows
+            self.state.answering = roster.answering
             self.state.select_agent(agent)
-            self.state.details = await load_details_for(self.runtime, state=self.state, agent=agent)
+            self.state.details = details
             await interaction.edit_original_response(
                 view=DetailsView(
                     self.state,
                     runtime=self.runtime,
                     allowed_user_id=self.allowed_user_id,
+                    details=details,
+                    agent=agent,
                 ).bind_render_interaction(interaction, panel=self.state),
                 allowed_mentions=discord.AllowedMentions.none(),
             )

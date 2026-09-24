@@ -113,4 +113,8 @@ class ExpiringView:
         """Shared on_timeout implementation: expire unless superseded."""
         if self._is_superseded():
             return
+        if self._render_panel is not None:
+            # Expiry is itself a terminal render. Fence callbacks and modal
+            # submissions that started from this panel before the timeout.
+            self._render_panel.render_seq += 1
         await edit_expired_message(build_expired_view(), interaction=self._render_interaction)

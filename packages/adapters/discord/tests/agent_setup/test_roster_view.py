@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import datetime as dt
 import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -9,16 +11,22 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import httpx
 import pytest
+from daimon.adapters.discord.agent_setup import details_view as details_view_module
+from daimon.adapters.discord.agent_setup import roster_view as roster_view_module
 from daimon.adapters.discord.agent_setup.budget import (
     LAYOUT_COMPONENT_BUDGET,
     ROSTER_CHROME_COST,
     ROSTER_PAGE_SIZE,
     ROSTER_ROW_COST,
 )
-from daimon.adapters.discord.agent_setup.navigation import INVOKER_ONLY_MESSAGE
+from daimon.adapters.discord.agent_setup.navigation import (
+    INVOKER_ONLY_MESSAGE,
+    STALE_PANEL_MESSAGE,
+)
 from daimon.adapters.discord.agent_setup.roster_view import RosterView, roster_rows
 from daimon.adapters.discord.agent_setup.state import PanelState, ThreadContext
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.core.agent_details import AgentDetails
 from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -441,7 +449,10 @@ async def test_roster_view_timeout_replaces_the_panel(mock_interaction: MagicMoc
     assert not any(isinstance(c, discord.ui.Button) for c in expired.walk_children()), (
         "the expired replacement carries no interactive children"
     )
+    assert state.render_seq == 2, "expiry advances the panel generation to fence old callbacks"
     assert view.timeout == 600, "the panel's timeout is ten minutes"
+    stale_click = _clicker()
+    assert await view.interaction_check(stale_click) is False, "expired controls are rejected"
 
 
 async def test_a_superseded_roster_view_does_not_rewrite_the_message(
@@ -458,6 +469,24 @@ async def test_a_superseded_roster_view_does_not_rewrite_the_message(
 
     await second.on_timeout()
     mock_interaction.edit_original_response.assert_called_once()
+
+
+async def test_superseded_roster_view_refuses_stale_interactions(
+    mock_interaction: MagicMock,
+) -> None:
+    state = _state(agents=(_agent("alice"),))
+    first = RosterView(state, runtime=MagicMock(), allowed_user_id=42)
+    first.bind_render_interaction(mock_interaction, panel=state)
+    second = RosterView(state, runtime=MagicMock(), allowed_user_id=42)
+    second.bind_render_interaction(mock_interaction, panel=state)
+    stale_click = _clicker()
+
+    allowed = await first.interaction_check(stale_click)
+
+    assert allowed is False, "a view superseded by a newer render cannot dispatch its actions"
+    assert stale_click.response.send_message.call_args.args[0] == STALE_PANEL_MESSAGE, (
+        "the stale click is told to use the current panel"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +600,101 @@ async def test_details_click_loads_the_agent_before_editing_the_panel(
     assert state.selected_agent == row, "the click moves the panel's selection"
     swapped = interaction.edit_original_response.call_args.kwargs["view"]
     assert type(swapped).__name__ == "DetailsView", "the panel swaps to the Details screen"
+
+
+@pytest.mark.parametrize("completion_order", [("A", "B"), ("B", "A")])
+async def test_concurrent_details_clicks_keep_each_render_bound_to_its_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    completion_order: tuple[str, str],
+) -> None:
+    """An older Details read cannot render or act on a different selection."""
+    agents = (_agent("A"), _agent("B"))
+    state = _state(agents=agents)
+    view = RosterView(
+        state,
+        runtime=_runtime(
+            sessionmaker=MagicMock(), anthropic=MagicMock(), default=DeploymentDefault()
+        ),
+        allowed_user_id=42,
+    )
+    started = {agent.name: asyncio.Event() for agent in agents}
+    release = {agent.name: asyncio.Event() for agent in agents}
+
+    def details_for(agent: RosterAgent) -> AgentDetails:
+        return AgentDetails(
+            ma_agent_id=agent.ma_agent_id,
+            name=agent.name,
+            model_id=agent.model_id,
+            model_display_name=agent.model_id,
+            daimon_managed=False,
+            created_by_is_workspace=True,
+            created_at=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
+            answers_here=False,
+            applies_note=f"Changes to {agent.name} apply from the next message to it.",
+        )
+
+    async def controlled_load(
+        _runtime: DiscordRuntime, *, state: PanelState, agent: RosterAgent
+    ) -> AgentDetails:
+        started[agent.name].set()
+        await release[agent.name].wait()
+        return details_for(agent)
+
+    monkeypatch.setattr(roster_view_module, "load_details_for", controlled_load)
+    setup_targets: list[RosterAgent | None] = []
+    coding_targets: list[RosterAgent | None] = []
+
+    async def capture_setup(
+        _interaction: discord.Interaction,
+        *,
+        runtime: DiscordRuntime,
+        state: PanelState,
+        target: RosterAgent | None,
+    ) -> None:
+        setup_targets.append(target)
+
+    async def capture_coding_tools(
+        _interaction: discord.Interaction,
+        *,
+        runtime: DiscordRuntime,
+        state: PanelState,
+        allowed_user_id: int,
+        agent: RosterAgent | None = None,
+    ) -> None:
+        coding_targets.append(agent)
+
+    monkeypatch.setattr(details_view_module, "open_setup_conversation", capture_setup)
+    monkeypatch.setattr(details_view_module, "is_guild_admin", lambda _interaction: True)
+    monkeypatch.setattr(details_view_module, "send_coding_tools_access", capture_coding_tools)
+
+    interactions = {name: _clicker(responded=True) for name in ("A", "B")}
+    tasks = {
+        agent.name: asyncio.create_task(view._on_details(interactions[agent.name], agent=agent))
+        for agent in agents
+    }
+    await asyncio.gather(*(event.wait() for event in started.values()))
+
+    rendered: dict[str, Any] = {}
+    for name in completion_order:
+        release[name].set()
+        await tasks[name]
+        if interactions[name].edit_original_response.await_count:
+            rendered[name] = interactions[name].edit_original_response.call_args.kwargs["view"]
+
+    assert tuple(rendered) == ("B",), "the latest click owns the final render"
+    state.select_agent(agents[0])
+    for name, details_view in rendered.items():
+        assert details_view.details.name == name, "the card shows its bound agent"
+        interaction = _clicker()
+        await details_view._on_setup(interaction)
+        await details_view._on_coding_tools(interaction)
+
+    assert [target.name if target else None for target in setup_targets] == list(rendered), (
+        "setup conversations target the agent shown on the captured card"
+    )
+    assert [target.name if target else None for target in coding_targets] == list(rendered), (
+        "coding-tool tokens target the agent shown on the captured card"
+    )
 
 
 async def test_details_click_reports_a_failed_load_and_leaves_the_panel_alone(

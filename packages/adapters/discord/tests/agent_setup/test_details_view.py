@@ -698,6 +698,41 @@ async def test_setup_targets_the_agent_this_card_describes(account_id: uuid.UUID
     interaction.response.defer.assert_called_once()
 
 
+async def test_rendered_details_actions_keep_the_card_agent_after_selection_changes(
+    account_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import daimon.adapters.discord.agent_setup.details_view as details_view_mod
+
+    setup_targets: list[RosterAgent | None] = []
+    coding_targets: list[RosterAgent | None] = []
+
+    async def _capture_setup(_interaction: Any, **kwargs: Any) -> None:
+        setup_targets.append(kwargs["target"])
+
+    async def _capture_coding_tools(
+        _interaction: Any, *, agent: RosterAgent | None = None, **_kwargs: Any
+    ) -> None:
+        coding_targets.append(agent)
+
+    monkeypatch.setattr(details_view_mod, "open_setup_conversation", _capture_setup)
+    monkeypatch.setattr(details_view_mod, "send_coding_tools_access", _capture_coding_tools)
+    details = _details(name="card-agent")
+    state = _state(details, account_id=account_id)
+    view = DetailsView(state, runtime=_make_runtime(), allowed_user_id=42)
+    state.select_agent(_roster_agent("later-selection", ma_agent_id="ag_later"))
+
+    await _find_button(view, setup_target_label("card-agent")).callback(_admin_interaction())
+    await _find_button(view, "🧰 Use from your coding tools").callback(_admin_interaction())
+
+    assert [agent.name if agent else None for agent in setup_targets] == ["card-agent"], (
+        "the setup target stays bound to the Details card"
+    )
+    assert [agent.name if agent else None for agent in coding_targets] == ["card-agent"], (
+        "coding-tool access stays bound to the Details card"
+    )
+
+
 async def test_coding_tools_refuses_a_demoted_admin_without_minting(
     account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
 ) -> None:

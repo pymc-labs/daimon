@@ -37,6 +37,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token
+from daimon.core.roster import RosterAgent
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 
 import discord
@@ -50,6 +51,7 @@ async def send_coding_tools_access(
     runtime: DiscordRuntime,
     state: PanelState,
     allowed_user_id: int,
+    agent: RosterAgent | None = None,
 ) -> None:
     """Mint a per-agent MCP token for the selected agent and reply ephemerally
     with the config block + Revoke view.
@@ -63,7 +65,7 @@ async def send_coding_tools_access(
     legacy panel's field, read as a fallback so both entry points keep working
     while they coexist.
     """
-    selected = state.selected_agent or state.selected
+    selected = agent or state.selected_agent or state.selected
     if selected is None:
         return
     log.info("agent_setup.coding_tools.click", agent_name=selected.name)

@@ -130,3 +130,7 @@ slack_dedupe	SlackDedupe	SlackPreDrainAckLoss	violates:NoUndocumentedLoss	64	-	p
 notebook_upload	NotebookUpload	UploadSafe	clean	29	-	two concurrent attempts; atomic burn before body; restart persistence; no duplicate accepted upload
 notebook_upload	NotebookUpload	CrashLoss	violates:CrashEventuallyUploads	29	-	retained gap: process death after burn and before body makes a retry fail after restart
 notebook_upload	NotebookUpload	LateBurnMutation	violates:NoDuplicateSuccessfulUpload	11	-	mutation: moving the burn after the body await permits two successes
+# ---- Discord setup panel ----
+setup_panel	SetupPanel	SetupPanelPreFix	violates:SetupTargetMatchesCard	24	-	pre-fix selection shared across concurrent Details reads misroutes setup target
+setup_panel	SetupPanel	SetupPanelPreFixCoding	violates:CodingTargetMatchesCard	25	-	pre-fix selection shared across concurrent Details reads mints coding-tools access for the wrong agent
+setup_panel	SetupPanel	SetupPanelSafe	clean	44	-	latest click owns rendering; captured target stays paired; stale reads after panel advance are dropped

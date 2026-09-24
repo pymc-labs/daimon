@@ -103,6 +103,9 @@ class PanelState:
     # ExpiringView.bind_render_interaction on every render; a view holding a
     # stale generation is off screen and must not rewrite the message.
     render_seq: int = 0
+    # Latest Details request begun from the roster. Async reads share this
+    # state, so only the most recently clicked row may publish a result.
+    details_request_seq: int = 0
     recent_setup_conversations: list[str] = dataclasses.field(default_factory=list[str])
     # ---- Read-only setup panel (roster / details / routing) -----------------
     # The tenant's agents as `daimon.core.roster` ordered them: whichever agent
