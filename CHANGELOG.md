@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Prepare Opus 5.5 as the seeded agent and new-agent default, with current
+  pricing. The optional development agent remains on Sonnet 5.
 - The documentation site carries daimon's own look: the readme sticker as
   logo and favicon, and a palette taken from it.
 

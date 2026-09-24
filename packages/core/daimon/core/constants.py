@@ -19,6 +19,7 @@ ALLOWED_MODEL_IDS: tuple[str, ...] = tuple(AGENT_MODEL_PRICING.keys())
 # one here — `models_catalog.list_model_choices` falls back to the raw id for
 # any id missing from this map, and `test_models_catalog` asserts none does.
 MODEL_DISPLAY_NAMES: Final[dict[str, str]] = {
+    "claude-opus-5-5": "Opus 5.5",
     "claude-opus-5": "Opus 5",
     "claude-opus-4-8": "Opus 4.8",
     "claude-opus-4-7": "Opus 4.7",
@@ -33,7 +34,7 @@ MODEL_DISPLAY_NAMES: Final[dict[str, str]] = {
 # modal and the Slack submit path, which is how three surfaces ended up a
 # generation behind `defaults/agents/daimon.yaml` while each looked correct in
 # isolation. Keep it equal to the model that file pins.
-DEFAULT_AGENT_MODEL: str = "claude-sonnet-5"
+DEFAULT_AGENT_MODEL: str = "claude-opus-5-5"
 
 # The per-agent skill and MCP-server limits every surface enforces. The setup
 # panel (disabling its add controls) and the chat update path (refusing a

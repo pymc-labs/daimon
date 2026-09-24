@@ -17,3 +17,6 @@ Layout:
   etc. are packaged into the zip.
 
 Operator workflow: edit YAML → `daimon defaults apply`.
+
+The shipped `daimon` agent defaults to `claude-opus-5-5`. The optional
+`dev_agent` keeps its deliberate `claude-sonnet-5` pin.
