@@ -53,9 +53,15 @@ on:
       - "packages/adapters/mcp/daimon/adapters/mcp/oauth_slack.py"
       - "packages/core/daimon/core/slack_oauth.py"
       - "packages/core/daimon/core/defaults/provisioning.py"
+      - "packages/core/daimon/core/stores/slack_bot_tokens.py"
+      - "packages/core/daimon/core/stores/tenants.py"
+      - "packages/core/daimon/core/sessions.py"
       # thread queue / adapter overlap
       - "packages/core/daimon/core/turn/run.py"
       - "packages/core/daimon/core/stores/thread_sessions.py"
+      - "packages/core/daimon/core/ma.py"
+      - "packages/adapters/slack/daimon/adapters/slack/credential_submissions.py"
+      - "packages/adapters/discord/daimon/adapters/discord/credential_modals.py"
   workflow_dispatch:
 
 permissions:
