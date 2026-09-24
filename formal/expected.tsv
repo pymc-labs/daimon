@@ -82,6 +82,12 @@ report_publish	ReportPublish	PublishSafe	clean	12	-	archive, seam result, PDF, a
 report_publish	ReportPublish	PublishPreFix	violates:VisibleArtifactsCoherent	2	-	pre-fix: current PDF/revision exposed before the accepted bundle changes
 report_publish	PublishOverlap	PublishOverlapUnsafe	violates:VisibleArtifactsCoherent	138	-	mutation: a second publish prunes an aged archive while its seam response is pending
 report_publish	PublishOverlap	PublishOverlapSafe	clean	399	-	process-local in-flight archive protection preserves accepted concurrent publish tuples and reader snapshots
+# ---- GitHub push resync queue ----
+github_push_resync	PushResync	PushResyncSafe	clean	297	-	persisted acknowledgement and generation fence preserve current-state completion through bounded crashes
+github_push_resync	PushResync	PushResyncEarlyAck	violates:AckHasDurableGeneration	2	-	pre-queue background task: HTTP 200 can precede durable work
+github_push_resync	PushResync	PushResyncStaleComplete	violates:DoneHasCurrentBranch	29	-	mutated completion without generation fence loses the newer push
+github_push_resync	PushResync	PushResyncCrashDuplicate	violates:NoRepeatedExternalEffect	111	-	documented repeat of an external effect after crash before queue completion
+github_push_resync	PushResync	PushResyncProgress	clean	55	-	crash-free weak-fair progress after two finite arrivals and successful external writes
 # ---- metering ----
 metering	Metering	Metering	clean	8006	-	live recorder + usage sweep + per-deployment ledger with the replay-billing fix: all safety invariants
 metering	Metering	MeteringReplayGap	violates:LiveMetersWholeTurn	160	-	pre-#234: a model call seen only in the reconnect/finalize replay is never billed by the turn

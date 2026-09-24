@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wizard submission, and recovery transaction atomicity.
 - A bounded report-publish model checks that the visible PDF, bundle, digest,
   and retry archive stay coherent across seam failure and the local commit.
+- A bounded GitHub push resync model checks durable acknowledgements,
+  generation-fenced completion, crash duplicates, and fair crash-free progress.
 - TLA+ models for usage metering (live recorder, usage sweep, balance gate)
   and Slack event dedupe and redelivery, each calibrated against earlier bug
   fixes. `docs/billing.md` now states the overdraft bound for concurrent and
