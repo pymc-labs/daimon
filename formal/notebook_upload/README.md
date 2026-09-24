@@ -27,16 +27,16 @@ burned.
 
 | Model item | Implementation |
 | --- | --- |
-| Verify token and extract `jti` | [`admin.py`](../../apps/notebook-host/src/notebook_host/admin.py:455) |
-| Synchronous burn before body read and reject replay | [`admin.py`](../../apps/notebook-host/src/notebook_host/admin.py:462) |
-| Body read, size rejection, and accepted upload path | [`admin.py`](../../apps/notebook-host/src/notebook_host/admin.py:470) |
-| Read, prune, insert, and persist the consumed `jti` | [`consumed_store.py`](../../apps/notebook-host/src/notebook_host/consumed_store.py:79) |
-| Durable replacement of `consumed.json` | [`consumed_store.py`](../../apps/notebook-host/src/notebook_host/consumed_store.py:52) |
-| Default path under the host data directory | [`config.py`](../../apps/notebook-host/src/notebook_host/config.py:162) |
-| One Uvicorn worker in the checked-in entrypoint | [`__main__.py`](../../apps/notebook-host/src/notebook_host/__main__.py:11) |
-| Concurrent same-token requests | [`test_admin_upload.py`](../../apps/notebook-host/tests/test_admin_upload.py:166) |
-| Oversize rejection still burns the token | [`test_admin_upload.py`](../../apps/notebook-host/tests/test_admin_upload.py:190) |
-| Replay after rebuilding host state | [`test_admin_upload.py`](../../apps/notebook-host/tests/test_admin_upload.py:205) |
+| Verify token and extract `jti` | [`admin.py`](../../apps/notebook-host/src/notebook_host/admin.py#L455) |
+| Synchronous burn before body read and reject replay | [`admin.py`](../../apps/notebook-host/src/notebook_host/admin.py#L462) |
+| Body read, size rejection, and accepted upload path | [`admin.py`](../../apps/notebook-host/src/notebook_host/admin.py#L470) |
+| Read, prune, insert, and persist the consumed `jti` | [`consumed_store.py`](../../apps/notebook-host/src/notebook_host/consumed_store.py#L79) |
+| Atomic filename replacement of `consumed.json` | [`consumed_store.py`](../../apps/notebook-host/src/notebook_host/consumed_store.py#L52) |
+| Default path under the host data directory | [`config.py`](../../apps/notebook-host/src/notebook_host/config.py#L162) |
+| One Uvicorn worker in the checked-in entrypoint | [`__main__.py`](../../apps/notebook-host/src/notebook_host/__main__.py#L11) |
+| Concurrent same-token requests | [`test_admin_upload.py`](../../apps/notebook-host/tests/test_admin_upload.py#L166) |
+| Oversize rejection still burns the token | [`test_admin_upload.py`](../../apps/notebook-host/tests/test_admin_upload.py#L190) |
+| Replay after rebuilding host state | [`test_admin_upload.py`](../../apps/notebook-host/tests/test_admin_upload.py#L205) |
 
 `UploadSafe.cfg` checks type correctness, at most one successful upload, and
 the result of a crash after burn but before body read. It explores 29 distinct
@@ -44,7 +44,7 @@ states. `CrashLoss.cfg` intentionally violates `CrashEventuallyUploads`. Weak
 fairness for restart and retry makes TLC show the retry after restart:
 
 1. One concurrent attempt burns the token.
-2. The host dies before reading the body; the burn remains durable.
+2. The host dies before reading the body; the burn remains in `consumed.json`.
 3. The host restarts.
 4. The pending concurrent attempt is rejected as a replay.
 5. A retry after restart is also rejected; no upload succeeded.
@@ -57,7 +57,7 @@ mutation is a model-sensitivity check, not a claim that this historical
 implementation was deployed.
 
 This is the chosen single-use tradeoff: a request can lose its upload if the
-host dies after persisting the burn or if body validation rejects it. The
+host dies after writing the burn or if body validation rejects it. The
 existing oversize regression checks that a smaller retry receives 409. The
 crash trace is model evidence for the same ordering, not a separate runtime
 crash-injection test.
@@ -73,12 +73,15 @@ crash-injection test.
   multiple host processes sharing `consumed.json` can both read the jti as
   unused and race their file replacements. That topology is excluded and the
   model makes no universal multi-process one-use claim.
-- The durable burn is modeled as atomic. The temp-file write, chmod, and
-  `os.replace` failure modes are not explored. A crash before replacement may
-  leave the jti unburned; the loss trace begins after replacement.
+- The burn is modeled as surviving a host-process restart after `os.replace`.
+  The temp-file write, chmod, and replacement failure modes are not explored.
+  A crash before replacement may leave the jti unburned; the loss trace begins
+  after replacement. Power-loss durability is excluded because the store does
+  not fsync the file and parent directory.
 - Token signature, expiry, slug/name validation, distinct tokens, body
   streaming, partial file writes, and host ceilings are outside the state
   space. Each request attempt is for one shared jti, and a valid body succeeds
   without filesystem failure.
-- TLC explores this finite two-attempt abstraction; it does not prove the
-  Python implementation, operating-system durability, or deployment topology.
+- TLC explores this finite two-request-plus-retry abstraction; it does not
+  prove the Python implementation, power-loss durability, or deployment
+  topology.
