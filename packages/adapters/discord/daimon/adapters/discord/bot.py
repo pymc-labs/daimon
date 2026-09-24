@@ -51,6 +51,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError
+from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow
@@ -327,6 +328,11 @@ class DaimonBot(commands.Bot):
         # process is currently rendering.
         self._orphans_retired: bool = False
         self._orphan_sweep_lock = asyncio.Lock()
+        # Set by setup_hook, which runs after login and before the gateway
+        # connects, so it is set before any message or interaction can arrive.
+        # From then on every turn entry passes the sweep barrier. Left unset
+        # only by unit tests that build a bot without logging it in.
+        self._orphan_recovery_armed: bool = False
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Fire-and-forget a background task, tracked so it isn't GC'd."""
@@ -358,7 +364,8 @@ class DaimonBot(commands.Bot):
         await self.close()
 
     async def setup_hook(self) -> None:
-        """Load command Cogs before on_ready syncs the tree."""
+        """Arm orphan recovery and load command Cogs before on_ready syncs the tree."""
+        self.start_orphan_recovery()
         from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
         from daimon.adapters.discord.commands.billing import BillingCog
         from daimon.adapters.discord.commands.help import HelpCog
@@ -598,6 +605,31 @@ class DaimonBot(commands.Bot):
             self._seed_tenant_defaults(tenant_id=result.tenant_id, guild=guild, was_ready=False)
         )
 
+    def start_orphan_recovery(self) -> None:
+        """Start the boot sweep before the gateway can deliver a turn.
+
+        Mirrors Slack's `start_orphan_recovery`, which runs before Socket Mode
+        connects. discord.py dispatches messages before `on_ready` (which
+        waits for every guild to stream in), so a barrier gated on
+        `is_ready()` let a turn start and write its marker before the first
+        sweep, and that sweep then retired -- and interrupted on MA -- the
+        live turn. Arming here makes every turn entry wait for the sweep from
+        the first event on. The sweep needs only REST calls (`fetch_channel`),
+        which work once login has completed.
+        """
+        self._orphan_recovery_armed = True
+        self._spawn(self._retire_orphaned_turns())
+
+    async def _wait_for_orphan_recovery(self) -> None:
+        """The turn-admission barrier: returns once the boot sweep has run.
+
+        A sweep that failed is retried here, so a transient failure delays
+        turns rather than letting a later sweep mistake their markers for
+        orphans.
+        """
+        if self._orphan_recovery_armed:
+            await self._retire_orphaned_turns()
+
     async def _retire_orphaned_turns(self) -> None:
         async with self._orphan_sweep_lock:
             await self._retire_orphaned_turns_once()
@@ -612,8 +644,9 @@ class DaimonBot(commands.Bot):
 
         Marking it failed is honest and cheap, and the alternative -- draining
         in-flight turns before the container exits -- needs a lameduck story the
-        compose refresh does not have. This runs first in on_ready so a user
-        reading the thread sees the truth before anything else happens.
+        compose refresh does not have. It starts from setup_hook, before the
+        gateway connects, and every turn waits for it, so a user reading the
+        thread sees the truth before anything else happens.
 
         Failures to edit are swallowed per row: the message may be deleted, the
         thread archived, or permissions changed since. One unreachable embed
@@ -622,7 +655,9 @@ class DaimonBot(commands.Bot):
 
         Runs at most once per process: on_ready re-fires on every full gateway
         reconnect, and a marker set by this process is a LIVE turn, not an
-        orphan.
+        orphan. That only holds because no turn can write a marker before the
+        first run finishes (`_wait_for_orphan_recovery`); the MA interrupt
+        below would otherwise stop a live turn of this very process.
         """
         if self._orphans_retired:
             return
@@ -678,7 +713,15 @@ class DaimonBot(commands.Bot):
                     session, id=row.id, expected_message_id=row.active_turn_message_id
                 )
                 await session.commit()
-            if not cleared:
+            if cleared:
+                # Stop the turn MA is still running for this orphan, so it
+                # stops billing and the next mention's message is not sent
+                # into a running session (which MA ignores). A moved marker
+                # belongs to a live turn and is never interrupted.
+                await interrupt_orphaned_session(
+                    self.runtime.anthropic, session_id=row.ma_session_id
+                )
+            else:
                 log.info(
                     "turn.orphan_marker_moved",
                     thread_id=row.thread_id,
@@ -1372,8 +1415,7 @@ class DaimonBot(commands.Bot):
         turn running there reaches `_dispatch_continuations` at its own tail
         anyway, and will pick up whatever this call would have.
         """
-        if self.is_ready():
-            await self._retire_orphaned_turns()
+        await self._wait_for_orphan_recovery()
         if thread.id in self._processing:
             # The turn running there may already be past its own tail
             # dispatch, so remember the call and re-run it on release.
@@ -1707,11 +1749,10 @@ class DaimonBot(commands.Bot):
         ``unprompted`` marks the trigger as one nobody @mentioned; it reaches
         the agent as an attribute on the ``<user_query>`` element.
         """
-        if self.is_ready():
-            # on_ready and turn handlers can overlap after gateway reconnect.
-            # Serialize the first turn against the boot snapshot so a marker
-            # written by this process cannot be mistaken for an orphan.
-            await self._retire_orphaned_turns()
+        # Serialize every turn against the boot snapshot, including a turn
+        # that arrives before on_ready, so a marker written by this process
+        # cannot be mistaken for an orphan.
+        await self._wait_for_orphan_recovery()
         if self.user is None:
             log.warning("orchestrate_called_before_ready")
             return

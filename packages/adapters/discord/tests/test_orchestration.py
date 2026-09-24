@@ -858,6 +858,7 @@ class TestSetupHook:
             add_cog_calls.append(cog)
 
         bot.add_cog = tracking_add_cog  # type: ignore[assignment]
+        bot.start_orphan_recovery = MagicMock()  # type: ignore[method-assign]  # the boot sweep is not under test
 
         with patch.dict(
             "sys.modules",

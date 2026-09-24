@@ -10,8 +10,10 @@ Design rules:
 - Free async functions; no class (no cross-call state to own).
 - `AsyncAnthropic` is injected by the caller. No module-level client.
 - Errors from the SDK (`anthropic.APIError` and subclasses) propagate
-  unchanged. The one exception: `send_interrupt_and_wait` converts its own
-  timeout — a purely local condition — into `TurnError(kind="interrupt_timeout")`.
+  unchanged. Two exceptions: `send_interrupt_and_wait` converts its own
+  timeout — a purely local condition — into `TurnError(kind="interrupt_timeout")`,
+  and `interrupt_orphaned_session` is best-effort by contract: it logs an
+  SDK error or its own timeout instead of raising.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import structlog
-from anthropic import APIStatusError, AsyncAnthropic
+from anthropic import APIError, APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionEvent,
@@ -182,6 +184,67 @@ async def send_interrupt_and_wait(
 # MA raises anthropic.ConflictError (status 409) with type "invalid_request_error"
 # and message "Concurrent modification detected. Please fetch the latest version and retry."
 _VERSION_CONFLICT_STATUSES: frozenset[int] = frozenset({409})
+
+
+# The boot orphan sweeps await each interrupt while turn admission waits on
+# them, so the call is bounded here rather than by the client's own timeout
+# (the adapters' clients retry MA_MAX_RETRIES times, 600 s per attempt).
+ORPHAN_INTERRUPT_TIMEOUT_S: float = 10.0
+
+
+async def interrupt_orphaned_session(
+    anthropic: AsyncAnthropic,
+    *,
+    session_id: str,
+    timeout_s: float | None = None,
+) -> bool:
+    """Stop the MA turn a dead adapter process left running. Best-effort.
+
+    A turn's render loop dies with the process that started it, but MA keeps
+    running the turn: it goes on billing, and the next mention in the thread
+    reuses the session and sends its `user.message` into a session that is
+    still running -- MA answers that with 200 and ignores it (see the driver's
+    tool-confirmation send), so the new turn would render the dead turn's
+    answer. The boot orphan sweeps call this for every row whose marker they
+    actually cleared.
+
+    Sends `user.interrupt` without waiting for the session to go idle, and
+    gives up after `timeout_s` (default `ORPHAN_INTERRUPT_TIMEOUT_S`, retries
+    included): the sweep holds turn
+    admission while it runs, so an MA brownout must cost each orphan at most
+    `timeout_s`, not the client's retry budget. A session that is already
+    idle, archived or gone answers with an error (or a no-op); either way
+    there is nothing left to stop. An `anthropic.APIError` or the timeout is
+    logged and reported as `False`, never raised.
+
+    ponytail: the sweeps assume one adapter process per platform (see
+    `list_orphaned_turns`). A second, overlapping process would see the first
+    one's live markers as orphans, and this call would then stop those live
+    MA turns, not just relabel their cards.
+    """
+    if timeout_s is None:
+        timeout_s = ORPHAN_INTERRUPT_TIMEOUT_S
+    try:
+        await asyncio.wait_for(
+            anthropic.beta.sessions.events.send(
+                session_id,
+                events=[{"type": "user.interrupt"}],
+            ),
+            timeout=timeout_s,
+        )
+    except TimeoutError:
+        log.warning("turn.orphan_interrupt_timeout", session_id=session_id, timeout_s=timeout_s)
+        return False
+    except APIError as err:
+        log.info(
+            "turn.orphan_interrupt_failed",
+            session_id=session_id,
+            err_type=type(err).__name__,
+            error=str(err)[:200],
+        )
+        return False
+    log.info("turn.orphan_interrupted", session_id=session_id)
+    return True
 
 
 async def update_agent_with_version_retry(

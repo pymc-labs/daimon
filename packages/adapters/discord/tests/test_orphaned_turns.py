@@ -9,11 +9,16 @@ live in the store tests.
 
 from __future__ import annotations
 
+import json
+import re
 import uuid
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import httpx
+import pytest
+from anthropic import AsyncAnthropic
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -26,12 +31,14 @@ from daimon.core.stores.thread_sessions import (
     list_orphaned_turns,
     mark_turn_active,
 )
-from daimon.testing import ma_session
+from daimon.testing import build_fake_anthropic, ma_session
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-def _make_bot(sessionmaker: async_sessionmaker[AsyncSession]) -> DaimonBot:
+def _make_bot(
+    sessionmaker: async_sessionmaker[AsyncSession], *, anthropic: AsyncAnthropic | None = None
+) -> DaimonBot:
     settings = MagicMock()
     settings.mcp = McpSettings()
     discord_settings = MagicMock()
@@ -39,7 +46,7 @@ def _make_bot(sessionmaker: async_sessionmaker[AsyncSession]) -> DaimonBot:
     settings.discord = discord_settings
     runtime = DiscordRuntime(
         settings=settings,
-        anthropic=AsyncMock(),
+        anthropic=anthropic if anthropic is not None else AsyncMock(),
         sessionmaker=sessionmaker,
         notebook_rate_limiter=RateLimiter(max_requests=999),
         billing_config=None,
@@ -57,6 +64,7 @@ async def _make_orphan(
     *,
     thread_id: str = "555",
     message_id: str = "777",
+    ma_session_id: str = "sesn_test",
 ) -> uuid.UUID:
     tenant = await make_tenant(session)
     row = await create_thread_session(
@@ -65,7 +73,7 @@ async def _make_orphan(
         platform="discord",
         thread_id=thread_id,
         account_id=uuid.uuid4(),
-        ma_session_id="sesn_test",
+        ma_session_id=ma_session_id,
     )
     await mark_turn_active(
         session,
@@ -75,6 +83,83 @@ async def _make_orphan(
     )
     await session.commit()
     return row.id
+
+
+_EVENTS_PATH = re.compile(r"^/v1/sessions/(?P<sid>[^/]+)/events$")
+
+
+class _InterruptRecorder:
+    """An MA transport recording every event sent to a session; sessions in
+    ``failing`` answer 404, as MA does for a session that no longer exists."""
+
+    def __init__(self, *, failing: frozenset[str] = frozenset()) -> None:
+        self.sent: list[tuple[str, str]] = []
+        self._failing = failing
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        match = _EVENTS_PATH.match(request.url.path)
+        not_found = {"type": "error", "error": {"type": "not_found_error", "message": "not found"}}
+        if request.method != "POST" or match is None:
+            return httpx.Response(404, json=not_found)
+        sid = match["sid"]
+        for event in json.loads(request.content)["events"]:
+            self.sent.append((sid, event["type"]))
+        if sid in self._failing:
+            return httpx.Response(404, json=not_found)
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "sevt_1", "type": "user.interrupt", "processed_at": None}]},
+        )
+
+
+def _reachable_thread() -> MagicMock:
+    message = MagicMock(spec=discord.Message)
+    message.edit = AsyncMock()
+    thread = MagicMock(spec=discord.Thread)
+    thread.fetch_message = AsyncMock(return_value=message)
+    return thread
+
+
+async def test_sweep_interrupts_the_orphaned_turns_ma_session(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The embed says the turn was interrupted; the MA session must stop too.
+
+    Left running, the dead turn keeps billing, and the next mention reuses the
+    session and sends its user.message into a still-running session, which MA
+    answers with 200 and ignores.
+    """
+    await _make_orphan(db_session, ma_session_id="sesn_orphan")
+    recorder = _InterruptRecorder()
+    bot = _make_bot(db_session_factory, anthropic=build_fake_anthropic(recorder))
+    bot.get_channel = MagicMock(return_value=_reachable_thread())  # pyright: ignore[reportAttributeAccessIssue]
+
+    await bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]
+
+    assert recorder.sent == [("sesn_orphan", "user.interrupt")], (
+        "the orphaned turn's MA session must be interrupted exactly once"
+    )
+    assert await list_orphaned_turns(db_session, platform="discord") == []
+
+
+async def test_a_failed_interrupt_does_not_stop_the_sweep(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _make_orphan(db_session, thread_id="555", message_id="777", ma_session_id="sesn_gone")
+    await _make_orphan(db_session, thread_id="556", message_id="778", ma_session_id="sesn_alive")
+    recorder = _InterruptRecorder(failing=frozenset({"sesn_gone"}))
+    bot = _make_bot(db_session_factory, anthropic=build_fake_anthropic(recorder))
+    bot.get_channel = MagicMock(return_value=_reachable_thread())  # pyright: ignore[reportAttributeAccessIssue]
+
+    await bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]  # must not raise
+
+    assert sorted(recorder.sent) == [
+        ("sesn_alive", "user.interrupt"),
+        ("sesn_gone", "user.interrupt"),
+    ], "one session's failed interrupt must not skip the other's"
+    assert await list_orphaned_turns(db_session, platform="discord") == []
 
 
 async def test_sweep_marks_the_embed_failed_and_clears_the_row(
@@ -151,7 +236,8 @@ async def test_sweep_does_not_clear_a_marker_rewritten_during_message_edit(
 ) -> None:
     """A turn that starts while the old card is being retired owns its new marker."""
     mapping_id = await _make_orphan(db_session)
-    bot = _make_bot(db_session_factory)
+    recorder = _InterruptRecorder()
+    bot = _make_bot(db_session_factory, anthropic=build_fake_anthropic(recorder))
     message = MagicMock(spec=discord.Message)
 
     async def _start_new_turn(**_kwargs: object) -> None:
@@ -169,6 +255,10 @@ async def test_sweep_does_not_clear_a_marker_rewritten_during_message_edit(
     bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
 
     await bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]
+
+    assert recorder.sent == [], (
+        "a session whose marker moved is running a live turn and must not be interrupted"
+    )
 
     orphans = await list_orphaned_turns(db_session, platform="discord")
     assert [row.id for row in orphans] == [mapping_id], (
@@ -271,3 +361,149 @@ async def test_ceiling_outcome_still_clears_the_active_turn_marker(
     assert mapping.watermark_message_id is None, (
         "a ceiling outcome carries state.error is not None, so the watermark must never be written"
     )
+
+
+async def test_a_turn_started_before_on_ready_is_not_interrupted_by_the_boot_sweep(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """discord.py dispatches messages before on_ready (which waits for every
+    guild to stream in). A mention in that window must pass the sweep barrier
+    too; otherwise it writes its marker first, and on_ready's sweep takes the
+    live turn for an orphan, retires its card and interrupts it on MA.
+
+    Only the previous process's orphan may be interrupted.
+    """
+    from decimal import Decimal
+    from unittest.mock import patch
+
+    from daimon.core.stores import tenant_ledger
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TurnState
+
+    from .harness import make_bot
+    from .test_orchestration import (
+        _make_channel_message,  # pyright: ignore[reportPrivateUsage]
+        _make_runtime,  # pyright: ignore[reportPrivateUsage]
+        _stub_resolved_config,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    # The previous process died mid-turn in another thread.
+    await _make_orphan(db_session, thread_id="555", message_id="777", ma_session_id="sesn_dead")
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("100.00"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    await db_session.commit()
+
+    runtime = _make_runtime(tenant.id, db_session_factory)
+    bot = make_bot(runtime)
+    bot.get_channel = MagicMock(return_value=_reachable_thread())  # pyright: ignore[reportAttributeAccessIssue]
+    # What start_orphan_recovery (setup_hook) does, minus spawning the sweep:
+    # the mention arrives before the spawned sweep has run, so the barrier in
+    # the turn itself must run it (the test DB shares one connection, so the
+    # spawned task is not started here).
+    bot._orphan_recovery_armed = True  # pyright: ignore[reportPrivateUsage]
+    assert not bot.is_ready(), "the scenario is a turn that arrives before on_ready"
+
+    message = _make_channel_message()
+    mock_thread = MagicMock(spec=discord.Thread)
+    mock_thread.id = 9999
+    mock_thread.send = AsyncMock()
+    message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
+
+    live_markers_after_on_ready: list[str] = []
+
+    async def _turn_during_which_on_ready_fires(*_args: object, **_kwargs: object) -> RunOutcome:
+        await bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]  # on_ready's sweep
+        async with db_session_factory() as session:
+            live_markers_after_on_ready.extend(
+                row.thread_id for row in await list_orphaned_turns(session, platform="discord")
+            )
+        return RunOutcome(
+            state=TurnState(), ma_session_id="sesn_live", mapping_id=None, recovered=False
+        )
+
+    with (
+        patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock) as resolve,
+        patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as create,
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as agent,
+        patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock) as env,
+        patch(
+            "daimon.adapters.discord.bot.run_prepared_turn",
+            new=AsyncMock(side_effect=_turn_during_which_on_ready_fires),
+        ),
+    ):
+        resolve.return_value = _stub_resolved_config()
+        create.return_value = ma_session(id="sesn_live")
+        agent.return_value = "ag_test"
+        env.return_value = "env_test"
+
+        await bot.on_message(message)
+
+    interrupted = [
+        call.args[0]
+        for call in runtime.anthropic.beta.sessions.events.send.await_args_list  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+    ]
+    assert interrupted == ["sesn_dead"], (
+        "only the previous process's orphan may be interrupted, never this process's live turn"
+    )
+    assert live_markers_after_on_ready == ["9999"], (
+        "on_ready's sweep must leave the live turn's marker in place"
+    )
+
+
+async def test_setup_hook_arms_the_orphan_barrier_before_the_gateway_connects(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bot = _make_bot(db_session_factory)
+    bot.add_cog = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]  # cogs are not under test
+    bot.add_dynamic_items = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+    bot.start_orphan_recovery = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+
+    await bot.setup_hook()
+
+    bot.start_orphan_recovery.assert_called_once_with()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+
+
+async def test_a_hung_interrupt_does_not_hold_the_sweep(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every turn waits on the sweep, so an MA call that never answers must be
+    cut off after the interrupt's own timeout, not the client's retry budget."""
+    import asyncio
+
+    from daimon.core import ma
+    from daimon.core.constants import MA_MAX_RETRIES
+
+    monkeypatch.setattr(ma, "ORPHAN_INTERRUPT_TIMEOUT_S", 0.05, raising=False)
+    await _make_orphan(db_session, ma_session_id="sesn_hung")
+
+    calls: list[str] = []
+
+    async def _never_answers(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    anthropic = AsyncAnthropic(
+        api_key="test",
+        max_retries=MA_MAX_RETRIES,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(_never_answers), base_url="https://api.anthropic.com"
+        ),
+    )
+    bot = _make_bot(db_session_factory, anthropic=anthropic)
+    bot.get_channel = MagicMock(return_value=_reachable_thread())  # pyright: ignore[reportAttributeAccessIssue]
+
+    async with asyncio.timeout(5):
+        await bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]
+
+    assert calls == ["/v1/sessions/sesn_hung/events"], "the interrupt must have been attempted"
+    assert await list_orphaned_turns(db_session, platform="discord") == []

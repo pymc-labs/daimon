@@ -283,7 +283,9 @@ async def list_orphaned_turns(
     died with the previous container.
 
     ponytail: assumes one adapter process per platform. With two, this would
-    reap the other's in-flight turns -- gate on an owner id before scaling out.
+    reap the other's in-flight turns -- and the boot sweeps now also send each
+    reaped row's MA session a `user.interrupt`, so they would stop those live
+    turns outright. Gate on an owner id before scaling out.
     """
     rows = (
         await session.execute(

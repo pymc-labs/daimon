@@ -345,8 +345,7 @@ async def run_wizard_submit_turn(
             _log.warning("wizard_submit.no_messageable_channel", short_id=row.id)
             return
 
-        if bot.is_ready():
-            await bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]  # share Discord's one-shot boot recovery barrier
+        await bot._wait_for_orphan_recovery()  # pyright: ignore[reportPrivateUsage]  # share Discord's one-shot boot recovery barrier
 
         if isinstance(channel, discord.Thread):
             parent_channel_id = str(channel.parent_id)
