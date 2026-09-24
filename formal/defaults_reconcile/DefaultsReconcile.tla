@@ -62,7 +62,7 @@ Resolve ==
 
 \* A later reconcile sees both matches; reconcile_agent keeps the newest
 \* match and archives the older one (matches[1:]).
-SweepDuplicate ==
+Deduplicate ==
   /\ resources = Ids
   /\ phase["a"] = "done" /\ phase["b"] = "done"
   /\ "agent_a" \in resources /\ "agent_b" \in resources
@@ -77,7 +77,7 @@ Next ==
   \/ \E c \in Callers : Create(c)
   \/ \E c \in Callers : Finish(c)
   \/ Resolve
-  \/ SweepDuplicate
+  \/ Deduplicate
 
 TypeOK ==
   /\ phase \in [Callers -> {"ready", "listed", "created", "done"}]

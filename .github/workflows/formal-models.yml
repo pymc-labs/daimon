@@ -25,6 +25,14 @@ on:
       - "packages/core/daimon/core/session_preparation.py"
       - "packages/core/daimon/core/session_preparation_stages.py"
       - "packages/core/daimon/core/stores/session_preparations.py"
+      # defaults_reconcile/
+      - "packages/core/daimon/core/defaults/_reconcile.py"
+      - "packages/core/daimon/core/defaults/reconcile_agents.py"
+      - "packages/core/daimon/core/defaults/ma_index.py"
+      - "packages/core/daimon/core/defaults/sweep.py"
+      - "packages/core/daimon/core/ma_resolver.py"
+      - "packages/core/daimon/core/turn/admission.py"
+      - "packages/core/tests/defaults/test_concurrent_reconcile.py"
       # continuation/
       - "packages/core/daimon/core/stores/task_continuations.py"
       - "packages/adapters/discord/daimon/adapters/discord/continuation_dispatch.py"
