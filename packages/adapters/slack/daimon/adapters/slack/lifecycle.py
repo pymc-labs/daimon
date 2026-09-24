@@ -57,7 +57,12 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
-from daimon.core.turn.state import ToolUseBlock, TurnState, extract_final_response
+from daimon.core.turn.state import (
+    ToolUseBlock,
+    TurnState,
+    extract_final_response,
+    extract_sealed_responses,
+)
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -66,6 +71,7 @@ __all__ = ["SlackTurnLifecycle"]
 log = structlog.get_logger()
 
 _DEBOUNCE_S = 5.0
+_SEALED_RESPONSE_MIN_CHARS = 500  # Same substantive-answer threshold as Discord.
 
 # Everything a chat.postMessage/chat.update can raise. slack_sdk wraps ok:false
 # responses in SlackApiError but re-raises transport failures unwrapped
@@ -362,7 +368,16 @@ class SlackTurnLifecycle:
         # not be repaired with copy that claims an answer existed.
         repair_notice = "⚠️ Something went wrong finishing this turn."
         try:
-            final_text = extract_final_response(state.content)
+            answer_parts = [
+                text
+                for _, text in extract_sealed_responses(
+                    state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS
+                )
+            ]
+            final_response = extract_final_response(state.content)
+            if final_response:
+                answer_parts.append(final_response)
+            final_text = "\n\n".join(answer_parts)
             if not final_text:
                 # No final answer. A tool-only turn keeps the collapsed done
                 # footer; a truly empty turn (cancellation) shows "Turn

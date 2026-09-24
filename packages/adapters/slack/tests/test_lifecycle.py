@@ -665,6 +665,31 @@ async def test_terminal_success_tool_only_leaves_collapsed_done(
     )
 
 
+@pytest.mark.parametrize("final_text", ["", "The follow-up is complete."])
+async def test_terminal_success_keeps_substantive_answer_before_trailing_tool(
+    fake_slack_web_client: Any, final_text: str
+) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    sealed_answer = "The analysis is complete. " + "x" * 500
+    content = [
+        TextBlock(kind="text", text=sealed_answer),
+        ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="memory", input={}),
+    ]
+    if final_text:
+        content.append(TextBlock(kind="text", text=final_text))
+
+    await lc.on_terminal_success(TurnState(content=content))
+
+    rendered = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert sealed_answer in rendered, "a later tool must not erase an already completed answer"
+    if final_text:
+        assert rendered.index(sealed_answer) < rendered.index(final_text), (
+            "a final recap must follow the sealed answer"
+        )
+    assert lc.final_ts is not None, "a delivered sealed answer needs a final watermark"
+
+
 async def test_terminal_success_empty_content_shows_turn_cancelled(
     fake_slack_web_client: Any,
 ) -> None:
