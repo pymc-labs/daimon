@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import jwt as pyjwt
 import pytest
-from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic import AsyncAnthropic
 from daimon.adapters.discord.agent_setup import mcp_access as mcp_access_mod
 from daimon.adapters.discord.agent_setup.budget import (
     LAYOUT_COMPONENT_BUDGET,
@@ -50,7 +50,7 @@ from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.ma import MARouter, build_fake_anthropic, build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PUBLIC_URL = "https://mcp.example.com"
@@ -130,10 +130,12 @@ def _state(
     )
 
 
-def _make_runtime(sessionmaker: Any = None, *, settings: Any = None) -> DiscordRuntime:
+def _make_runtime(
+    sessionmaker: Any = None, *, settings: Any = None, anthropic: AsyncAnthropic | None = None
+) -> DiscordRuntime:
     return DiscordRuntime(
         settings=settings if settings is not None else MagicMock(),
-        anthropic=build_stub_anthropic(),
+        anthropic=anthropic if anthropic is not None else build_stub_anthropic(),
         sessionmaker=sessionmaker if sessionmaker is not None else MagicMock(),
         notebook_rate_limiter=RateLimiter(max_requests=999),
         billing_config=None,
@@ -804,17 +806,19 @@ async def test_coding_tools_mints_for_a_live_admin_in_a_separate_ephemeral(
     )
     agent = ma_agent(id="ag_research", name="research-bot", tenant_id=tenant_id)
 
-    async def _fake_find(*_args: Any, **_kwargs: Any) -> BetaManagedAgentsAgent:
-        return agent
-
-    monkeypatch.setattr(mcp_access_mod, "find_agent_by_daimon_tag", _fake_find)
+    router = MARouter()
+    router.add_agent(agent)
     monkeypatch.setattr(
         mcp_access_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant_id)
     )
 
     details = _details()
     state = _state(details, account_id=account_id)
-    runtime = _make_runtime(db_session_factory, settings=_mcp_settings())
+    runtime = _make_runtime(
+        db_session_factory,
+        settings=_mcp_settings(),
+        anthropic=build_fake_anthropic(router.dispatch),
+    )
     view = DetailsView(state, runtime=runtime, allowed_user_id=42)
     interaction = _admin_interaction()
 
