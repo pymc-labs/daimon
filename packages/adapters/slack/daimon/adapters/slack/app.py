@@ -598,6 +598,7 @@ class SlackApp:
                                 channel=_row.parent_channel_id or _row.channel_id,
                                 thread_id=_row.origin_thread_id,
                                 account_id=_row.account_id,
+                                team_id=_team,
                             )
 
                         common: dict[str, Any] = {
@@ -1145,92 +1146,128 @@ class SlackApp:
                 team_id=team_id,
                 files=_collect_files([event]),
             )
-            # Drain loop: new events may arrive during the drain turn; they land
-            # in _pending and are picked up by the next iteration. Each drained
-            # turn independently re-enters _run_thread_turn, which admission-gates
-            # and bills every turn — new session or reused.
-            while queued := self._pending.pop(thread_id, []):
-                # Partition by author and run one composite turn per author,
-                # in first-seen arrival order. Coalescing distinct authors onto
-                # one turn would route B's mention into A's session, under A's
-                # vault token and Slack visibility, billed to A, with B's own
-                # per-user cap never evaluated. One turn = one caller.
-                # Mirrors Discord's _drain_pending_mentions (bot.py:900-914).
-                by_user: dict[str, list[dict[str, Any]]] = {}
-                for q_event in queued:
-                    author = _author_id(q_event)
-                    if not author:
-                        # No author to run as. `_run_thread_turn` would resolve a
-                        # principal for the empty string and bill a turn to a
-                        # phantom account. Discord cannot hit this — a Message
-                        # always has an author.
-                        log.warning(
-                            "slack.drain.skipped_authorless_event",
-                            thread_id=thread_id,
-                            team_id=team_id,
-                        )
-                        continue
-                    by_user.setdefault(author, []).append(q_event)
-                for user_events in by_user.values():
-                    # One author's failure must not consume the others'. Their
-                    # events are already popped from _pending, so the `finally`
-                    # notice below cannot reach them — without this they would
-                    # vanish with no turn and no message. Discord gets the same
-                    # property for free because `_handle_mention` renders turn
-                    # errors internally and never raises; `_run_thread_turn`
-                    # documents the opposite ("errors propagate to the listener
-                    # boundary"), so Slack has to isolate here.
-                    try:
-                        await self._run_thread_turn(
-                            user_events[0],
-                            channel=channel,
-                            web_client=web_client,
-                            tenant_id=tenant_id,
-                            thread_id=thread_id,
-                            content_override=_compose_queued_content(user_events),
-                            team_id=team_id,
-                            # Merge files from ALL of this author's queued events,
-                            # in first-seen order — user_events[0] alone would
-                            # silently drop files on their later mentions.
-                            files=_collect_files(user_events),
-                        )
-                    except (
-                        DaimonError,
-                        anthropic.APIError,
-                        SlackApiError,
-                        InvalidToken,
-                        SQLAlchemyError,
-                        aiohttp.ClientError,
-                        TimeoutError,
-                    ) as exc:
-                        log.exception(
-                            "slack.drain.turn_failed",
-                            thread_id=thread_id,
-                            team_id=team_id,
-                            exc_info=exc,
-                        )
-                        with contextlib.suppress(SlackApiError):
-                            await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                                channel=channel,
-                                text=(
-                                    "Sorry, something went wrong handling that — please try again."
-                                ),
-                                thread_ts=thread_id,
-                            )
+            await self._drain_pending_mentions(
+                channel=channel,
+                web_client=web_client,
+                tenant_id=tenant_id,
+                thread_id=thread_id,
+                team_id=team_id,
+            )
         finally:
             self._release_thread(thread_id)
             still_pending = self._pending.pop(thread_id, [])
             self._release_inflight(tenant_id)
-            # Notify any mentions that were queued (⌛) but never drained because
-            # the turn or drain loop raised.  Best-effort: ignore posting failures.
-            for queued_event in still_pending:
-                q_channel: str = queued_event.get("channel") or channel
-                with contextlib.suppress(SlackApiError):
-                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                        channel=q_channel,
-                        text="Sorry, something went wrong handling that — please try again.",
-                        thread_ts=thread_id,
+            await self._notify_undrained_mentions(
+                still_pending, channel=channel, web_client=web_client, thread_id=thread_id
+            )
+
+    async def _drain_pending_mentions(
+        self,
+        *,
+        channel: str,
+        web_client: AsyncWebClient,
+        tenant_id: uuid.UUID,
+        thread_id: str,
+        team_id: str,
+    ) -> None:
+        """Run the mentions queued (⌛) behind this thread's turn, one turn per author.
+
+        Callers must own the thread's `_processing` slot: a mention turn
+        (`_orchestrate`) and an out-of-turn continuation dispatch
+        (`dispatch_continuations_in_thread`) both call this before releasing
+        it, so a mention queued behind either one gets its own turn.
+        """
+        # Drain loop: new events may arrive during the drain turn; they land
+        # in _pending and are picked up by the next iteration. Each drained
+        # turn independently re-enters _run_thread_turn, which admission-gates
+        # and bills every turn — new session or reused.
+        while queued := self._pending.pop(thread_id, []):
+            # Partition by author and run one composite turn per author,
+            # in first-seen arrival order. Coalescing distinct authors onto
+            # one turn would route B's mention into A's session, under A's
+            # vault token and Slack visibility, billed to A, with B's own
+            # per-user cap never evaluated. One turn = one caller.
+            # Mirrors Discord's _drain_pending_mentions (bot.py:900-914).
+            by_user: dict[str, list[dict[str, Any]]] = {}
+            for q_event in queued:
+                author = _author_id(q_event)
+                if not author:
+                    # No author to run as. `_run_thread_turn` would resolve a
+                    # principal for the empty string and bill a turn to a
+                    # phantom account. Discord cannot hit this — a Message
+                    # always has an author.
+                    log.warning(
+                        "slack.drain.skipped_authorless_event",
+                        thread_id=thread_id,
+                        team_id=team_id,
                     )
+                    continue
+                by_user.setdefault(author, []).append(q_event)
+            for user_events in by_user.values():
+                # One author's failure must not consume the others'. Their
+                # events are already popped from _pending, so the owner's
+                # `_notify_undrained_mentions` cannot reach them — without this they would
+                # vanish with no turn and no message. Discord gets the same
+                # property for free because `_handle_mention` renders turn
+                # errors internally and never raises; `_run_thread_turn`
+                # documents the opposite ("errors propagate to the listener
+                # boundary"), so Slack has to isolate here.
+                try:
+                    await self._run_thread_turn(
+                        user_events[0],
+                        channel=channel,
+                        web_client=web_client,
+                        tenant_id=tenant_id,
+                        thread_id=thread_id,
+                        content_override=_compose_queued_content(user_events),
+                        team_id=team_id,
+                        # Merge files from ALL of this author's queued events,
+                        # in first-seen order — user_events[0] alone would
+                        # silently drop files on their later mentions.
+                        files=_collect_files(user_events),
+                    )
+                except (
+                    DaimonError,
+                    anthropic.APIError,
+                    SlackApiError,
+                    InvalidToken,
+                    SQLAlchemyError,
+                    aiohttp.ClientError,
+                    TimeoutError,
+                ) as exc:
+                    log.exception(
+                        "slack.drain.turn_failed",
+                        thread_id=thread_id,
+                        team_id=team_id,
+                        exc_info=exc,
+                    )
+                    with contextlib.suppress(SlackApiError):
+                        await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                            channel=channel,
+                            text=("Sorry, something went wrong handling that — please try again."),
+                            thread_ts=thread_id,
+                        )
+
+    async def _notify_undrained_mentions(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        channel: str,
+        web_client: AsyncWebClient,
+        thread_id: str,
+    ) -> None:
+        """Apologise to mentions queued (⌛) but never drained because the owner raised.
+
+        Best-effort: posting failures are ignored.
+        """
+        for queued_event in events:
+            q_channel: str = queued_event.get("channel") or channel
+            with contextlib.suppress(SlackApiError):
+                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=q_channel,
+                    text="Sorry, something went wrong handling that — please try again.",
+                    thread_ts=thread_id,
+                )
 
     async def _run_thread_turn(
         self,
@@ -2255,6 +2292,7 @@ class SlackApp:
         channel: str,
         thread_id: str,
         account_id: uuid.UUID,
+        team_id: str,
     ) -> None:
         """Claim and run any pending continuations for this thread, from outside a turn.
 
@@ -2274,6 +2312,7 @@ class SlackApp:
                 "channel": channel,
                 "thread_id": thread_id,
                 "account_id": account_id,
+                "team_id": team_id,
             }
             return
         self._processing.add(thread_id)
@@ -2285,8 +2324,23 @@ class SlackApp:
                 thread_id=thread_id,
                 account_id=account_id,
             )
+            # A mention that arrived during the dispatch queued behind it (⌛);
+            # it gets its own turn here, as it would behind a mention turn.
+            await self._drain_pending_mentions(
+                channel=channel,
+                web_client=web_client,
+                tenant_id=tenant_id,
+                thread_id=thread_id,
+                team_id=team_id,
+            )
         finally:
             self._release_thread(thread_id)
+            await self._notify_undrained_mentions(
+                self._pending.pop(thread_id, []),
+                channel=channel,
+                web_client=web_client,
+                thread_id=thread_id,
+            )
 
     def _release_thread(self, thread_id: str) -> None:
         """Free the thread's `_processing` slot; re-run a dispatch it skipped.

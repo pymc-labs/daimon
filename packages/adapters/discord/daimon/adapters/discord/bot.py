@@ -1426,6 +1426,11 @@ class DaimonBot(commands.Bot):
             await self._dispatch_continuations(
                 tenant_id=tenant_id, thread=thread, guild_id=guild_id
             )
+            # A mention that arrived during the dispatch queued behind it (⌛);
+            # it gets its own turn here, as it would behind a mention turn.
+            # If the dispatch raised, the queue is left for the thread's next
+            # turn to drain rather than dropped.
+            await self._drain_pending_mentions(thread.id, guild_id, tenant_id)
         finally:
             self._release_thread(thread.id)
 

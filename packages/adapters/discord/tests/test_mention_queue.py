@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
@@ -22,6 +22,7 @@ from daimon.adapters.discord.bot import (  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings
 from daimon.core.defaults.provisioning import provision_tenant
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
@@ -908,3 +909,62 @@ async def test_queued_mention_survives_reaction_failure(queued_bot: DaimonBot) -
 
     assert [c[0] for c in calls] == [m1, q1]
     q1.channel.send.assert_not_called()  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# A mention queued behind an out-of-turn continuation dispatch.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mention_queued_during_a_continuation_dispatch_gets_its_own_turn(
+    queued_bot: DaimonBot,
+) -> None:
+    """A mention that lands while a form's continuation turn holds the thread is drained.
+
+    `dispatch_continuations_in_thread` holds `_processing`, so the mention
+    queues behind it with ⌛ exactly as it would behind a mention turn. When
+    the dispatch ends, the queued mention must get its own turn instead of
+    waiting for the next mention in the thread.
+    """
+    calls: list[tuple[discord.Message, str | None]] = []
+
+    async def stub(
+        message: discord.Message,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        *,
+        content_override: str | None = None,
+        created_thread_ids: list[int] | None = None,
+        attachments_override: list[discord.Attachment] | None = None,
+    ) -> None:
+        calls.append((message, content_override))
+
+    queued_bot._handle_mention = stub  # type: ignore[method-assign]
+    q1 = _make_thread_message(content="and the chart too?")
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = 789
+
+    async def _continuation_turn_while_a_mention_arrives(**_kwargs: object) -> None:
+        await queued_bot.on_message(q1)
+        assert queued_bot._pending.get(789) == [q1], (  # pyright: ignore[reportPrivateUsage]
+            "a mention during the dispatch must queue behind it, not run beside it"
+        )
+
+    with patch.object(
+        queued_bot,
+        "_dispatch_continuations",
+        side_effect=_continuation_turn_while_a_mention_arrives,
+    ):
+        await queued_bot.dispatch_continuations_in_thread(
+            tenant_id=derive_tenant_uuid(platform="discord", workspace_id="123456"),
+            thread=thread,
+            guild_id="123456",
+        )
+
+    q1.add_reaction.assert_awaited_once_with("⌛")  # type: ignore[attr-defined]
+    assert calls == [(q1, "and the chart too?")], (
+        f"the queued mention must get its own turn once the dispatch ends, got {calls}"
+    )
+    assert 789 not in queued_bot._pending  # pyright: ignore[reportPrivateUsage]
+    assert 789 not in queued_bot._processing  # pyright: ignore[reportPrivateUsage]

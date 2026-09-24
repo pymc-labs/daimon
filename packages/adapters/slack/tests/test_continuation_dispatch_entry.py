@@ -143,6 +143,7 @@ async def test_dispatch_continuations_in_thread_skips_a_thread_already_processin
         channel=_CHANNEL,
         thread_id=_THREAD_ID,
         account_id=account_id,
+        team_id="T_CONT_ENTRY",
     )
 
     async with db_session_factory() as session:
@@ -187,6 +188,7 @@ async def test_dispatch_continuations_in_thread_releases_the_guard_after_dispatc
         channel=_CHANNEL,
         thread_id=_THREAD_ID,
         account_id=account_id,
+        team_id="T_CONT_ENTRY",
     )
 
     async with db_session_factory() as session:
@@ -220,6 +222,7 @@ async def test_dispatch_continuations_in_thread_releases_the_guard_when_dispatch
             channel=_CHANNEL,
             thread_id=_THREAD_ID,
             account_id=uuid.uuid4(),
+            team_id="T_CONT_ENTRY",
         )
 
     assert _THREAD_ID not in app._processing, (  # pyright: ignore[reportPrivateUsage]
@@ -397,6 +400,7 @@ async def test_dispatch_skipped_while_processing_runs_when_the_turn_releases_the
             channel=_CHANNEL,
             thread_id=_THREAD_ID,
             account_id=account_id,
+            team_id="T_CONT_ENTRY_TAIL",
         )
 
     with (
@@ -445,6 +449,7 @@ async def test_no_redispatch_while_draining(
         channel=_CHANNEL,
         thread_id=_THREAD_ID,
         account_id=account_id,
+        team_id="T_CONT_ENTRY",
     )
     app.draining = True
     app._release_thread(_THREAD_ID)  # pyright: ignore[reportPrivateUsage]
@@ -452,3 +457,86 @@ async def test_no_redispatch_while_draining(
     async with db_session_factory() as session:
         row = await get_continuation(session, idempotency_key=key)
     assert row is not None and row.status == "pending"
+
+
+async def test_mention_queued_during_a_continuation_dispatch_gets_its_own_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A mention that lands while a form's continuation turn holds the thread is drained.
+
+    The dispatch holds `_processing`, so the mention queues behind it with ⌛
+    exactly as it would behind a mention turn. When the dispatch ends, the
+    queued mention must get its own turn instead of waiting for the next
+    mention in the thread (formal/thread_queue `NoStrandedMention`).
+    """
+    tenant_id, account_id, key = await _seed_pending_row(
+        db_session,
+        db_session_factory,
+        workspace_id="T_CONT_ENTRY_MENTION",
+        requested_work="pick up the report",
+    )
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
+    web_client = fake_slack_web_client.client
+    mention = {
+        "ts": "9300000001.000099",
+        "thread_ts": _THREAD_ID,
+        "user": "U_OTHER",
+        "text": "and the chart too?",
+    }
+
+    async def _continuation_turn_while_a_mention_arrives(*_args: Any, **_kwargs: Any) -> None:
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            mention,
+            team_id="T_CONT_ENTRY_MENTION",
+            channel=_CHANNEL,
+            event_ts=mention["ts"],
+            web_client=web_client,
+            tenant_id=tenant_id,
+        )
+        assert app._pending.get(_THREAD_ID) == [mention], (  # pyright: ignore[reportPrivateUsage]
+            "a mention during the dispatch must queue behind it, not run beside it"
+        )
+
+    thread_turn = AsyncMock()
+    with (
+        patch.object(
+            app,
+            "_run_continuation_turn",
+            side_effect=_continuation_turn_while_a_mention_arrives,
+        ),
+        patch.object(app, "_run_thread_turn", thread_turn),
+    ):
+        await app.dispatch_continuations_in_thread(
+            web_client=web_client,
+            tenant_id=tenant_id,
+            channel=_CHANNEL,
+            thread_id=_THREAD_ID,
+            account_id=account_id,
+            team_id="T_CONT_ENTRY_MENTION",
+        )
+        for task in list(app._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+            await task
+
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None and row.status != "pending", "the continuation itself must run"
+    hourglass = [
+        req
+        for (method, url), reqs in fake_slack_web_client.mock.requests.items()
+        if method == "POST" and url.path == "/api/reactions.add"
+        for req in reqs
+    ]
+    assert hourglass, "the queued mention should carry the ⌛ reaction"
+    assert thread_turn.await_count == 1, (
+        f"the queued mention must get its own turn once the dispatch ends, "
+        f"got {thread_turn.await_count} turns"
+    )
+    call = thread_turn.await_args
+    assert call is not None
+    assert call.args[0] is mention
+    assert call.kwargs["content_override"] == "and the chart too?"
+    assert call.kwargs["team_id"] == "T_CONT_ENTRY_MENTION"
+    assert _THREAD_ID not in app._pending  # pyright: ignore[reportPrivateUsage]
+    assert _THREAD_ID not in app._processing  # pyright: ignore[reportPrivateUsage]
