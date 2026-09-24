@@ -24,9 +24,26 @@ repository, size-limit, validation, and attach errors complete the queue job
 while remaining visible in the binding's `last_sync_error` for operator action.
 Retries have no terminal attempt limit. A transient failure summary stays on
 the row until a new push or a successful pass, and a later clean binding sync
-clears its stored error. Delivery receipts
-are removed after 30 days, so GitHub redelivery is deduplicated for that
-window; a later replay creates another safe current-branch pass.
+clears its stored error. A bound resync resolves the binding to its exact
+Managed Agents agent ID and carries that ID through local skill identity and
+agent attachment. If multiple active agents in the tenant share the same Daimon
+name at bridge resolution, the binding fails permanently before credential
+selection or GitHub fetch. If a duplicate is observed later, the resync refuses
+before MA or ledger writes, including orphan deletion for a repo with no skills.
+In either case, `last_sync_error` asks the operator to archive duplicate agents.
+After cleanup, a new push on the default branch starts another pass.
+
+Skill display titles are scoped by tenant and Daimon agent name, not MA agent
+ID. The resync checks for duplicates before those writes, and the final attach
+rechecks the exact ID. A duplicate created after the last pre-write check can
+still race the separate MA title write; the later attach check refuses to
+update the duplicate agent, but the shared skill title may already have been
+created or versioned. The model retains this trace rather than claiming atomic
+isolation across MA list and write calls.
+
+Delivery receipts are removed after 30 days, so GitHub redelivery is
+deduplicated for that window; a later replay creates another safe current-branch
+pass.
 
 For each repo/ref, a PostgreSQL session advisory lock is held across the full
 binding batch. This serializes ordinary workers for the same branch. The lock

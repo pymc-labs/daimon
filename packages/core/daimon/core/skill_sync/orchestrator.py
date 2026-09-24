@@ -51,10 +51,12 @@ from anthropic.types.beta import (
 )
 from cryptography.fernet import MultiFernet
 from daimon.core.defaults.ma_index import (
+    MA_METADATA_KEY_TENANT,
     find_agent_by_daimon_tag,
     find_attach_mount_collision,
     find_conflicting_skill_mount,
     find_skill_by_display_title,
+    list_agents_by_tenant,
 )
 from daimon.core.defaults.metadata import (
     strip_tenant_prefix,
@@ -97,6 +99,42 @@ _log = structlog.get_logger(__name__)
 
 _UPLOAD_CONCURRENCY: int = 6
 _PER_SKILL_TIMEOUT_S: float = 60.0
+
+
+async def _get_sync_target_agent(
+    *,
+    anthropic_client: AsyncAnthropic,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    target_ma_agent_id: str | None,
+) -> BetaManagedAgentsAgent | None:
+    """Resolve the sync target, pinning bound resyncs to their MA identity."""
+    if target_ma_agent_id is None:
+        return await find_agent_by_daimon_tag(
+            anthropic_client, tenant_id=tenant_id, name=agent_name
+        )
+
+    agent = await anthropic_client.beta.agents.retrieve(target_ma_agent_id)
+    if agent.archived_at is not None or (agent.metadata or {}).get(MA_METADATA_KEY_TENANT) != str(
+        tenant_id
+    ):
+        raise DaimonError(
+            f"bound skill sync target {target_ma_agent_id} is archived or outside "
+            f"tenant {tenant_id}"
+        )
+    tenant_agents = await list_agents_by_tenant(anthropic_client, tenant_id=tenant_id)
+    target_is_active = any(str(candidate.id) == target_ma_agent_id for candidate in tenant_agents)
+    same_name_ids = [
+        str(candidate.id)
+        for candidate in tenant_agents
+        if ((candidate.metadata or {}).get("daimon_name") or candidate.name) == agent_name
+    ]
+    if not target_is_active or len(same_name_ids) != 1 or same_name_ids[0] != target_ma_agent_id:
+        raise DaimonError(
+            f"multiple or inactive MA sync targets for tenant {tenant_id} and name "
+            f"{agent_name!r}; archive duplicate agents before resyncing this binding"
+        )
+    return agent
 
 
 def _compute_skills_union_list(
@@ -434,6 +472,7 @@ async def sync_agent_skills(
     http_client: httpx.AsyncClient,
     anthropic_client: AsyncAnthropic,
     credential_override: str | None = None,
+    target_ma_agent_id: str | None = None,
     github_fallback_pat: str | None = None,
     app_id: str | None = None,
     app_private_key: SecretStr | None = None,
@@ -443,6 +482,11 @@ async def sync_agent_skills(
     max_tarball_members: int = MAX_TARBALL_MEMBERS,
 ) -> SyncReport:
     """Sync all skill_repos for one agent. Named error boundary.
+
+        ``target_ma_agent_id`` lets a binding-driven resync preserve the MA
+        identity resolved from its binding. That exact resource is retrieved
+        and checked for tenant ownership and non-archived state before use;
+        name-only callers keep the canonical name resolver.
 
         ``credential_override`` lets a caller (the webhook resync) pass a
         pre-selected GitHub credential. Whatever the caller supplies is the
@@ -517,8 +561,11 @@ async def sync_agent_skills(
     # last resort, never silently using the principal credential for a resolved agent.
     # PAT-optional: public repos work when get_pat returns None (the fetcher returns
     # 404 for private repos, handled below as `skipped_repos`).
-    ma_agent = await find_agent_by_daimon_tag(
-        anthropic_client, tenant_id=tenant_id, name=agent_name
+    ma_agent = await _get_sync_target_agent(
+        anthropic_client=anthropic_client,
+        tenant_id=tenant_id,
+        agent_name=agent_name,
+        target_ma_agent_id=target_ma_agent_id,
     )
     resolved_agent_id: uuid.UUID | None
     if ma_agent is not None:
@@ -674,6 +721,20 @@ async def sync_agent_skills(
                     prebuilt_zip=entry.prebuilt_zip,
                 )
 
+        # Recheck a bound target after any successful repo fetch and before
+        # upload or orphan cleanup. Even an empty tarball can trigger orphan
+        # deletion. A same-name replacement discovered here shares the registry
+        # display-title namespace even though attach stays ID-pinned.
+        # A duplicate created after this check can still race the MA title write:
+        # MA offers no atomic title reservation tied to this agent ID.
+        if successfully_fetched and target_ma_agent_id is not None:
+            await _get_sync_target_agent(
+                anthropic_client=anthropic_client,
+                tenant_id=tenant_id,
+                agent_name=agent_name,
+                target_ma_agent_id=target_ma_agent_id,
+            )
+
         # 3. Bounded-concurrent upload (in deterministic name order for test stability).
         ordered = [pending[name] for name in sorted(pending.keys())]
         await _upload_all(
@@ -756,7 +817,12 @@ async def sync_agent_skills(
     if not any(row.anthropic_id is not None for row in current_rows):
         return report
 
-    agent = await find_agent_by_daimon_tag(anthropic_client, tenant_id=tenant_id, name=agent_name)
+    agent = await _get_sync_target_agent(
+        anthropic_client=anthropic_client,
+        tenant_id=tenant_id,
+        agent_name=agent_name,
+        target_ma_agent_id=target_ma_agent_id,
+    )
     if agent is None:
         reason = "agent disappeared from Managed Agents before skills could be attached"
         _log.warning(
@@ -785,6 +851,14 @@ async def sync_agent_skills(
     # doesn't cause us to clobber a skill added between our initial read and now
     # (#144-2). `row_ids` (DB state) stays outside the closure — it doesn't change.
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
+        if target_ma_agent_id is not None and (
+            fresh.archived_at is not None
+            or (fresh.metadata or {}).get(MA_METADATA_KEY_TENANT) != str(tenant_id)
+        ):
+            raise DaimonError(
+                f"bound skill sync target {target_ma_agent_id} is archived or outside "
+                f"tenant {tenant_id}"
+            )
         union_list = _compute_skills_union_list(fresh.skills, row_ids)
         if union_list is None:
             # Race: another writer already attached all skills; return fresh agent

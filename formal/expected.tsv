@@ -148,3 +148,6 @@ setup_panel	CodingTokenIdentity	CodingTokenIdentitySafeMissing	clean	7	-	card A 
 skill_sync	BindingResult	BindingResultSafe	clean	6	-	transient fetch failure retries; permanent attach error completes visibly
 skill_sync	BindingResult	BindingResultFetchOmitted	violates:NoTransientSuccessAck	3	-	pre-fix: skipped fetch failure is absent from failed_uploads, so queue acknowledges with no error
 skill_sync	BindingResult	BindingResultRetryAll	violates:PermanentFailureNotRetried	4	-	mutation: permanent attach failure enters retry-wait
+skill_sync	BindingIdentity	BindingIdentitySafe	clean	17	-	exact MA identity, duplicate refusal, and no wrong-agent attach; bounded A/B roster
+skill_sync	BindingIdentity	BindingIdentityNameSubstitution	violates:NoWrongAgentAttach	18	-	pre-fix: same-name B appears after A bridge resolution, name-only attach selects B
+skill_sync	BindingIdentity	BindingIdentityTitleRace	violates:NoAmbiguousTitleWrite	13	-	residual: same-name B is present when A's shared-name title is written; collision risk only
