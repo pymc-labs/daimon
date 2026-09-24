@@ -37,7 +37,7 @@ unchanged for retry, and cancellation stops further ticks.
 | Guarded final render and terminal callback | [`driver.py`](../../packages/core/daimon/core/turn/driver.py:997) |
 | Snapshot diff append-only assumption | [`render.py`](../../packages/core/daimon/core/turn/render.py:84) |
 | Reconnect replay folds the current-turn suffix onto accumulated state, using reducer event-ID dedup | [`driver.py`](../../packages/core/daimon/core/turn/driver.py:769) |
-| Replay boundary scan skips final event and applies posture-specific idle boundary | [`driver.py`](../../packages/core/daimon/core/turn/driver.py:650) |
+| Replay boundary scan anchors on the latest `user.message`, applies posture-specific prior-idle boundaries, and truncates at this turn's first terminal event | [`driver.py`](../../packages/core/daimon/core/turn/driver.py:648) |
 | SSE lifecycle hook is deduplicated across reconnects before invocation | [`driver.py`](../../packages/core/daimon/core/turn/driver.py:842) |
 
 ## TLC checks and interpretation
@@ -52,9 +52,13 @@ It checks `TypeOK`, `TerminalExclusive`, and `RenderAnchorBound`; TLC fails
 This ordering is unreachable through the turn driver's live consume loop:
 `_consume_with_reconnect` returns as soon as it folds either a
 `session.status_idle` event or a `session.status_terminated` event, so it cannot
-fold the second terminal event from that stream. Replay also scopes the fetched
-history to the suffix after the last prior idle boundary before folding it.
-This is a source-level guarantee, not an asserted Managed Agents guarantee.
+fold the second terminal event from that stream. Replay scopes history to the
+current `user.message`, selects only earlier idles as prior-turn boundaries,
+and truncates at this turn's first terminal event. The executable regression
+`test_terminated_replay_keeps_answer_after_current_turn_idle` includes an older
+completed turn and confirms the current response survives a termination event
+following its idle under both confirmation postures. This is a source-level
+guarantee, not an asserted Managed Agents guarantee.
 The model's adversarial switch explicitly permits the driver's terminal guard
 to be bypassed so the original counterexample remains reproducible. The model
 does not claim that `TurnState.error` and `stop_reason` are universally
@@ -99,13 +103,18 @@ succeeds or is cancelled. It explores 57 distinct states and reports no error.
 These finite delivery and fairness assumptions are explicit model inputs, not
 claims about unbounded real-time guarantees.
 
-The idle-boundary heuristic is reviewed in source but not implemented as an
-event-list model here. `_events_since_last_turn_boundary` scans all but the
-last event, excludes `requires_action` idles only in `AutoApprove`, then folds
-the suffix. This preserves the current turn's own idle on eventless finalization
-and prevents prior-turn content from leaking through reconnect. TLC's event
-abstraction does not include multi-turn session histories, terminal stop-reason
-variants, confirmation sends, or the session-status query that gates replay.
+The replay boundary selection is reviewed in source but not implemented as an
+event-list model here. `_events_since_last_turn_boundary` anchors to the latest
+`user.message`, treats `requires_action` idles as mid-turn only in
+`AutoApprove`, and stops at the current turn's first terminal event. If an
+incomplete replay omits every `user.message`, attribution is ambiguous; the
+legacy idle-boundary fallback remains and already-folded in-memory content is
+still preserved by merging. If the replay also omits current-turn content that
+was never received live, its turn membership cannot be recovered reliably and
+that content may be absent from the finalized state. TLC's event abstraction
+does not include multi-turn session histories, user-message anchors, terminal
+stop-reason variants, confirmation sends, or the session-status query that gates
+replay.
 
 Other deliberate bounds: only two message IDs, one tool ID/result, boolean
 terminal payloads, one render result per revision, and no wall clock. It checks

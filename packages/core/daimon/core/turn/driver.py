@@ -657,7 +657,18 @@ def _events_since_last_turn_boundary(
     (Pitfall 2 of multi-turn reconnect). The current turn begins right after the
     last event that ENDED a previous turn.
 
-    Two rules decide what counts as "ended a previous turn", and both matter:
+    The most recent `user.message` anchors the current turn in a complete
+    session log. Only idle events before that message can delimit an earlier
+    turn; an idle after it belongs to this turn, even when a later
+    `session.status_terminated` event follows. The current turn's first terminal
+    event also ends the replay suffix, matching the live stream's stop behavior.
+
+    If an incomplete replay omits every user message, retain the legacy
+    terminal-idle boundary heuristic. The in-memory state is still folded as
+    the base, so already observed current-turn events remain intact.
+
+    Two rules decide which idle events delimit the current turn, and both
+    matter:
 
     1. Under `AutoApprove`, a `session.status_idle` carrying a `requires_action`
        stop reason is NOT a turn boundary. It is a mid-turn PAUSE: the driver
@@ -679,33 +690,56 @@ def _events_since_last_turn_boundary(
        production caller (`headless_runner`) opens a fresh session per fire, so
        its replays never span two turns.
 
-    2. The current turn's OWN terminal idle is not a prior-turn boundary. On the
-       eventless-cycle finalize path (`_pump`, status idle/terminated) the turn
-       has just ended and the last event in `events` is that turn's own terminal
-       `session.status_idle`; counting it would strip every current-turn event
-       and fold an empty state, dropping the very terminal event this replay
-       exists to recover. Since that idle is always the final element there, the
-       scan skips the last slot. The mid-turn reconnect call site (is_retry) is
-       unaffected: its `events` never end on the current turn's own idle (the
-       consume loop returns on a terminal event before a reconnect is ever
-       attempted), so the skipped slot was never a boundary candidate there.
+    2. An idle after the current `user.message` belongs to this turn, including
+       its own terminal idle. This matters when `session.status_terminated`
+       follows the idle in history: the idle still ends the turn, and the later
+       termination event must not make the idle look like a prior-turn boundary
+       or replace the already-complete result. Once the suffix is selected,
+       truncate it at the first turn-terminal idle/termination, matching the
+       live consume loop. The mid-turn reconnect call site is unaffected by
+       terminal truncation because the consume loop returns as soon as it sees
+       a terminal event.
 
-    If no boundary is found, the whole list is returned (single-turn session --
-    no prior-turn content to filter).
+    If the replay omits all `user.message` events, exact attribution is
+    impossible from the remaining event types alone. In that case, the legacy
+    last-idle-before-final-event heuristic is retained; callers fold the result
+    onto their existing state so already observed content is not erased.
     """
+
+    def _ends_turn(event: object) -> bool:
+        if getattr(event, "type", None) == "session.status_terminated":
+            return True
+        if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
+            return False
+        return not (
+            isinstance(tool_confirmation, AutoApprove)
+            and event.stop_reason.type == "requires_action"
+        )
+
+    current_start = max(
+        (i for i, ev in enumerate(events) if getattr(ev, "type", None) == "user.message"),
+        default=None,
+    )
+    boundary_candidates = (
+        range(current_start) if current_start is not None else range(len(events) - 1)
+    )
     last_boundary = -1
-    for i, ev in enumerate(events[:-1]):
+    for i in boundary_candidates:
+        ev = events[i]
         if getattr(ev, "type", None) != "session.status_idle":
             continue
-        if (
-            isinstance(tool_confirmation, AutoApprove)
-            and getattr(getattr(ev, "stop_reason", None), "type", None) == "requires_action"
-        ):
+        if not _ends_turn(ev):
             continue  # a mid-turn pause, not the end of a turn -- rule 1 above
         last_boundary = i
-    if last_boundary == -1:
-        return events
-    return events[last_boundary + 1 :]
+    current_events = events[last_boundary + 1 :]
+
+    # The live consume loop returns immediately at its first terminal event.
+    # A later termination notification is session lifecycle state, not a
+    # second outcome for that already-finished turn.
+    for i, ev in enumerate(current_events):
+        if _ends_turn(ev):
+            return current_events[: i + 1]
+    return current_events
 
 
 async def _consume_with_reconnect(
