@@ -366,3 +366,89 @@ async def test_continuation_turn_omits_handoff_notice_for_private_input(
     assert '"handoff"' in handoff_controls, (
         f"a task handoff must still carry the one-time notice, got {handoff_controls}"
     )
+
+
+async def test_dispatch_skipped_while_processing_runs_when_the_turn_releases_the_thread(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A form submitted after the running turn's own tail dispatch is not stranded.
+
+    The mention turn owns `_processing`; the submission's dispatch arrives
+    once that turn has already passed its tail dispatch, so it is skipped.
+    When `_orchestrate` releases the thread, the skipped dispatch must run
+    (formal/thread_queue `FormDuringTail`), not wait for the next message.
+    """
+    tenant_id, account_id, key = await _seed_pending_row(
+        db_session,
+        db_session_factory,
+        workspace_id="T_CONT_ENTRY_TAIL",
+        requested_work=None,
+    )
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
+    web_client = fake_slack_web_client.client
+
+    async def _turn_whose_tail_already_ran(*_args: Any, **_kwargs: Any) -> None:
+        # The form submission lands here: past the tail, before the release.
+        await app.dispatch_continuations_in_thread(
+            web_client=web_client,
+            tenant_id=tenant_id,
+            channel=_CHANNEL,
+            thread_id=_THREAD_ID,
+            account_id=account_id,
+        )
+
+    with (
+        patch.object(app, "_run_thread_turn", side_effect=_turn_whose_tail_already_ran),
+        patch.object(app, "_maybe_post_connect_nudge", new_callable=AsyncMock),
+    ):
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            {"ts": _THREAD_ID, "user": "U_REQUESTER", "text": "hi"},
+            team_id="T_CONT_ENTRY_TAIL",
+            channel=_CHANNEL,
+            event_ts=_THREAD_ID,
+            web_client=web_client,
+            tenant_id=tenant_id,
+        )
+    for task in list(app._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+        await task
+
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None, "the seeded continuation should still exist"
+    assert row.status == "skipped" and row.skip_reason == "skip_save_only", (
+        f"the skipped dispatch must run once the thread is released, got {row.status}"
+    )
+    assert _THREAD_ID not in app._processing, (  # pyright: ignore[reportPrivateUsage]
+        "the re-run dispatch must release the guard it took"
+    )
+
+
+async def test_no_redispatch_while_draining(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Shutdown drain starts no new work: the row stays pending for the next turn."""
+    tenant_id, account_id, key = await _seed_pending_row(
+        db_session,
+        db_session_factory,
+        workspace_id="T_CONT_ENTRY_DRAIN",
+        requested_work=None,
+    )
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
+    app._processing.add(_THREAD_ID)  # pyright: ignore[reportPrivateUsage]
+    await app.dispatch_continuations_in_thread(
+        web_client=fake_slack_web_client.client,
+        tenant_id=tenant_id,
+        channel=_CHANNEL,
+        thread_id=_THREAD_ID,
+        account_id=account_id,
+    )
+    app.draining = True
+    app._release_thread(_THREAD_ID)  # pyright: ignore[reportPrivateUsage]
+    assert not app._bg_tasks, "a draining adapter must not spawn the dispatch"  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None and row.status == "pending"

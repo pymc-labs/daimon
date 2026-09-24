@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reinstall, so the hub and the boot defaults sweep kept treating the workspace
   as gone; and an uninstall event delivered late, after the reinstall, no
   longer deletes the fresh bot token.
+- A private form submitted in Slack or Discord just as the thread's turn was
+  finishing now resumes the task that was waiting on it, instead of waiting
+  for the next message in the thread.
 - Reconnect replay keeps the current turn's answer and rendered content when
   the event history is incomplete or ends with a session termination; repeated
   SSE events no longer repeat adapter callbacks.
