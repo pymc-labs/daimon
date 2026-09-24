@@ -92,6 +92,49 @@ async def test_acknowledged_work_survives_worker_death_before_resync_starts(
     assert row is not None and row.state == "done", "successful recovery should complete the job"
 
 
+@pytest.mark.parametrize(
+    ("retryable_bindings", "expected_state"),
+    [(0, "done"), (1, "pending")],
+)
+async def test_queue_retries_only_retryable_binding_failures(
+    db_nullpool_engine: AsyncEngine,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    retryable_bindings: int,
+    expected_state: str,
+) -> None:
+    repo_full_name = f"owner/repo-{uuid.uuid4().hex}"
+    await _enqueue(
+        db_session_factory,
+        delivery_id=f"categorized-{retryable_bindings}",
+        repo_full_name=repo_full_name,
+    )
+
+    async def categorized_result(
+        *,
+        repo_full_name: str,
+        ref: str,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        fernet: MultiFernet,
+        anthropic_client: AsyncAnthropic,
+        github_settings: GithubSettings,
+        http_client: object | None = None,
+    ) -> ResyncReport:
+        return ResyncReport(failed_bindings=1, retryable_bindings=retryable_bindings)
+
+    monkeypatch.setattr(resync_queue, "resync_bound_repo", categorized_result)
+    processed = await _run_drain(engine=db_nullpool_engine, sessionmaker=db_session_factory)
+
+    async with db_session_factory() as session:
+        row = await store.get_for_repo_ref(
+            session, repo_full_name=repo_full_name, ref="refs/heads/main"
+        )
+    assert processed == 1, "the scheduler should process one categorized repository result"
+    assert row is not None and row.state == expected_state, (
+        "only transient binding failures should retain durable queue work"
+    )
+
+
 async def test_expired_lease_recovers_after_process_dies_mid_binding_batch(
     db_nullpool_engine: AsyncEngine,
     db_session_factory: async_sessionmaker[AsyncSession],

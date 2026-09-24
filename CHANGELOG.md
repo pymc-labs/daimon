@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - GitHub push-triggered skill resyncs now persist before webhook acknowledgement,
-  recover through scheduler leases, and retry failed binding batches. See
+  recover through scheduler leases, retry transient binding failures with
+  backoff, and retain permanent binding errors for operator action. See
   `docs/github-push-resync.md` for delivery and concurrency limits.
 - Bounded TLA+ models and a source-linked coverage report for turn rendering,
   scheduling, session preparation, continuations, adapter recovery, billing,

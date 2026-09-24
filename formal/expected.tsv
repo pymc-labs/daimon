@@ -144,3 +144,7 @@ setup_panel	CodingTokenIdentity	CodingTokenIdentitySafe	clean	5	-	card A remains
 setup_panel	CodingTokenIdentity	CodingTokenIdentitySafeUnavailable	clean	7	-	card A becomes foreign-tenant after render and is refused without minting
 setup_panel	CodingTokenIdentity	CodingTokenIdentitySafeArchived	clean	7	-	card A is archived after render and is refused without minting
 setup_panel	CodingTokenIdentity	CodingTokenIdentitySafeMissing	clean	7	-	card A disappears after render and is refused without minting
+# ---- per-binding GitHub skill resync result classification ----
+skill_sync	BindingResult	BindingResultSafe	clean	6	-	transient fetch failure retries; permanent attach error completes visibly
+skill_sync	BindingResult	BindingResultFetchOmitted	violates:NoTransientSuccessAck	3	-	pre-fix: skipped fetch failure is absent from failed_uploads, so queue acknowledges with no error
+skill_sync	BindingResult	BindingResultRetryAll	violates:PermanentFailureNotRetried	4	-	mutation: permanent attach failure enters retry-wait

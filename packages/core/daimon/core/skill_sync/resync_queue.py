@@ -99,14 +99,14 @@ async def drain_github_push_resync_queue(
             )
             current_time = datetime.now(UTC)
             async with sessionmaker.begin() as session:
-                if report.failed_bindings:
+                if report.retryable_bindings:
                     delay = _retry_delay(job.attempts)
                     released = await resync_store.retry(
                         session,
                         job=job,
                         lease_owner=lease_owner,
                         retry_after=current_time + delay,
-                        error=f"{report.failed_bindings} binding sync(s) failed",
+                        error=f"{report.retryable_bindings} binding sync(s) failed",
                         now=current_time,
                     )
                 else:
@@ -128,6 +128,7 @@ async def drain_github_push_resync_queue(
                 ref=job.ref,
                 generation=job.claimed_generation,
                 failed_bindings=report.failed_bindings,
+                retryable_bindings=report.retryable_bindings,
                 lease_lost=lease_lost.is_set(),
             )
         except asyncio.CancelledError:

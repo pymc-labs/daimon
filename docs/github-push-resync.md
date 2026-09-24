@@ -17,10 +17,14 @@ match. A newer generation stays pending for another pass.
 
 The scheduler processes up to three due rows on each tick. It claims work in
 database order with `FOR UPDATE SKIP LOCKED`, renews the two-minute lease every
-30 seconds, and retries failed setup or any failed binding with exponential
-backoff capped at five minutes. Retries have no terminal attempt limit. A
-failure summary stays on the row until a new push or a successful pass. The
-per-binding `last_sync_error` remains available for detail. Delivery receipts
+30 seconds, and retries failed setup or transient binding failures with
+exponential backoff capped at five minutes. Transient GitHub/MA transport
+errors, 429s, and 5xx responses retry; permanent credential, permission,
+repository, size-limit, validation, and attach errors complete the queue job
+while remaining visible in the binding's `last_sync_error` for operator action.
+Retries have no terminal attempt limit. A transient failure summary stays on
+the row until a new push or a successful pass, and a later clean binding sync
+clears its stored error. Delivery receipts
 are removed after 30 days, so GitHub redelivery is deduplicated for that
 window; a later replay creates another safe current-branch pass.
 
