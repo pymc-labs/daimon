@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixes. `docs/billing.md` now states the overdraft bound for concurrent and
   MCP-started turns, the sweep's attribution, and why deployments must not
   share a Managed Agents workspace.
+- A bounded model and signed PostgreSQL tests capture out-of-order GitHub App
+  installation repository events and the unresolved need for reconciliation.
 
 ### Changed
 
@@ -40,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A Cancel click on a newly posted Slack status card is routed while Slack's
   `chat.postMessage` response is still pending; after the response, routing
   follows the message timestamp so recovery can rebind the active turn.
+- A malformed GitHub installation creation payload with a present non-array
+  `repositories` value no longer clears the existing repository cache.
 - A malformed tenant tag in one Managed Agents session no longer aborts the
   usage sweep; malformed optional account metadata drops member attribution
   while preserving tenant usage and its debit.

@@ -112,6 +112,8 @@ metering	BalanceGate	BalanceGateHeadless	violates:OverdraftBound	192	-	documente
 # ---- GitHub installation repository updates ----
 github_installation	InstallationUpdates	InstallationUpdatesStaleWrite	violates:EachCompletedDeltaIsPresent	27	-	pre-fix: overlapping read/modify/write operations replace concurrent repo deltas
 github_installation	InstallationUpdates	InstallationUpdatesSafe	clean	93	-	atomic row updates preserve concurrent repo additions and removals
+github_installation	InstallationDeliveryOrder	InstallationDeliveryOrderCreated	violates:FinalSetMatchesGitHub	5	-	delayed creation snapshot overwrites a repository delta delivered first
+github_installation	InstallationDeliveryOrder	InstallationDeliveryOrderDeltas	violates:FinalSetMatchesGitHub	11	-	opposite repository deltas delivered out of occurrence order leave stale membership
 # ---- slack dedupe ----
 slack_cancel	CancelRegistration	CancelRegistrationSafe	clean	6	-	register the per-turn action key before Slack can expose the card
 slack_cancel	CancelRegistration	CancelRegistrationUnsafe	violates:VisibleAuthorClickCancels	4	-	pre-fix: a click can arrive after card visibility and before ts registration
