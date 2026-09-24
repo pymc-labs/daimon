@@ -16,6 +16,9 @@ java -cp "$TLA2TOOLS_JAR" tlc2.TLC \
 java -cp "$TLA2TOOLS_JAR" tlc2.TLC \
   -config formal/github_installation/InstallationDeliveryOrderDeltas.cfg \
   formal/github_installation/InstallationDeliveryOrder.tla
+java -cp "$TLA2TOOLS_JAR" tlc2.TLC \
+  -config formal/github_installation/InstallationReconciliation.cfg \
+  formal/github_installation/InstallationReconciliation.tla
 ```
 
 ## Implementation mapping
@@ -25,9 +28,11 @@ java -cp "$TLA2TOOLS_JAR" tlc2.TLC \
 | `ReadA` / `ReadB` / `ReadRemoval` then stale writes | The earlier `add_repos` and `remove_repos` read the array with `_load`, computed a replacement in Python, and passed it to `upsert`. |
 | Atomic `WriteA` / `WriteB` / `WriteRemoval` | [`github_app_installations.py`](../../packages/core/daimon/core/stores/github_app_installations.py) `add_repos` / `remove_repos` update the array in one PostgreSQL `UPDATE`. |
 | `EachCompletedDeltaIsPresent` | [`test_github_app_installations.py`](../../packages/core/tests/stores/test_github_app_installations.py) holds three real PostgreSQL readers at a barrier, then releases two adds and one remove against independent connections. |
-| `DeliverCreated` | [`webhooks.py`](../../packages/adapters/mcp/daimon/adapters/mcp/webhooks.py) `_handle_installation` replaces the cached set with the `installation` event's `repositories` array for `action=created`. |
-| `DeliverAdded` / `DeliverRemoved` | [`webhooks.py`](../../packages/adapters/mcp/daimon/adapters/mcp/webhooks.py) `_handle_installation_repositories` applies repository deltas with `add_repos` / `remove_repos`. |
-| `FinalSetMatchesGitHub` | Signed tests in [`test_webhooks_github.py`](../../packages/adapters/mcp/tests/test_webhooks_github.py) drive event deliveries through the MCP handler and verify the resulting PostgreSQL row. The two event-order tests assert the stale states produced by current delivery handling. |
+| `DeliverCreated` / `DeliverAdded` / `DeliverRemoved` | [`InstallationDeliveryOrder.tla`](InstallationDeliveryOrder.tla) records the webhook-only behavior that produced the original stale states. Current webhooks enqueue refresh work instead of applying these event payloads to the cache. |
+| `Notify` / `FetchComplete` / `CommitCurrent` / `DiscardStale` | [`github_installation_reconciliation.py`](../../packages/core/daimon/core/stores/github_installation_reconciliation.py) coalesces event generations and only writes a complete repository snapshot for the current lease and generation. |
+| Authoritative `FetchComplete` | [`github_app_auth.py`](../../packages/core/daimon/core/github_app_auth.py) uses a metadata-only installation token and reads every page from `GET /installation/repositories`; an API or payload failure leaves the last complete cache unchanged and the job retryable. |
+| Delete fence | The `installation.deleted` webhook clears the cache and advances the same durable generation. A result already in flight cannot write across that generation change. |
+| `CompletedSnapshotIsCurrent` | Signed webhook tests in [`test_webhooks_github.py`](../../packages/adapters/mcp/tests/test_webhooks_github.py) run both reported delivery orders through PostgreSQL and a deterministic GitHub API fake, then compare the cache with the fake's authoritative set. |
 
 GitHub [documents that webhook deliveries can arrive out of order](https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/troubleshooting-webhooks#webhooks-deliveries-are-out-of-order)
 and suggests using payload timestamps when comparing event time. The [installation event schema](https://docs.github.com/en/webhooks/webhook-events-and-payloads#installation)
@@ -57,34 +62,36 @@ counterexamples: a delayed creation snapshot can lose an earlier-delivered
 delta, and opposite deltas delivered out of occurrence order can leave stale
 membership.
 
-The signed-webhook PostgreSQL tests reproduce those outcomes through the real
-handler and store. They establish the current behavior; they do not make it an
-acceptable result.
+The original signed-webhook PostgreSQL tests established those stale outcomes.
+They now run the reported delivery traces through the refresh queue and verify
+the completed PostgreSQL snapshot against a deterministic GitHub API fake.
 
-There is no freshness fix in this change. A repository delta may arrive before
-the installation row exists, in which case the handler drops it. An atomic
-update or conflict policy cannot recover that lost delta. Opposite deltas also
-cannot be reordered using a source-backed event revision. Correctness needs an
-explicit reconciliation policy, such as fetching the authoritative repository
-list or durably recording events for ordered/reconciled processing. The
-remaining policy question is whether reconciliation should happen in the
-webhook request, through a durable retry/reconcile path, or tolerate temporary
-cache drift.
+The current handler treats `installation` and `installation_repositories`
+deliveries as refresh notifications. It records a receipt and advances a
+coalesced per-installation job before acknowledging the webhook. The scheduler
+checks the current installation with the App JWT, mints a metadata-only token,
+and fetches the full repository listing. The list is committed in one DB
+transaction only if the worker still owns the current generation. A deleted
+delivery removes the cached row immediately; a later API lookup can restore it
+if GitHub confirms the installation still exists, which handles delayed
+deletion notifications without trusting their delivery order.
 
-The webhook now ignores a `created` event whose present `repositories` field
-is not an array, avoiding interpretation of malformed data as an authoritative
-empty set. The docs do not mark `repositories` as required, so an absent field
-continues to be treated as an empty snapshot; the guard distinguishes a
-malformed present value from an omitted optional value. This does not solve
-valid but delayed snapshots.
+The cache may be temporarily unavailable while a new installation is
+reconciled, and remains at its last complete value during API failures. Durable
+retries do not make API availability or webhook delivery a strong freshness
+guarantee. Normal clone requests still use a one-repository token, and the
+tenant-local recorded access proof remains the authorization gate; the
+installation-wide metadata listing only refreshes the deployment cache.
 
-Both models use one installation and distinct valid repository names. They do
-not model simultaneous handler executions, duplicate redeliveries, event loss,
-process crashes, multiple installations, or API reconciliation. TLC checks
-finite abstractions, not SQLAlchemy or PostgreSQL; the database tests supply
-evidence for the handler/store paths they exercise.
+The delivery-order model uses one installation and distinct valid repository
+names. The reconciliation-fence model checks that an older fetch cannot
+complete after a newer notification. Neither represents GitHub API failures,
+event loss, multiple installations, or PostgreSQL transactions. TLC checks
+finite abstractions; the PostgreSQL/API-fake tests provide evidence for the
+handler, queue, and client paths they exercise.
 
 TLC 2.19 checked 27 states in the stale-write configuration and found its
 counterexample. The atomic configuration checked 93 states without an invariant
 violation. The event-order state counts and traces are recorded in
-`formal/expected.tsv`.
+`formal/expected.tsv`. `InstallationReconciliation` checked 27 distinct states
+without an invariant violation under its bound of three queued generations.

@@ -11,7 +11,6 @@ a closure with the config bound. Boot fails fast on misconfig (Pitfall 5).
 
 from __future__ import annotations
 
-import contextlib
 import json
 import uuid
 from collections.abc import Awaitable, Callable
@@ -22,11 +21,15 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from daimon.core.billing import BillingConfig
 from daimon.core.config import GithubSettings
-from daimon.core.errors import StoreError
 from daimon.core.github_app_auth import verify_signature
 from daimon.core.github_repo_auth import normalize_owner_repo
-from daimon.core.stores import github_app_installations as install_store
-from daimon.core.stores import github_push_resync, payment_events, pending_clawbacks, tenant_ledger
+from daimon.core.stores import (
+    github_installation_reconciliation,
+    github_push_resync,
+    payment_events,
+    pending_clawbacks,
+    tenant_ledger,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 from starlette.responses import Response
@@ -204,7 +207,7 @@ async def _handle_installation(
     payload: dict[str, Any],
     delivery_id: str,
 ) -> Response:
-    """Handle installation created / deleted events."""
+    """Queue an authoritative installation refresh; delete clears cache now."""
     action = _get(payload, "action")
     if action not in ("created", "deleted"):
         log.info(
@@ -220,55 +223,37 @@ async def _handle_installation(
         return Response(status_code=200)
 
     installation_id_raw = _get(install_info, "id")  # pyright: ignore[reportUnknownArgumentType]
-    account_info = _get(install_info, "account")  # pyright: ignore[reportUnknownArgumentType]
-    if isinstance(account_info, dict):
-        account_login_val = _get(account_info, "login")  # pyright: ignore[reportUnknownArgumentType]
-        account_login: str = str(account_login_val) if isinstance(account_login_val, str) else ""
-    else:
-        account_login = ""
-
-    repos_raw = _get(payload, "repositories")
-    if action == "created" and "repositories" in payload and not isinstance(repos_raw, list):
-        log.warning("github.webhook.malformed_installation_repositories", delivery_id=delivery_id)
-        return Response(status_code=200)
-    repos_list: list[Any] = list(repos_raw) if isinstance(repos_raw, list) else []  # pyright: ignore[reportExplicitAny,reportUnknownArgumentType]
-    repo_names: list[str] = [
-        str(r.get("full_name", ""))  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
-        for r in repos_list
-        if isinstance(r, dict) and r.get("full_name")  # pyright: ignore[reportUnknownMemberType]
-    ]
-
-    if not isinstance(installation_id_raw, int):
+    if (
+        not isinstance(installation_id_raw, int)
+        or isinstance(installation_id_raw, bool)
+        or installation_id_raw <= 0
+    ):
         log.warning(
             "github.webhook.malformed_installation_id",
             delivery_id=delivery_id,
         )
-        return Response(status_code=200)
+        return Response(status_code=400)
     installation_id: int = installation_id_raw
+    if not delivery_id or len(delivery_id) > 255:
+        log.warning("github.webhook.malformed_delivery_id", event="installation")
+        return Response(status_code=400)
 
-    if action == "deleted":
-        async with sessionmaker.begin() as session:
-            with contextlib.suppress(StoreError):  # no-op when installation not found (idempotent)
-                await install_store.delete_installation(session, installation_id=installation_id)
-        log.info(
-            "github.webhook.installation_deleted",
-            delivery_id=delivery_id,
+    async with sessionmaker.begin() as session:
+        enqueued = await github_installation_reconciliation.enqueue(
+            session,
             installation_id=installation_id,
-        )
-    elif action == "created":
-        async with sessionmaker.begin() as session:
-            await install_store.upsert(
-                session,
-                installation_id=installation_id,
-                account_login=account_login,
-                repo_full_names=repo_names,
-            )
-        log.info(
-            "github.webhook.installation_upserted",
             delivery_id=delivery_id,
-            installation_id=installation_id,
-            repo_count=len(repo_names),
+            event="installation",
+            deleted=action == "deleted",
+            now=datetime.now(UTC),
         )
+    log.info(
+        "github.webhook.installation_reconciliation_enqueued",
+        delivery_id=delivery_id,
+        installation_id=installation_id,
+        deleted=action == "deleted",
+        enqueued=enqueued,
+    )
 
     return Response(status_code=200)
 
@@ -279,52 +264,51 @@ async def _handle_installation_repositories(
     payload: dict[str, Any],
     delivery_id: str,
 ) -> Response:
-    """Handle installation_repositories added / removed events."""
+    """Queue a repository-set refresh; delta payloads are ordering signals only."""
+    action = _get(payload, "action")
+    if action not in ("added", "removed"):
+        log.info(
+            "github.webhook.installation_repositories_action_ignored",
+            action=action,
+            delivery_id=delivery_id,
+        )
+        return Response(status_code=200)
+
     install_info = _get(payload, "installation")
     if not isinstance(install_info, dict):
         log.warning("github.webhook.malformed_installation_repositories", delivery_id=delivery_id)
         return Response(status_code=200)
 
     installation_id_raw = _get(install_info, "id")  # pyright: ignore[reportUnknownArgumentType]
-    if not isinstance(installation_id_raw, int):
+    if (
+        not isinstance(installation_id_raw, int)
+        or isinstance(installation_id_raw, bool)
+        or installation_id_raw <= 0
+    ):
         log.warning(
             "github.webhook.malformed_installation_id",
             delivery_id=delivery_id,
         )
-        return Response(status_code=200)
+        return Response(status_code=400)
     installation_id: int = installation_id_raw
-
-    added_raw = _get(payload, "repositories_added")
-    removed_raw = _get(payload, "repositories_removed")
-    added_list: list[Any] = list(added_raw) if isinstance(added_raw, list) else []  # pyright: ignore[reportExplicitAny,reportUnknownArgumentType]
-    removed_list: list[Any] = list(removed_raw) if isinstance(removed_raw, list) else []  # pyright: ignore[reportExplicitAny,reportUnknownArgumentType]
-    added: list[str] = [
-        str(r.get("full_name", ""))  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
-        for r in added_list
-        if isinstance(r, dict) and r.get("full_name")  # pyright: ignore[reportUnknownMemberType]
-    ]
-    removed: list[str] = [
-        str(r.get("full_name", ""))  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
-        for r in removed_list
-        if isinstance(r, dict) and r.get("full_name")  # pyright: ignore[reportUnknownMemberType]
-    ]
-
+    if not delivery_id or len(delivery_id) > 255:
+        log.warning("github.webhook.malformed_delivery_id", event="installation_repositories")
+        return Response(status_code=400)
     async with sessionmaker.begin() as session:
-        if added:
-            with contextlib.suppress(StoreError):  # no-op if installation row not found
-                await install_store.add_repos(session, installation_id=installation_id, repos=added)
-        if removed:
-            with contextlib.suppress(StoreError):  # no-op if installation row not found
-                await install_store.remove_repos(
-                    session, installation_id=installation_id, repos=removed
-                )
+        enqueued = await github_installation_reconciliation.enqueue(
+            session,
+            installation_id=installation_id,
+            delivery_id=delivery_id,
+            event="installation_repositories",
+            deleted=False,
+            now=datetime.now(UTC),
+        )
 
     log.info(
-        "github.webhook.installation_repositories_updated",
+        "github.webhook.installation_reconciliation_enqueued",
         delivery_id=delivery_id,
         installation_id=installation_id,
-        added_count=len(added),
-        removed_count=len(removed),
+        enqueued=enqueued,
     )
     return Response(status_code=200)
 

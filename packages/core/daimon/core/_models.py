@@ -933,6 +933,52 @@ class GitHubAppInstallation(Base):
     )
 
 
+class GitHubInstallationReconciliation(Base):
+    """Coalesced refresh work and generation fence per GitHub installation."""
+
+    __tablename__ = "github_installation_reconciliations"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('pending', 'running', 'done')",
+            name="ck_github_installation_reconciliations_state",
+        ),
+        Index("ix_github_installation_reconciliations_due", "state", "available_at", "created_at"),
+    )
+
+    installation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
+    claimed_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class GitHubInstallationDelivery(Base):
+    """Finite idempotency receipts for installation webhooks."""
+
+    __tablename__ = "github_installation_deliveries"
+
+    delivery_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    installation_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event: Mapped[str] = mapped_column(Text, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class GitHubPushResync(Base):
     """Coalesced durable work for one GitHub repository ref."""
 

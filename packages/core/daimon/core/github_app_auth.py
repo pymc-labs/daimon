@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from collections.abc import Mapping
+from typing import cast
 
 import httpx
 import jwt
@@ -152,6 +153,127 @@ async def mint_installation_token(
             f"(installation_id={installation_id})"
         )
     return str(body["token"])
+
+
+async def mint_installation_listing_token(
+    http_client: httpx.AsyncClient,
+    *,
+    jwt: str,
+    installation_id: int,
+) -> str:
+    """Mint a metadata-only installation token for listing its repositories.
+
+    Unlike ``mint_installation_token``, this deliberately does not restrict the
+    token to one repository: the installation repositories endpoint must return
+    the full set. The token has only metadata read permission and is used only
+    by the reconciliation worker.
+    """
+    url = f"https://api.github.com/app/installations/{installation_id}/access_tokens"
+    response = await http_client.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {jwt}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json={"permissions": {"metadata": "read"}},
+    )
+    response.raise_for_status()
+    body: object = response.json()
+    if not isinstance(body, dict):
+        raise ValueError(
+            f"GitHub installation-token response is not an object "
+            f"(installation_id={installation_id})"
+        )
+    body_object = cast(dict[str, object], body)
+    token = body_object.get("token")
+    if not isinstance(token, str):
+        raise ValueError(
+            f"GitHub installation-token response missing string 'token' "
+            f"(installation_id={installation_id})"
+        )
+    return token
+
+
+async def get_app_installation_account(
+    http_client: httpx.AsyncClient,
+    *,
+    jwt: str,
+    installation_id: int,
+) -> str | None:
+    """Return the account login, or None when GitHub confirms uninstall."""
+    url = f"https://api.github.com/app/installations/{installation_id}"
+    response = await http_client.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {jwt}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    body: object = response.json()
+    if not isinstance(body, dict):
+        raise ValueError(f"GitHub installation response is not an object ({installation_id})")
+    body_object = cast(dict[str, object], body)
+    account = body_object.get("account")
+    if not isinstance(account, dict):
+        raise ValueError(
+            f"GitHub installation response is missing account.login ({installation_id})"
+        )
+    account_object = cast(dict[str, object], account)
+    login = account_object.get("login")
+    if not isinstance(login, str):
+        raise ValueError(
+            f"GitHub installation response is missing account.login ({installation_id})"
+        )
+    return login
+
+
+async def list_installation_repositories(
+    http_client: httpx.AsyncClient,
+    *,
+    token: str,
+) -> list[str]:
+    """Fetch and validate every page of the installation repository listing."""
+    url = "https://api.github.com/installation/repositories"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    repos: list[str] = []
+    seen: set[str] = set()
+    page = 1
+    while True:
+        response = await http_client.get(
+            url, headers=headers, params={"per_page": 100, "page": page}
+        )
+        response.raise_for_status()
+        body: object = response.json()
+        if not isinstance(body, dict):
+            raise ValueError("GitHub installation-repositories response is malformed")
+        body_object = cast(dict[str, object], body)
+        repository_list = body_object.get("repositories")
+        if not isinstance(repository_list, list):
+            raise ValueError("GitHub installation-repositories response is malformed")
+        for repository in cast(list[object], repository_list):
+            if not isinstance(repository, dict):
+                raise ValueError("GitHub installation-repositories page has a malformed repository")
+            repository_object = cast(dict[str, object], repository)
+            full_name = repository_object.get("full_name")
+            if not isinstance(full_name, str):
+                raise ValueError("GitHub installation-repositories page has a malformed repository")
+            if not full_name or full_name.count("/") != 1:
+                raise ValueError("GitHub installation-repositories page has an invalid full_name")
+            if full_name not in seen:
+                repos.append(full_name)
+                seen.add(full_name)
+        if "next" not in response.links:
+            return repos
+        page += 1
 
 
 async def get_installation_id_for_repo(
