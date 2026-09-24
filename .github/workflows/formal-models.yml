@@ -1,0 +1,79 @@
+name: Formal models
+
+# Model-checks every TLA+ config in formal/expected.tsv with TLC and compares
+# the verdict and the distinct-state count (formal/README.md): a deliberately
+# unsafe config must still find its counterexample, a safe config must stay
+# clean, and no config may explore 0 states. Runs when a model changes,
+# and when the code a model describes changes, as a reminder to keep the model
+# in step with it (the model does not read the code). About 30 s of TLC.
+on:
+  pull_request:
+    paths:
+      - "formal/**"
+      - ".github/workflows/formal-models.yml"
+      # turn/
+      - "packages/core/daimon/core/turn/driver.py"
+      - "packages/core/daimon/core/turn/reducers.py"
+      - "packages/core/daimon/core/turn/render.py"
+      # scheduler/
+      - "packages/core/daimon/core/scheduler.py"
+      - "packages/core/daimon/core/stores/routines.py"
+      - "packages/adapters/scheduler/daimon/adapters/scheduler/main.py"
+      # session_preparation/
+      - "packages/core/daimon/core/session_preparation.py"
+      - "packages/core/daimon/core/session_preparation_stages.py"
+      - "packages/core/daimon/core/stores/session_preparations.py"
+      # continuation/
+      - "packages/core/daimon/core/stores/task_continuations.py"
+      - "packages/adapters/discord/daimon/adapters/discord/continuation_dispatch.py"
+      - "packages/adapters/slack/daimon/adapters/slack/continuation_dispatch.py"
+      # adapter_recovery/
+      - "packages/adapters/discord/daimon/adapters/discord/bot.py"
+      - "packages/adapters/slack/daimon/adapters/slack/app.py"
+      - "packages/adapters/slack/daimon/adapters/slack/boot_sweep.py"
+      # billing/
+      - "packages/adapters/mcp/daimon/adapters/mcp/webhooks.py"
+      - "packages/core/daimon/core/_models.py"
+      - "packages/core/alembic/versions/0024_pending_payment_clawbacks.py"
+      - "packages/core/daimon/core/stores/pending_clawbacks.py"
+      - "packages/core/daimon/core/stores/payment_events.py"
+      - "packages/core/daimon/core/stores/tenant_ledger.py"
+      # wizard/
+      - "packages/adapters/discord/daimon/adapters/discord/wizard_submit.py"
+      - "packages/core/daimon/core/stores/wizard_session.py"
+      - "packages/core/daimon/core/wizard/state.py"
+      - "packages/core/daimon/core/wizard_sweep.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: formal-models-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tlc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Fetch TLC (tla2tools v1.7.4 = TLC 2.19, pinned by sha256)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/tla2tools.jar" \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $RUNNER_TEMP/tla2tools.jar" | sha256sum -c -
+      - name: Model-check every config against formal/expected.tsv
+        env:
+          TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
+        run: |
+          set -o pipefail
+          formal/check.sh | tee "$RUNNER_TEMP/formal-check.txt"
+      - name: Summary
+        if: always()
+        run: |
+          { echo '### Formal models'; echo '```'; cat "$RUNNER_TEMP/formal-check.txt" 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
