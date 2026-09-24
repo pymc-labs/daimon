@@ -77,6 +77,9 @@ adapter_recovery	AdapterOverlap	WizardBypassMessage	violates:NoMessageIntoRunnin
 adapter_recovery	AdapterOverlap	WizardBypassRows	violates:AtMostOneLiveRow	291	-	regression, fixed on main by #238: lock-free recovery beside a wizard bind leaves two live rows
 adapter_recovery	AdapterOverlap	WizardBypassRowsLocked	clean	1580	-	#238 (merged): recovery under the bind lock, adopting the live replacement
 adapter_recovery	AdapterOverlap	SingleProcessRecovery	clean	672	-	one process: lock-free recovery is safe
+# ---- report publishing ----
+report_publish	ReportPublish	PublishSafe	clean	12	-	archive, seam result, PDF, and SQLite commit preserve visible artifact coherence
+report_publish	ReportPublish	PublishPreFix	violates:VisibleArtifactsCoherent	2	-	pre-fix: current PDF/revision exposed before the accepted bundle changes
 # ---- metering ----
 metering	Metering	Metering	clean	8006	-	live recorder + usage sweep + per-deployment ledger with the replay-billing fix: all safety invariants
 metering	Metering	MeteringReplayGap	violates:LiveMetersWholeTurn	160	-	pre-#234: a model call seen only in the reconnect/finalize replay is never billed by the turn
