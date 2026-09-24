@@ -26,31 +26,54 @@ if [[ ! -f "$JAR" ]]; then
   echo "tla2tools.jar not found at $JAR (set TLA2TOOLS_JAR)" >&2
   exit 2
 fi
-META=$(mktemp -d "${TMPDIR:-/tmp}/daimon-formal-check.XXXXXX")
+META=$(mktemp -d "${TMPDIR:-/tmp}/daimon-formal-check.XXXXXX") || exit 2
 trap 'rm -rf "$META"' EXIT
 
 # Run one TLC check under a disk and time guard. A model whose state space is
 # larger than intended grows its metadir without bound (one local run filled a
-# host disk with 16G); kill TLC past TLC_MAX_META_MB (default 2048) or
-# TLC_TIMEOUT_S (default 1200), and delete each config's metadir as soon as its
-# run ends instead of at the end of the whole check.
+# host disk with 16G). TLC is killed when the config's metadir passes
+# TLC_MAX_META_MB (default 2048) or the run passes TLC_TIMEOUT_S (default 480,
+# under the CI job limit), and each config's metadir is deleted as soon as its
+# run ends. Needs GNU coreutils (timeout, du). Sets TLC_KILL_REASON when the
+# guard ended the run, so the caller can report why the row failed.
 # usage: run_tlc <workdir> <metadir> <outfile> <java args...>  (pass -metadir <metadir>/m)
+TLC_MAX_META_MB=${TLC_MAX_META_MB:-2048}
+TLC_TIMEOUT_S=${TLC_TIMEOUT_S:-480}
+for _var in TLC_MAX_META_MB TLC_TIMEOUT_S; do
+  if ! [[ "${!_var}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$_var must be a positive whole number (megabytes / seconds), got '${!_var}'" >&2
+    exit 2
+  fi
+done
+TLC_KILL_REASON=""
 run_tlc() {
   local dir=$1 meta=$2 outfile=$3; shift 3
-  local max_mb=${TLC_MAX_META_MB:-2048} max_s=${TLC_TIMEOUT_S:-1200}
+  TLC_KILL_REASON=""
   mkdir -p "$meta"
-  (cd "$dir" && exec timeout "$max_s" java -XX:+UseParallelGC -Djava.io.tmpdir="$meta" "$@") >"$outfile" 2>&1 &
-  local pid=$! mb
+  : >"$outfile"
+  # Append mode, so a guard message written after TLC's last line is not
+  # overwritten by TLC's own file offset. --foreground keeps java in this
+  # script's process group, so Ctrl-C still reaches it; -k escalates to KILL
+  # if the JVM ignores TERM.
+  (cd "$dir" && exec timeout --foreground -k 30 "$TLC_TIMEOUT_S" \
+      java -XX:+UseParallelGC -Djava.io.tmpdir="$meta" "$@") >>"$outfile" 2>&1 &
+  local pid=$! mb ticks=0
   while kill -0 "$pid" 2>/dev/null; do
+    sleep 0.2
+    ticks=$((ticks + 1))
+    (( ticks % 25 )) && continue  # du about every 5 s; exit is noticed within 0.2 s
     mb=$(du -sm "$meta" 2>/dev/null | cut -f1)
-    if [[ "${mb:-0}" -gt "$max_mb" ]]; then
-      echo "DISK GUARD: metadir ${mb}M > ${max_mb}M, TLC killed" >>"$outfile"
+    if [[ "${mb:-0}" -gt "$TLC_MAX_META_MB" ]]; then
+      TLC_KILL_REASON="DISK GUARD: metadir ${mb}M > ${TLC_MAX_META_MB}M"
       pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null
       break
     fi
-    sleep 2
   done
   wait "$pid"; local code=$?
+  if [[ -z "$TLC_KILL_REASON" && $code -eq 124 ]]; then
+    TLC_KILL_REASON="TIMEOUT after ${TLC_TIMEOUT_S}s"
+  fi
+  [[ -n "$TLC_KILL_REASON" ]] && echo "$TLC_KILL_REASON, TLC killed" >>"$outfile"
   rm -rf "$meta"
   return $code
 }
@@ -76,7 +99,9 @@ while IFS=$'\t' read -r dir spec cfg expect expect_states flags _note; do
   code=$?
   out=$(cat "$META/out")
   secs=$((SECONDS - start))
-  if [[ $code -eq 0 ]] && grep -q "No error has been found" <<<"$out"; then
+  if [[ -n "$TLC_KILL_REASON" ]]; then
+    got="error($TLC_KILL_REASON)"
+  elif [[ $code -eq 0 ]] && grep -q "No error has been found" <<<"$out"; then
     got=clean
   elif [[ $code -eq 12 ]] && inv=$(grep -oE "Invariant [A-Za-z0-9_]+ is violated" <<<"$out" | head -1) && [[ -n "$inv" ]]; then
     got="violates:$(awk '{print $2}' <<<"$inv")"

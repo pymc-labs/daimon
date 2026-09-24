@@ -59,6 +59,14 @@ Then check every configuration from the repository root:
 formal/check.sh    # about 30 s
 ```
 
+`check.sh` guards every TLC run: it kills TLC when a config's metadir grows
+past `TLC_MAX_META_MB` (default 2048) or the run takes longer than
+`TLC_TIMEOUT_S` (default 480 s, under the CI job limit). Each config's metadir
+is deleted when its run ends. Both variables must be positive whole numbers,
+and anything else, such as `2G`, is refused. A killed run fails its row with
+the reason (`DISK GUARD …` or `TIMEOUT …`). The guard needs GNU coreutils
+(`timeout`, `du`); on macOS, install coreutils first.
+
 `check.sh` runs each row of [`expected.tsv`](expected.tsv) (model directory,
 spec, config, expected verdict, distinct-state count, TLC flags) and fails
 unless TLC's verdict matches: `clean` for safe configurations,
