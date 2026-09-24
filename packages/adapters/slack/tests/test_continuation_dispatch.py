@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import pytest
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
 from daimon.core.stores.domain import TaskContinuationRow
@@ -26,6 +27,10 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TARGET_AGENT_ID = "agent_continuation_target"
+
+
+class _SimulatedProcessDeath(BaseException):
+    """Bypass dispatcher error handling to model abrupt process termination."""
 
 
 def _fake_target_agent_handler(tenant_id_str: str) -> Any:
@@ -250,3 +255,78 @@ async def test_a_busy_session_settles_skipped_and_requeues_under_a_new_key(
     assert requeued.target_ma_agent_id == _TARGET_AGENT_ID
     assert requeued.requester_account_id == requester.account_id
     assert requeued.reason == "task_handoff"
+
+
+@pytest.mark.parametrize(
+    "effect_before_crash", [False, True], ids=["before-effect", "after-effect"]
+)
+async def test_process_death_strands_claim_without_automatic_retry(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    effect_before_crash: bool,
+) -> None:
+    tenant = await make_tenant(
+        db_session, platform="slack", workspace_id=f"T_CONT_CRASH_{effect_before_crash}"
+    )
+    requester = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U_CONT_CRASH"
+    )
+    await db_session.commit()
+    thread_id = "9200000004.000001"
+    request = ContinuationRequest(
+        tenant_id=tenant.id,
+        platform="slack",
+        parent_channel_id="C_CONT_CRASH",
+        thread_id=thread_id,
+        requester_account_id=requester.account_id,
+        requester_external_user_id="U_CONT_CRASH",
+        target_ma_agent_id=_TARGET_AGENT_ID,
+        target_name="receiving-agent",
+        requested_work="continue",
+        reason="task_handoff",
+        idempotency_key=uuid.uuid4(),
+    )
+    await record_continuation(db_session_factory, request)
+    anthropic = build_fake_anthropic(_fake_target_agent_handler(str(tenant.id)))
+    visible_effects: list[str] = []
+
+    async def _die_during_follow_up(row: TaskContinuationRow, seed: str) -> None:
+        if effect_before_crash:
+            visible_effects.append(seed)
+        raise _SimulatedProcessDeath
+
+    def _dispatch(run_follow_up: Callable[[TaskContinuationRow, str], Awaitable[None]]) -> Any:
+        return dispatch_pending_continuations(
+            db_session_factory,
+            anthropic,
+            fake_slack_web_client.client,
+            tenant_id=tenant.id,
+            channel="C_CONT_CRASH",
+            thread_id=thread_id,
+            active_turn=False,
+            run_follow_up=run_follow_up,
+            now=lambda: datetime.now(UTC),
+        )
+
+    with pytest.raises(_SimulatedProcessDeath):
+        await _dispatch(_die_during_follow_up)
+
+    claimed = await get_continuation(db_session, idempotency_key=request.idempotency_key)
+    assert claimed is not None and claimed.status == "claimed", (
+        "process death must leave the committed continuation claim unsettled"
+    )
+    assert len(visible_effects) == int(effect_before_crash), (
+        "the injected effect must match the selected crash boundary"
+    )
+
+    calls, run_follow_up = _recorder()
+    await _dispatch(run_follow_up)
+    assert calls == [], "a new dispatcher must not retry an already-claimed continuation"
+    assert len(visible_effects) == int(effect_before_crash), (
+        "a later dispatch must not repeat the observable effect"
+    )
+    still_claimed = await get_continuation(db_session, idempotency_key=request.idempotency_key)
+    assert still_claimed is not None and still_claimed.status == "claimed", (
+        "a later dispatch must leave the stranded claim unchanged"
+    )
