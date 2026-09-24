@@ -95,6 +95,9 @@ metering	BalanceGate	BalanceGatePre8192ff7Overdraft	violates:OverdraftBound	3398
 metering	BalanceGate	BalanceGatePreFa83d3c	violates:GatedSpend	104	-	pre-fa83d3c: the participation classifier starts on a zero balance (no gate) and spends
 metering	BalanceGate	BalanceGatePreFa83d3cUnmetered	violates:SpendMetered	141	-	pre-fa83d3c, metering only: a finished classifier call is never debited
 metering	BalanceGate	BalanceGateHeadless	violates:OverdraftBound	192	-	documented residual: headless MCP turns are debited only by the sweep, so the gate reads a stale balance
+# ---- GitHub installation repository updates ----
+github_installation	InstallationUpdates	InstallationUpdatesStaleWrite	violates:EachCompletedDeltaIsPresent	27	-	pre-fix: overlapping read/modify/write operations replace concurrent repo deltas
+github_installation	InstallationUpdates	InstallationUpdatesSafe	clean	93	-	atomic row updates preserve concurrent repo additions and removals
 # ---- slack dedupe ----
 slack_dedupe	SlackDedupe	SlackDedupe	clean	953059	-	dedupe + per-author drain + 7-day prune vs redelivery window: at most one turn, one caller, no silent loss
 slack_dedupe	SlackDedupe	SlackPre997b3d8	violates:TurnPrincipal	268977	-	pre-997b3d8: the drain loop merged every queued author into one turn
