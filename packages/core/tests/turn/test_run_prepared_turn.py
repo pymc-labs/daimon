@@ -20,6 +20,7 @@ from pathlib import Path
 import anthropic
 import httpx
 import pytest
+import structlog
 from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
@@ -2532,3 +2533,95 @@ async def test_a_rolled_back_recovery_archives_the_session_it_created(
         "the session the rolled-back recovery created must be archived; "
         "a failing archive call is logged, not raised (this one answers 500)"
     )
+
+
+async def test_orphan_archive_timeout_does_not_wait_and_logs_late_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wait timeout bounds the caller but leaves the shielded SDK request alive."""
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    completed = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        started.set()
+        await finish.wait()
+        completed.set()
+        return httpx.Response(
+            500,
+            json={"type": "error", "error": {"type": "api_error", "message": "late failure"}},
+        )
+
+    anthropic_client = anthropic.AsyncAnthropic(
+        api_key="test",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+        ),
+        max_retries=0,
+    )
+    monkeypatch.setattr(run_module, "_ORPHAN_ARCHIVE_TIMEOUT_S", 0.01)
+    try:
+        with structlog.testing.capture_logs() as logs:
+            started_at = loop.time()
+            await run_module._archive_orphaned_session(anthropic_client, session_id="sess_orphan")
+            elapsed = loop.time() - started_at
+            assert started.is_set(), "the archive request should have started before timeout"
+            assert elapsed < 0.5, "timeout should bound the caller's wait"
+            assert not completed.is_set(), "the shielded archive request should still be in flight"
+
+            finish.set()
+            await asyncio.wait_for(completed.wait(), timeout=0.5)
+            await asyncio.sleep(0)
+        failures = [
+            event for event in logs if event["event"] == "turn.recovery_orphan_archive_failed"
+        ]
+        assert len(failures) == 2, (
+            f"the timeout and the request's later 500 must each be logged; got {failures}"
+        )
+    finally:
+        finish.set()
+        await anthropic_client.close()
+
+
+async def test_orphan_archive_second_cancel_preserves_the_unwinding_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        started.set()
+        await finish.wait()
+        return httpx.Response(
+            500,
+            json={"type": "error", "error": {"type": "api_error", "message": "archive failed"}},
+        )
+
+    anthropic_client = anthropic.AsyncAnthropic(
+        api_key="test",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+        ),
+        max_retries=0,
+    )
+    monkeypatch.setattr(run_module, "_ORPHAN_ARCHIVE_TIMEOUT_S", 0.05)
+
+    async def unwind() -> None:
+        try:
+            raise ValueError("original transaction failure")
+        except BaseException:
+            await run_module._archive_orphaned_session(anthropic_client, session_id="sess_orphan")
+            raise
+
+    try:
+        unwind_task = asyncio.create_task(unwind())
+        await asyncio.wait_for(started.wait(), timeout=0.5)
+        unwind_task.cancel("second cancellation")
+        assert not unwind_task.done(), "the cleanup should keep waiting after a second cancel"
+        finish.set()
+        with pytest.raises(ValueError, match="original transaction failure"):
+            await unwind_task
+    finally:
+        finish.set()
+        await anthropic_client.close()

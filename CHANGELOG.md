@@ -29,7 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A session recovery that is rolled back (by the turn time limit or a
   cancel) after creating its replacement session now archives that session
-  instead of leaving it running upstream with nothing pointing at it.
+  instead of leaving it running upstream with nothing pointing at it. The
+  archive wait is bounded, its eventual result is logged, and repeated
+  cancellation does not replace the error that caused the rollback.
 
 - A session loss recovered right at a turn's time limit no longer leaves a
   replacement session behind that the next mention silently continues on
