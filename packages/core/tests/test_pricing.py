@@ -50,6 +50,9 @@ def test_format_cost_strips_trailing_zeros() -> None:
 
 
 def test_model_pricing_includes_opus_sonnet_haiku() -> None:
+    assert MODEL_PRICING["claude-opus-5-5"] == ModelRates(
+        input=4.0, output=20.0, cache_write=5.0, cache_read=0.20
+    ), "opus 5.5 must be metered at the published standard five-minute cache rates"
     assert "claude-opus-5" in MODEL_PRICING, "opus 5 must be priced and selectable"
     assert "claude-opus-4-8" in MODEL_PRICING, "opus 4.8 must be priced and selectable"
     assert "claude-opus-4-7" in MODEL_PRICING, "opus 4.7 must be priced"
@@ -60,6 +63,7 @@ def test_model_pricing_includes_opus_sonnet_haiku() -> None:
 
 
 def test_allowed_model_ids_holds_agent_models_only() -> None:
+    assert "claude-opus-5-5" in ALLOWED_MODEL_IDS, "opus 5.5 must be selectable"
     assert "claude-opus-5" in ALLOWED_MODEL_IDS, "opus 5 must be selectable"
     for model_id in TOOL_MODEL_PRICING:
         assert model_id not in ALLOWED_MODEL_IDS, (
