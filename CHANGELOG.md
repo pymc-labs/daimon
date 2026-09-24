@@ -97,6 +97,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn's own member and ledger reason, instead of waiting for the usage sweep
   (or going unmetered where no scheduler runs).
 
+### Security
+
+- GitHub App installation tokens are minted for the one bound repository
+  instead of every repository in the installation, and read-only when the
+  binding was verified as a public repo or the token is used for skill sync.
+
 ## [0.2.0] - 2026-09-21
 
 Everything since the first release. Slack catches up with Discord across

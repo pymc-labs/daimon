@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import Mapping
 
 import httpx
 import jwt
@@ -95,6 +96,8 @@ async def mint_installation_token(
     *,
     jwt: str,
     installation_id: int,
+    repository: str,
+    permissions: Mapping[str, str] | None = None,
 ) -> str:
     """Exchange an App JWT for an installation access token (1h TTL).
 
@@ -102,10 +105,21 @@ async def mint_installation_token(
     with the required GitHub headers. Raises httpx.HTTPStatusError on non-2xx —
     never returns a sentinel (architecture rule: no exception-to-sentinel conversion).
 
+    The token is always narrowed to the one ``repository`` the caller is
+    authorized for. An installation typically covers many repositories and is
+    created by the repo owner for their own use, while every caller here acts
+    on behalf of a single binding whose recorded proof covers one repository;
+    an un-narrowed token would carry access to every repository in the
+    installation. ``repository`` is required so no caller can mint an
+    installation-wide token by omission.
+
     Args:
         http_client: Injected async HTTP client. Caller owns lifecycle.
         jwt: Signed App JWT from build_app_jwt.
         installation_id: Numeric GitHub installation ID.
+        repository: Repository name (no owner prefix) the token is scoped to.
+        permissions: Optional permission subset (e.g. ``{"contents": "read"}``);
+            None keeps the installation's granted permissions.
 
     Returns:
         The installation access token string from the JSON response.
@@ -114,6 +128,13 @@ async def mint_installation_token(
         httpx.HTTPStatusError: On any non-2xx response from GitHub.
     """
     url = f"https://api.github.com/app/installations/{installation_id}/access_tokens"
+    if not repository or "/" in repository:
+        raise ValueError(
+            f"installation tokens must be scoped to one repository name, got {repository!r}"
+        )
+    request_body: dict[str, object] = {"repositories": [repository]}
+    if permissions is not None:
+        request_body["permissions"] = dict(permissions)
     resp = await http_client.post(
         url,
         headers={
@@ -121,6 +142,7 @@ async def mint_installation_token(
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         },
+        json=request_body,
     )
     resp.raise_for_status()
     body: dict[str, object] = resp.json()

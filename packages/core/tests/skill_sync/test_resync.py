@@ -10,6 +10,7 @@ Patterns:
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from collections.abc import Callable
@@ -384,6 +385,10 @@ async def test_resync_prefers_installation_token(
     assert len(token_exchange_calls) == 1, (
         "installation token exchange endpoint must be called when an App installation exists"
     )
+    assert json.loads(token_exchange_calls[0].content or b"{}") == {
+        "repositories": ["app-token-repo"],
+        "permissions": {"contents": "read"},
+    }, "the resync token must be narrowed to the pushed repo and read-only"
     assert len(tarball_calls) >= 1, "tarball fetch must happen after token exchange"
     auth_header = tarball_calls[0].headers.get("authorization", "")
     assert "ghs_app_installation_token_xyz" in auth_header, (
