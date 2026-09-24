@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer left unanswered until the next mention, and a failed ⌛ reaction
   (for example, a missing Add Reactions permission) no longer drops the
   queued mention.
+- Finishing an MCP OAuth sign-in no longer fails with "Sign-in did not
+  complete" when one of your turns re-copies the agent's shared token for the
+  same server at that moment; the sign-in replaces it and is kept. That turn
+  also no longer fails when the sign-in replaces the token it was updating.
 - Reconnect replay keeps the current turn's answer and rendered content when
   the event history is incomplete or ends with a session termination; repeated
   SSE events no longer repeat adapter callbacks.
