@@ -89,15 +89,18 @@ async def find_turn_card_by_key(
     intent_created_at: dt.datetime,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: dt.datetime | None = None,
+    time_window: tuple[dt.datetime, dt.datetime] | None = None,
 ) -> CardLookup:
-    """Find a card by its Cancel value since the intent creation timestamp.
+    """Find a card by its Cancel value in a bounded search interval.
 
     ``NOT_FOUND`` is returned only after Slack reports the bounded interval
-    complete. The interval ends five minutes after intent creation; a post
-    accepted later than that window can be missed under the bounded recovery
-    policy.
-    API errors, malformed pages, and broken cursor chains return
+    complete. API errors, malformed pages, and broken cursor chains return
     ``INDETERMINATE`` so callers cannot mistake an incomplete read for absence.
+    ``time_window`` may bound a known message timestamp directly. Otherwise
+    the search covers one minute before intent creation through five minutes
+    after it; a post accepted later than that window can be missed under this
+    bounded recovery policy.
+
     At most three pages are read, with an eight-second timeout per page and at
     least sixty seconds between requests. This accommodates Slack's reduced
     one-request-per-minute limit for some distributed apps. If Slack reports
@@ -112,12 +115,21 @@ async def find_turn_card_by_key(
     scan_latest = now or dt.datetime.now(dt.UTC)
     if scan_latest.tzinfo is None or scan_latest.utcoffset() is None:
         return CardLookup(CardLookupStatus.INDETERMINATE, reason="invalid_scan_time")
-    scan_latest = min(
-        scan_latest,
-        intent_created_at + dt.timedelta(seconds=300),
-    )
-    scan_oldest = intent_created_at - dt.timedelta(seconds=_INTENT_TIME_MARGIN_SECONDS)
-    if scan_latest < intent_created_at:
+    if time_window is None:
+        scan_oldest = intent_created_at - dt.timedelta(seconds=_INTENT_TIME_MARGIN_SECONDS)
+        bounded_latest = intent_created_at + dt.timedelta(seconds=300)
+    else:
+        scan_oldest, bounded_latest = time_window
+        if (
+            scan_oldest.tzinfo is None
+            or scan_oldest.utcoffset() is None
+            or bounded_latest.tzinfo is None
+            or bounded_latest.utcoffset() is None
+            or bounded_latest < scan_oldest
+        ):
+            return CardLookup(CardLookupStatus.INDETERMINATE, reason="invalid_scan_window")
+    scan_latest = min(scan_latest, bounded_latest)
+    if scan_latest < intent_created_at or scan_latest < scan_oldest:
         return CardLookup(CardLookupStatus.INDETERMINATE, reason="invalid_scan_window")
     oldest = f"{scan_oldest.timestamp():.6f}"
     latest = f"{scan_latest.timestamp():.6f}"

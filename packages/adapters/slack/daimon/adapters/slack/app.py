@@ -41,7 +41,11 @@ from daimon.adapters.slack.attachments import (
     build_skipped_image_prefix,
 )
 from daimon.adapters.slack.billing_panel.actions import handle_billing_command, handle_topup_select
-from daimon.adapters.slack.boot_sweep import retire_orphaned_turns
+from daimon.adapters.slack.boot_sweep import (
+    recover_slack_card_intents,
+    retire_orphaned_turns,
+    snapshot_slack_card_intents,
+)
 from daimon.adapters.slack.context import build_context_xml, build_delta_xml
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
@@ -126,6 +130,11 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     mark_turn_active,
     update_watermark,
+)
+from daimon.core.stores.turn_card_intents import (
+    create_turn_card_intent,
+    record_turn_card_message,
+    retire_turn_card_intent,
 )
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn import turn_deadline
@@ -287,6 +296,7 @@ class SlackApp:
         # Drain flag — set on SIGTERM; blocks new mention handling.
         self.draining: bool = False
         self._orphan_recovery_task: asyncio.Task[None] | None = None
+        self._card_recovery_task: asyncio.Task[None] | None = None
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Fire-and-forget a background task, tracked so it isn't GC'd."""
@@ -307,6 +317,11 @@ class SlackApp:
         while True:
             try:
                 await retire_orphaned_turns(self.runtime, now=datetime.now(UTC))
+                intents = await snapshot_slack_card_intents(self.runtime.sessionmaker)
+                if intents:
+                    self._card_recovery_task = self._spawn(
+                        recover_slack_card_intents(self.runtime, intents)
+                    )
                 return
             except Exception:
                 log.exception("slack.turn.orphan_recovery_failed", retry_delay_s=delay_s)
@@ -1450,6 +1465,20 @@ class SlackApp:
         _lc_agent_name: str = agent.name
         _lc_model_id: str = agent.model.id
 
+        # Commit the intent before Slack can accept the initial card. If the
+        # response is lost or this task is cancelled during the request, a
+        # restart can still discover the prepared intent.
+        async with self.runtime.sessionmaker() as intent_session:
+            card_intent = await create_turn_card_intent(
+                intent_session,
+                tenant_id=tenant_id,
+                platform="slack",
+                thread_id=thread_id,
+                turn_token=uuid.uuid4(),
+                channel_id=channel,
+            )
+            await intent_session.commit()
+
         # lifecycle_holder tracks whichever SlackTurnLifecycle actually
         # completed the turn -- recovery_lifecycle rebuilds a fresh one against
         # the recreated session, and the watermark write further down must read
@@ -1467,6 +1496,7 @@ class SlackApp:
             deregister=self._deregister_cancel,
             register_pending=self._register_cancel,
             deregister_pending=self._deregister_cancel,
+            intent_id=card_intent.id,
         )
         lifecycle_holder: list[SlackTurnLifecycle] = [lifecycle]
 
@@ -1475,6 +1505,24 @@ class SlackApp:
         # can hold for minutes, and the card must exist before all of that,
         # not merely before run_prepared_turn.
         await lifecycle.post_initial()
+
+        # Make response timestamp persistence a gate before session or turn
+        # work. A failure here leaves the visible card's prepared intent for
+        # restart lookup and must not run an untracked turn.
+        try:
+            async with self.runtime.sessionmaker() as intent_session:
+                recorded = await record_turn_card_message(
+                    intent_session,
+                    id=card_intent.id,
+                    message_id=lifecycle.status_ts or "",
+                )
+                await intent_session.commit()
+            if not recorded:
+                raise RuntimeError("Slack initial card intent could not record its message ID")
+        except BaseException:
+            if lifecycle.status_ts is not None:
+                self._deregister_cancel(lifecycle.status_ts)
+            raise
 
         # Mapping-row ids the turn marker has been written against, tracked
         # from here rather than built inline in the finally below: unlike
@@ -1512,6 +1560,7 @@ class SlackApp:
         # Event. A marker-clear failure must not mask the turn's own outcome,
         # which is why each clear below is individually suppressed on
         # SQLAlchemyError -- a missed clear is recovered by the next boot sweep.
+        intent_terminal = False
         try:
             # One shared ceiling deadline for THIS turn, computed once the clock
             # starts (D-03/D-04): right after admission passes, not before --
@@ -1565,6 +1614,7 @@ class SlackApp:
                         text=explanation,
                         blocks=[],
                     )
+                    intent_terminal = True
                 else:
                     await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel,
@@ -1588,6 +1638,7 @@ class SlackApp:
                         text=busy_text,
                         blocks=[],
                     )
+                    intent_terminal = True
                 else:
                     await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel,
@@ -1620,6 +1671,7 @@ class SlackApp:
                         text=explanation,
                         blocks=[],
                     )
+                    intent_terminal = True
                 else:
                     await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel,
@@ -1866,6 +1918,7 @@ class SlackApp:
                     # this turn's answer rather than left standing beside a
                     # second, successful card.
                     adopt_status_ts=lifecycle.status_ts,
+                    intent_id=card_intent.id,
                 )
                 # The replacement summary belongs to the turn, not to the
                 # lifecycle object that happens to render it -- a recovery
@@ -1932,6 +1985,7 @@ class SlackApp:
                         render_interval_s=2.0,
                         deadline=turn_deadline_at,
                     )
+                    intent_terminal = lifecycle_holder[0].final_ts is not None
             finally:
                 # Leak-policy bookkeeping only — a delete failure must not mask the
                 # turn's own outcome; stale rows age out via the reader-side TTL.
@@ -2067,6 +2121,21 @@ class SlackApp:
             # so one failed clear cannot skip the other row.
             if lifecycle.status_ts is not None:
                 self._deregister_cancel(lifecycle.status_ts)
+            intent_terminal = intent_terminal or lifecycle_holder[0].final_ts is not None
+            if intent_terminal and lifecycle_holder[0].status_ts is not None:
+                try:
+                    async with self.runtime.sessionmaker() as intent_session:
+                        await retire_turn_card_intent(
+                            intent_session,
+                            id=card_intent.id,
+                            expected_message_id=lifecycle_holder[0].status_ts,
+                        )
+                        await intent_session.commit()
+                except SQLAlchemyError:
+                    log.exception(
+                        "slack.turn_card_intent.retire_failed",
+                        intent_id=str(card_intent.id),
+                    )
             for _marker_id in _marker_mapping_ids:
                 with contextlib.suppress(SQLAlchemyError):
                     async with self.runtime.sessionmaker() as _clear_session:
@@ -2136,6 +2205,16 @@ class SlackApp:
             reuse_existing=True,
             deadline=follow_deadline,
         )
+        async with self.runtime.sessionmaker() as intent_session:
+            card_intent = await create_turn_card_intent(
+                intent_session,
+                tenant_id=tenant_id,
+                platform="slack",
+                thread_id=thread_id,
+                turn_token=uuid.uuid4(),
+                channel_id=channel,
+            )
+            await intent_session.commit()
         follow_cancel = asyncio.Event()
         follow_lifecycle = SlackTurnLifecycle(
             client=web_client,
@@ -2149,8 +2228,24 @@ class SlackApp:
             deregister=self._deregister_cancel,
             register_pending=self._register_cancel,
             deregister_pending=self._deregister_cancel,
+            intent_id=card_intent.id,
         )
+        lifecycle_holder: list[SlackTurnLifecycle] = [follow_lifecycle]
         await follow_lifecycle.post_initial()
+        try:
+            async with self.runtime.sessionmaker() as intent_session:
+                recorded = await record_turn_card_message(
+                    intent_session,
+                    id=card_intent.id,
+                    message_id=follow_lifecycle.status_ts or "",
+                )
+                await intent_session.commit()
+            if not recorded:
+                raise RuntimeError("Slack continuation card intent could not record its message ID")
+        except BaseException:
+            if follow_lifecycle.status_ts is not None:
+                self._deregister_cancel(follow_lifecycle.status_ts)
+            raise
         if follow_prepared.mapping_id is not None and follow_lifecycle.status_ts is not None:
             async with self.runtime.sessionmaker() as _at_session:
                 await mark_turn_active(
@@ -2224,6 +2319,7 @@ class SlackApp:
                 deregister_pending=self._deregister_cancel,
                 adopt_status_ts=follow_lifecycle.status_ts,
             )
+            lifecycle_holder[0] = new_lifecycle
             if follow_lifecycle.status_ts is not None:
                 self._register_cancel(
                     follow_lifecycle.status_ts, cancel, row.requester_external_user_id
@@ -2271,8 +2367,23 @@ class SlackApp:
                     deadline=follow_deadline,
                 )
         finally:
-            if follow_lifecycle.status_ts is not None:
-                self._deregister_cancel(follow_lifecycle.status_ts)
+            final_lifecycle = lifecycle_holder[0]
+            if final_lifecycle.status_ts is not None:
+                self._deregister_cancel(final_lifecycle.status_ts)
+            if final_lifecycle.final_ts is not None and final_lifecycle.status_ts is not None:
+                try:
+                    async with self.runtime.sessionmaker() as intent_session:
+                        await retire_turn_card_intent(
+                            intent_session,
+                            id=card_intent.id,
+                            expected_message_id=final_lifecycle.status_ts,
+                        )
+                        await intent_session.commit()
+                except SQLAlchemyError:
+                    log.exception(
+                        "slack.turn_card_intent.retire_failed",
+                        intent_id=str(card_intent.id),
+                    )
             if follow_prepared.mapping_id is not None:
                 with contextlib.suppress(SQLAlchemyError):
                     async with self.runtime.sessionmaker() as _clear_session:
@@ -2424,4 +2535,8 @@ class SlackApp:
             remaining_threads=len(self._processing),
             remaining_mentions=len(self._mention_tasks) + self._mention_acks_pending,
         )
+        if self._card_recovery_task is not None and not self._card_recovery_task.done():
+            self._card_recovery_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._card_recovery_task
         await client.close()
