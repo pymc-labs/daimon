@@ -34,11 +34,13 @@ from daimon.testing.archives import make_tarball
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_cli_principal, make_tenant
 from daimon.testing.ma import (
+    FakeMAState,
     NotHandled,
     build_fake_anthropic,
     combine_handlers,
     make_fake_ma_handler,
 )
+from daimon.testing.ma_models import ma_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------
@@ -1065,6 +1067,363 @@ async def test_resync_pat_tier_is_per_agent(
     auth_b = auth_headers_b[0]
     assert auth_b is None, (
         f"agent B has no per-agent credential — fetch must be unauthenticated (anon); got: {auth_b!r}"
+    )
+
+
+async def test_resync_uses_exact_binding_agent_identity(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A binding for the older same-name MA agent must retain its exact target."""
+    from daimon.core.stores.user_skills import list_user_skills_for_agent
+
+    fernet = make_fernet()
+    tenant = await make_tenant(db_session)
+    repo_url = "owner/bound-identity-repo"
+    ma_handler = make_fake_ma_handler()
+    anthropic_client = build_fake_anthropic(combine_handlers(_make_skills_handler(), ma_handler))
+
+    ma_id_a = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant.id,
+        agent_name="bound-agent",
+    )
+    agent_id_a = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_id_a)
+    await _setup_binding(db_session, tenant_id=tenant.id, agent_id=agent_id_a, repo_url=repo_url)
+    pat_a = "ghp_binding_agent_a"
+    await cred_store.upsert_credential(
+        db_session,
+        principal_id=agent_id_a,
+        github_login="agent-a-login",
+        encrypted_token=encrypt_token(fernet, pat_a),
+        scopes=("repo",),
+    )
+    await ag_binding_store.set_agent_github_binding(
+        db_session, agent_id=agent_id_a, principal_id=agent_id_a
+    )
+    await db_session.commit()
+
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    auth_headers: list[str | None] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        auth_headers.append(request.headers.get("authorization"))
+        return httpx.Response(200, content=tarball)
+
+    update_targets: list[str] = []
+
+    def record_agent_updates(request: httpx.Request) -> httpx.Response:
+        match = re.fullmatch(r"/v1/agents/([^/]+)", request.url.path)
+        if request.method == "POST" and match:
+            update_targets.append(match.group(1))
+        raise NotHandled
+
+    await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        anthropic_client=build_fake_anthropic(
+            combine_handlers(record_agent_updates, _make_skills_handler(), ma_handler)
+        ),
+    )
+
+    assert auth_headers and pat_a in (auth_headers[0] or ""), (
+        "the binding's GitHub fetch must use agent A's PAT"
+    )
+    assert update_targets == [ma_id_a], (
+        f"the binding's skill attach must target its exact MA agent, got {update_targets}"
+    )
+    async with db_session_factory() as session:
+        rows_a = await list_user_skills_for_agent(
+            session, tenant_id=tenant.id, principal_id=agent_id_a, agent_name="bound-agent"
+        )
+    assert [row.name for row in rows_a] == ["r"], (
+        "the binding's user_skills ledger must be keyed by its MA identity"
+    )
+
+
+async def test_resync_refuses_duplicate_name_before_github_or_ma_writes(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.user_skills import list_user_skills_for_agent
+
+    fernet = make_fernet()
+    tenant = await make_tenant(db_session)
+    repo_url = "owner/duplicate-bound-name"
+    ma_handler = make_fake_ma_handler()
+    anthropic_client = build_fake_anthropic(ma_handler)
+    ma_id_a = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant.id,
+        agent_name="duplicate-agent",
+    )
+    ma_id_b = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant.id,
+        agent_name="duplicate-agent",
+    )
+    agent_id_a = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_id_a)
+    agent_id_b = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_id_b)
+    await _setup_binding(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id_a,
+        repo_url=repo_url,
+        proof_kind="public",
+    )
+    await db_session.commit()
+
+    github_requests: list[httpx.Request] = []
+    ma_writes: list[str] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        github_requests.append(request)
+        return httpx.Response(
+            200,
+            content=make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"}),
+        )
+
+    def capture_ma_writes(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and (
+            request.url.path == "/v1/skills" or re.fullmatch(r"/v1/agents/[^/]+", request.url.path)
+        ):
+            ma_writes.append(request.url.path)
+        raise NotHandled
+
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        anthropic_client=build_fake_anthropic(
+            combine_handlers(capture_ma_writes, _make_skills_handler(), ma_handler)
+        ),
+    )
+
+    assert report.failed_bindings == 1, "ambiguity refusal must count as a failed binding"
+    assert report.retryable_bindings == 0, (
+        "ambiguity refusal is permanent until duplicate agents are fixed"
+    )
+    assert github_requests == [], "ambiguous bindings must stop before fetching the repo"
+    assert ma_writes == [], "ambiguous bindings must stop before uploading or attaching skills"
+    async with db_session_factory() as session:
+        binding = await binding_store.get_binding(session, tenant_id=tenant.id, agent_id=agent_id_a)
+        rows_a = await list_user_skills_for_agent(
+            session, tenant_id=tenant.id, principal_id=agent_id_a, agent_name="duplicate-agent"
+        )
+        rows_b = await list_user_skills_for_agent(
+            session, tenant_id=tenant.id, principal_id=agent_id_b, agent_name="duplicate-agent"
+        )
+    assert binding is not None and binding.last_sync_error is not None, (
+        "the ambiguity refusal must be stored on the binding"
+    )
+    assert "multiple MA agents" in binding.last_sync_error, (
+        f"the refusal should explain the duplicate-name state, got {binding.last_sync_error!r}"
+    )
+    assert rows_a == [], "refusing the binding must not write agent A's user_skills ledger"
+    assert rows_b == [], "refusing the binding must not write agent B's user_skills ledger"
+
+
+async def test_resync_refuses_duplicate_added_after_bridge_resolution(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fernet = make_fernet()
+    tenant = await make_tenant(db_session)
+    repo_url = "owner/late-duplicate-bound-name"
+    ma_state = FakeMAState()
+    ma_handler = make_fake_ma_handler(ma_state)
+    anthropic_client = build_fake_anthropic(ma_handler)
+    ma_id_a = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant.id,
+        agent_name="late-duplicate-agent",
+    )
+    agent_id_a = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_id_a)
+    await _setup_binding(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id_a,
+        repo_url=repo_url,
+        proof_kind="public",
+    )
+    await db_session.commit()
+
+    duplicate = ma_agent(
+        id="ag_late_duplicate",
+        name="late-duplicate-agent",
+        tenant_id=tenant.id,
+        created_at=datetime.now(UTC),
+    ).model_dump(mode="json")
+    agent_list_calls: list[None] = []
+
+    def introduce_duplicate(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            visible_agents = list(ma_state.agents.values())
+            agent_list_calls.append(None)
+            if len(agent_list_calls) == 2:
+                ma_state.agents["ag_late_duplicate"] = duplicate
+            return httpx.Response(200, json={"data": visible_agents, "has_more": False})
+        raise NotHandled
+
+    github_requests: list[httpx.Request] = []
+    ma_writes: list[str] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        github_requests.append(request)
+        return httpx.Response(
+            200,
+            content=make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"}),
+        )
+
+    def capture_ma_writes(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and (
+            request.url.path == "/v1/skills" or re.fullmatch(r"/v1/agents/[^/]+", request.url.path)
+        ):
+            ma_writes.append(request.url.path)
+        raise NotHandled
+
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        anthropic_client=build_fake_anthropic(
+            combine_handlers(
+                capture_ma_writes, introduce_duplicate, _make_skills_handler(), ma_handler
+            )
+        ),
+    )
+
+    assert report.failed_bindings == 1, "ambiguity refusal must count as a failed binding"
+    assert report.retryable_bindings == 0, (
+        "ambiguity refusal is permanent until duplicate agents are fixed"
+    )
+    assert len(agent_list_calls) == 3, (
+        "the fake must add the duplicate after initial target preflight and expose it before upload"
+    )
+    assert len(github_requests) == 1, "the late duplicate appears after the repo fetch begins"
+    assert ma_writes == [], "the post-fetch guard must stop before skill upload or agent attach"
+    async with db_session_factory() as session:
+        binding = await binding_store.get_binding(session, tenant_id=tenant.id, agent_id=agent_id_a)
+    assert binding is not None and binding.last_sync_error is not None, (
+        "the late ambiguity refusal must be stored on the binding"
+    )
+    assert "archive duplicate agents" in binding.last_sync_error, (
+        f"the late refusal should identify the ambiguous target, got {binding.last_sync_error!r}"
+    )
+
+
+async def test_resync_empty_repo_refuses_duplicate_before_orphan_delete(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.user_skills import list_user_skills_for_agent, upsert_user_skill
+
+    fernet = make_fernet()
+    tenant = await make_tenant(db_session)
+    repo_url = "owner/late-duplicate-empty-repo"
+    ma_state = FakeMAState()
+    ma_handler = make_fake_ma_handler(ma_state)
+    anthropic_client = build_fake_anthropic(ma_handler)
+    ma_id_a = await _setup_agent_in_ma(
+        fake_ma_handler=ma_handler,
+        anthropic_client=anthropic_client,
+        tenant_id=tenant.id,
+        agent_name="empty-repo-agent",
+    )
+    agent_id_a = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_id_a)
+    await _setup_binding(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id_a,
+        repo_url=repo_url,
+        proof_kind="public",
+    )
+    await upsert_user_skill(
+        db_session,
+        tenant_id=tenant.id,
+        principal_id=agent_id_a,
+        agent_name="empty-repo-agent",
+        name="orphan",
+        source_repo_url=repo_url,
+        source_repo_branch="main",
+        source_path="orphan/SKILL.md",
+        content_hash="existing-content",
+        anthropic_id="sk_orphan",
+        anthropic_latest_version="1",
+    )
+    await db_session.commit()
+
+    duplicate = ma_agent(
+        id="ag_late_empty_duplicate",
+        name="empty-repo-agent",
+        tenant_id=tenant.id,
+        created_at=datetime.now(UTC),
+    ).model_dump(mode="json")
+    agent_list_calls: list[None] = []
+
+    def introduce_duplicate(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            visible_agents = list(ma_state.agents.values())
+            agent_list_calls.append(None)
+            if len(agent_list_calls) == 2:
+                ma_state.agents["ag_late_empty_duplicate"] = duplicate
+            return httpx.Response(200, json={"data": visible_agents, "has_more": False})
+        raise NotHandled
+
+    github_requests: list[httpx.Request] = []
+    ma_deletes: list[str] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        github_requests.append(request)
+        return httpx.Response(200, content=make_tarball({}))
+
+    def capture_ma_delete(request: httpx.Request) -> httpx.Response:
+        match = re.fullmatch(r"/v1/skills/([^/]+)", request.url.path)
+        if request.method == "DELETE" and match:
+            ma_deletes.append(match.group(1))
+            return httpx.Response(200, json={"id": match.group(1), "type": "skill_deleted"})
+        raise NotHandled
+
+    report = await resync_bound_repo(
+        repo_full_name=repo_url,
+        ref="refs/heads/main",
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        anthropic_client=build_fake_anthropic(
+            combine_handlers(capture_ma_delete, introduce_duplicate, ma_handler)
+        ),
+    )
+
+    assert report.failed_bindings == 1 and report.retryable_bindings == 0, (
+        "an empty-repo duplicate refusal must be a permanent binding failure"
+    )
+    assert len(agent_list_calls) == 3, (
+        "the empty fetched repo must perform the post-fetch ambiguity check before orphan cleanup"
+    )
+    assert len(github_requests) == 1, "the late duplicate is introduced after fetch starts"
+    assert ma_deletes == [], "the ambiguity guard must stop before deleting the orphan skill"
+    async with db_session_factory() as session:
+        rows = await list_user_skills_for_agent(
+            session, tenant_id=tenant.id, principal_id=agent_id_a, agent_name="empty-repo-agent"
+        )
+        binding = await binding_store.get_binding(session, tenant_id=tenant.id, agent_id=agent_id_a)
+    assert [row.name for row in rows] == ["orphan"], (
+        "the ambiguity guard must preserve the local orphan row too"
+    )
+    assert binding is not None and binding.last_sync_error is not None, (
+        "the refusal must remain actionable on the binding"
     )
 
 

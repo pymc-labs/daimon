@@ -117,8 +117,8 @@ async def _resolve_agent_name_and_principal(
     session: AsyncSession,
     binding: AgentRepoBindingRow,
     anthropic_client: AsyncAnthropic,
-) -> tuple[str, uuid.UUID] | None:
-    """Resolve (agent_name, principal_id) from a binding row.
+) -> tuple[str, uuid.UUID, str] | None:
+    """Resolve (agent_name, principal_id, MA agent ID) from a binding row.
 
     Uses the PROVEN-CORRECT re-derive-and-compare bridge (Plan 56-01 OQ1):
     iterate the tenant's MA agents, re-derive uuid5 for each, match the one
@@ -136,12 +136,15 @@ async def _resolve_agent_name_and_principal(
     # the listing through the tenant-filtered home (T4: no raw agents.list here).
     from daimon.core.defaults.ma_index import list_agents_by_tenant
 
+    tenant_agents = await list_agents_by_tenant(anthropic_client, tenant_id=tenant_id)
     resolved_agent_name: str | None = None
-    for ma_agent in await list_agents_by_tenant(anthropic_client, tenant_id=tenant_id):
+    resolved_ma_agent_id: str | None = None
+    for ma_agent in tenant_agents:
         candidate_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(ma_agent.id))
         if candidate_uuid == binding.agent_id:
             daimon_name = (ma_agent.metadata or {}).get("daimon_name")
             resolved_agent_name = daimon_name or ma_agent.name
+            resolved_ma_agent_id = str(ma_agent.id)
             break
 
     if resolved_agent_name is None:
@@ -152,12 +155,25 @@ async def _resolve_agent_name_and_principal(
         )
         return None
 
+    duplicate_ids = [
+        str(agent.id)
+        for agent in tenant_agents
+        if ((agent.metadata or {}).get("daimon_name") or agent.name) == resolved_agent_name
+        and str(agent.id) != resolved_ma_agent_id
+    ]
+    if duplicate_ids:
+        raise DaimonError(
+            f"multiple MA agents share tenant {tenant_id} and name {resolved_agent_name!r}; "
+            "archive duplicates before resyncing this binding"
+        )
+
     principal = await get_or_create_cli_principal(
         session,
         tenant_id=tenant_id,
         os_user="webhook",
     )
-    return resolved_agent_name, principal.account_id
+    assert resolved_ma_agent_id is not None
+    return resolved_agent_name, principal.account_id, resolved_ma_agent_id
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +412,7 @@ async def _resync_one_binding(
             )
             if resolved is None:
                 raise DaimonError("agent not found in MA (bridge resolution failed)")
-            agent_name, principal_id = resolved
+            agent_name, principal_id, ma_agent_id = resolved
             credential = await _select_credential(
                 repo_full_name=repo_full_name,
                 binding=binding,
@@ -420,6 +436,7 @@ async def _resync_one_binding(
                         principal_id=principal_id,
                         tenant_id=binding.tenant_id,
                         agent_name=agent_name,
+                        target_ma_agent_id=ma_agent_id,
                         repos=[SkillRepo(url=repo_full_name, branch=binding.default_branch)],
                         sessionmaker=sessionmaker,
                         fernet=fernet,
@@ -434,6 +451,7 @@ async def _resync_one_binding(
                         principal_id=principal_id,
                         tenant_id=binding.tenant_id,
                         agent_name=agent_name,
+                        target_ma_agent_id=ma_agent_id,
                         repos=[SkillRepo(url=repo_full_name, branch=binding.default_branch)],
                         sessionmaker=sessionmaker,
                         fernet=fernet,

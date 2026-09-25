@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bound GitHub skill resyncs now preserve the binding's exact Managed Agents
+  identity through ledger updates and skill attachment. Duplicate active agent
+  names already present at bridge resolution refuse the resync before
+  credential selection or repository fetch. Duplicates observed later refuse
+  before MA or ledger writes, including orphan deletion; errors remain visible
+  as permanent binding failures.
 - Discord setup Details now drops superseded reads and binds setup and
   coding-tool actions to the agent shown on the card. A bounded TLA+ model
   retains the pre-fix wrong-target traces.

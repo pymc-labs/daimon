@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from anthropic import AsyncAnthropic
+from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import (
     BetaManagedAgentsCustomSkill,
     SkillListResponse,
@@ -33,6 +33,7 @@ from daimon.core.defaults.ma_index import (
     _SKILLS_PAGE_LIMIT,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.defaults.metadata import tenant_scoped_display_title
+from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skill_sync import orchestrator as orch_mod
@@ -51,10 +52,56 @@ from daimon.core.stores.user_skills import (
 from daimon.testing.archives import make_tarball
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_cli_principal
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma import (
+    MARouter,
+    build_fake_anthropic,
+    list_response,
+    not_found_response,
+)
 from daimon.testing.ma_models import ma_agent
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+async def test_bound_sync_target_rejects_archived_or_foreign_agent() -> None:
+    tenant_id = uuid.uuid4()
+    for agent in (
+        ma_agent(
+            id="ag_archived",
+            tenant_id=tenant_id,
+            archived_at=datetime.now(UTC),
+        ),
+        ma_agent(id="ag_foreign", tenant_id=uuid.uuid4()),
+    ):
+        router = MARouter()
+        router.add_agent(agent)
+        client = build_fake_anthropic(router.dispatch)
+        with pytest.raises(DaimonError):
+            await orch_mod._get_sync_target_agent(
+                anthropic_client=client,
+                tenant_id=tenant_id,
+                agent_name="agent",
+                target_ma_agent_id=agent.id,
+            )
+
+
+async def test_bound_sync_target_does_not_fall_back_when_exact_agent_is_missing() -> None:
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents/ag_missing",
+        lambda _request, _match: not_found_response("no such agent"),
+    )
+    client = build_fake_anthropic(router.dispatch)
+
+    with pytest.raises(APIStatusError):
+        await orch_mod._get_sync_target_agent(
+            anthropic_client=client,
+            tenant_id=uuid.uuid4(),
+            agent_name="agent",
+            target_ma_agent_id="ag_missing",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
