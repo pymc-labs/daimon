@@ -56,6 +56,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     list_orphaned_turns,
 )
+from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.turn.posture import Billed, BillingPosture
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing import ma_agent, ma_model_usage, ma_session, ma_session_agent
@@ -935,11 +936,50 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
 
     app, _ = make_orchestrate_app(db_session_factory)
 
+    async def inspect_committed_intent_before_response(url: URL, **kwargs: Any) -> CallbackResult:
+        del url
+        async with db_session_factory() as s:
+            intents = await list_recoverable_turn_card_intents(s, platform="slack")
+        assert len(intents) == 1
+        assert intents[0].status == "prepared"
+        blocks = kwargs["json"]["blocks"]
+        button = next(
+            element
+            for block in blocks
+            if block.get("type") == "actions"
+            for element in block.get("elements", [])
+        )
+        assert button["value"] == intents[0].id.hex
+        return CallbackResult(payload={"ok": True, "ts": "1000000000.000001", "channel": channel})
+
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/chat.postMessage",
+        callback=inspect_committed_intent_before_response,
+    )
+
     # fake_run_turn calls lifecycle.on_terminal_success so final_ts is set.
     # The ToolUseBlock matters: the post-turn output sweep is gated on the
     # turn having used a tool — a text-only TurnState would (correctly) skip
     # the sweep and the delivery assertions below would fail for the wrong reason.
     async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
+        # A separate connection must see the committed intent before the
+        # first MA turn work begins.
+        async with db_session_factory() as s:
+            intents = await list_recoverable_turn_card_intents(s, platform="slack")
+        assert len(intents) == 1
+        assert intents[0].status == "posted"
+        assert intents[0].message_id == "1000000000.000001"
+        post_body = fake_slack_web_client.mock.requests[
+            ("POST", URL("https://slack.com/api/chat.postMessage"))
+        ][0].kwargs["json"]
+        cancel_button = next(
+            element
+            for block in post_body["blocks"]
+            if block.get("type") == "actions"
+            for element in block.get("elements", [])
+        )
+        assert cancel_button["value"] == intents[0].id.hex
+
         state = TurnState(
             content=[
                 ToolUseBlock(
@@ -1050,6 +1090,179 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
     assert row.watermark_message_id == "1000000000.000001", (
         "watermark must equal lifecycle.final_ts from chat.postMessage (STURN-05)"
     )
+    async with db_session_factory() as s:
+        remaining_intents = await list_recoverable_turn_card_intents(s, platform="slack")
+    assert remaining_intents == [], "a completed turn retires its matching card intent"
+
+
+async def test_initial_card_post_failure_keeps_prepared_intent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A rejected or ambiguous post leaves the committed intent available for recovery."""
+    team_id = "T_CARD_POST_FAILURE"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    thread_ts = "9000000001.000099"
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    app, _ = make_orchestrate_app(db_session_factory)
+    fake_slack_web_client.mock.clear()
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/chat.postMessage",
+        payload={"ok": False, "error": "channel_not_found"},
+    )
+    event = {
+        "type": "app_mention",
+        "ts": thread_ts,
+        "event_ts": thread_ts,
+        "channel": "C_TEST",
+        "user": "U_CARD_POST_FAILURE",
+        "text": "<@U_BOT> hello",
+    }
+    admission = MagicMock()
+    admission.agent.name = "test-agent"
+    admission.agent.model.id = "claude-sonnet-4-6"
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_admin_status",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
+        pytest.raises(SlackApiError),
+    ):
+        await app._run_thread_turn(  # pyright: ignore[reportPrivateUsage]
+            event,
+            channel="C_TEST",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+            thread_id=thread_ts,
+            team_id=team_id,
+        )
+
+    async with db_session_factory() as s:
+        intents = await list_recoverable_turn_card_intents(s, platform="slack")
+    assert len(intents) == 1
+    assert intents[0].status == "prepared"
+    assert intents[0].message_id is None
+    assert app._cancel_registry == {}  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_initial_card_timestamp_write_failure_prevents_turn_and_preserves_intent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A visible card whose timestamp is not durable must not start MA work."""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    team_id = "T_CARD_TS_WRITE_FAILURE"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    thread_ts = "9000000001.000098"
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    app, _ = make_orchestrate_app(db_session_factory)
+    event = {
+        "type": "app_mention",
+        "ts": thread_ts,
+        "event_ts": thread_ts,
+        "channel": "C_TEST",
+        "user": "U_CARD_TS_WRITE_FAILURE",
+        "text": "<@U_BOT> hello",
+    }
+    admission = MagicMock()
+    admission.agent.name = "test-agent"
+    admission.agent.model.id = "claude-sonnet-4-6"
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_admin_status",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
+        patch(
+            "daimon.adapters.slack.app.record_turn_card_message",
+            side_effect=SQLAlchemyError("simulated persistence outage"),
+        ),
+        patch("daimon.adapters.slack.app.bind_session", new_callable=AsyncMock) as bind_session,
+        pytest.raises(SQLAlchemyError, match="simulated persistence outage"),
+    ):
+        await app._run_thread_turn(  # pyright: ignore[reportPrivateUsage]
+            event,
+            channel="C_TEST",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+            thread_id=thread_ts,
+            team_id=team_id,
+        )
+
+    bind_session.assert_not_awaited()
+    assert app._cancel_registry == {}  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as s:
+        intents = await list_recoverable_turn_card_intents(s, platform="slack")
+    assert len(intents) == 1
+    assert intents[0].status == "prepared"
+    assert intents[0].message_id is None
+
+
+async def test_cancelled_initial_card_post_keeps_prepared_intent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Cancellation during post can follow Slack acceptance, so keep the intent."""
+    team_id = "T_CARD_POST_CANCEL"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    thread_ts = "9000000001.000097"
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    app, _ = make_orchestrate_app(db_session_factory)
+    post_started = asyncio.Event()
+
+    async def hold_post(url: URL, **kwargs: Any) -> CallbackResult:
+        del url, kwargs
+        post_started.set()
+        await asyncio.Event().wait()
+        return CallbackResult(payload={"ok": True, "ts": "1000000000.000001"})
+
+    fake_slack_web_client.mock.clear()
+    fake_slack_web_client.mock.post("https://slack.com/api/chat.postMessage", callback=hold_post)
+    event = {
+        "type": "app_mention",
+        "ts": thread_ts,
+        "event_ts": thread_ts,
+        "channel": "C_TEST",
+        "user": "U_CARD_POST_CANCEL",
+        "text": "<@U_BOT> hello",
+    }
+    admission = MagicMock()
+    admission.agent.name = "test-agent"
+    admission.agent.model.id = "claude-sonnet-4-6"
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_admin_status",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
+    ):
+        task = asyncio.create_task(
+            app._run_thread_turn(  # pyright: ignore[reportPrivateUsage]
+                event,
+                channel="C_TEST",
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant_id,
+                thread_id=thread_ts,
+                team_id=team_id,
+            )
+        )
+        await asyncio.wait_for(post_started.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert app._cancel_registry == {}  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as s:
+        intents = await list_recoverable_turn_card_intents(s, platform="slack")
+    assert len(intents) == 1
+    assert intents[0].status == "prepared"
+    assert intents[0].message_id is None
 
 
 async def test_orchestrate_continuation_when_live_session_exists_calls_build_delta_xml(

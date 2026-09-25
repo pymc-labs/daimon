@@ -127,6 +127,11 @@ from daimon.core.stores.thread_sessions import (
     mark_turn_active,
     update_watermark,
 )
+from daimon.core.stores.turn_card_intents import (
+    create_turn_card_intent,
+    record_turn_card_message,
+    retire_turn_card_intent,
+)
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn import turn_deadline
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
@@ -1450,6 +1455,20 @@ class SlackApp:
         _lc_agent_name: str = agent.name
         _lc_model_id: str = agent.model.id
 
+        # Commit the intent before Slack can accept the initial card. If the
+        # response is lost or this task is cancelled during the request, a
+        # restart can still discover the prepared intent.
+        async with self.runtime.sessionmaker() as intent_session:
+            card_intent = await create_turn_card_intent(
+                intent_session,
+                tenant_id=tenant_id,
+                platform="slack",
+                thread_id=thread_id,
+                turn_token=uuid.uuid4(),
+                channel_id=channel,
+            )
+            await intent_session.commit()
+
         # lifecycle_holder tracks whichever SlackTurnLifecycle actually
         # completed the turn -- recovery_lifecycle rebuilds a fresh one against
         # the recreated session, and the watermark write further down must read
@@ -1467,6 +1486,7 @@ class SlackApp:
             deregister=self._deregister_cancel,
             register_pending=self._register_cancel,
             deregister_pending=self._deregister_cancel,
+            intent_id=card_intent.id,
         )
         lifecycle_holder: list[SlackTurnLifecycle] = [lifecycle]
 
@@ -1475,6 +1495,24 @@ class SlackApp:
         # can hold for minutes, and the card must exist before all of that,
         # not merely before run_prepared_turn.
         await lifecycle.post_initial()
+
+        # Make response timestamp persistence a gate before session or turn
+        # work. A failure here leaves the visible card's prepared intent for
+        # restart lookup and must not run an untracked turn.
+        try:
+            async with self.runtime.sessionmaker() as intent_session:
+                recorded = await record_turn_card_message(
+                    intent_session,
+                    id=card_intent.id,
+                    message_id=lifecycle.status_ts or "",
+                )
+                await intent_session.commit()
+            if not recorded:
+                raise RuntimeError("Slack initial card intent could not record its message ID")
+        except BaseException:
+            if lifecycle.status_ts is not None:
+                self._deregister_cancel(lifecycle.status_ts)
+            raise
 
         # Mapping-row ids the turn marker has been written against, tracked
         # from here rather than built inline in the finally below: unlike
@@ -1512,6 +1550,7 @@ class SlackApp:
         # Event. A marker-clear failure must not mask the turn's own outcome,
         # which is why each clear below is individually suppressed on
         # SQLAlchemyError -- a missed clear is recovered by the next boot sweep.
+        intent_terminal = False
         try:
             # One shared ceiling deadline for THIS turn, computed once the clock
             # starts (D-03/D-04): right after admission passes, not before --
@@ -1565,6 +1604,7 @@ class SlackApp:
                         text=explanation,
                         blocks=[],
                     )
+                    intent_terminal = True
                 else:
                     await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel,
@@ -1588,6 +1628,7 @@ class SlackApp:
                         text=busy_text,
                         blocks=[],
                     )
+                    intent_terminal = True
                 else:
                     await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel,
@@ -1620,6 +1661,7 @@ class SlackApp:
                         text=explanation,
                         blocks=[],
                     )
+                    intent_terminal = True
                 else:
                     await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel,
@@ -1866,6 +1908,7 @@ class SlackApp:
                     # this turn's answer rather than left standing beside a
                     # second, successful card.
                     adopt_status_ts=lifecycle.status_ts,
+                    intent_id=card_intent.id,
                 )
                 # The replacement summary belongs to the turn, not to the
                 # lifecycle object that happens to render it -- a recovery
@@ -1932,6 +1975,7 @@ class SlackApp:
                         render_interval_s=2.0,
                         deadline=turn_deadline_at,
                     )
+                    intent_terminal = lifecycle_holder[0].final_ts is not None
             finally:
                 # Leak-policy bookkeeping only — a delete failure must not mask the
                 # turn's own outcome; stale rows age out via the reader-side TTL.
@@ -2067,6 +2111,20 @@ class SlackApp:
             # so one failed clear cannot skip the other row.
             if lifecycle.status_ts is not None:
                 self._deregister_cancel(lifecycle.status_ts)
+            if intent_terminal and lifecycle.status_ts is not None:
+                try:
+                    async with self.runtime.sessionmaker() as intent_session:
+                        await retire_turn_card_intent(
+                            intent_session,
+                            id=card_intent.id,
+                            expected_message_id=lifecycle.status_ts,
+                        )
+                        await intent_session.commit()
+                except SQLAlchemyError:
+                    log.exception(
+                        "slack.turn_card_intent.retire_failed",
+                        intent_id=str(card_intent.id),
+                    )
             for _marker_id in _marker_mapping_ids:
                 with contextlib.suppress(SQLAlchemyError):
                     async with self.runtime.sessionmaker() as _clear_session:
