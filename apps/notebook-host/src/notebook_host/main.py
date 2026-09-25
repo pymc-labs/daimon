@@ -27,6 +27,7 @@ from notebook_host.jail import (
     SlugPaths,
     UidPoolExhaustedError,
     can_apply_jail,
+    clear_slug_uv_cache,
     ensure_slug_jail,
     remove_slug_tree,
     resolve_jail_uid,
@@ -201,6 +202,7 @@ async def _spawn_blog_process(state: AdminState, slug: str) -> bool:
     if not ready:
         kill(np)
         state.processes.pop(slug, None)
+        clear_slug_uv_cache(state.settings.data_dir, slug)
         _log.warning("blog %r did not become ready on :%d; will retry next sweep", slug, port)
         return False
     return True
