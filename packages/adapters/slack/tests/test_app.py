@@ -1203,6 +1203,96 @@ async def test_initial_card_timestamp_write_failure_prevents_turn_and_preserves_
     assert intents[0].message_id is None
 
 
+async def test_terminal_render_followed_by_raise_still_retires_card_intent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The card is terminal even if later work raises before the turn returns."""
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    team_id = "T_CARD_TERMINAL_THEN_RAISE"
+    tenant = await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    thread_ts = "9000000001.000090"
+    app, _ = make_orchestrate_app(db_session_factory)
+    event = {
+        "type": "app_mention",
+        "ts": thread_ts,
+        "event_ts": thread_ts,
+        "channel": "C_TEST",
+        "user": "U_CARD_TERMINAL_THEN_RAISE",
+        "text": "<@U_BOT> hello",
+    }
+    admission = MagicMock()
+    admission.account_id = tenant.account_id
+    admission.agent.id = "agent_test_id"
+    admission.agent.name = "test-agent"
+    admission.agent.model.id = "claude-sonnet-4-6"
+    admission.config.thread_binding_kind = "standard"
+    admission.config.agent_name = "test-agent"
+    admission.config.configuration_target_ma_agent_id = None
+    admission.config.configuration_target_name = None
+    prepared = SimpleNamespace(
+        ma_session_id="session-terminal-then-raise",
+        mapping_id=None,
+        watermark=None,
+        reused=False,
+        continuity=SimpleNamespace(state="continued", transfer_kind=None),
+    )
+
+    @asynccontextmanager
+    async def fake_origin(*_args: Any, **_kwargs: Any) -> Any:
+        yield None
+
+    async def terminal_then_raise(*_args: Any, lifecycle: Any, **_kwargs: Any) -> None:
+        await lifecycle.on_terminal_success(
+            TurnState(content=[TextBlock(kind="text", text="finished before exception")])
+        )
+        raise RuntimeError("failure after terminal card render")
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_admin_status",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
+        patch(
+            "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock, return_value=prepared
+        ),
+        patch("daimon.adapters.slack.app.turn_origin", new=fake_origin),
+        patch("daimon.adapters.slack.app.render_turn_origin", return_value=""),
+        patch(
+            "daimon.adapters.slack.app.build_context_xml",
+            new_callable=AsyncMock,
+            return_value="hello",
+        ),
+        patch(
+            "daimon.adapters.slack.app.download_as_image_blocks",
+            new_callable=AsyncMock,
+            return_value=([], []),
+        ),
+        patch(
+            "daimon.adapters.slack.app.run_prepared_turn",
+            new_callable=AsyncMock,
+            side_effect=terminal_then_raise,
+        ),
+        pytest.raises(RuntimeError, match="after terminal card render"),
+    ):
+        await app._run_thread_turn(  # pyright: ignore[reportPrivateUsage]
+            event,
+            channel="C_TEST",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant.tenant_id,
+            thread_id=thread_ts,
+            team_id=team_id,
+        )
+
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert intents == [], "a successfully rendered terminal card must retire its intent"
+
+
 async def test_cancelled_initial_card_post_keeps_prepared_intent(
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
@@ -3821,6 +3911,12 @@ async def test_bind_phase_failure_leaves_no_cancel_registry_entry(
         "a card left behind by a bind-phase failure must not keep a live Cancel "
         "entry -- the outer finally must deregister it even though bind_session "
         "never returned"
+    )
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert len(intents) == 1 and intents[0].status == "posted", (
+        "a pre-terminal bind failure must preserve the intent so boot recovery "
+        "can retire its still-live Cancel card"
     )
 
 

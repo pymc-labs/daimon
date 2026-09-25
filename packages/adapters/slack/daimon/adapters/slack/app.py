@@ -2121,13 +2121,14 @@ class SlackApp:
             # so one failed clear cannot skip the other row.
             if lifecycle.status_ts is not None:
                 self._deregister_cancel(lifecycle.status_ts)
-            if intent_terminal and lifecycle.status_ts is not None:
+            intent_terminal = intent_terminal or lifecycle_holder[0].final_ts is not None
+            if intent_terminal and lifecycle_holder[0].status_ts is not None:
                 try:
                     async with self.runtime.sessionmaker() as intent_session:
                         await retire_turn_card_intent(
                             intent_session,
                             id=card_intent.id,
-                            expected_message_id=lifecycle.status_ts,
+                            expected_message_id=lifecycle_holder[0].status_ts,
                         )
                         await intent_session.commit()
                 except SQLAlchemyError:
