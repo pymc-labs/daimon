@@ -514,28 +514,29 @@ async def test_recovery_is_backgrounded_after_intents_are_snapshotted(
     runtime = build_slack_runtime(Fernet.generate_key().decode(), db_session_factory)
     card_work_started = asyncio.Event()
     hold_card_work = asyncio.Event()
+    passed_intents: list[TurnCardIntentRow] = []
 
     async def retire_orphans(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    async def recover_cards(*_args: Any, **_kwargs: Any) -> None:
+    async def recover_cards(
+        _runtime: SlackRuntime,
+        intents: list[TurnCardIntentRow],
+    ) -> None:
+        passed_intents.extend(intents)
         card_work_started.set()
         await hold_card_work.wait()
 
-    async def snapshot(*_args: Any) -> list[TurnCardIntentRow]:
-        return [intent]
-
     monkeypatch.setattr("daimon.adapters.slack.app.retire_orphaned_turns", retire_orphans)
-    monkeypatch.setattr(
-        "daimon.adapters.slack.app.snapshot_slack_card_intents",
-        snapshot,
-    )
     monkeypatch.setattr("daimon.adapters.slack.app.recover_slack_card_intents", recover_cards)
     app = SlackApp(runtime=runtime)
     await app.start_orphan_recovery()
     await app._wait_for_orphan_recovery()  # pyright: ignore[reportPrivateUsage]
+    late_intent = await _create_intent(db_session_factory, thread_id="1000000000.000002")
     await card_work_started.wait()
 
+    assert [item.id for item in passed_intents] == [intent.id]
+    assert late_intent.id not in {item.id for item in passed_intents}
     assert app._card_recovery_task is not None  # pyright: ignore[reportPrivateUsage]
     assert not app._card_recovery_task.done()  # pyright: ignore[reportPrivateUsage]
     app._card_recovery_task.cancel()  # pyright: ignore[reportPrivateUsage]
