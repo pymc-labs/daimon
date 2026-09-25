@@ -198,3 +198,17 @@ async def test_rate_limit_preserves_retry_after_for_scheduler() -> None:
     assert result.status is CardLookupStatus.INDETERMINATE
     assert result.reason == "rate_limited"
     assert result.retry_after_seconds == 61.0
+
+
+async def test_clock_skew_does_not_treat_empty_window_as_complete() -> None:
+    result = await find_turn_card_by_key(
+        _client(),
+        channel="C1",
+        thread_ts="100.0",
+        cancel_key=_KEY,
+        intent_created_at=_INTENT_CREATED_AT,
+        now=_INTENT_CREATED_AT - dt.timedelta(minutes=2),
+    )
+
+    assert result.status is CardLookupStatus.INDETERMINATE
+    assert result.reason == "invalid_scan_window"

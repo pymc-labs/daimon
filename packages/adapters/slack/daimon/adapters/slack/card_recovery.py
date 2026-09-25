@@ -107,11 +107,14 @@ async def find_turn_card_by_key(
     scan_latest = now or dt.datetime.now(dt.UTC)
     if scan_latest.tzinfo is None or scan_latest.utcoffset() is None:
         return CardLookup(CardLookupStatus.INDETERMINATE, reason="invalid_scan_time")
-    oldest = f"{(intent_created_at.timestamp() - _INTENT_TIME_MARGIN_SECONDS):.6f}"
     scan_latest = min(
         scan_latest,
         intent_created_at + dt.timedelta(seconds=300),
     )
+    scan_oldest = intent_created_at - dt.timedelta(seconds=_INTENT_TIME_MARGIN_SECONDS)
+    if scan_latest < scan_oldest:
+        return CardLookup(CardLookupStatus.INDETERMINATE, reason="invalid_scan_window")
+    oldest = f"{scan_oldest.timestamp():.6f}"
     latest = f"{scan_latest.timestamp():.6f}"
 
     while True:
@@ -134,16 +137,22 @@ async def find_turn_card_by_key(
         except TimeoutError:
             return CardLookup(CardLookupStatus.INDETERMINATE, reason="api_timeout")
         except SlackApiError as error:
-            retry_after_header = error.response.headers.get("Retry-After")
+            response = cast(Mapping[str, object], error.response)
+            raw_headers = response.get("headers")
+            headers: Mapping[str, object] = {}
+            if isinstance(raw_headers, Mapping):
+                headers = cast(Mapping[str, object], raw_headers)
+            raw_retry_after: object | None = headers.get("Retry-After")
             try:
                 retry_after_seconds = (
-                    float(retry_after_header) if retry_after_header is not None else None
+                    float(raw_retry_after) if isinstance(raw_retry_after, str) else None
                 )
             except ValueError:
                 retry_after_seconds = None
+            status_code = response.get("status_code")
             return CardLookup(
                 CardLookupStatus.INDETERMINATE,
-                reason="rate_limited" if error.response.status_code == 429 else "api_error",
+                reason="rate_limited" if status_code == 429 else "api_error",
                 retry_after_seconds=retry_after_seconds,
             )
         except (SlackRequestError, aiohttp.ClientError):
