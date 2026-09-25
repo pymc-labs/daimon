@@ -93,7 +93,7 @@ def init_sentry(
     *,
     dsn: str | None,
     environment: str,
-    process: Literal["discord", "mcp", "scheduler", "slack"],
+    process: Literal["discord", "mcp", "scheduler", "slack", "teams"],
     release: str | None,
     traces_sample_rate: float,
     integrations: list[Integration],
