@@ -207,7 +207,7 @@ async def test_clock_skew_does_not_treat_empty_window_as_complete() -> None:
         thread_ts="100.0",
         cancel_key=_KEY,
         intent_created_at=_INTENT_CREATED_AT,
-        now=_INTENT_CREATED_AT - dt.timedelta(minutes=2),
+        now=_INTENT_CREATED_AT - dt.timedelta(seconds=30),
     )
 
     assert result.status is CardLookupStatus.INDETERMINATE

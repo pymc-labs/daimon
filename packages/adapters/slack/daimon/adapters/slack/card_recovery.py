@@ -117,7 +117,7 @@ async def find_turn_card_by_key(
         intent_created_at + dt.timedelta(seconds=300),
     )
     scan_oldest = intent_created_at - dt.timedelta(seconds=_INTENT_TIME_MARGIN_SECONDS)
-    if scan_latest < scan_oldest:
+    if scan_latest < intent_created_at:
         return CardLookup(CardLookupStatus.INDETERMINATE, reason="invalid_scan_window")
     oldest = f"{scan_oldest.timestamp():.6f}"
     latest = f"{scan_latest.timestamp():.6f}"
