@@ -76,6 +76,21 @@ or the policy for an intent whose message ID remains NULL; these still need
 adapter integration and their own executable tests. In particular, finding a
 prepared intent does not by itself prove whether the remote post happened.
 
+The store rejects empty message IDs and the database CHECK enforces the same
+rule. `delete_retired_turn_card_intents()` can remove only retired rows older
+than a caller-supplied cutoff, in bounded batches. No adapter calls that
+cleanup API yet.
+
+The platform lookup helpers are also preparatory. Discord scans a caller-
+supplied time window and at most 1,000 messages; reaching the message budget
+or failing mid-scan is indeterminate, even if an earlier page matched.
+Slack scans from 60 seconds before intent creation to at most five minutes
+after it, up to three 15-message pages with at least 60 seconds between page
+requests. A remaining cursor, timeout, or API error is indeterminate; a 429
+preserves `Retry-After` for the later reconciler. Complete absence means
+absence within that bounded window, not proof that Slack never accepted a
+delayed post. Neither lookup is wired to boot recovery in this change.
+
 TLC 2.19 explores 11 states in the protocol configuration and checks `TypeOK`,
 `PostedCardHasCommittedIntent`, `PostedStateHasMessageId`, and
 `BootListsEveryActiveIntent`. The pre-wiring configuration explores 4 states
