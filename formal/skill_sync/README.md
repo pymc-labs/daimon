@@ -9,7 +9,7 @@ A later successful retry clears the stored error.
 | Model action or variable | Code and executable check |
 | --- | --- |
 | `Claim`, `RetrySucceeds`, `queueState` | [`claim_due`](../../packages/core/daimon/core/stores/github_push_resync.py#L87) claims pending or due retry work. [`drain_github_push_resync_queue`](../../packages/core/daimon/core/skill_sync/resync_queue.py#L40) calls [`resync_bound_repo`](../../packages/core/daimon/core/skill_sync/resync.py#L325), then calls the store retry or complete operation. [`test_resync_queue.py`](../../packages/core/tests/skill_sync/test_resync_queue.py#L99) checks a binding report completes permanently failed jobs and retries transient ones. |
-| `TransientFetchFailure`, `PermanentAttachFailure`, `storedError` | [`SyncReport`](../../packages/core/daimon/core/skill_sync/orchestrator.py#L139) carries skipped fetches, failed uploads, attach failures, and the retryable classification. [Generic fetch errors](../../packages/core/daimon/core/skill_sync/orchestrator.py#L597) classify transport/429/5xx as transient; credential/proof failures, auth/404, size limits, and invalid bundles remain permanent. [Upload errors](../../packages/core/daimon/core/skill_sync/orchestrator.py#L416) and [attach results](../../packages/core/daimon/core/skill_sync/orchestrator.py#L769) are also classified. [`_resync_one_binding`](../../packages/core/daimon/core/skill_sync/resync.py#L374) persists all report categories to `last_sync_error`; a clean later run clears it. Tests drive a real HTTP 503, MA upload/attach failures, and a missing attach agent through the transport-level fake and Postgres. |
+| `TransientFetchFailure`, `PermanentAttachFailure`, `storedError` | [`SyncReport`](../../packages/core/daimon/core/skill_sync/orchestrator.py#L139) carries skipped fetches, failed uploads, attach failures, and the retryable classification. [Generic fetch errors](../../packages/core/daimon/core/skill_sync/orchestrator.py#L597) classify transport/429/5xx as transient; credential/proof failures, auth/404, size limits, and invalid bundles remain permanent. [Upload errors](../../packages/core/daimon/core/skill_sync/orchestrator.py#L416) and [attach results](../../packages/core/daimon/core/skill_sync/orchestrator.py#L769) are also classified. [`_resync_one_binding`](../../packages/core/daimon/core/skill_sync/resync.py#L374) persists all report categories to `last_sync_error`; a clean later run clears it. Tests drive a real HTTP 503, MA upload/attach failures, and a missing attach agent through the transport-level fake and Postgres. GitHub tarball and bound-resync App-token mint rate limits share the queue's retry deadline; the queue test covers App-mint 403/429, permission-403 control, and stopping a two-binding batch after the first rate limit. |
 
 ## Bounds and assumptions
 
@@ -18,8 +18,10 @@ A later successful retry clears the stored error.
   completion are abstracted as atomic transitions; lease expiry/crash recovery
   is covered by the separate GitHub push resync queue model.
 - Retry-wait represents the existing queue backoff; exact delay values,
-  attempts, multiple bindings, cancellation, credential rotation, and database
-  transaction failures are not modeled. Fairness assumes no process crash and
+  attempts, cancellation, credential rotation, and database transaction
+  failures are not modeled. The two-binding App-mint regression is executable
+  coverage; the model abstracts the same rate-limit result as a provider
+  deadline regardless of which GitHub request produced it. Fairness assumes no process crash and
   that enabled claim and resync actions eventually run.
 - The bounded transient fetch path occurs before that binding has uploaded
   skills, so it has no partial MA write. Other retries can follow earlier MA

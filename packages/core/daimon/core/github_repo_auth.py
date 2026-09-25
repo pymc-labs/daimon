@@ -46,6 +46,7 @@ from daimon.core.github_app_auth import (
     get_installation_id_for_repo,
     mint_installation_token,
 )
+from daimon.core.github_rate_limit import GitHubRateLimitError
 from daimon.core.stores.domain import AgentRepoBindingRow, RepoProofKind
 from pydantic import BaseModel, ConfigDict, SecretStr
 
@@ -405,8 +406,8 @@ async def resolve_clone_token(
     # Best-effort App path: a transient GitHub failure on the installation
     # lookup / token mint (e.g. a 403 secondary-rate-limit, common once the App
     # has many installs) must not take down a clone that a public+fallback-PAT
-    # binding could still serve. On any HTTP error, degrade to "App unavailable"
-    # and fall through to the fallback/none decision. A malformed App private
+    # binding could still serve. On any HTTP error or rate-limit result, degrade
+    # to "App unavailable" and fall through to the fallback/none decision. A malformed App private
     # key still raises from build_app_jwt (operator misconfig — fail loud so it
     # is fixed, not silently masked). A private binding with no App and no PAT
     # still fails loudly at the raise below.
@@ -427,7 +428,7 @@ async def resolve_clone_token(
                     repository=repo,
                     permissions=_READ_ONLY if binding.proof_kind == "public" else None,
                 )
-        except httpx.HTTPError as err:
+        except (httpx.HTTPError, GitHubRateLimitError) as err:
             log.warning(
                 "github_repo_auth.app_path_failed",
                 repo_url=binding.repo_url,
@@ -531,10 +532,11 @@ async def resolve_skill_sync_token(
     before calling.
 
     The App path is best-effort: a lookup-or-mint failure raising
-    ``httpx.HTTPError`` degrades to "App unavailable" (logged, repo + error
-    only — never a token) and falls through to the fallback/anonymous
-    decision, mirroring ``resolve_clone_token``'s degradation so a transient
-    GitHub failure never fails a sync a fallback token could still serve. A
+    ``httpx.HTTPError`` or ``GitHubRateLimitError`` degrades to "App
+    unavailable" (logged, repo + error only — never a token) and falls
+    through to the fallback/anonymous decision, mirroring
+    ``resolve_clone_token``'s degradation so a transient GitHub failure never
+    fails a sync a fallback token could still serve. A
     malformed App private key still raises from ``build_app_jwt`` (operator
     misconfiguration must fail loudly, not be silently masked).
 
@@ -616,7 +618,7 @@ async def resolve_skill_sync_token(
                     repository=repo,
                     permissions=_READ_ONLY,
                 )
-        except httpx.HTTPError as err:
+        except (httpx.HTTPError, GitHubRateLimitError) as err:
             log.warning(
                 "github_repo_auth.skill_sync_app_path_failed",
                 repo_url=normalized,

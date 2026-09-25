@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- GitHub App installation-token mint rate limits during bound skill resync now
+  defer the durable queue job using GitHub's retry deadline; permission 403s
+  remain permanent. See `docs/github-push-resync.md` for the covered request
+  paths and remaining scope.
 - Opus 5.5 can be selected for an agent and is metered at its published rates.
   The seeded and new-agent defaults remain Sonnet 5.
 - The documentation site carries daimon's own look: the readme sticker as
