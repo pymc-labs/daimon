@@ -128,6 +128,7 @@ class DiscordTurnLifecycle:
         adopt_message_ref: discord.Message | None = None,
         delete: DeleteFn | None = None,
         unprompted: bool = False,
+        on_first_post: Callable[[discord.Message], Awaitable[None]] | None = None,
     ) -> None:
         self._send = send
         self._edit = edit
@@ -157,6 +158,8 @@ class DiscordTurnLifecycle:
         self._last_flush: float = 0.0
         self._terminal: bool = False
         self._cancel_view = cancel_view
+        self._on_first_post = on_first_post
+        self._first_post_attempted: bool = False
         self._persisted_sealed_indices: set[int] = set()
         self._was_answered: bool = False
         # A continuity notice that belongs ABOVE the answer it explains. The
@@ -233,10 +236,22 @@ class DiscordTurnLifecycle:
         now = self._clock()
         if self._message_ref is None:
             # First post — immediate, no debounce
-            self._message_ref = await self._send_message(
+            self._first_post_attempted = True
+            message = await self._send_message(
                 embeds=self._build_embeds(now), view=self._cancel_view
             )
+            self._message_ref = message
             self._last_flush = now
+            if self._on_first_post is not None:
+                # Persist the returned message ID before the turn proceeds. If
+                # this fails, retain the prepared intent and stop the caller.
+                await self._on_first_post(message)
+                self._on_first_post = None
+        elif self._on_first_post is not None:
+            # A retry after database failure can confirm the same post without
+            # issuing another Discord send or starting MA work.
+            await self._on_first_post(self._message_ref)
+            self._on_first_post = None
         elif now - self._last_flush >= _DEBOUNCE_S:
             # Debounce elapsed — edit
             await self._edit(
@@ -443,6 +458,11 @@ class DiscordTurnLifecycle:
         if self._message_ref is None:
             return None
         return str(self._message_ref.id)
+
+    @property
+    def first_post_attempted(self) -> bool:
+        """Whether the lifecycle has invoked Discord for its first card post."""
+        return self._first_post_attempted
 
     @property
     def was_answered(self) -> bool:

@@ -65,15 +65,15 @@ protocol: a card post requires a committed intent, a posted row has a message
 ID, and boot listing includes active prepared and posted rows.
 `InitialCardIntentPreWiring.cfg` adds the pre-wiring action that permits a post
 with no committed intent and retains its `PostedCardHasCommittedIntent`
-counterexample. Slack now follows the modeled commit-before-post order in
-`SlackApp`; Discord runtime wiring remains pending. The safe config maps
+counterexample. Both adapters now commit an intent before each initial card
+request. The safe config maps
 `CommitPreparedIntent` to `create_turn_card_intent()` plus the caller's
 transaction commit, `PostInitialCard` to the adapter platform request,
 `PersistMessageId` to `record_turn_card_message()`, and `BootListIntents` to
 `list_recoverable_turn_card_intents()`. It does not model platform-history
 search, attachment of the UUID to platform metadata, ambiguous post responses,
-or the policy for an intent whose message ID remains NULL. Slack's executable
-tests cover those actions within the lookup's time and page bounds. Finding a
+or the policy for an intent whose message ID remains NULL. Both adapters have
+executable tests for those actions within their lookup bounds. Finding a
 prepared intent does not by itself prove whether the remote post happened.
 
 Slack's [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py)
@@ -100,15 +100,17 @@ rule. `delete_retired_turn_card_intents()` can remove only retired rows older
 than a caller-supplied cutoff, in bounded batches. No adapter calls that
 cleanup API yet.
 
-The platform lookup helpers are also preparatory. Discord scans a caller-
-supplied time window and at most 1,000 messages; reaching the message budget
+The platform lookups are used by boot recovery. Discord scans a caller-supplied
+time window and at most 1,000 messages per lookup; reaching the message budget
 or failing mid-scan is indeterminate, even if an earlier page matched.
 Slack scans from 60 seconds before intent creation to at most five minutes
-after it, up to three 15-message pages with at least 60 seconds between page
-requests. A remaining cursor, timeout, or API error is indeterminate; a 429
-preserves `Retry-After` for the later reconciler. Complete absence means
-absence within that bounded window, not proof that Slack never accepted a
-delayed post. Neither lookup is wired to boot recovery in this change.
+after it for NULL-ID rows, or around the known timestamp for posted rows, up
+to three 15-message pages with at least 60 seconds between page requests. A
+remaining cursor, timeout, or API error is indeterminate; a 429
+preserves `Retry-After` for the reconciler. Complete absence means absence
+within that bounded window, not proof that a platform never accepted a delayed
+post. A duplicate outside the scanned window can also remain live after a
+different matching card is edited and the row retires.
 
 TLC 2.19 explores 11 states in the protocol configuration and checks `TypeOK`,
 `PostedCardHasCommittedIntent`, `PostedStateHasMessageId`, and
@@ -122,6 +124,57 @@ with expected message ID NULL, but deciding when that is safe remains an
 adapter recovery policy. Recovery also assumes a single adapter process;
 overlapping old and new instances can misclassify the sibling's marker as an
 orphan.
+
+[`InitialCardReconcile.tla`](InitialCardReconcile.tla) bounds the next recovery
+step to two intents (one from the dead process and one admitted after boot) and
+three cards (including a duplicate delivery for the old intent). It models a
+committed prepared row, platform post, response-ID persistence, a one-time boot
+snapshot, a terminal render that removes Cancel, keyed history lookup, keyed
+edit, and conditional retirement. `BootSnapshot` maps to the adapters' boot
+orphan gate plus `list_recoverable_turn_card_intents()`; `EditLiveCard` requires
+the Cancel UUID still be present. The source post paths are
+[`bot.py`](../../packages/adapters/discord/daimon/adapters/discord/bot.py),
+[`wizard_submit.py`](../../packages/adapters/discord/daimon/adapters/discord/wizard_submit.py),
+and [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py).
+The store actions map to
+[`turn_card_intents.py`](../../packages/core/daimon/core/stores/turn_card_intents.py).
+Discord snapshots inside `_retire_orphaned_turns_once()` before admitting new
+turns, then runs up to four background workers from
+[`bot.py`](../../packages/adapters/discord/daimon/adapters/discord/bot.py).
+[`turn_card_recovery.py`](../../packages/adapters/discord/daimon/adapters/discord/turn_card_recovery.py)
+scans at most 1,000 messages per lookup, fetches matching and known IDs,
+edits only cards that still carry their own Cancel UUID, and retains a row
+when a fetch or edit fails. A prepared NULL-ID row retires after two complete
+no-match scans at least 60 seconds apart on a monotonic clock. The
+[`Discord regressions`](../../packages/adapters/discord/tests/test_turn_card_recovery.py)
+exercise known-ID duplicates, failed edits and fetches, terminal cards,
+monotonic retry spacing, and bounded worker fanout. Slack's corresponding
+runtime and tests are in
+[`boot_sweep.py`](../../packages/adapters/slack/daimon/adapters/slack/boot_sweep.py)
+and [`test_card_intent_recovery.py`](../../packages/adapters/slack/tests/test_card_intent_recovery.py).
+These code paths match the modeled guards within their stated bounds; the
+model does not prove the adapters correct.
+
+TLC checks 209 distinct states for `PostedHasResponseId`,
+`SnapshotExcludesNewIntent`, and `NoTerminalCardEdited`. Two guard mutations
+remain registered: editing after the terminal render violates
+`NoTerminalCardEdited` in 100 states, and refreshing the boot snapshot to
+include a new-process intent violates `SnapshotExcludesNewIntent` in 24.
+`InitialCardReconcileLossyHistory.cfg` intentionally allows two complete but
+false-negative reads; its eight-step trace retires a prepared row while the
+card remains live (88 distinct states). This is the accepted duplicate/stranded
+card risk under the availability policy, not a property that the implementation
+can eliminate.
+
+The model makes each database transaction, platform visibility change, and
+card edit one atomic action. It abstracts timestamps, retry delays, API
+failures, cursor completeness, and compare-and-set SQL details; two
+`CompleteNoMatch` actions represent two complete scans whose required spacing
+must be checked in executable tests. It assumes one adapter process during
+recovery and a platform Cancel key that is visible in history until terminal
+render. There is no fairness or delivery-progress claim. An incomplete scan
+must not count as `CompleteNoMatch`; a delayed post outside the bounded search
+window may still produce the retained lossy-history trace.
 
 The uniqueness key is `(tenant_id, turn_token)`, so retries with a reused token
 cannot create a second row on another thread or platform; address mismatches
@@ -314,12 +367,9 @@ exercise the same ordering through each real lifecycle and boot-sweep path.
 
 Before the durable intent, Slack's pre-response Cancel key was process-local.
 It routed clicks before `chat.postMessage` returned but gave a restarted
-process no way to find the card. Slack now commits a stable UUID before the
-post, puts it in the Cancel button, and searches thread history at boot as
-described above. Discord runtime wiring is separate.
-Alternatively, the initial card can be delayed until session binding finishes;
-that accepts slower feedback during session setup and still leaves the smaller
-post-response/marker-commit crash window. This model makes no fairness or
+process no way to find the card. Both adapters now commit a stable UUID before
+the post, put it in the Cancel control, and search thread history at boot as
+described above. This historical model makes no fairness or
 progress claim. It bounds the trace to one mapping, one initial card, one
 process death, one restart sweep, and one subsequent card post; it abstracts
 remote edits and database commits as atomic model actions.

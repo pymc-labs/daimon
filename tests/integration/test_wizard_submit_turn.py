@@ -19,6 +19,7 @@ import re
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import discord
 import httpx
@@ -45,6 +46,7 @@ from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
 )
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _AGENT_ID = "ag_wizard_submit_test"
@@ -282,6 +284,24 @@ async def test_submitting_a_form_resumes_the_threads_existing_session(
         "no new thread_sessions row must be created for a reused session"
     )
     assert after.ma_session_id == existing_session_id
+    assert after.active_turn_message_id is None, (
+        "wizard terminal cleanup must clear the active-turn marker"
+    )
+    initial_post = channel.send.call_args_list[0]
+    view = initial_post.kwargs["view"]
+    assert view.cancel_button.custom_id.startswith("daimon:cancel:"), (
+        "the wizard status card must carry its durable intent ID in CancelView"
+    )
+    async with db_session_factory() as session:
+        intent = (
+            await session.execute(
+                sql_text("SELECT status, message_id FROM turn_card_intents WHERE id = :intent_id"),
+                {"intent_id": UUID(view.cancel_button.custom_id.removeprefix("daimon:cancel:"))},
+            )
+        ).one_or_none()
+    assert intent is not None and intent.status == "retired" and intent.message_id == "42", (
+        "a normally completed wizard turn must persist its response ID and retire the intent"
+    )
 
 
 # --- answer block as the user message ----------------------------------------

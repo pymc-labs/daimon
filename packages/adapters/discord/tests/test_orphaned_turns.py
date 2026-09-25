@@ -9,6 +9,7 @@ live in the store tests.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -27,11 +28,13 @@ from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
     list_orphaned_turns,
     mark_turn_active,
 )
+from daimon.core.stores.turn_card_intents import create_turn_card_intent
 from daimon.testing import build_fake_anthropic, ma_session
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -544,3 +547,90 @@ async def test_a_hung_interrupt_does_not_hold_the_sweep(
 
     assert calls == ["/v1/sessions/sesn_hung/events"], "the interrupt must have been attempted"
     assert await list_orphaned_turns(db_session, platform="discord") == []
+
+
+async def test_boot_card_recovery_bounds_worker_fanout(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bot = _make_bot(db_session_factory)
+    bot.wait_until_ready = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+    active = 0
+    peak_active = 0
+
+    async def reconcile(_intent: TurnCardIntentRow) -> None:
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+
+    bot._reconcile_turn_card_intent = AsyncMock(side_effect=reconcile)  # pyright: ignore[reportAttributeAccessIssue]
+    intents = [
+        TurnCardIntentRow(
+            id=uuid.uuid4(),
+            tenant_id=uuid.uuid4(),
+            platform="discord",
+            thread_id=str(index),
+            turn_token=uuid.uuid4(),
+            channel_id=None,
+            message_id=None,
+            status="prepared",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        for index in range(12)
+    ]
+
+    await bot._reconcile_boot_turn_cards(intents)  # pyright: ignore[reportPrivateUsage]
+
+    assert bot._reconcile_turn_card_intent.await_count == len(intents), (  # pyright: ignore[reportPrivateUsage, reportUnknownMemberType]
+        "the bounded worker pool must eventually process every snapshotted intent"
+    )
+    assert peak_active == 4, "only the configured fixed worker count may reconcile concurrently"
+
+
+async def test_boot_card_snapshot_excludes_intents_created_after_the_sweep(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session, workspace_id="card-snapshot-tenant")
+    old_intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="7101",
+        turn_token=uuid.uuid4(),
+    )
+    await db_session.commit()
+
+    bot = _make_bot(db_session_factory)
+    bot._orphan_recovery_armed = True  # pyright: ignore[reportPrivateUsage]
+    bot._start_turn_card_recovery = MagicMock()  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+
+    await bot._retire_orphaned_turns_once()  # pyright: ignore[reportPrivateUsage]
+    assert bot._boot_turn_card_intents == [old_intent], (  # pyright: ignore[reportPrivateUsage]
+        "the pre-admission sweep must snapshot the existing intent"
+    )
+
+    new_intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="7102",
+        turn_token=uuid.uuid4(),
+    )
+    await db_session.commit()
+
+    monkeypatch.setattr(
+        "daimon.adapters.discord.bot.list_tenants_by_platform",
+        AsyncMock(return_value=[]),
+    )
+    bot.tree.sync = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+    await bot.on_ready()
+    await bot._retire_orphaned_turns()  # pyright: ignore[reportPrivateUsage]
+
+    assert new_intent.id != old_intent.id, "the post-snapshot intent is a distinct new turn"
+    assert bot._boot_turn_card_intents == [old_intent], (  # pyright: ignore[reportPrivateUsage]
+        "on_ready and repeated sweeps must not absorb new-process intents into boot recovery"
+    )

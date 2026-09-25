@@ -61,6 +61,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, Self, cast
 
@@ -76,6 +77,10 @@ from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.thread_send import safe_thread_send
+from daimon.adapters.discord.turn_card_recovery import (
+    post_initial_turn_card,
+    retire_terminal_turn_card,
+)
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.wizard import (
     _authorize_tap,  # pyright: ignore[reportPrivateUsage]  # shared requester-only gate the sibling dispatch classes use -- reused verbatim so authorization logic exists in exactly one place
@@ -506,15 +511,27 @@ async def run_wizard_submit_turn(
             await msg.edit(**kwargs)
 
         cancel = asyncio.Event()
-        cancel_view = CancelView(allowed_user_id=interaction.user.id, cancel=cancel)
-        lifecycle = DiscordTurnLifecycle(
-            send=_send_embed,
-            edit=_edit_message,
-            agent_name=agent.name,
-            model_id=agent.model.id,
-            cancel_view=cancel_view,
+
+        def _make_lifecycle(
+            turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
+        ) -> DiscordTurnLifecycle:
+            return DiscordTurnLifecycle(
+                send=_send_embed,
+                edit=_edit_message,
+                agent_name=agent.name,
+                model_id=agent.model.id,
+                cancel_view=CancelView(
+                    allowed_user_id=interaction.user.id, cancel=cancel, turn_id=turn_id
+                ),
+                on_first_post=on_first_post,
+            )
+
+        turn_card_intent, lifecycle = await post_initial_turn_card(
+            bot.runtime.sessionmaker,
+            tenant_id=row.tenant_id,
+            thread_id=thread_id,
+            make_lifecycle=_make_lifecycle,
         )
-        await lifecycle.post_initial()
 
         # lifecycle_holder tracks whichever DiscordTurnLifecycle actually
         # completed the turn -- recovery_lifecycle rebuilds a fresh one
@@ -533,7 +550,11 @@ async def run_wizard_submit_turn(
                 edit=_edit_message,
                 agent_name=agent.name,
                 model_id=agent.model.id,
-                cancel_view=CancelView(allowed_user_id=interaction.user.id, cancel=cancel_event),
+                cancel_view=CancelView(
+                    allowed_user_id=interaction.user.id,
+                    cancel=cancel_event,
+                    turn_id=turn_card_intent.id,
+                ),
                 # Take over the failed attempt's message so its upstream-error
                 # embed is edited into this turn's answer rather than left
                 # standing next to a second, successful message.
@@ -589,6 +610,13 @@ async def run_wizard_submit_turn(
                         expected_message_id=expected_message_id,
                     )
                     await marker_session.commit()
+            if outcome is not None:
+                await retire_terminal_turn_card(
+                    bot.runtime.sessionmaker,
+                    intent_id=turn_card_intent.id,
+                    expected_message_id=lifecycle_holder[0].final_message_id,
+                    no_post_confirmed=not lifecycle_holder[0].first_post_attempted,
+                )
 
         assert outcome is not None
         turn_state = outcome.state
