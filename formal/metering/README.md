@@ -256,6 +256,8 @@ is owed. Neither model states a combined bound.
   - One session and one tenant.
   - Transactions are atomic model steps, which matches one transaction per
     `record_turn_usage` call.
+  - The atomic-write assumption has executable PostgreSQL calibration in
+    [`test_record_turn_usage_ledger_failure_rolls_back_pair_and_allows_retry`](../../packages/core/tests/test_usage_recording.py): it lets the recorder insert and flush a usage row, causes the following ledger insert to fail on `Numeric(12, 6)` overflow, and checks from an independent connection that neither row committed. A retry with valid pricing then leaves exactly one usage row and its matching debit. This checks a database error inside the transaction; it does not model process or host loss, storage durability, or a lost response after commit.
   - The unique key is modelled as first-writer-wins, which is PostgreSQL
     `ON CONFLICT DO NOTHING` behaviour under `READ COMMITTED` (a concurrent
     second insert waits, then does nothing).
