@@ -2230,6 +2230,7 @@ class SlackApp:
             deregister_pending=self._deregister_cancel,
             intent_id=card_intent.id,
         )
+        lifecycle_holder: list[SlackTurnLifecycle] = [follow_lifecycle]
         await follow_lifecycle.post_initial()
         try:
             async with self.runtime.sessionmaker() as intent_session:
@@ -2318,6 +2319,7 @@ class SlackApp:
                 deregister_pending=self._deregister_cancel,
                 adopt_status_ts=follow_lifecycle.status_ts,
             )
+            lifecycle_holder[0] = new_lifecycle
             if follow_lifecycle.status_ts is not None:
                 self._register_cancel(
                     follow_lifecycle.status_ts, cancel, row.requester_external_user_id
@@ -2365,15 +2367,16 @@ class SlackApp:
                     deadline=follow_deadline,
                 )
         finally:
-            if follow_lifecycle.status_ts is not None:
-                self._deregister_cancel(follow_lifecycle.status_ts)
-            if follow_lifecycle.final_ts is not None and follow_lifecycle.status_ts is not None:
+            final_lifecycle = lifecycle_holder[0]
+            if final_lifecycle.status_ts is not None:
+                self._deregister_cancel(final_lifecycle.status_ts)
+            if final_lifecycle.final_ts is not None and final_lifecycle.status_ts is not None:
                 try:
                     async with self.runtime.sessionmaker() as intent_session:
                         await retire_turn_card_intent(
                             intent_session,
                             id=card_intent.id,
-                            expected_message_id=follow_lifecycle.status_ts,
+                            expected_message_id=final_lifecycle.status_ts,
                         )
                         await intent_session.commit()
                 except SQLAlchemyError:

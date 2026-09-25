@@ -14,6 +14,7 @@ faked at the transport (`fake_slack_web_client`), never method-mocked.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -553,6 +554,36 @@ async def test_continuation_terminal_render_then_raise_retires_intent(
         run_action=terminal_then_raise,
     )
     assert isinstance(error, RuntimeError)
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert intents == []
+
+
+async def test_continuation_recovery_lifecycle_terminal_render_retires_intent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    async def recover_then_finish(*_args: Any, **kwargs: Any) -> RunOutcome:
+        recovery_lifecycle = kwargs["recovery_lifecycle"](asyncio.Event())
+        await recovery_lifecycle.on_terminal_failure(
+            TurnState(), RuntimeError("recovered turn failed")
+        )
+        return RunOutcome(
+            state=TurnState(),
+            ma_session_id="sess_continuation_entry",
+            mapping_id=None,
+            recovered=True,
+        )
+
+    _, _, error = await _run_continuation_with_card_intent(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_CARD_RECOVERY_TERMINAL",
+        run_action=recover_then_finish,
+    )
+    assert error is None
     async with db_session_factory() as session:
         intents = await list_recoverable_turn_card_intents(session, platform="slack")
     assert intents == []
