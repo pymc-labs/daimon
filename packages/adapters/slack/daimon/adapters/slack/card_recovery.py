@@ -13,7 +13,7 @@ import dataclasses
 import datetime as dt
 import enum
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import aiohttp
 from slack_sdk.errors import SlackApiError, SlackRequestError
@@ -44,6 +44,11 @@ class CardLookup:
     message_timestamps: tuple[str, ...] = ()
     reason: str | None = None
     retry_after_seconds: float | None = None
+
+
+class _SlackErrorResponse(Protocol):
+    headers: Mapping[str, str]
+    status_code: int
 
 
 def _as_mapping(value: object) -> dict[str, object] | None:
@@ -137,22 +142,17 @@ async def find_turn_card_by_key(
         except TimeoutError:
             return CardLookup(CardLookupStatus.INDETERMINATE, reason="api_timeout")
         except SlackApiError as error:
-            response = cast(Mapping[str, object], error.response)
-            raw_headers = response.get("headers")
-            headers: Mapping[str, object] = {}
-            if isinstance(raw_headers, Mapping):
-                headers = cast(Mapping[str, object], raw_headers)
-            raw_retry_after: object | None = headers.get("Retry-After")
+            response = cast(_SlackErrorResponse, error.response)
+            retry_after_header = response.headers.get("Retry-After")
             try:
                 retry_after_seconds = (
-                    float(raw_retry_after) if isinstance(raw_retry_after, str) else None
+                    float(retry_after_header) if retry_after_header is not None else None
                 )
             except ValueError:
                 retry_after_seconds = None
-            status_code = response.get("status_code")
             return CardLookup(
                 CardLookupStatus.INDETERMINATE,
-                reason="rate_limited" if status_code == 429 else "api_error",
+                reason="rate_limited" if response.status_code == 429 else "api_error",
                 retry_after_seconds=retry_after_seconds,
             )
         except (SlackRequestError, aiohttp.ClientError):
