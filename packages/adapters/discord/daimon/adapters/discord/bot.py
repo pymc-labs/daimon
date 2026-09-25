@@ -33,6 +33,7 @@ from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.adapters.discord.thread_send import safe_thread_send
 from daimon.adapters.discord.turn_card_recovery import (
     post_initial_turn_card,
+    reconcile_turn_card_intent,
     retire_terminal_turn_card,
 )
 from daimon.adapters.discord.views import CancelView
@@ -58,7 +59,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow
+from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.tenants import (
     get_tenant_liveness,
     list_tenants_by_platform,
@@ -73,6 +74,7 @@ from daimon.core.stores.thread_sessions import (
     mark_turn_active,
     update_watermark,
 )
+from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.thread_naming import strip_mentions
 from daimon.core.thread_participation import ParticipationMode
@@ -336,6 +338,8 @@ class DaimonBot(commands.Bot):
         # process is currently rendering.
         self._orphans_retired: bool = False
         self._orphan_sweep_lock = asyncio.Lock()
+        self._boot_turn_card_intents: list[TurnCardIntentRow] | None = None
+        self._turn_card_recovery_started: bool = False
         # Set by setup_hook, which runs after login and before the gateway
         # connects, so it is set before any message or interaction can arrive.
         # From then on every turn entry passes the sweep barrier. Left unset
@@ -688,9 +692,14 @@ class DaimonBot(commands.Bot):
         if self._orphans_retired:
             return
         async with self.runtime.sessionmaker() as session:
+            if self._boot_turn_card_intents is None:
+                self._boot_turn_card_intents = await list_recoverable_turn_card_intents(
+                    session, platform="discord"
+                )
             orphans = await list_orphaned_turns(session, platform="discord")
         if not orphans:
             self._orphans_retired = True
+            self._start_turn_card_recovery()
             return
         log.info("turn.orphans_found", count=len(orphans))
 
@@ -754,6 +763,57 @@ class DaimonBot(commands.Bot):
                     message_id=row.active_turn_message_id,
                 )
         self._orphans_retired = True
+        self._start_turn_card_recovery()
+
+    def _start_turn_card_recovery(self) -> None:
+        """Reconcile the pre-admission intent snapshot after gateway readiness."""
+        if (
+            not self._orphan_recovery_armed
+            or self._turn_card_recovery_started
+            or self._boot_turn_card_intents is None
+        ):
+            return
+        self._turn_card_recovery_started = True
+        for intent in self._boot_turn_card_intents:
+            self._spawn(self._reconcile_turn_card_intent(intent))
+
+    async def _reconcile_turn_card_intent(
+        self,
+        intent: TurnCardIntentRow,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        """Recover one intent independently so a delayed search cannot block others."""
+        await self.wait_until_ready()
+        for attempt in range(3):
+            try:
+                channel = self.get_channel(int(intent.thread_id)) or await self.fetch_channel(
+                    int(intent.thread_id)
+                )
+                if not isinstance(channel, discord.Thread):
+                    log.warning(
+                        "turn.card_intent_thread_unavailable",
+                        intent_id=str(intent.id),
+                        thread_id=intent.thread_id,
+                        channel_type=type(channel).__name__,
+                    )
+                    return
+                await reconcile_turn_card_intent(
+                    self.runtime.sessionmaker,
+                    intent=intent,
+                    thread=channel,
+                )
+                return
+            except (discord.HTTPException, discord.ClientException, ValueError) as err:
+                if attempt < 2:
+                    await sleep(5.0)
+                    continue
+                log.warning(
+                    "turn.card_intent_thread_fetch_failed",
+                    intent_id=str(intent.id),
+                    thread_id=intent.thread_id,
+                    error=str(err),
+                )
 
     async def on_ready(self) -> None:
         """Forward-only reconcile sweep: provision-if-missing, re-seed pending/failed,

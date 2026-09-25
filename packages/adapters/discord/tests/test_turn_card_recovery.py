@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 import discord
@@ -17,11 +17,13 @@ from daimon.adapters.discord.turn_card_recovery import (
     TurnCardSearchState,
     find_turn_card_message,
     post_initial_turn_card,
+    reconcile_turn_card_intent,
     retire_terminal_turn_card,
     turn_card_custom_id,
     turn_card_ids_from_message,
 )
 from daimon.adapters.discord.views import CancelView
+from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.turn.state import TurnState
 from daimon.testing.factories import make_tenant
@@ -184,6 +186,183 @@ async def test_history_lookup_reports_indeterminate_when_message_budget_is_exhau
     assert result.state is TurnCardSearchState.INDETERMINATE, (
         "reaching the scan budget cannot prove that no later matching card exists"
     )
+
+
+@pytest.mark.asyncio
+async def test_history_lookup_reports_indeterminate_for_invalid_time_window() -> None:
+    thread = _HistoryThread([[_fetched_message(900)]])
+
+    result = await find_turn_card_message(
+        thread,
+        turn_id=_TURN_ID,
+        created_after=_CREATED_AFTER,
+        before=_CREATED_AFTER - timedelta(seconds=1),
+    )  # type: ignore[arg-type]
+
+    assert result.state is TurnCardSearchState.INDETERMINATE, (
+        "an upper bound before the intent timestamp cannot prove the card was absent"
+    )
+    assert thread.calls == [], "invalid intervals must not be queried as complete history"
+
+
+@pytest.mark.asyncio
+async def test_boot_recovery_retires_terminal_card_without_editing_final_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent = TurnCardIntentRow(
+        id=_TURN_ID,
+        tenant_id=UUID("12345678-1234-5678-1234-567812345679"),
+        platform="discord",
+        thread_id="456",
+        turn_token=UUID("12345678-1234-5678-1234-567812345680"),
+        channel_id=None,
+        message_id="900",
+        status="posted",
+        created_at=_CREATED_AFTER,
+        updated_at=_CREATED_AFTER,
+    )
+    message = SimpleNamespace(id=900, components=[], edit=MagicMock())
+    thread = MagicMock()
+    thread.fetch_message = AsyncMock(return_value=message)
+    retired: list[dict[str, object]] = []
+
+    async def record_retirement(_sessionmaker: object, **kwargs: object) -> bool:
+        retired.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "daimon.adapters.discord.turn_card_recovery.retire_terminal_turn_card",
+        record_retirement,
+    )
+
+    await reconcile_turn_card_intent(
+        MagicMock(),
+        intent=intent,
+        thread=thread,
+    )  # type: ignore[arg-type]
+
+    message.edit.assert_not_called()
+    assert retired == [{"intent_id": _TURN_ID, "expected_message_id": "900"}], (
+        "a terminal response card should be retired without overwriting its answer"
+    )
+
+
+@pytest.mark.asyncio
+async def test_boot_recovery_edits_every_found_live_duplicate_after_recording_one_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent = TurnCardIntentRow(
+        id=_TURN_ID,
+        tenant_id=UUID("12345678-1234-5678-1234-567812345679"),
+        platform="discord",
+        thread_id="456",
+        turn_token=UUID("12345678-1234-5678-1234-567812345680"),
+        channel_id=None,
+        message_id=None,
+        status="prepared",
+        created_at=_CREATED_AFTER,
+        updated_at=_CREATED_AFTER,
+    )
+    messages = [_fetched_message(901, _TURN_ID), _fetched_message(902, _TURN_ID)]
+    edit = AsyncMock()
+    monkeypatch.setattr(discord.Message, "edit", edit)
+    thread = _HistoryThread([[messages[0]], [messages[1]]])
+    thread.fetch_message = AsyncMock(side_effect=messages)  # type: ignore[attr-defined]
+    recorded: list[dict[str, object]] = []
+    retired: list[dict[str, object]] = []
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    async def record_message(_session: object, **kwargs: object) -> bool:
+        recorded.append(kwargs)
+        return True
+
+    async def record_retirement(_sessionmaker: object, **kwargs: object) -> bool:
+        retired.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "daimon.adapters.discord.turn_card_recovery.record_turn_card_message",
+        record_message,
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.discord.turn_card_recovery.retire_terminal_turn_card",
+        record_retirement,
+    )
+
+    await reconcile_turn_card_intent(
+        MagicMock(return_value=_Session()),
+        intent=intent,
+        thread=thread,  # type: ignore[arg-type]
+        now=lambda: _SEARCH_BEFORE,
+    )  # type: ignore[arg-type]
+
+    assert recorded == [{"id": _TURN_ID, "message_id": "901"}], (
+        "one deterministic response ID should be persisted before any edits"
+    )
+    assert edit.await_count == 2, (
+        "every matching duplicate that still carries this Cancel key should be retired"
+    )
+    assert retired == [{"intent_id": _TURN_ID, "expected_message_id": "901"}], (
+        "the row should be retired with the persisted response ID as its fence"
+    )
+
+
+@pytest.mark.asyncio
+async def test_boot_recovery_needs_two_complete_misses_before_retiring_null_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intent = TurnCardIntentRow(
+        id=_TURN_ID,
+        tenant_id=UUID("12345678-1234-5678-1234-567812345679"),
+        platform="discord",
+        thread_id="456",
+        turn_token=UUID("12345678-1234-5678-1234-567812345680"),
+        channel_id=None,
+        message_id=None,
+        status="prepared",
+        created_at=_CREATED_AFTER,
+        updated_at=_CREATED_AFTER,
+    )
+    thread = _HistoryThread([[]])
+    clock = [_CREATED_AFTER + timedelta(minutes=1)]
+    sleeps: list[float] = []
+    retired: list[dict[str, object]] = []
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += timedelta(seconds=seconds)
+
+    async def record_retirement(_sessionmaker: object, **kwargs: object) -> bool:
+        retired.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "daimon.adapters.discord.turn_card_recovery.retire_terminal_turn_card",
+        record_retirement,
+    )
+
+    await reconcile_turn_card_intent(
+        MagicMock(),
+        intent=intent,
+        thread=thread,  # type: ignore[arg-type]
+        sleep=sleep,
+        now=lambda: clock[0],
+    )
+
+    assert sleeps == [60.0], "a full minute must separate the complete absence reads"
+    assert len(thread.calls) == 2, "prepared IDs need two complete history scans"
+    assert retired == [
+        {"intent_id": _TURN_ID, "expected_message_id": None, "no_post_confirmed": True}
+    ], "two complete misses may retire only the still-NULL prepared intent"
 
 
 @pytest.mark.asyncio
