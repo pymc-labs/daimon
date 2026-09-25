@@ -8,6 +8,7 @@ should be edited.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -81,9 +82,15 @@ async def retire_terminal_turn_card(
     intent_id: UUID,
     expected_message_id: str | None,
     no_post_confirmed: bool = False,
+    allow_prepared_without_message: bool = False,
 ) -> bool:
-    """Retire a completed card by ID, or a prepared intent when no post was attempted."""
-    if expected_message_id is None and not no_post_confirmed:
+    """Retire by response ID, or explicitly permit retirement of a prepared NULL-ID row.
+
+    `no_post_confirmed` is reserved for callers that know they never attempted
+    the send. Boot recovery uses `allow_prepared_without_message` only after
+    two complete no-match reads separated by a monotonic minute.
+    """
+    if expected_message_id is None and not (no_post_confirmed or allow_prepared_without_message):
         return False
     try:
         async with sessionmaker() as session:
@@ -220,40 +227,10 @@ async def reconcile_turn_card_intent(
     thread: discord.Thread,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     """Reconcile one boot-snapshotted intent without delaying admission."""
-    if intent.message_id is not None:
-        for attempt in range(3):
-            try:
-                message = await thread.fetch_message(int(intent.message_id))
-            except discord.NotFound:
-                await retire_terminal_turn_card(
-                    sessionmaker,
-                    intent_id=intent.id,
-                    expected_message_id=intent.message_id,
-                )
-                return
-            except (discord.HTTPException, discord.ClientException, ValueError) as err:
-                if attempt < 2:
-                    await sleep(5.0)
-                    continue
-                log.warning(
-                    "turn.card_intent_fetch_failed",
-                    intent_id=str(intent.id),
-                    message_id=intent.message_id,
-                    error=str(err),
-                )
-                return
-            if intent.id in turn_card_ids_from_message(message):
-                await _mark_card_interrupted(message, intent_id=intent.id)
-            await retire_terminal_turn_card(
-                sessionmaker,
-                intent_id=intent.id,
-                expected_message_id=intent.message_id,
-            )
-            return
-
-    complete_miss_at: datetime | None = None
+    complete_miss_at: float | None = None
     incomplete_attempts = 0
     while incomplete_attempts < 3:
         current_time = now()
@@ -265,50 +242,68 @@ async def reconcile_turn_card_intent(
             before=search_before,
         )
         if result.state in (TurnCardSearchState.FOUND, TurnCardSearchState.MULTIPLE):
-            recorded_message_id = str(result.message_ids[0])
-            try:
-                async with sessionmaker() as session:
-                    recorded = await record_turn_card_message(
-                        session,
-                        id=intent.id,
-                        message_id=recorded_message_id,
-                    )
-                    if not recorded:
-                        return
-                    await session.commit()
-            except SQLAlchemyError:
-                log.warning(
-                    "turn.card_intent_recovered_id_failed",
-                    intent_id=str(intent.id),
-                    message_id=recorded_message_id,
-                    exc_info=True,
-                )
-                return
-            for message_id in result.message_ids:
+            message_ids = set(result.message_ids)
+            if intent.message_id is None:
+                recorded_message_id = str(min(message_ids))
                 try:
-                    message = await thread.fetch_message(message_id)
-                except (discord.HTTPException, discord.ClientException, ValueError) as err:
+                    async with sessionmaker() as session:
+                        recorded = await record_turn_card_message(
+                            session,
+                            id=intent.id,
+                            message_id=recorded_message_id,
+                        )
+                        if not recorded:
+                            return
+                        await session.commit()
+                except SQLAlchemyError:
                     log.warning(
-                        "turn.card_intent_match_fetch_failed",
+                        "turn.card_intent_recovered_id_failed",
                         intent_id=str(intent.id),
-                        message_id=str(message_id),
-                        error=str(err),
+                        message_id=recorded_message_id,
+                        exc_info=True,
                     )
-                    continue
-                if intent.id in turn_card_ids_from_message(message):
-                    await _mark_card_interrupted(message, intent_id=intent.id)
+                    return
+            else:
+                recorded_message_id = intent.message_id
+
+            if not await _reconcile_matching_messages(
+                thread,
+                intent_id=intent.id,
+                message_ids=message_ids,
+                known_message_id=intent.message_id,
+                sleep=sleep,
+            ):
+                return
             await retire_terminal_turn_card(
                 sessionmaker,
                 intent_id=intent.id,
                 expected_message_id=recorded_message_id,
             )
             return
+        if result.state is TurnCardSearchState.NOT_FOUND and intent.message_id is not None:
+            # The known response may be terminal and therefore absent from the
+            # key search; still verify it while retaining the history scan's
+            # duplicate coverage.
+            if not await _reconcile_matching_messages(
+                thread,
+                intent_id=intent.id,
+                message_ids=set(),
+                known_message_id=intent.message_id,
+                sleep=sleep,
+            ):
+                return
+            await retire_terminal_turn_card(
+                sessionmaker,
+                intent_id=intent.id,
+                expected_message_id=intent.message_id,
+            )
+            return
         if result.state is TurnCardSearchState.NOT_FOUND:
             if complete_miss_at is None:
-                complete_miss_at = current_time
+                complete_miss_at = monotonic()
                 await sleep(60.0)
                 continue
-            seconds_since_miss = (current_time - complete_miss_at).total_seconds()
+            seconds_since_miss = monotonic() - complete_miss_at
             if seconds_since_miss < 60.0:
                 await sleep(60.0 - seconds_since_miss)
                 continue
@@ -316,7 +311,7 @@ async def reconcile_turn_card_intent(
                 sessionmaker,
                 intent_id=intent.id,
                 expected_message_id=None,
-                no_post_confirmed=True,
+                allow_prepared_without_message=True,
             )
             return
 
@@ -326,10 +321,44 @@ async def reconcile_turn_card_intent(
     log.warning("turn.card_intent_recovery_exhausted", intent_id=str(intent.id))
 
 
-async def _mark_card_interrupted(message: discord.Message, *, intent_id: UUID) -> None:
-    """Edit only a card that still carries this intent's Cancel key."""
+async def _reconcile_matching_messages(
+    thread: discord.Thread,
+    *,
+    intent_id: UUID,
+    message_ids: set[int],
+    known_message_id: str | None,
+    sleep: Callable[[float], Awaitable[None]],
+) -> bool:
+    """Edit every still-live match; return false on any unresolved API failure."""
+    if known_message_id is not None:
+        message_ids.add(int(known_message_id))
+    for message_id in sorted(message_ids):
+        for attempt in range(3):
+            try:
+                message = await thread.fetch_message(message_id)
+            except discord.NotFound:
+                break
+            except (discord.HTTPException, discord.ClientException, ValueError) as err:
+                if attempt < 2:
+                    await sleep(5.0)
+                    continue
+                log.warning(
+                    "turn.card_intent_match_fetch_failed",
+                    intent_id=str(intent_id),
+                    message_id=str(message_id),
+                    error=str(err),
+                )
+                return False
+            if not await _mark_card_interrupted(message, intent_id=intent_id):
+                return False
+            break
+    return True
+
+
+async def _mark_card_interrupted(message: discord.Message, *, intent_id: UUID) -> bool:
+    """Return true for a terminal card or a successfully edited live card."""
     if intent_id not in turn_card_ids_from_message(message):
-        return
+        return True
     try:
         await message.edit(
             embed=discord.Embed(
@@ -341,6 +370,7 @@ async def _mark_card_interrupted(message: discord.Message, *, intent_id: UUID) -
             ),
             view=None,
         )
+        return True
     except (discord.HTTPException, discord.ClientException) as err:
         log.warning(
             "turn.card_intent_edit_failed",
@@ -348,3 +378,4 @@ async def _mark_card_interrupted(message: discord.Message, *, intent_id: UUID) -
             message_id=str(message.id),
             error=str(err),
         )
+        return False

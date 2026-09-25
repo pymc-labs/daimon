@@ -114,6 +114,7 @@ _DRAIN_GRACE_S: float = 60.0
 # only 5 of 16 tenants' skills before 429ing; the agent reconcile then failed
 # attaching skills the sweep had never created.
 _SWEEP_CONCURRENCY = 2
+_TURN_CARD_RECOVERY_CONCURRENCY = 4
 
 
 def _resolve_bot_display_name(settings: Settings) -> str:
@@ -774,8 +775,22 @@ class DaimonBot(commands.Bot):
         ):
             return
         self._turn_card_recovery_started = True
-        for intent in self._boot_turn_card_intents:
-            self._spawn(self._reconcile_turn_card_intent(intent))
+        self._spawn(self._reconcile_boot_turn_cards(self._boot_turn_card_intents))
+
+    async def _reconcile_boot_turn_cards(self, intents: list[TurnCardIntentRow]) -> None:
+        """Run a fixed number of workers over the startup intent snapshot."""
+        if not intents:
+            return
+        await self.wait_until_ready()
+        intent_iter = iter(intents)
+
+        async def worker() -> None:
+            for intent in intent_iter:
+                await self._reconcile_turn_card_intent(intent)
+
+        await asyncio.gather(
+            *(worker() for _ in range(min(_TURN_CARD_RECOVERY_CONCURRENCY, len(intents))))
+        )
 
     async def _reconcile_turn_card_intent(
         self,
@@ -1791,7 +1806,7 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     intent_id=turn_card_intent.id,
                     expected_message_id=lifecycle_holder[0].final_message_id,
-                    no_post_confirmed=not lifecycle_holder[0].first_post_attempted,
+                    allow_prepared_without_message=not lifecycle_holder[0].first_post_attempted,
                 )
 
         assert outcome is not None
@@ -2477,7 +2492,7 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     intent_id=turn_card_intent.id,
                     expected_message_id=lifecycle_holder[0].final_message_id,
-                    no_post_confirmed=not lifecycle_holder[0].first_post_attempted,
+                    allow_prepared_without_message=not lifecycle_holder[0].first_post_attempted,
                 )
 
         # Reached only on the non-exceptional path -- any raise inside the try
