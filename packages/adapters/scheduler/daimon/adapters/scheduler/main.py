@@ -68,6 +68,7 @@ from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import record_result, update_routine_agent_id
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_balance import is_over_balance
+from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
@@ -344,6 +345,16 @@ async def _sweep_slack_event_dedup(sm: async_sessionmaker[AsyncSession]) -> None
         log.exception("scheduler.slack_event_dedup_sweep.failed")
 
 
+async def _sweep_retired_turn_card_intents(
+    sm: async_sessionmaker[AsyncSession],
+) -> None:
+    """Prune old retired card intents; database errors retry on the next tick."""
+    try:
+        await sweep_retired_turn_card_intents(sm, now=datetime.now(UTC))
+    except SQLAlchemyError:
+        log.exception("scheduler.turn_card_intent_sweep.failed")
+
+
 async def _sweep_hub_oauth_kv(sm: async_sessionmaker[AsyncSession]) -> None:
     """Prune expired hub login rows once. Boundary catch: a sweep failure
     must not kill the scheduler loop; the next tick retries. No upstream call.
@@ -475,6 +486,7 @@ async def run(
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
+            await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
             await _drain_github_push_resync(
                 engine=engine,
@@ -500,6 +512,7 @@ async def run(
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
+            await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
             await _drain_github_push_resync(
                 engine=engine,

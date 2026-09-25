@@ -97,8 +97,9 @@ runtime is calibrated by tests, not proven by `InitialCardIntent.tla`.
 
 The store rejects empty message IDs and the database CHECK enforces the same
 rule. `delete_retired_turn_card_intents()` can remove only retired rows older
-than a caller-supplied cutoff, in bounded batches. No adapter calls that
-cleanup API yet.
+than a caller-supplied cutoff, in bounded batches. The scheduler removes up
+to 500 retired rows per tick after seven days, preserving a short forensic
+window while ensuring active recovery intents are never pruned.
 
 The platform lookups are used by boot recovery. Discord scans a caller-supplied
 time window and at most 1,000 messages per lookup; reaching the message budget
