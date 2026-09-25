@@ -79,9 +79,10 @@ async def retire_terminal_turn_card(
     *,
     intent_id: UUID,
     expected_message_id: str | None,
+    no_post_confirmed: bool = False,
 ) -> bool:
-    """Retire a completed card only when its persisted Discord ID still matches."""
-    if expected_message_id is None:
+    """Retire a completed card by ID, or a prepared intent when no post was attempted."""
+    if expected_message_id is None and not no_post_confirmed:
         return False
     try:
         async with sessionmaker() as session:

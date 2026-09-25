@@ -159,6 +159,7 @@ class DiscordTurnLifecycle:
         self._terminal: bool = False
         self._cancel_view = cancel_view
         self._on_first_post = on_first_post
+        self._first_post_attempted: bool = False
         self._persisted_sealed_indices: set[int] = set()
         self._was_answered: bool = False
         # A continuity notice that belongs ABOVE the answer it explains. The
@@ -235,6 +236,7 @@ class DiscordTurnLifecycle:
         now = self._clock()
         if self._message_ref is None:
             # First post — immediate, no debounce
+            self._first_post_attempted = True
             message = await self._send_message(
                 embeds=self._build_embeds(now), view=self._cancel_view
             )
@@ -456,6 +458,11 @@ class DiscordTurnLifecycle:
         if self._message_ref is None:
             return None
         return str(self._message_ref.id)
+
+    @property
+    def first_post_attempted(self) -> bool:
+        """Whether the lifecycle has invoked Discord for its first card post."""
+        return self._first_post_attempted
 
     @property
     def was_answered(self) -> bool:

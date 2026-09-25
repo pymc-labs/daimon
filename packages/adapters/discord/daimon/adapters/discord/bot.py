@@ -1731,6 +1731,7 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     intent_id=turn_card_intent.id,
                     expected_message_id=lifecycle_holder[0].final_message_id,
+                    no_post_confirmed=not lifecycle_holder[0].first_post_attempted,
                 )
 
         assert outcome is not None
@@ -2416,6 +2417,7 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     intent_id=turn_card_intent.id,
                     expected_message_id=lifecycle_holder[0].final_message_id,
+                    no_post_confirmed=not lifecycle_holder[0].first_post_attempted,
                 )
 
         # Reached only on the non-exceptional path -- any raise inside the try

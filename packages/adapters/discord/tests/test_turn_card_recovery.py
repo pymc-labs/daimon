@@ -378,3 +378,41 @@ async def test_terminal_intent_retirement_failure_is_best_effort(
         db_session_factory, intent_id=intent.id, expected_message_id="903"
     )
     assert retired is False, "retirement failure must not replace an already terminal turn result"
+
+
+@pytest.mark.asyncio
+async def test_unprompted_terminal_without_post_retires_prepared_intent(
+    db_session: Any, db_session_factory: Any
+) -> None:
+    tenant = await make_tenant(db_session, workspace_id="turn-card-no-post")
+    await db_session.commit()
+
+    async def send(**_kwargs: Any) -> object:
+        raise AssertionError("unprompted turns must not post before visible output")
+
+    async def edit(_message: object, **_kwargs: Any) -> None:
+        return None
+
+    def make_lifecycle(_turn_id: UUID, on_first_post: Any) -> DiscordTurnLifecycle:
+        return DiscordTurnLifecycle(
+            send=send,
+            edit=edit,
+            agent_name="test-agent",
+            model_id="claude-sonnet-4-6",
+            unprompted=True,
+            on_first_post=on_first_post,
+        )
+
+    intent, lifecycle = await post_initial_turn_card(
+        db_session_factory,
+        tenant_id=tenant.id,
+        thread_id="904",
+        make_lifecycle=make_lifecycle,
+    )
+    assert not lifecycle.first_post_attempted, "no output means no Discord request occurred"
+    assert await retire_terminal_turn_card(
+        db_session_factory,
+        intent_id=intent.id,
+        expected_message_id=None,
+        no_post_confirmed=True,
+    ), "a known no-post terminal can retire its prepared row"
