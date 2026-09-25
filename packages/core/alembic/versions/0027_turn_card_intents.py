@@ -48,7 +48,8 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "(status = 'prepared' AND message_id IS NULL) OR "
-            "(status = 'posted' AND message_id IS NOT NULL) OR status = 'retired'",
+            "(status = 'posted' AND message_id IS NOT NULL AND message_id <> '') OR "
+            "(status = 'retired' AND (message_id IS NULL OR message_id <> ''))",
             name="ck_turn_card_intents_message_state",
         ),
         sa.PrimaryKeyConstraint("id"),

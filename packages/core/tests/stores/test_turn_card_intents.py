@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from daimon.core._models import TurnCardIntent
 from daimon.core.stores.turn_card_intents import (
     TurnCardIntentConflictError,
     create_turn_card_intent,
+    delete_retired_turn_card_intents,
     list_recoverable_turn_card_intents,
     record_turn_card_message,
     retire_turn_card_intent,
 )
 from daimon.testing.factories import make_tenant
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
@@ -59,6 +64,8 @@ async def test_turn_card_intent_message_update_and_retirement_are_conditional(
     assert await record_turn_card_message(db_session, id=intent.id, message_id="m1"), (
         "a prepared intent should accept its platform message ID"
     )
+    with pytest.raises(ValueError, match="message_id must be nonempty"):
+        await record_turn_card_message(db_session, id=intent.id, message_id="")
     assert await record_turn_card_message(db_session, id=intent.id, message_id="m1"), (
         "recording the same message ID must be idempotent"
     )
@@ -76,6 +83,69 @@ async def test_turn_card_intent_message_update_and_retirement_are_conditional(
     )
     assert await list_recoverable_turn_card_intents(db_session, platform="discord") == [], (
         "retired intents must leave the boot recovery listing"
+    )
+
+
+async def test_turn_card_intent_database_rejects_empty_posted_message_id(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-empty-message",
+        turn_token=uuid.uuid4(),
+    )
+    with pytest.raises(IntegrityError):
+        await db_session.execute(
+            update(TurnCardIntent)
+            .where(TurnCardIntent.id == intent.id)
+            .values(status="posted", message_id="")
+        )
+    await db_session.rollback()
+
+
+async def test_delete_retired_turn_card_intents_is_bounded_and_cutoff_scoped(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    rows = [
+        await create_turn_card_intent(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id=f"thread-{i}",
+            turn_token=uuid.uuid4(),
+        )
+        for i in range(4)
+    ]
+    old = datetime.now(UTC) - timedelta(days=8)
+    recent = datetime.now(UTC) - timedelta(days=1)
+    await db_session.execute(
+        update(TurnCardIntent)
+        .where(TurnCardIntent.id.in_([rows[0].id, rows[1].id]))
+        .values(status="retired", updated_at=old)
+    )
+    await db_session.execute(
+        update(TurnCardIntent)
+        .where(TurnCardIntent.id == rows[2].id)
+        .values(status="retired", updated_at=recent)
+    )
+    await db_session.execute(
+        update(TurnCardIntent).where(TurnCardIntent.id == rows[3].id).values(updated_at=old)
+    )
+    await db_session.flush()
+
+    deleted = await delete_retired_turn_card_intents(
+        db_session, cutoff=datetime.now(UTC) - timedelta(days=7), batch_size=1
+    )
+    remaining = set((await db_session.execute(select(TurnCardIntent.id))).scalars().all())
+    assert deleted == 1, "cleanup must respect its caller-supplied batch limit"
+    assert rows[2].id in remaining, "recent retired intents must be retained"
+    assert rows[3].id in remaining, "active intents must be retained regardless of age"
+    assert len({rows[0].id, rows[1].id} & remaining) == 1, (
+        "the batch must leave exactly one old retired intent for later cleanup"
     )
 
 

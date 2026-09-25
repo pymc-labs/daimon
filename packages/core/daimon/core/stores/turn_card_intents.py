@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import cast
 
 from daimon.core._models import TurnCardIntent
 from daimon.core.stores.domain import TurnCardIntentRow
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,6 +71,8 @@ async def record_turn_card_message(
     Returns True when this call records the ID or confirms the same ID was
     already recorded. A retired row or a different recorded ID returns False.
     """
+    if not message_id:
+        raise ValueError("message_id must be nonempty")
     result = await session.execute(
         update(TurnCardIntent)
         .where(
@@ -137,3 +140,23 @@ async def list_recoverable_turn_card_intents(
         )
     ).scalars()
     return [TurnCardIntentRow.model_validate(row) for row in rows]
+
+
+async def delete_retired_turn_card_intents(
+    session: AsyncSession,
+    *,
+    cutoff: datetime,
+    batch_size: int,
+) -> int:
+    """Delete at most batch_size retired intents updated before cutoff."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    victims = (
+        select(TurnCardIntent.id)
+        .where(TurnCardIntent.status == "retired", TurnCardIntent.updated_at < cutoff)
+        .order_by(TurnCardIntent.updated_at, TurnCardIntent.id)
+        .limit(batch_size)
+    )
+    result = await session.execute(delete(TurnCardIntent).where(TurnCardIntent.id.in_(victims)))
+    await session.flush()
+    return cast(CursorResult[object], result).rowcount or 0
