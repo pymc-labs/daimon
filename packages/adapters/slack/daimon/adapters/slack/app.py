@@ -41,7 +41,11 @@ from daimon.adapters.slack.attachments import (
     build_skipped_image_prefix,
 )
 from daimon.adapters.slack.billing_panel.actions import handle_billing_command, handle_topup_select
-from daimon.adapters.slack.boot_sweep import retire_orphaned_turns
+from daimon.adapters.slack.boot_sweep import (
+    recover_slack_card_intents,
+    retire_orphaned_turns,
+    snapshot_slack_card_intents,
+)
 from daimon.adapters.slack.context import build_context_xml, build_delta_xml
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
@@ -292,6 +296,7 @@ class SlackApp:
         # Drain flag — set on SIGTERM; blocks new mention handling.
         self.draining: bool = False
         self._orphan_recovery_task: asyncio.Task[None] | None = None
+        self._card_recovery_task: asyncio.Task[None] | None = None
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Fire-and-forget a background task, tracked so it isn't GC'd."""
@@ -312,6 +317,11 @@ class SlackApp:
         while True:
             try:
                 await retire_orphaned_turns(self.runtime, now=datetime.now(UTC))
+                intents = await snapshot_slack_card_intents(self.runtime.sessionmaker)
+                if intents:
+                    self._card_recovery_task = self._spawn(
+                        recover_slack_card_intents(self.runtime, intents)
+                    )
                 return
             except Exception:
                 log.exception("slack.turn.orphan_recovery_failed", retry_delay_s=delay_s)
@@ -2482,4 +2492,8 @@ class SlackApp:
             remaining_threads=len(self._processing),
             remaining_mentions=len(self._mention_tasks) + self._mention_acks_pending,
         )
+        if self._card_recovery_task is not None and not self._card_recovery_task.done():
+            self._card_recovery_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._card_recovery_task
         await client.close()
