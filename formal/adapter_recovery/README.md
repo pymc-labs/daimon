@@ -136,8 +136,22 @@ the Cancel UUID still be present. The source post paths are
 and [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py).
 The store actions map to
 [`turn_card_intents.py`](../../packages/core/daimon/core/stores/turn_card_intents.py).
-Boot reconciliation remains under implementation; the model checks the
-intended action ordering, not a deployed adapter guarantee.
+Discord snapshots inside `_retire_orphaned_turns_once()` before admitting new
+turns, then runs up to four background workers from
+[`bot.py`](../../packages/adapters/discord/daimon/adapters/discord/bot.py).
+[`turn_card_recovery.py`](../../packages/adapters/discord/daimon/adapters/discord/turn_card_recovery.py)
+scans at most 1,000 messages per lookup, fetches matching and known IDs,
+edits only cards that still carry their own Cancel UUID, and retains a row
+when a fetch or edit fails. A prepared NULL-ID row retires after two complete
+no-match scans at least 60 seconds apart on a monotonic clock. The
+[`Discord regressions`](../../packages/adapters/discord/tests/test_turn_card_recovery.py)
+exercise known-ID duplicates, failed edits and fetches, terminal cards,
+monotonic retry spacing, and bounded worker fanout. Slack's corresponding
+runtime and tests are in
+[`boot_sweep.py`](../../packages/adapters/slack/daimon/adapters/slack/boot_sweep.py)
+and [`test_card_intent_recovery.py`](../../packages/adapters/slack/tests/test_card_intent_recovery.py).
+These code paths match the modeled guards within their stated bounds; the
+model does not prove the adapters correct.
 
 TLC checks 209 distinct states for `PostedHasResponseId`,
 `SnapshotExcludesNewIntent`, and `NoTerminalCardEdited`. Two guard mutations
