@@ -52,13 +52,52 @@ handlers await that task. Discord serializes reconnect recovery with turn
 admission and uses compare-and-clear so a marker changed after the snapshot
 survives. The fixed configuration has no reachable live-turn marker loss.
 
-There remains a separate crash window: a process can post its initial status
-card and die before persisting the marker. Boot recovery cannot discover that
-card from the current database schema. Closing this window safely requires a
-durable pre-post intent or changing post/bind ordering; either changes recovery
-or user-visible latency semantics and is outside this minimal repair. Recovery
-also assumes a single adapter process; overlapping old and new instances can
-misclassify the sibling's marker as an orphan.
+Core now exposes a durable intent store for initial status cards. Safe use
+requires the caller to commit the prepared row before making the platform
+request; `flush()` alone is not durable. The row is idempotently keyed by
+`(tenant_id, turn_token)` and stores platform, thread, and optional channel as
+an immutable address checked on retries. It moves from `prepared` (no message
+ID) to `posted` when the platform response is stored. Boot listing includes
+both active states, so a committed intent survives a process restart.
+
+[`InitialCardIntent.tla`](InitialCardIntent.tla) models the intended persistence
+protocol: a card post requires a committed intent, a posted row has a message
+ID, and boot listing includes active prepared and posted rows.
+`InitialCardIntentPreWiring.cfg` adds the pre-wiring action that permits a post
+with no committed intent and retains its `PostedCardHasCommittedIntent`
+counterexample. These are model properties, not current adapter guarantees:
+neither adapter calls the new store yet. The safe config maps
+`CommitPreparedIntent` to `create_turn_card_intent()` plus the caller's
+transaction commit, `PostInitialCard` to the adapter platform request,
+`PersistMessageId` to `record_turn_card_message()`, and `BootListIntents` to
+`list_recoverable_turn_card_intents()`. It does not model platform-history
+search, attachment of the UUID to platform metadata, ambiguous post responses,
+or the policy for an intent whose message ID remains NULL; these still need
+adapter integration and their own executable tests. In particular, finding a
+prepared intent does not by itself prove whether the remote post happened.
+
+TLC 2.19 explores 11 states in the protocol configuration and checks `TypeOK`,
+`PostedCardHasCommittedIntent`, `PostedStateHasMessageId`, and
+`BootListsEveryActiveIntent`. The pre-wiring configuration explores 4 states
+before violating `PostedCardHasCommittedIntent` in the one-step post-before-
+commit trace. No fairness or delivery-progress claim is made.
+
+`retire_turn_card_intent()` compare-and-retires only the row whose message ID
+still matches the caller's snapshot. Callers may also target a prepared row
+with expected message ID NULL, but deciding when that is safe remains an
+adapter recovery policy. Recovery also assumes a single adapter process;
+overlapping old and new instances can misclassify the sibling's marker as an
+orphan.
+
+The uniqueness key is `(tenant_id, turn_token)`, so retries with a reused token
+cannot create a second row on another thread or platform; address mismatches
+raise `TurnCardIntentConflictError`. This table does not enforce one active
+intent per thread. Separate turn tokens can both be active for the same tenant,
+platform, and thread; boot listing returns both. Retirement is fenced by row
+UUID and expected message ID, so a stale recovery of one turn cannot clear a
+different turn's row. The core PostgreSQL test exercises two active rows and
+that stale-ID case. The TLA model below is bounded to one intent and does not
+assert per-thread cardinality.
 
 ## TLC evidence
 
@@ -213,9 +252,11 @@ second initial card beside it.
 set -eu
 : "${TLA2TOOLS_JAR:?Set TLA2TOOLS_JAR to the path of tla2tools.jar}"
 MODEL_DIR="${TMPDIR:-/tmp}/daimon-initial-card-crash-tlc"
-mkdir -p "$MODEL_DIR/frozen" "$MODEL_DIR/duplicate"
+mkdir -p "$MODEL_DIR/frozen" "$MODEL_DIR/duplicate" "$MODEL_DIR/intent" "$MODEL_DIR/pre-wiring"
 java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -metadir "$MODEL_DIR/frozen" -config formal/adapter_recovery/InitialCardCrash.cfg formal/adapter_recovery/InitialCardCrash.tla || test "$?" -eq 12
 java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -metadir "$MODEL_DIR/duplicate" -config formal/adapter_recovery/InitialCardDuplicate.cfg formal/adapter_recovery/InitialCardCrash.tla || test "$?" -eq 12
+java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -metadir "$MODEL_DIR/intent" -config formal/adapter_recovery/InitialCardIntent.cfg formal/adapter_recovery/InitialCardIntent.tla
+java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 -metadir "$MODEL_DIR/pre-wiring" -config formal/adapter_recovery/InitialCardIntentPreWiring.cfg formal/adapter_recovery/InitialCardIntent.tla || test "$?" -eq 12
 ```
 
 The configs disable deadlock checking because this finite crash abstraction

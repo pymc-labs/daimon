@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a durable core store and migration for initial-card intent rows. Adapter
+  callers are not wired in this change; see the adapter recovery model for the
+  required commit-before-post ordering and unresolved ambiguous-post boundary.
 - GitHub push-triggered skill resyncs now persist before webhook acknowledgement,
   recover through scheduler leases, retry transient binding failures with
   backoff, and retain permanent binding errors for operator action. See
