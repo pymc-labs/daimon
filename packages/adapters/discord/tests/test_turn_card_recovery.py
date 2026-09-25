@@ -19,6 +19,7 @@ from daimon.adapters.discord.turn_card_recovery import (
 
 _TURN_ID = UUID("12345678-1234-5678-1234-567812345678")
 _CREATED_AFTER = datetime(2026, 9, 25, tzinfo=UTC)
+_SEARCH_BEFORE = _CREATED_AFTER + timedelta(minutes=5)
 
 
 def _fetched_message(message_id: int, *turn_ids: UUID) -> discord.Message:
@@ -62,10 +63,13 @@ class _HistoryThread:
         self,
         *,
         after: datetime,
+        before: datetime,
         oldest_first: bool,
-        limit: None,
+        limit: int,
     ) -> AsyncIterator[discord.Message]:
-        self.calls.append({"after": after, "oldest_first": oldest_first, "limit": limit})
+        self.calls.append(
+            {"after": after, "before": before, "oldest_first": oldest_first, "limit": limit}
+        )
 
         async def iterate() -> AsyncIterator[discord.Message]:
             for page in self.pages:
@@ -94,20 +98,29 @@ async def test_history_lookup_finds_turn_card_across_pages() -> None:
         ]
     )
 
-    result = await find_turn_card_message(thread, turn_id=_TURN_ID, created_after=_CREATED_AFTER)  # type: ignore[arg-type]
+    result = await find_turn_card_message(
+        thread, turn_id=_TURN_ID, created_after=_CREATED_AFTER, before=_SEARCH_BEFORE
+    )  # type: ignore[arg-type]
 
     assert result.state is TurnCardSearchState.FOUND, "one matching message should be found"
     assert result.message_ids == (900,), "the matching Discord message ID should be returned"
     assert thread.calls == [
-        {"after": _CREATED_AFTER - timedelta(seconds=1), "oldest_first": True, "limit": None}
-    ], "the lookup should include the intent's millisecond bucket and paginate the interval"
+        {
+            "after": _CREATED_AFTER - timedelta(seconds=1),
+            "before": _SEARCH_BEFORE,
+            "oldest_first": True,
+            "limit": 1000,
+        }
+    ], "the lookup should include the intent's millisecond bucket and bound the search window"
 
 
 @pytest.mark.asyncio
 async def test_history_lookup_reports_multiple_matching_messages() -> None:
     thread = _HistoryThread([[_fetched_message(901, _TURN_ID)], [_fetched_message(900, _TURN_ID)]])
 
-    result = await find_turn_card_message(thread, turn_id=_TURN_ID, created_after=_CREATED_AFTER)  # type: ignore[arg-type]
+    result = await find_turn_card_message(
+        thread, turn_id=_TURN_ID, created_after=_CREATED_AFTER, before=_SEARCH_BEFORE
+    )  # type: ignore[arg-type]
 
     assert result.state is TurnCardSearchState.MULTIPLE, (
         "two cards carrying one durable turn ID must be reported as ambiguous"
@@ -122,7 +135,9 @@ async def test_history_api_failure_after_match_is_indeterminate() -> None:
     forbidden = discord.Forbidden(response, "missing read-history permission")
     thread = _HistoryThread([[_fetched_message(900, _TURN_ID)], forbidden])
 
-    result = await find_turn_card_message(thread, turn_id=_TURN_ID, created_after=_CREATED_AFTER)  # type: ignore[arg-type]
+    result = await find_turn_card_message(
+        thread, turn_id=_TURN_ID, created_after=_CREATED_AFTER, before=_SEARCH_BEFORE
+    )  # type: ignore[arg-type]
 
     assert result.state is TurnCardSearchState.INDETERMINATE, (
         "an unread history page means duplicate count is unknown even after a match"
@@ -134,9 +149,28 @@ async def test_history_api_failure_after_match_is_indeterminate() -> None:
 async def test_exhaustive_history_without_match_is_only_reported_as_not_found() -> None:
     thread = _HistoryThread([[_fetched_message(899)], [_fetched_message(900)]])
 
-    result = await find_turn_card_message(thread, turn_id=_TURN_ID, created_after=_CREATED_AFTER)  # type: ignore[arg-type]
+    result = await find_turn_card_message(
+        thread, turn_id=_TURN_ID, created_after=_CREATED_AFTER, before=_SEARCH_BEFORE
+    )  # type: ignore[arg-type]
 
     assert result.state is TurnCardSearchState.NOT_FOUND, (
         "the lookup reports absence without deciding whether to post another card"
     )
     assert result.message_ids == (), "nonmatching messages should not be returned"
+
+
+@pytest.mark.asyncio
+async def test_history_lookup_reports_indeterminate_when_message_budget_is_exhausted() -> None:
+    thread = _HistoryThread([[_fetched_message(899), _fetched_message(900)]])
+
+    result = await find_turn_card_message(
+        thread,
+        turn_id=_TURN_ID,
+        created_after=_CREATED_AFTER,
+        before=_SEARCH_BEFORE,
+        message_budget=2,
+    )  # type: ignore[arg-type]
+
+    assert result.state is TurnCardSearchState.INDETERMINATE, (
+        "reaching the scan budget cannot prove that no later matching card exists"
+    )

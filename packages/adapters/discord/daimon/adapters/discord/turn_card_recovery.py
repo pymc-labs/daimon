@@ -73,24 +73,41 @@ async def find_turn_card_message(
     *,
     turn_id: UUID,
     created_after: datetime,
+    before: datetime,
+    message_budget: int = 1000,
 ) -> TurnCardSearchResult:
-    """Scan all newer thread messages for this turn ID.
+    """Scan a bounded time and message window for this turn ID.
 
     discord.py turns a datetime bound into a millisecond snowflake. Start one
     second earlier so a card posted in the intent's timestamp bucket is not
     skipped. The turn ID still filters unrelated messages. discord.py paginates
     the ``limit=None`` history iterator. Any HTTP failure
     makes the result indeterminate, even if a matching message was already
-    yielded, because unread pages could contain a duplicate.
+    yielded, because unread pages could contain a duplicate. Reaching the
+    message budget is also indeterminate: unread messages could contain a
+    duplicate.
     """
+    if message_budget <= 0:
+        raise ValueError("message_budget must be positive")
     message_ids: set[int] = set()
+    messages_read = 0
     try:
         async for message in thread.history(
-            after=created_after - timedelta(seconds=1), oldest_first=True, limit=None
+            after=created_after - timedelta(seconds=1),
+            before=before,
+            oldest_first=True,
+            limit=message_budget,
         ):
+            messages_read += 1
             if turn_id in turn_card_ids_from_message(message):
                 message_ids.add(message.id)
     except discord.HTTPException:
+        return TurnCardSearchResult(
+            state=TurnCardSearchState.INDETERMINATE,
+            message_ids=tuple(sorted(message_ids)),
+        )
+
+    if messages_read == message_budget:
         return TurnCardSearchResult(
             state=TurnCardSearchState.INDETERMINATE,
             message_ids=tuple(sorted(message_ids)),
