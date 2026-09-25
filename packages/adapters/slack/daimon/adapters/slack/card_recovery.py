@@ -27,7 +27,7 @@ _PAGE_LIMIT = 15
 _PAGE_BUDGET = 3
 _PAGE_TIMEOUT_SECONDS = 8.0
 _PAGE_PACING_SECONDS = 60.0
-_INTENT_TIME_MARGIN_SECONDS = 300
+_INTENT_TIME_MARGIN_SECONDS = 60
 
 
 class CardLookupStatus(enum.StrEnum):
@@ -43,6 +43,7 @@ class CardLookup:
     message_ts: str | None = None
     message_timestamps: tuple[str, ...] = ()
     reason: str | None = None
+    retry_after_seconds: float | None = None
 
 
 def _as_mapping(value: object) -> dict[str, object] | None:
@@ -82,10 +83,14 @@ async def find_turn_card_by_key(
     cancel_key: str,
     intent_created_at: dt.datetime,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    now: dt.datetime | None = None,
 ) -> CardLookup:
     """Find a card by its Cancel value since the intent creation timestamp.
 
-    ``NOT_FOUND`` is returned only after Slack reports the history complete.
+    ``NOT_FOUND`` is returned only after Slack reports the bounded interval
+    complete. The interval ends five minutes after intent creation; a post
+    accepted later than that window can be missed under the bounded recovery
+    policy.
     API errors, malformed pages, and broken cursor chains return
     ``INDETERMINATE`` so callers cannot mistake an incomplete read for absence.
     At most three pages are read, with an eight-second timeout per page and at
@@ -99,7 +104,15 @@ async def find_turn_card_by_key(
     matches: list[str] = []
     if intent_created_at.tzinfo is None or intent_created_at.utcoffset() is None:
         return CardLookup(CardLookupStatus.INDETERMINATE, reason="invalid_intent_time")
+    scan_latest = now or dt.datetime.now(dt.UTC)
+    if scan_latest.tzinfo is None or scan_latest.utcoffset() is None:
+        return CardLookup(CardLookupStatus.INDETERMINATE, reason="invalid_scan_time")
     oldest = f"{(intent_created_at.timestamp() - _INTENT_TIME_MARGIN_SECONDS):.6f}"
+    scan_latest = min(
+        scan_latest,
+        intent_created_at + dt.timedelta(seconds=300),
+    )
+    latest = f"{scan_latest.timestamp():.6f}"
 
     while True:
         if seen_cursors:
@@ -109,6 +122,7 @@ async def find_turn_card_by_key(
                 "channel": channel,
                 "ts": thread_ts,
                 "oldest": oldest,
+                "latest": latest,
                 "limit": _PAGE_LIMIT,
             }
             if cursor is not None:
@@ -119,7 +133,20 @@ async def find_turn_card_by_key(
                 )
         except TimeoutError:
             return CardLookup(CardLookupStatus.INDETERMINATE, reason="api_timeout")
-        except (SlackApiError, SlackRequestError, aiohttp.ClientError):
+        except SlackApiError as error:
+            retry_after_header = error.response.headers.get("Retry-After")
+            try:
+                retry_after_seconds = (
+                    float(retry_after_header) if retry_after_header is not None else None
+                )
+            except ValueError:
+                retry_after_seconds = None
+            return CardLookup(
+                CardLookupStatus.INDETERMINATE,
+                reason="rate_limited" if error.response.status_code == 429 else "api_error",
+                retry_after_seconds=retry_after_seconds,
+            )
+        except (SlackRequestError, aiohttp.ClientError):
             return CardLookup(CardLookupStatus.INDETERMINATE, reason="api_error")
 
         response_data = cast(Mapping[str, object], response)

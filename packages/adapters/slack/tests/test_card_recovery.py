@@ -14,7 +14,8 @@ from slack_sdk.web.async_client import AsyncWebClient
 _REPLIES = re.compile(r"https://slack\.com/api/conversations\.replies.*")
 _KEY = "turn-intent-uuid"
 _INTENT_CREATED_AT = dt.datetime(2024, 1, 1, tzinfo=dt.UTC)
-_SEARCH_OLDEST = f"{(_INTENT_CREATED_AT.timestamp() - 300):.6f}"
+_SCAN_LATEST = _INTENT_CREATED_AT + dt.timedelta(minutes=5)
+_SEARCH_OLDEST = f"{(_INTENT_CREATED_AT.timestamp() - 60):.6f}"
 
 
 async def _no_sleep(_seconds: float) -> None:
@@ -61,6 +62,7 @@ async def test_finds_card_by_cancel_button_value() -> None:
             cancel_key=_KEY,
             intent_created_at=_INTENT_CREATED_AT,
             sleep=_no_sleep,
+            now=_SCAN_LATEST,
         )
 
     assert result.status is CardLookupStatus.FOUND
@@ -80,6 +82,7 @@ async def test_paginates_past_fifteen_messages_to_find_card() -> None:
             cancel_key=_KEY,
             intent_created_at=_INTENT_CREATED_AT,
             sleep=_no_sleep,
+            now=_SCAN_LATEST + dt.timedelta(hours=1),
         )
         requests = [
             dict(url.query)
@@ -92,6 +95,7 @@ async def test_paginates_past_fifteen_messages_to_find_card() -> None:
     assert len(requests) == 2
     assert requests[0]["limit"] == "15"
     assert requests[0]["oldest"] == _SEARCH_OLDEST
+    assert requests[0]["latest"] == f"{_SCAN_LATEST.timestamp():.6f}"
     assert requests[1]["cursor"] == "page-two"
 
 
@@ -107,6 +111,7 @@ async def test_returns_every_duplicate_key_timestamp_across_pages() -> None:
             cancel_key=_KEY,
             intent_created_at=_INTENT_CREATED_AT,
             sleep=_no_sleep,
+            now=_SCAN_LATEST,
         )
 
     assert result.status is CardLookupStatus.MULTIPLE
@@ -126,6 +131,7 @@ async def test_api_failure_is_indeterminate() -> None:
             cancel_key=_KEY,
             intent_created_at=_INTENT_CREATED_AT,
             sleep=_no_sleep,
+            now=_SCAN_LATEST,
         )
 
     assert result.status is CardLookupStatus.INDETERMINATE
@@ -144,6 +150,7 @@ async def test_more_without_a_cursor_is_indeterminate() -> None:
             cancel_key=_KEY,
             intent_created_at=_INTENT_CREATED_AT,
             sleep=_no_sleep,
+            now=_SCAN_LATEST,
         )
 
     assert result.status is CardLookupStatus.INDETERMINATE
@@ -163,7 +170,31 @@ async def test_scan_budget_exhaustion_is_indeterminate() -> None:
             cancel_key=_KEY,
             intent_created_at=_INTENT_CREATED_AT,
             sleep=_no_sleep,
+            now=_SCAN_LATEST,
         )
 
     assert result.status is CardLookupStatus.INDETERMINATE
     assert result.reason == "scan_limit"
+
+
+async def test_rate_limit_preserves_retry_after_for_scheduler() -> None:
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES,
+            status=429,
+            headers={"Retry-After": "61"},
+            payload={"ok": False, "error": "ratelimited"},
+        )
+
+        result = await find_turn_card_by_key(
+            _client(),
+            channel="C1",
+            thread_ts="100.0",
+            cancel_key=_KEY,
+            intent_created_at=_INTENT_CREATED_AT,
+            now=_SCAN_LATEST,
+        )
+
+    assert result.status is CardLookupStatus.INDETERMINATE
+    assert result.reason == "rate_limited"
+    assert result.retry_after_seconds == 61.0
