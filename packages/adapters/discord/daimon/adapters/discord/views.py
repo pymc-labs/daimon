@@ -26,6 +26,9 @@ this adapter stays non-persistent.
 from __future__ import annotations
 
 import asyncio
+from uuid import UUID
+
+from daimon.adapters.discord.turn_card_recovery import turn_card_custom_id
 
 import discord
 
@@ -70,9 +73,17 @@ class GuardedView(discord.ui.View):
 class CancelView(GuardedView):
     """Turn cancel button (no timeout -- lifecycle manages removal)."""
 
-    def __init__(self, *, allowed_user_id: int, cancel: asyncio.Event) -> None:
+    def __init__(
+        self,
+        *,
+        allowed_user_id: int,
+        cancel: asyncio.Event,
+        turn_id: UUID | None = None,
+    ) -> None:
         super().__init__(allowed_user_id=allowed_user_id, timeout=None)
         self._cancel = cancel
+        if turn_id is not None:
+            self.cancel_button.custom_id = turn_card_custom_id(turn_id)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
     async def cancel_button(
