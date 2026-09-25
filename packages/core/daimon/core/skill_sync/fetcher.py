@@ -12,11 +12,14 @@ the typed shapes the orchestrator pattern-matches.
 from __future__ import annotations
 
 import io
-import math
-from datetime import UTC, datetime, timedelta
 
 import httpx
 import structlog
+from daimon.core.github_rate_limit import (
+    GitHubRateLimitError,
+    is_rate_limit_response,
+    rate_limit_retry_after,
+)
 from daimon.core.github_repo_auth import normalize_owner_repo
 
 _log = structlog.get_logger(__name__)
@@ -28,52 +31,6 @@ class PATMissingError(Exception):
 
 class GitHubAuthError(Exception):
     """401/403 from GitHub — bad credential or insufficient scopes."""
-
-
-class GitHubRateLimitError(Exception):
-    """GitHub rate limit response with the earliest safe retry time."""
-
-    def __init__(self, retry_after: datetime) -> None:
-        super().__init__("GitHub rate limit exceeded")
-        self.retry_after = retry_after
-
-
-def _rate_limit_retry_after(resp: httpx.Response) -> datetime:
-    """Return the latest provider deadline or the one-minute fallback."""
-    now = datetime.now(UTC)
-    deadlines: list[datetime] = []
-    retry_after = resp.headers.get("retry-after")
-    if retry_after is not None:
-        try:
-            seconds = float(retry_after)
-            if math.isfinite(seconds):
-                deadlines.append(now + timedelta(seconds=max(0.0, seconds)))
-        except (ValueError, OverflowError):
-            pass
-    if resp.headers.get("x-ratelimit-remaining") == "0":
-        reset = resp.headers.get("x-ratelimit-reset")
-        if reset is not None:
-            try:
-                reset_at = datetime.fromtimestamp(float(reset), UTC)
-            except (ValueError, OverflowError, OSError):
-                pass
-            else:
-                deadlines.append(reset_at)
-    return max(deadlines) if deadlines else now + timedelta(seconds=60)
-
-
-async def _is_rate_limit_response(resp: httpx.Response) -> bool:
-    """Recognize explicit 429s and GitHub's rate-limit shaped 403s."""
-    if resp.status_code == 429:
-        return True
-    if resp.status_code != 403:
-        return False
-    if resp.headers.get("retry-after") is not None:
-        return True
-    if resp.headers.get("x-ratelimit-remaining") == "0":
-        return True
-    await resp.aread()
-    return b"rate limit" in resp.content.lower()
 
 
 class GitHubUnreachable(Exception):
@@ -124,10 +81,8 @@ class GitHubTarballFetcher:
             headers=headers,
             follow_redirects=True,
         ) as resp:
-            if resp.status_code == 429 or (
-                resp.status_code == 403 and await _is_rate_limit_response(resp)
-            ):
-                retry_after = _rate_limit_retry_after(resp)
+            if await is_rate_limit_response(resp):
+                retry_after = rate_limit_retry_after(resp)
                 _log.warning(
                     "skill_sync.fetcher.rate_limited",
                     url=url,

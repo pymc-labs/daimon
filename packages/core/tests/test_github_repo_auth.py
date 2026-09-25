@@ -193,6 +193,39 @@ async def test_resolve_clone_token_app_installed_mints_installation_token() -> N
 
 
 @pytest.mark.asyncio
+async def test_resolve_clone_token_rate_limited_app_mint_falls_back_to_public_pat() -> None:
+    """A rate-limited best-effort App mint must preserve the clone fallback."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/acme/oss-repo/installation":
+            return httpx.Response(status_code=200, json={"id": 777})
+        if request.url.path == "/app/installations/777/access_tokens":
+            return httpx.Response(
+                status_code=403,
+                headers={"retry-after": "45"},
+                json={"message": "You have exceeded a secondary rate limit."},
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    binding = _make_binding(repo_url="acme/oss-repo", ma_secret_ref="anon:", proof_kind="public")
+
+    token = await resolve_clone_token(
+        client,
+        binding=binding,
+        per_agent_pat=None,
+        fallback_pat="ghp_operator_fallback",
+        app_id="12345",
+        app_private_key=SecretStr(_generate_rsa_keypair()),
+        now=1_000_000,
+    )
+
+    assert token == "ghp_operator_fallback", (
+        "rate-limited App minting must degrade to the verified-public fallback PAT"
+    )
+
+
+@pytest.mark.asyncio
 async def test_resolve_clone_token_app_not_installed_falls_back_to_public() -> None:
     """No PAT, App not installed (404), a verified-public proof + fallback PAT
     -> public mode."""
@@ -1032,6 +1065,41 @@ async def test_resolve_skill_sync_token_lookup_error_degrades_to_fallback() -> N
     )
 
     assert token == "ghp_operator_fallback", "a lookup error must degrade to the fallback PAT"
+
+
+@pytest.mark.asyncio
+async def test_resolve_skill_sync_token_rate_limited_app_mint_falls_back_to_public_pat() -> None:
+    """A rate-limited App mint must remain best-effort for the sync resolver."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app/installations/777/access_tokens":
+            return httpx.Response(
+                status_code=403,
+                headers={"retry-after": "45"},
+                json={"message": "You have exceeded a secondary rate limit."},
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def lookup(owner: str, repo: str) -> int | None:
+        return 777
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    token = await resolve_skill_sync_token(
+        client,
+        repo_url="acme/oss-repo",
+        per_agent_pat=None,
+        proof_kind="public",
+        fallback_pat="ghp_operator_fallback",
+        app_id="12345",
+        app_private_key=SecretStr(_generate_rsa_keypair()),
+        installation_lookup=lookup,
+        now=1_000_000,
+    )
+
+    assert token == "ghp_operator_fallback", (
+        "rate-limited App minting must degrade to the fallback PAT"
+    )
 
 
 @pytest.mark.asyncio

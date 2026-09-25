@@ -11,12 +11,15 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet, MultiFernet
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from daimon.core._models import GitHubPushResync
 from daimon.core.config import GithubSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skill_sync import resync_queue
 from daimon.core.skill_sync.resync import ResyncReport, resync_bound_repo
 from daimon.core.stores import agent_repo_binding as binding_store
+from daimon.core.stores import github_app_installations as install_store
 from daimon.core.stores import github_push_resync as store
 from daimon.core.stores.domain import RepoAccessProof
 from daimon.testing.crypto import make_fernet
@@ -288,6 +291,149 @@ async def test_queue_classifies_rate_limit_and_permission_responses(
                 now=row.available_at - timedelta(microseconds=1),
             )
         assert early is None, "the durable queue must not claim before the provider deadline"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "body", "headers", "expected_state", "minimum_wait"),
+    [
+        (
+            403,
+            {"message": "You have exceeded a secondary rate limit."},
+            {"retry-after": "75"},
+            "pending",
+            74,
+        ),
+        (
+            403,
+            {"message": "API rate limit exceeded"},
+            {
+                "retry-after": "30",
+                "x-ratelimit-remaining": "0",
+                "x-ratelimit-reset": "{reset}",
+            },
+            "pending",
+            119,
+        ),
+        (429, {"message": "rate limited"}, {"retry-after": "65"}, "pending", 64),
+        (403, {"message": "Resource not accessible by integration"}, {}, "done", 0),
+    ],
+)
+async def test_app_mint_rate_limits_retry_the_bound_queue_job(
+    db_session: AsyncSession,
+    db_nullpool_engine: AsyncEngine,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    body: dict[str, str],
+    headers: dict[str, str],
+    expected_state: str,
+    minimum_wait: int,
+) -> None:
+    """App-token mint rate limits defer durable work; permission 403s complete it."""
+    repo_full_name = f"owner/app-mint-{uuid.uuid4().hex}"
+    cli = await make_cli_principal(db_session, os_user="resync-app-mint-rate-limit")
+    tenant_id = cli.tenant_id
+    ma_handler = make_fake_ma_handler()
+    agent_ids: list[uuid.UUID] = []
+    async with build_fake_anthropic(ma_handler) as client:
+        for agent_name in ("app-mint-agent-a", "app-mint-agent-b"):
+            agent = await client.beta.agents.create(
+                name=agent_name,
+                model="claude-sonnet-4-6",
+                metadata={"daimon_tenant": str(tenant_id), "daimon_name": agent_name},
+            )
+            agent_ids.append(derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id))
+    for agent_id in agent_ids:
+        await binding_store.set_binding(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_url=repo_full_name,
+            default_branch="main",
+            ma_secret_ref="stub",
+            proof=RepoAccessProof(kind="pat", at=datetime.now(UTC), account_id=None),
+        )
+    await install_store.upsert(
+        db_session,
+        installation_id=9001,
+        account_login="owner",
+        repo_full_names=[repo_full_name],
+    )
+    await db_session.commit()
+    await _enqueue(db_session_factory, delivery_id="app-mint-rate", repo_full_name=repo_full_name)
+
+    if headers.get("x-ratelimit-reset") == "{reset}":
+        headers["x-ratelimit-reset"] = str(int(time.time()) + 120)
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    app_settings = GithubSettings(app_id="123456", app_private_key=private_key_pem)
+    app_mint_requests = 0
+
+    def github_transport(request: httpx.Request) -> httpx.Response:
+        nonlocal app_mint_requests
+        if request.url.path.endswith("/access_tokens"):
+            app_mint_requests += 1
+            return httpx.Response(status_code, headers=headers, json=body)
+        raise AssertionError(f"unexpected GitHub request: {request.url.path}")
+
+    async def resync_with_app_mint(
+        *,
+        repo_full_name: str,
+        ref: str,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        fernet: MultiFernet,
+        anthropic_client: AsyncAnthropic,
+        github_settings: GithubSettings,
+        http_client: object | None = None,
+    ) -> ResyncReport:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(github_transport)) as client:
+            return await resync_bound_repo(
+                repo_full_name=repo_full_name,
+                ref=ref,
+                sessionmaker=sessionmaker,
+                fernet=make_fernet(),
+                anthropic_client=anthropic_client,
+                github_settings=app_settings,
+                http_client=client,
+            )
+
+    monkeypatch.setattr(resync_queue, "resync_bound_repo", resync_with_app_mint)
+    started_at = datetime.now(UTC)
+    async with build_fake_anthropic(ma_handler) as client:
+        processed = await resync_queue.drain_github_push_resync_queue(
+            engine=db_nullpool_engine,
+            sessionmaker=db_session_factory,
+            fernet=_fernet(),
+            anthropic_client=client,
+            github_settings=app_settings,
+        )
+    async with db_session_factory() as session:
+        row = await store.get_for_repo_ref(
+            session, repo_full_name=repo_full_name, ref="refs/heads/main"
+        )
+    assert processed == 1, "the durable queue should classify the App-mint response"
+    assert row is not None and row.state == expected_state, (
+        "rate-limited App token minting retries while true permission failures complete"
+    )
+    assert app_mint_requests == (1 if expected_state == "pending" else 2), (
+        "the first rate-limited App mint stops the batch; a permanent permission error does not"
+    )
+    if minimum_wait:
+        assert row.available_at >= started_at + timedelta(seconds=minimum_wait), (
+            "queue availability must include the App-mint provider deadline"
+        )
+        async with db_session_factory.begin() as session:
+            early_claim = await store.claim_due(
+                session,
+                lease_owner=uuid.uuid4(),
+                lease_for=timedelta(minutes=2),
+                now=row.available_at - timedelta(microseconds=1),
+            )
+        assert early_claim is None, "the queue cannot claim before the App-mint deadline"
 
 
 async def test_expired_lease_recovers_after_process_dies_mid_binding_batch(

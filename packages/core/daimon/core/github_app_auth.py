@@ -28,6 +28,11 @@ from typing import cast
 
 import httpx
 import jwt
+from daimon.core.github_rate_limit import (
+    GitHubRateLimitError,
+    is_rate_limit_response,
+    rate_limit_retry_after,
+)
 
 _APP_INSTALL_URL_TEMPLATE = "https://github.com/apps/{slug}/installations/new"
 
@@ -126,7 +131,8 @@ async def mint_installation_token(
         The installation access token string from the JSON response.
 
     Raises:
-        httpx.HTTPStatusError: On any non-2xx response from GitHub.
+        GitHubRateLimitError: On an explicit rate-limit response.
+        httpx.HTTPStatusError: On other non-2xx responses from GitHub.
     """
     url = f"https://api.github.com/app/installations/{installation_id}/access_tokens"
     if not repository or "/" in repository:
@@ -145,6 +151,8 @@ async def mint_installation_token(
         },
         json=request_body,
     )
+    if await is_rate_limit_response(resp):
+        raise GitHubRateLimitError(rate_limit_retry_after(resp))
     resp.raise_for_status()
     body: dict[str, object] = resp.json()
     if not isinstance(body, dict) or "token" not in body:  # pyright: ignore[reportUnnecessaryIsInstance]
