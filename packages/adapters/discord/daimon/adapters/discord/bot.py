@@ -2133,6 +2133,12 @@ class DaimonBot(commands.Bot):
                 )
             else:
                 await thread.send(error_text)
+            await retire_terminal_turn_card(
+                self.runtime.sessionmaker,
+                intent_id=turn_card_intent.id,
+                expected_message_id=lifecycle.final_message_id,
+                no_post_confirmed=not lifecycle.first_post_attempted,
+            )
             return
         except SessionPreparationFailed:
             # Nothing was attempted -- bind_session did not run the turn
@@ -2145,6 +2151,12 @@ class DaimonBot(commands.Bot):
                 )
             else:
                 await thread.send(failure_text)
+            await retire_terminal_turn_card(
+                self.runtime.sessionmaker,
+                intent_id=turn_card_intent.id,
+                expected_message_id=lifecycle.final_message_id,
+                no_post_confirmed=not lifecycle.first_post_attempted,
+            )
             return
         except SessionBusyError:
             # Nothing failed and nothing is misconfigured: the previous turn in
@@ -2158,6 +2170,12 @@ class DaimonBot(commands.Bot):
                 await _edit_message(lifecycle.message_ref, content=busy_text, embed=None, view=None)
             else:
                 await thread.send(busy_text)
+            await retire_terminal_turn_card(
+                self.runtime.sessionmaker,
+                intent_id=turn_card_intent.id,
+                expected_message_id=lifecycle.final_message_id,
+                no_post_confirmed=not lifecycle.first_post_attempted,
+            )
             return
 
         log.info(

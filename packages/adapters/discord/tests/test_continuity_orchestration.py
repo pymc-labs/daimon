@@ -36,6 +36,7 @@ from daimon.core.ma_resolver import ResolverCache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger
+from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
     SessionAgentMismatch,
@@ -249,6 +250,13 @@ async def _seed_tenant(db_session: AsyncSession, *, guild_id: str) -> uuid.UUID:
     return tenant.id
 
 
+async def _assert_no_recoverable_cards(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with sessionmaker() as session:
+        assert await list_recoverable_turn_card_intents(session, platform="discord") == []
+
+
 @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
 @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
 @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
@@ -293,6 +301,7 @@ async def test_session_preparation_failed_posts_copy_and_runs_no_turn(
         f"expected the preparation-failed copy, got {posted}"
     )
     assert any(p is not None and "mention me again to retry" in p.lower() for p in posted)
+    await _assert_no_recoverable_cards(db_session_factory)
     _ = tenant_id
 
 
@@ -348,6 +357,7 @@ async def test_responder_changed_without_handoff_posts_offer_and_runs_no_turn(
         for p in posted
     ), f"expected the responder-changed-without-handoff offer, got {posted}"
     assert any(p is not None and "have test-agent take over this task" in p for p in posted)
+    await _assert_no_recoverable_cards(db_session_factory)
 
 
 @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -902,3 +912,4 @@ async def test_session_busy_posts_must_finish_copy_and_runs_no_turn(
     assert render_current_work_must_finish("test-agent", handoff=True) in edited, (
         f"expected the busy copy edited into the status embed, got {edited}"
     )
+    await _assert_no_recoverable_cards(db_session_factory)
