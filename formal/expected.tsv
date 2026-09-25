@@ -29,6 +29,10 @@ adapter_recovery	InitialCardCrash	InitialCardCrash	violates:NoFrozenCardAfterRec
 adapter_recovery	InitialCardCrash	InitialCardDuplicate	violates:NoDuplicateVisibleCards	10	-	unmarked initial card remains beside the next turn's card
 adapter_recovery	InitialCardIntent	InitialCardIntent	clean	11	-	committed intent precedes post; boot listing includes prepared and posted intents
 adapter_recovery	InitialCardIntent	InitialCardIntentPreWiring	violates:PostedCardHasCommittedIntent	4	-	pre-wiring adapter permits platform post before the intent transaction commits
+adapter_recovery	InitialCardReconcile	InitialCardReconcile	clean	209	-	two intents and duplicate old card: boot snapshot excludes new turns; only keyed live cards can be edited
+adapter_recovery	InitialCardReconcile	InitialCardReconcileUnsafeEdit	violates:NoTerminalCardEdited	100	-	mutation: stale found result edits a card after its terminal render removed Cancel
+adapter_recovery	InitialCardReconcile	InitialCardReconcileUnsafeSnapshot	violates:SnapshotExcludesNewIntent	24	-	mutation: refreshing the boot snapshot captures a new process turn
+adapter_recovery	InitialCardReconcile	InitialCardReconcileLossyHistory	violates:NoStrandedLiveCard	88	-	accepted residual: two complete but false-negative history reads retire a prepared intent and strand a visible card
 # ---- recovery commit boundary ----
 recovery_commit	RecoveryCommit	RecoveryCommit	clean	9	-	replacement row, dead mark and lineage link commit atomically; cancellation before commit leaves no row
 recovery_commit	RecoveryCommit	UnsafeInnerCommit	violates:NoOrphanAfterRecovery	9	-	pre-fix: separately committed replacement survives recovery rollback unlinked

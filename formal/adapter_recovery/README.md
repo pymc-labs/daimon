@@ -123,6 +123,43 @@ adapter recovery policy. Recovery also assumes a single adapter process;
 overlapping old and new instances can misclassify the sibling's marker as an
 orphan.
 
+[`InitialCardReconcile.tla`](InitialCardReconcile.tla) bounds the next recovery
+step to two intents (one from the dead process and one admitted after boot) and
+three cards (including a duplicate delivery for the old intent). It models a
+committed prepared row, platform post, response-ID persistence, a one-time boot
+snapshot, a terminal render that removes Cancel, keyed history lookup, keyed
+edit, and conditional retirement. `BootSnapshot` maps to the adapters' boot
+orphan gate plus `list_recoverable_turn_card_intents()`; `EditLiveCard` requires
+the Cancel UUID still be present. The source post paths are
+[`bot.py`](../../packages/adapters/discord/daimon/adapters/discord/bot.py),
+[`wizard_submit.py`](../../packages/adapters/discord/daimon/adapters/discord/wizard_submit.py),
+and [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py).
+The store actions map to
+[`turn_card_intents.py`](../../packages/core/daimon/core/stores/turn_card_intents.py).
+Boot reconciliation remains under implementation; the model checks the
+intended action ordering, not a deployed adapter guarantee.
+
+TLC checks 209 distinct states for `PostedHasResponseId`,
+`SnapshotExcludesNewIntent`, and `NoTerminalCardEdited`. Two guard mutations
+remain registered: editing after the terminal render violates
+`NoTerminalCardEdited` in 100 states, and refreshing the boot snapshot to
+include a new-process intent violates `SnapshotExcludesNewIntent` in 24.
+`InitialCardReconcileLossyHistory.cfg` intentionally allows two complete but
+false-negative reads; its eight-step trace retires a prepared row while the
+card remains live (88 distinct states). This is the accepted duplicate/stranded
+card risk under the availability policy, not a property that the implementation
+can eliminate.
+
+The model makes each database transaction, platform visibility change, and
+card edit one atomic action. It abstracts timestamps, retry delays, API
+failures, cursor completeness, and compare-and-set SQL details; two
+`CompleteNoMatch` actions represent two complete scans whose required spacing
+must be checked in executable tests. It assumes one adapter process during
+recovery and a platform Cancel key that is visible in history until terminal
+render. There is no fairness or delivery-progress claim. An incomplete scan
+must not count as `CompleteNoMatch`; a delayed post outside the bounded search
+window may still produce the retained lossy-history trace.
+
 The uniqueness key is `(tenant_id, turn_token)`, so retries with a reused token
 cannot create a second row on another thread or platform; address mismatches
 raise `TurnCardIntentConflictError`. This table does not enforce one active
