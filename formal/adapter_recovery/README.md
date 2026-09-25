@@ -65,16 +65,35 @@ protocol: a card post requires a committed intent, a posted row has a message
 ID, and boot listing includes active prepared and posted rows.
 `InitialCardIntentPreWiring.cfg` adds the pre-wiring action that permits a post
 with no committed intent and retains its `PostedCardHasCommittedIntent`
-counterexample. These are model properties, not current adapter guarantees:
-neither adapter calls the new store yet. The safe config maps
+counterexample. Slack now follows the modeled commit-before-post order in
+`SlackApp`; Discord runtime wiring remains pending. The safe config maps
 `CommitPreparedIntent` to `create_turn_card_intent()` plus the caller's
 transaction commit, `PostInitialCard` to the adapter platform request,
 `PersistMessageId` to `record_turn_card_message()`, and `BootListIntents` to
 `list_recoverable_turn_card_intents()`. It does not model platform-history
 search, attachment of the UUID to platform metadata, ambiguous post responses,
-or the policy for an intent whose message ID remains NULL; these still need
-adapter integration and their own executable tests. In particular, finding a
+or the policy for an intent whose message ID remains NULL. Slack's executable
+tests cover those actions within the lookup's time and page bounds. Finding a
 prepared intent does not by itself prove whether the remote post happened.
+
+Slack's [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py)
+commits the intent before `chat.postMessage` and commits its response timestamp
+before starting turn work. Its boot admission gate snapshots unresolved intents
+after the existing orphan sweep; [`boot_sweep.py`](../../packages/adapters/slack/daimon/adapters/slack/boot_sweep.py)
+then reconciles that snapshot in a background task. A six-minute process budget
+and three attempts per row bound the task. The lookup reads at most three
+15-message pages, waits at least 60 seconds between Slack reads, and reports
+truncation or API failure as indeterminate. It searches the intent's creation
+window for NULL-ID rows or a known timestamp window for posted rows. A matching
+Cancel UUID authorizes an interruption edit; all matching duplicates must be
+edited before retirement. Failed edits retain the row. A NULL-ID row retires
+only after two complete no-match scans at least 60 seconds apart. The
+[`Slack regressions`](../../packages/adapters/slack/tests/test_card_intent_recovery.py)
+exercise accepted posts with lost responses, duplicates, terminal cards,
+incomplete reads, failed edits, and the nonblocking boot snapshot. A complete
+bounded scan cannot prove that a platform post never happened; the chosen
+availability policy accepts a rare duplicate card after retirement. This
+runtime is calibrated by tests, not proven by `InitialCardIntent.tla`.
 
 The store rejects empty message IDs and the database CHECK enforces the same
 rule. `delete_retired_turn_card_intents()` can remove only retired rows older
@@ -258,8 +277,8 @@ omitted.
 
 ## Initial card posted before its durable marker
 
-`InitialCardCrash.tla` models the gap between a remote initial-card post and the
-database commit that records its message ID. It checks two failure outcomes:
+`InitialCardCrash.tla` models the historical gap between a remote initial-card
+post and the database commit that records its message ID. It checks two failure outcomes:
 the restart sweep leaves the unmarked card frozen, and a later turn posts a
 second initial card beside it.
 
@@ -293,12 +312,11 @@ beside that first card. The adapter tests in
 and [`test_orphaned_turns.py`](../../packages/adapters/slack/tests/test_orphaned_turns.py)
 exercise the same ordering through each real lifecycle and boot-sweep path.
 
-The Slack pre-response Cancel key is process-local. It allows a click to route
-before `chat.postMessage` returns, but it does not give a restarted process a
-durable way to find the card. A durable recovery needs a stable turn token
-written before the post and attached to the platform message, then a boot-time
-thread-history lookup that can recover its message ID. This requires
-platform-specific metadata/search behavior and history permissions.
+Before the durable intent, Slack's pre-response Cancel key was process-local.
+It routed clicks before `chat.postMessage` returned but gave a restarted
+process no way to find the card. Slack now commits a stable UUID before the
+post, puts it in the Cancel button, and searches thread history at boot as
+described above. Discord runtime wiring is separate.
 Alternatively, the initial card can be delayed until session binding finishes;
 that accepts slower feedback during session setup and still leaves the smaller
 post-response/marker-commit crash window. This model makes no fairness or
