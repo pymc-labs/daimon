@@ -65,15 +65,15 @@ protocol: a card post requires a committed intent, a posted row has a message
 ID, and boot listing includes active prepared and posted rows.
 `InitialCardIntentPreWiring.cfg` adds the pre-wiring action that permits a post
 with no committed intent and retains its `PostedCardHasCommittedIntent`
-counterexample. Slack now follows the modeled commit-before-post order in
-`SlackApp`; Discord runtime wiring remains pending. The safe config maps
+counterexample. Both adapters now commit an intent before each initial card
+request. The safe config maps
 `CommitPreparedIntent` to `create_turn_card_intent()` plus the caller's
 transaction commit, `PostInitialCard` to the adapter platform request,
 `PersistMessageId` to `record_turn_card_message()`, and `BootListIntents` to
 `list_recoverable_turn_card_intents()`. It does not model platform-history
 search, attachment of the UUID to platform metadata, ambiguous post responses,
-or the policy for an intent whose message ID remains NULL. Slack's executable
-tests cover those actions within the lookup's time and page bounds. Finding a
+or the policy for an intent whose message ID remains NULL. Both adapters have
+executable tests for those actions within their lookup bounds. Finding a
 prepared intent does not by itself prove whether the remote post happened.
 
 Slack's [`app.py`](../../packages/adapters/slack/daimon/adapters/slack/app.py)
@@ -100,15 +100,17 @@ rule. `delete_retired_turn_card_intents()` can remove only retired rows older
 than a caller-supplied cutoff, in bounded batches. No adapter calls that
 cleanup API yet.
 
-The platform lookup helpers are also preparatory. Discord scans a caller-
-supplied time window and at most 1,000 messages; reaching the message budget
+The platform lookups are used by boot recovery. Discord scans a caller-supplied
+time window and at most 1,000 messages per lookup; reaching the message budget
 or failing mid-scan is indeterminate, even if an earlier page matched.
 Slack scans from 60 seconds before intent creation to at most five minutes
-after it, up to three 15-message pages with at least 60 seconds between page
-requests. A remaining cursor, timeout, or API error is indeterminate; a 429
-preserves `Retry-After` for the later reconciler. Complete absence means
-absence within that bounded window, not proof that Slack never accepted a
-delayed post. Neither lookup is wired to boot recovery in this change.
+after it for NULL-ID rows, or around the known timestamp for posted rows, up
+to three 15-message pages with at least 60 seconds between page requests. A
+remaining cursor, timeout, or API error is indeterminate; a 429
+preserves `Retry-After` for the reconciler. Complete absence means absence
+within that bounded window, not proof that a platform never accepted a delayed
+post. A duplicate outside the scanned window can also remain live after a
+different matching card is edited and the row retires.
 
 TLC 2.19 explores 11 states in the protocol configuration and checks `TypeOK`,
 `PostedCardHasCommittedIntent`, `PostedStateHasMessageId`, and
@@ -365,12 +367,9 @@ exercise the same ordering through each real lifecycle and boot-sweep path.
 
 Before the durable intent, Slack's pre-response Cancel key was process-local.
 It routed clicks before `chat.postMessage` returned but gave a restarted
-process no way to find the card. Slack now commits a stable UUID before the
-post, puts it in the Cancel button, and searches thread history at boot as
-described above. Discord runtime wiring is separate.
-Alternatively, the initial card can be delayed until session binding finishes;
-that accepts slower feedback during session setup and still leaves the smaller
-post-response/marker-commit crash window. This model makes no fairness or
+process no way to find the card. Both adapters now commit a stable UUID before
+the post, put it in the Cancel control, and search thread history at boot as
+described above. This historical model makes no fairness or
 progress claim. It bounds the trace to one mapping, one initial card, one
 process death, one restart sweep, and one subsequent card post; it abstracts
 remote edits and database commits as atomic model actions.

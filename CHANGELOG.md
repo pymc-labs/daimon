@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Added durable initial-card intent rows and bounded Discord and Slack history
-  lookup helpers. Slack now commits an intent before posting, records the
-  returned message ID, and reconciles unresolved cards after a restart.
-  Discord runtime recovery follows separately.
+  lookup. Both adapters now commit an intent before posting, record the
+  returned message ID, and reconcile unresolved cards after a restart. A
+  bounded TLA+ model retains the stale-edit, new-intent snapshot, and lossy
+  history counterexamples.
 - GitHub push-triggered skill resyncs now persist before webhook acknowledgement,
   recover through scheduler leases, retry transient binding failures with
   backoff, and retain permanent binding errors for operator action. See
