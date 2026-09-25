@@ -49,6 +49,7 @@ from daimon.core.github_app_auth import build_app_jwt, mint_installation_token
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import select_clone_auth
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.skill_sync.fetcher import GitHubRateLimitError
 from daimon.core.skill_sync.orchestrator import sync_agent_skills
 from daimon.core.specs import SkillRepo
 from daimon.core.stores import agent_repo_binding as binding_store
@@ -73,17 +74,22 @@ class ResyncReport:
 
     failed_bindings: int
     retryable_bindings: int = 0
+    retry_after: datetime | None = None
 
 
 @dataclass(frozen=True)
 class _BindingOutcome:
     failed: bool
     retryable: bool
+    retry_after: datetime | None = None
 
 
 def _is_retryable_error(err: Exception) -> bool:
     """Classify transient GitHub, MA, and transport failures for queue retry."""
-    if isinstance(err, (httpx.TransportError, anthropic.APIConnectionError, TimeoutError)):
+    if isinstance(
+        err,
+        (GitHubRateLimitError, httpx.TransportError, anthropic.APIConnectionError, TimeoutError),
+    ):
         return True
     if isinstance(err, httpx.HTTPStatusError):
         status_code = err.response.status_code
@@ -343,11 +349,14 @@ async def resync_bound_repo(
     async with sessionmaker() as session:
         bindings = await binding_store.get_bindings_for_repo(session, repo_url=repo_full_name)
 
-    async def _resync_all(client: httpx.AsyncClient) -> tuple[int, int]:
+    async def _resync_all(
+        client: httpx.AsyncClient,
+    ) -> tuple[int, int, datetime | None]:
         # Shared per-binding loop body (D-01): http_client is the only input
         # that varies between the caller-owned and self-owned client paths.
         failed_bindings = 0
         retryable_bindings = 0
+        retry_after: datetime | None = None
         for binding in bindings:
             if not should_resync(ref, binding.default_branch):
                 _log.info(
@@ -372,18 +381,26 @@ async def resync_bound_repo(
                 failed_bindings += 1
             if outcome.retryable:
                 retryable_bindings += 1
-        return failed_bindings, retryable_bindings
+            if outcome.retry_after is not None:
+                retry_after = (
+                    max(retry_after, outcome.retry_after) if retry_after else outcome.retry_after
+                )
+                # A rate limit may be shared across credentials. Stop this batch
+                # and let the durable queue retry every remaining binding later.
+                break
+        return failed_bindings, retryable_bindings, retry_after
 
     if http_client is not None:
         # Caller-owned client (e.g. test injection) — use directly, don't close.
-        failed_bindings, retryable_bindings = await _resync_all(http_client)
+        failed_bindings, retryable_bindings, retry_after = await _resync_all(http_client)
     else:
         # Self-owned client — create and close around the full batch.
         async with httpx.AsyncClient(timeout=120.0) as owned_client:
-            failed_bindings, retryable_bindings = await _resync_all(owned_client)
+            failed_bindings, retryable_bindings, retry_after = await _resync_all(owned_client)
     return ResyncReport(
         failed_bindings=failed_bindings,
         retryable_bindings=retryable_bindings,
+        retry_after=retry_after,
     )
 
 
@@ -402,6 +419,7 @@ async def _resync_one_binding(
     last_sync_error: str | None = None
     failed = False
     retryable = False
+    retry_after: datetime | None = None
 
     try:
         async with sessionmaker() as session:
@@ -490,6 +508,8 @@ async def _resync_one_binding(
                     )
                 break
             except Exception as err:
+                if isinstance(err, GitHubRateLimitError):
+                    raise
                 if not _is_retryable_error(err) or attempt >= _RESYNC_MAX_ATTEMPTS:
                     raise
                 backoff = _RESYNC_BACKOFF_BASE * (2 ** (attempt - 1))
@@ -510,6 +530,8 @@ async def _resync_one_binding(
     except Exception as err:  # named boundary; per-binding failures captured
         failed = True
         retryable = _is_retryable_error(err)
+        if isinstance(err, GitHubRateLimitError):
+            retry_after = err.retry_after
         last_sync_error = str(err)
         _log.warning(
             "github.resync.failed",
@@ -538,4 +560,4 @@ async def _resync_one_binding(
                 agent_id=str(binding.agent_id),
                 error=str(persist_err),
             )
-    return _BindingOutcome(failed=failed, retryable=retryable)
+    return _BindingOutcome(failed=failed, retryable=retryable, retry_after=retry_after)

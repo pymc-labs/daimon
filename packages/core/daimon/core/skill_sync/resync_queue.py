@@ -12,6 +12,7 @@ from cryptography.fernet import MultiFernet
 from daimon.core.config import GithubSettings
 from daimon.core.skill_sync.resync import resync_bound_repo
 from daimon.core.stores import github_push_resync as resync_store
+from daimon.core.stores.domain import GitHubPushResyncRow
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -101,6 +102,8 @@ async def drain_github_push_resync_queue(
             async with sessionmaker.begin() as session:
                 if report.retryable_bindings:
                     delay = _retry_delay(job.attempts)
+                    if report.retry_after is not None:
+                        delay = max(delay, report.retry_after - current_time)
                     released = await resync_store.retry(
                         session,
                         job=job,
@@ -213,7 +216,7 @@ async def _renew_lease(
 async def _retry_job(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
-    job: resync_store.GitHubPushResyncRow,
+    job: GitHubPushResyncRow,
     lease_owner: uuid.UUID,
     error: str,
     delay: timedelta,

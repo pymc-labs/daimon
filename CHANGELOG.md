@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   credential selection or repository fetch. Duplicates observed later refuse
   before MA or ledger writes, including orphan deletion; errors remain visible
   as permanent binding failures.
+- Rate-limited GitHub tarball downloads now remain retryable, and durable push
+  resync waits for GitHub's `retry-after` or reset deadline before claiming the
+  job again. Other 403 permission failures remain permanent.
 - Discord setup Details now drops superseded reads and binds setup and
   coding-tool actions to the agent shown on the card. A bounded TLA+ model
   retains the pre-fix wrong-target traces.

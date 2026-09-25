@@ -75,6 +75,7 @@ from daimon.core.skill_sync.bundler import (
 )
 from daimon.core.skill_sync.fetcher import (
     GitHubAuthError,
+    GitHubRateLimitError,
     GitHubTarballFetcher,
     GitHubUnreachable,
     TarballTooLarge,
@@ -189,6 +190,8 @@ class SyncReport:
 def _is_retryable_error(err: Exception) -> bool:
     """Return whether a sync error may clear on a later provider attempt."""
     if isinstance(err, (httpx.TransportError, anthropic.APIConnectionError, TimeoutError)):
+        return True
+    if isinstance(err, GitHubRateLimitError):
         return True
     if isinstance(err, httpx.HTTPStatusError):
         status_code = err.response.status_code
@@ -656,6 +659,8 @@ async def sync_agent_skills(
             except (GitHubAuthError, GitHubUnreachable, TarballTooLarge) as err:
                 report.skipped_repos.append((repo.url, type(err).__name__))
                 continue
+            except GitHubRateLimitError:
+                raise
             except Exception as err:  # boundary
                 _log.warning("skill_sync.repo_fetch_failed", url=repo.url, error=str(err))
                 report.skipped_repos.append((repo.url, str(err)))
