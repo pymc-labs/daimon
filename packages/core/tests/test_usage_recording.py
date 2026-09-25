@@ -29,7 +29,8 @@ from daimon.core.stores import tenant_ledger, usage_events
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_model_usage
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 async def test_record_turn_usage_writes_row_from_real_sdk_event(
@@ -251,6 +252,92 @@ async def test_record_turn_usage_debit_idempotent_replay_no_double_debit(
     # If double-debited, balance would be < 49.98; single debit leaves it very close to 50.00
     assert balance_after > Decimal("49.90"), (
         "only one debit must occur even when the same event is replayed"
+    )
+
+
+async def test_record_turn_usage_ledger_failure_rolls_back_pair_and_allows_retry(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    db_nullpool_engine: AsyncEngine,
+) -> None:
+    """A ledger constraint failure must roll back the preceding usage insert."""
+    independent_sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    async with independent_sessions() as session:
+        tenant = await make_tenant(session)
+        await session.commit()
+
+    event = BetaManagedAgentsSpanModelRequestEndEvent(
+        id="evt_rollback_pair",
+        is_error=False,
+        model_request_start_id="start_rollback_pair",
+        model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
+        processed_at=datetime.now(UTC),
+        type="span.model_request_end",
+    )
+    recorder_args = {
+        "sessionmaker": db_session_factory,
+        "tenant_id": tenant.id,
+        "platform_user_id": "u_rollback_pair",
+        "managed_session_id": "s_rollback_pair",
+        "model_id": "claude-opus-4-7",
+        "event": event,
+        "pricing": MODEL_PRICING.get("claude-opus-4-7"),
+    }
+
+    # The usage_events insert and flush happen first. This markup makes the
+    # resulting ledger delta exceed Numeric(12, 6), so PostgreSQL rejects the
+    # second write inside the real recorder transaction.
+    with pytest.raises(DBAPIError, match="numeric field overflow"):
+        await usage_recording.record_turn_usage(
+            **recorder_args,
+            markup=Decimal("100000"),
+        )
+
+    async with independent_sessions() as session:
+        usage_rows = (
+            (
+                await session.execute(
+                    select(UsageEvent).where(
+                        UsageEvent.managed_session_id == "s_rollback_pair",
+                        UsageEvent.event_id == "evt_rollback_pair",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        ledger_rows = await tenant_ledger.list_for_tenant(session, tenant_id=tenant.id)
+    assert usage_rows == [], "failed ledger insert must roll back its preceding usage row"
+    assert not any(
+        row.idempotency_key == "turn:s_rollback_pair:evt_rollback_pair" for row in ledger_rows
+    ), "failed ledger insert must leave no debit row"
+
+    await usage_recording.record_turn_usage(**recorder_args, markup=Decimal("1.0"))
+
+    async with independent_sessions() as session:
+        usage_rows = (
+            (
+                await session.execute(
+                    select(UsageEvent).where(
+                        UsageEvent.managed_session_id == "s_rollback_pair",
+                        UsageEvent.event_id == "evt_rollback_pair",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        ledger_rows = await tenant_ledger.list_for_tenant(session, tenant_id=tenant.id)
+    matching_debits = [
+        row
+        for row in ledger_rows
+        if row.idempotency_key == "turn:s_rollback_pair:evt_rollback_pair"
+    ]
+    assert len(usage_rows) == 1, "retry must persist exactly one usage row"
+    assert len(matching_debits) == 1, "retry must persist exactly one matching debit"
+    assert usage_rows[0].tenant_id == tenant.id, "usage row must retain the retried tenant"
+    assert matching_debits[0].tenant_id == tenant.id, "debit must retain the retried tenant"
+    assert matching_debits[0].delta_usd == Decimal("-15.000000"), (
+        "retry debit must match the event's priced usage"
     )
 
 
