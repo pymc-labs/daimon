@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
@@ -31,6 +31,10 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
 from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.adapters.discord.thread_send import safe_thread_send
+from daimon.adapters.discord.turn_card_recovery import (
+    post_initial_turn_card,
+    retire_terminal_turn_card,
+)
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.vision import (
     build_image_url_prefix,
@@ -1544,18 +1548,31 @@ class DaimonBot(commands.Bot):
             await msg.delete()
 
         cancel = asyncio.Event()
-        lifecycle = DiscordTurnLifecycle(
-            send=_send_embed,
-            edit=_edit_message,
-            delete=_delete_message,
-            agent_name=agent.name,
-            model_id=agent.model.id,
-            cancel_view=CancelView(
-                allowed_user_id=int(row.requester_external_user_id), cancel=cancel
-            ),
-            unprompted=False,
+
+        def _make_lifecycle(
+            turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
+        ) -> DiscordTurnLifecycle:
+            return DiscordTurnLifecycle(
+                send=_send_embed,
+                edit=_edit_message,
+                delete=_delete_message,
+                agent_name=agent.name,
+                model_id=agent.model.id,
+                cancel_view=CancelView(
+                    allowed_user_id=int(row.requester_external_user_id),
+                    cancel=cancel,
+                    turn_id=turn_id,
+                ),
+                unprompted=False,
+                on_first_post=on_first_post,
+            )
+
+        turn_card_intent, lifecycle = await post_initial_turn_card(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            thread_id=row.thread_id,
+            make_lifecycle=_make_lifecycle,
         )
-        await lifecycle.post_initial()
 
         session_account_id = _resolve_session_account_id(
             discord_settings, admission, tenant_id=tenant_id, thread_id=row.thread_id
@@ -1649,7 +1666,9 @@ class DaimonBot(commands.Bot):
                 agent_name=agent.name,
                 model_id=agent.model.id,
                 cancel_view=CancelView(
-                    allowed_user_id=int(row.requester_external_user_id), cancel=cancel_event
+                    allowed_user_id=int(row.requester_external_user_id),
+                    cancel=cancel_event,
+                    turn_id=turn_card_intent.id,
                 ),
                 adopt_message_ref=lifecycle.message_ref,
                 unprompted=False,
@@ -1707,6 +1726,12 @@ class DaimonBot(commands.Bot):
                 async with self.runtime.sessionmaker() as session:
                     await clear_active_turn(session, id=done_id)
                     await session.commit()
+            if outcome is not None:
+                await retire_terminal_turn_card(
+                    self.runtime.sessionmaker,
+                    intent_id=turn_card_intent.id,
+                    expected_message_id=lifecycle_holder[0].final_message_id,
+                )
 
         assert outcome is not None
         final_lifecycle = lifecycle_holder[0]
@@ -1951,17 +1976,29 @@ class DaimonBot(commands.Bot):
             await msg.delete()
 
         cancel = asyncio.Event()
-        cancel_view = CancelView(allowed_user_id=message.author.id, cancel=cancel)
-        lifecycle = DiscordTurnLifecycle(
-            send=_send_embed,
-            edit=_edit_message,
-            delete=_delete_message,
-            agent_name=agent.name,
-            model_id=agent.model.id,
-            cancel_view=cancel_view,
-            unprompted=unprompted,
+
+        def _make_lifecycle(
+            turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
+        ) -> DiscordTurnLifecycle:
+            return DiscordTurnLifecycle(
+                send=_send_embed,
+                edit=_edit_message,
+                delete=_delete_message,
+                agent_name=agent.name,
+                model_id=agent.model.id,
+                cancel_view=CancelView(
+                    allowed_user_id=message.author.id, cancel=cancel, turn_id=turn_id
+                ),
+                unprompted=unprompted,
+                on_first_post=on_first_post,
+            )
+
+        turn_card_intent, lifecycle = await post_initial_turn_card(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            thread_id=str(thread.id),
+            make_lifecycle=_make_lifecycle,
         )
-        await lifecycle.post_initial()
 
         # Compute the account_id used to key thread-session lookup and create.
         # When per_caller_thread_sessions is ON (default): use the caller's real
@@ -2291,7 +2328,11 @@ class DaimonBot(commands.Bot):
                 delete=_delete_message,
                 agent_name=agent.name,
                 model_id=agent.model.id,
-                cancel_view=CancelView(allowed_user_id=message.author.id, cancel=cancel_event),
+                cancel_view=CancelView(
+                    allowed_user_id=message.author.id,
+                    cancel=cancel_event,
+                    turn_id=turn_card_intent.id,
+                ),
                 # Take over the failed attempt's message so its upstream-error
                 # embed is edited into this turn's answer rather than left
                 # standing next to a second, successful message.
@@ -2370,6 +2411,12 @@ class DaimonBot(commands.Bot):
                 async with self.runtime.sessionmaker() as _ct_session:
                     await clear_active_turn(_ct_session, id=_done_id)
                     await _ct_session.commit()
+            if outcome is not None:
+                await retire_terminal_turn_card(
+                    self.runtime.sessionmaker,
+                    intent_id=turn_card_intent.id,
+                    expected_message_id=lifecycle_holder[0].final_message_id,
+                )
 
         # Reached only on the non-exceptional path -- any raise inside the try
         # propagates past this point once the finally block above has run.

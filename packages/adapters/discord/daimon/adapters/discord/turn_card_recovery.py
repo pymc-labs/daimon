@@ -1,4 +1,4 @@
-"""Find Discord messages carrying the durable ID of an initial turn card.
+"""Post durable initial turn cards and find them in Discord history.
 
 The lookup reports ambiguity and incomplete history reads explicitly. It does
 not decide whether a missing card should be posted or whether a found card
@@ -7,13 +7,98 @@ should be edited.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
-from uuid import UUID
+from uuid import UUID, uuid4
+
+import structlog
+from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.core.stores.domain import TurnCardIntentRow
+from daimon.core.stores.turn_card_intents import (
+    create_turn_card_intent,
+    record_turn_card_message,
+    retire_turn_card_intent,
+)
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 from discord.components import ActionRow, Button
+
+log = structlog.get_logger()
+
+
+async def post_initial_turn_card(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: UUID,
+    thread_id: str,
+    make_lifecycle: Callable[
+        [UUID, Callable[[discord.Message], Awaitable[None]]], DiscordTurnLifecycle
+    ],
+) -> tuple[TurnCardIntentRow, DiscordTurnLifecycle]:
+    """Commit a durable intent before posting, then persist Discord's response ID.
+
+    If Discord accepts the post but the response is lost, or the message-ID
+    commit fails, the prepared row remains for later history lookup. The caller
+    must not start an explicitly prompted MA turn unless this function returns
+    successfully. Unprompted turns may defer their first visible post until the
+    render loop; that post still commits its response ID before the render hook
+    returns.
+    """
+    async with sessionmaker() as session:
+        intent = await create_turn_card_intent(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id=thread_id,
+            turn_token=uuid4(),
+        )
+        await session.commit()
+
+    async def record_posted_message(message: discord.Message) -> None:
+        async with sessionmaker() as session:
+            recorded = await record_turn_card_message(
+                session, id=intent.id, message_id=str(message.id)
+            )
+            if not recorded:
+                raise RuntimeError(
+                    "Discord initial turn card intent no longer accepts its message ID"
+                )
+            await session.commit()
+
+    lifecycle = make_lifecycle(intent.id, record_posted_message)
+    await lifecycle.post_initial()
+    return intent, lifecycle
+
+
+async def retire_terminal_turn_card(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    intent_id: UUID,
+    expected_message_id: str | None,
+) -> bool:
+    """Retire a completed card only when its persisted Discord ID still matches."""
+    if expected_message_id is None:
+        return False
+    try:
+        async with sessionmaker() as session:
+            retired = await retire_turn_card_intent(
+                session, id=intent_id, expected_message_id=expected_message_id
+            )
+            await session.commit()
+        return retired
+    except SQLAlchemyError:
+        log.warning(
+            "turn.card_intent_retire_failed",
+            intent_id=str(intent_id),
+            message_id=expected_message_id,
+            exc_info=True,
+        )
+        return False
+
 
 _TURN_CARD_CUSTOM_ID_PREFIX = "daimon:cancel:"
 
