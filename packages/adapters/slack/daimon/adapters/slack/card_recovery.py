@@ -12,9 +12,11 @@ import asyncio
 import dataclasses
 import datetime as dt
 import enum
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
+import aiohttp
+from slack_sdk.errors import SlackApiError, SlackRequestError
 from slack_sdk.web.async_client import AsyncWebClient
 
 # This remains compatible with new commercially distributed, unlisted Slack
@@ -22,8 +24,9 @@ from slack_sdk.web.async_client import AsyncWebClient
 # docs exempt Marketplace apps, internal customer-built apps, and existing
 # unlisted installations from that reduced limit.
 _PAGE_LIMIT = 15
-_PAGE_BUDGET = 2
+_PAGE_BUDGET = 3
 _PAGE_TIMEOUT_SECONDS = 8.0
+_PAGE_PACING_SECONDS = 60.0
 _INTENT_TIME_MARGIN_SECONDS = 300
 
 
@@ -38,6 +41,7 @@ class CardLookupStatus(enum.StrEnum):
 class CardLookup:
     status: CardLookupStatus
     message_ts: str | None = None
+    message_timestamps: tuple[str, ...] = ()
     reason: str | None = None
 
 
@@ -77,16 +81,18 @@ async def find_turn_card_by_key(
     thread_ts: str,
     cancel_key: str,
     intent_created_at: dt.datetime,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> CardLookup:
     """Find a card by its Cancel value since the intent creation timestamp.
 
     ``NOT_FOUND`` is returned only after Slack reports the history complete.
     API errors, malformed pages, and broken cursor chains return
     ``INDETERMINATE`` so callers cannot mistake an incomplete read for absence.
-    At most two pages are read, with an eight-second timeout per page. If Slack
-    reports more history beyond that budget, the result is ``INDETERMINATE``.
-    More than one match is reported as ``MULTIPLE``; the returned timestamp is
-    intentionally unset because choosing either card would be ambiguous.
+    At most three pages are read, with an eight-second timeout per page and at
+    least sixty seconds between requests. This accommodates Slack's reduced
+    one-request-per-minute limit for some distributed apps. If Slack reports
+    more history beyond that budget, the result is ``INDETERMINATE``. Multiple
+    matches return every timestamp so callers can reconcile duplicate cards.
     """
     cursor: str | None = None
     seen_cursors: set[str] = set()
@@ -96,6 +102,8 @@ async def find_turn_card_by_key(
     oldest = f"{(intent_created_at.timestamp() - _INTENT_TIME_MARGIN_SECONDS):.6f}"
 
     while True:
+        if seen_cursors:
+            await sleep(_PAGE_PACING_SECONDS)
         try:
             kwargs: dict[str, Any] = {
                 "channel": channel,
@@ -111,7 +119,7 @@ async def find_turn_card_by_key(
                 )
         except TimeoutError:
             return CardLookup(CardLookupStatus.INDETERMINATE, reason="api_timeout")
-        except Exception:
+        except (SlackApiError, SlackRequestError, aiohttp.ClientError):
             return CardLookup(CardLookupStatus.INDETERMINATE, reason="api_error")
 
         response_data = cast(Mapping[str, object], response)
@@ -127,8 +135,6 @@ async def find_turn_card_by_key(
                 if not isinstance(message_ts, str) or not message_ts:
                     return CardLookup(CardLookupStatus.INDETERMINATE, reason="missing_timestamp")
                 matches.append(message_ts)
-                if len(matches) > 1:
-                    return CardLookup(CardLookupStatus.MULTIPLE, reason="duplicate_key")
 
         metadata_value = response_data.get("response_metadata")
         metadata = _as_mapping(metadata_value) if metadata_value is not None else {}
@@ -144,12 +150,16 @@ async def find_turn_card_by_key(
             if response_data.get("has_more"):
                 return CardLookup(CardLookupStatus.INDETERMINATE, reason="missing_cursor")
             return CardLookup(
-                CardLookupStatus.FOUND if matches else CardLookupStatus.NOT_FOUND,
+                CardLookupStatus.MULTIPLE
+                if len(matches) > 1
+                else (CardLookupStatus.FOUND if matches else CardLookupStatus.NOT_FOUND),
                 message_ts=matches[0] if matches else None,
+                message_timestamps=tuple(matches),
+                reason="duplicate_key" if len(matches) > 1 else None,
             )
         if next_cursor in seen_cursors:
             return CardLookup(CardLookupStatus.INDETERMINATE, reason="pagination_stalled")
-        seen_cursors.add(next_cursor)
-        if len(seen_cursors) >= _PAGE_BUDGET:
+        if len(seen_cursors) + 1 >= _PAGE_BUDGET:
             return CardLookup(CardLookupStatus.INDETERMINATE, reason="scan_limit")
+        seen_cursors.add(next_cursor)
         cursor = next_cursor

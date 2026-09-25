@@ -17,6 +17,10 @@ _INTENT_CREATED_AT = dt.datetime(2024, 1, 1, tzinfo=dt.UTC)
 _SEARCH_OLDEST = f"{(_INTENT_CREATED_AT.timestamp() - 300):.6f}"
 
 
+async def _no_sleep(_seconds: float) -> None:
+    return None
+
+
 def _message(ts: str, *, key: str | None = None) -> dict[str, object]:
     blocks: list[dict[str, object]] = []
     if key is not None:
@@ -56,6 +60,7 @@ async def test_finds_card_by_cancel_button_value() -> None:
             thread_ts="100.0",
             cancel_key=_KEY,
             intent_created_at=_INTENT_CREATED_AT,
+            sleep=_no_sleep,
         )
 
     assert result.status is CardLookupStatus.FOUND
@@ -74,6 +79,7 @@ async def test_paginates_past_fifteen_messages_to_find_card() -> None:
             thread_ts="100.0",
             cancel_key=_KEY,
             intent_created_at=_INTENT_CREATED_AT,
+            sleep=_no_sleep,
         )
         requests = [
             dict(url.query)
@@ -89,7 +95,7 @@ async def test_paginates_past_fifteen_messages_to_find_card() -> None:
     assert requests[1]["cursor"] == "page-two"
 
 
-async def test_reports_duplicate_key_across_pages_as_ambiguous() -> None:
+async def test_returns_every_duplicate_key_timestamp_across_pages() -> None:
     with AioResponsesMock() as mock:
         mock.get(_REPLIES, payload=_page([_message("100.2", key=_KEY)], cursor="next"))
         mock.get(_REPLIES, payload=_page([_message("100.3", key=_KEY)]))
@@ -100,10 +106,12 @@ async def test_reports_duplicate_key_across_pages_as_ambiguous() -> None:
             thread_ts="100.0",
             cancel_key=_KEY,
             intent_created_at=_INTENT_CREATED_AT,
+            sleep=_no_sleep,
         )
 
     assert result.status is CardLookupStatus.MULTIPLE
-    assert result.message_ts is None
+    assert result.message_ts == "100.2"
+    assert result.message_timestamps == ("100.2", "100.3")
     assert result.reason == "duplicate_key"
 
 
@@ -117,6 +125,7 @@ async def test_api_failure_is_indeterminate() -> None:
             thread_ts="100.0",
             cancel_key=_KEY,
             intent_created_at=_INTENT_CREATED_AT,
+            sleep=_no_sleep,
         )
 
     assert result.status is CardLookupStatus.INDETERMINATE
@@ -134,6 +143,7 @@ async def test_more_without_a_cursor_is_indeterminate() -> None:
             thread_ts="100.0",
             cancel_key=_KEY,
             intent_created_at=_INTENT_CREATED_AT,
+            sleep=_no_sleep,
         )
 
     assert result.status is CardLookupStatus.INDETERMINATE
@@ -144,6 +154,7 @@ async def test_scan_budget_exhaustion_is_indeterminate() -> None:
     with AioResponsesMock() as mock:
         mock.get(_REPLIES, payload=_page([], cursor="page-two"))
         mock.get(_REPLIES, payload=_page([], cursor="page-three"))
+        mock.get(_REPLIES, payload=_page([], cursor="page-four"))
 
         result = await find_turn_card_by_key(
             _client(),
@@ -151,6 +162,7 @@ async def test_scan_budget_exhaustion_is_indeterminate() -> None:
             thread_ts="100.0",
             cancel_key=_KEY,
             intent_created_at=_INTENT_CREATED_AT,
+            sleep=_no_sleep,
         )
 
     assert result.status is CardLookupStatus.INDETERMINATE
