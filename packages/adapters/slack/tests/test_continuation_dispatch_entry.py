@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from aioresponses import CallbackResult
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
 from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
@@ -31,6 +32,7 @@ from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
+from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TurnState
@@ -369,6 +371,191 @@ async def test_continuation_turn_omits_handoff_notice_for_private_input(
     assert '"handoff"' in handoff_controls, (
         f"a task handoff must still carry the one-time notice, got {handoff_controls}"
     )
+
+
+async def _run_continuation_with_card_intent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    *,
+    workspace_id: str,
+    run_action: Any,
+) -> tuple[SlackApp, uuid.UUID | None, BaseException | None]:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=workspace_id)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("100.00"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    requester = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
+    )
+    await db_session.commit()
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
+    row = _make_continuation_row(
+        tenant_id=tenant.id, account_id=requester.account_id, reason="task_handoff"
+    )
+
+    error: BaseException | None = None
+    with (
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as resolve_agent,
+        patch(
+            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+        ) as resolve_env,
+        patch("daimon.adapters.slack.app.bind_session", new_callable=AsyncMock) as bind,
+        patch("daimon.adapters.slack.app.run_prepared_turn", new_callable=AsyncMock) as run_turn,
+    ):
+        resolve_agent.return_value = _AGENT_ID
+        resolve_env.return_value = _ENV_ID
+        bind.return_value = _prepared_turn(account_id=requester.account_id)
+        run_turn.side_effect = run_action
+        try:
+            await app._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
+                row,
+                "finish the migration",
+                web_client=fake_slack_web_client.client,
+                tenant_id=tenant.id,
+                channel=_CHANNEL,
+                thread_id=_THREAD_ID,
+            )
+        except BaseException as caught:
+            error = caught
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert len(intents) <= 1
+    return app, intents[0].id if intents else None, error
+
+
+async def test_continuation_commits_intent_before_post_and_records_response_id(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    message_ts = "9300000010.000001"
+
+    async def verify_committed_intent(_url: Any, **kwargs: Any) -> CallbackResult:
+        async with db_session_factory() as session:
+            intents = await list_recoverable_turn_card_intents(session, platform="slack")
+        assert len(intents) == 1 and intents[0].status == "prepared"
+        payload = kwargs["json"]
+        cancel_keys = [
+            element["value"]
+            for block in payload["blocks"]
+            if block.get("type") == "actions"
+            for element in block.get("elements", [])
+        ]
+        assert cancel_keys == [intents[0].id.hex]
+        return CallbackResult(payload={"ok": True, "ts": message_ts, "channel": _CHANNEL})
+
+    fake_slack_web_client.mock.clear()
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/chat.postMessage", callback=verify_committed_intent
+    )
+
+    async def complete_turn(*_args: Any, **_kwargs: Any) -> RunOutcome:
+        return RunOutcome(
+            state=TurnState(),
+            ma_session_id="sess_continuation_entry",
+            mapping_id=None,
+            recovered=False,
+        )
+
+    _, intent_id, error = await _run_continuation_with_card_intent(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_CARD_COMMIT",
+        run_action=complete_turn,
+    )
+    assert error is None
+    assert intent_id is not None
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert len(intents) == 1 and intents[0].id == intent_id
+    assert intents[0].status == "posted" and intents[0].message_id == message_ts
+
+
+async def test_continuation_retains_prepared_intent_when_slack_accepts_then_loses_response(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    accepted: list[dict[str, Any]] = []
+
+    async def accept_then_drop(_url: Any, **kwargs: Any) -> Any:
+        accepted.append(kwargs["json"])
+        raise TimeoutError("accepted post response was lost")
+
+    fake_slack_web_client.mock.clear()
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/chat.postMessage", callback=accept_then_drop
+    )
+
+    async def unused_turn(*_args: Any, **_kwargs: Any) -> RunOutcome:
+        pytest.fail("turn work must not run without a persisted Slack message ID")
+
+    _, intent_id, error = await _run_continuation_with_card_intent(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_CARD_AMBIGUOUS",
+        run_action=unused_turn,
+    )
+    assert isinstance(error, TimeoutError)
+    assert intent_id is not None
+    assert len(accepted) == 1
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert len(intents) == 1 and intents[0].id == intent_id
+    assert intents[0].status == "prepared" and intents[0].message_id is None
+
+
+async def test_continuation_preterminal_failure_keeps_posted_intent_recoverable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    async def fail_before_terminal(*_args: Any, **_kwargs: Any) -> RunOutcome:
+        raise RuntimeError("turn failed before terminal render")
+
+    _, intent_id, error = await _run_continuation_with_card_intent(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_CARD_LIVE_FAILURE",
+        run_action=fail_before_terminal,
+    )
+    assert isinstance(error, RuntimeError)
+    assert intent_id is not None
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert len(intents) == 1 and intents[0].id == intent_id
+    assert intents[0].status == "posted" and intents[0].message_id is not None
+
+
+async def test_continuation_terminal_render_then_raise_retires_intent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    async def terminal_then_raise(*_args: Any, **kwargs: Any) -> RunOutcome:
+        lifecycle = kwargs["lifecycle"]
+        await lifecycle.on_terminal_failure(TurnState(), RuntimeError("terminal failure"))
+        raise RuntimeError("raised after terminal render")
+
+    _, _, error = await _run_continuation_with_card_intent(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_CARD_TERMINAL",
+        run_action=terminal_then_raise,
+    )
+    assert isinstance(error, RuntimeError)
+    async with db_session_factory() as session:
+        intents = await list_recoverable_turn_card_intents(session, platform="slack")
+    assert intents == []
 
 
 async def test_dispatch_skipped_while_processing_runs_when_the_turn_releases_the_thread(

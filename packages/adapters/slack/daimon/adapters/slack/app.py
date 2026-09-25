@@ -2205,6 +2205,16 @@ class SlackApp:
             reuse_existing=True,
             deadline=follow_deadline,
         )
+        async with self.runtime.sessionmaker() as intent_session:
+            card_intent = await create_turn_card_intent(
+                intent_session,
+                tenant_id=tenant_id,
+                platform="slack",
+                thread_id=thread_id,
+                turn_token=uuid.uuid4(),
+                channel_id=channel,
+            )
+            await intent_session.commit()
         follow_cancel = asyncio.Event()
         follow_lifecycle = SlackTurnLifecycle(
             client=web_client,
@@ -2218,8 +2228,23 @@ class SlackApp:
             deregister=self._deregister_cancel,
             register_pending=self._register_cancel,
             deregister_pending=self._deregister_cancel,
+            intent_id=card_intent.id,
         )
         await follow_lifecycle.post_initial()
+        try:
+            async with self.runtime.sessionmaker() as intent_session:
+                recorded = await record_turn_card_message(
+                    intent_session,
+                    id=card_intent.id,
+                    message_id=follow_lifecycle.status_ts or "",
+                )
+                await intent_session.commit()
+            if not recorded:
+                raise RuntimeError("Slack continuation card intent could not record its message ID")
+        except BaseException:
+            if follow_lifecycle.status_ts is not None:
+                self._deregister_cancel(follow_lifecycle.status_ts)
+            raise
         if follow_prepared.mapping_id is not None and follow_lifecycle.status_ts is not None:
             async with self.runtime.sessionmaker() as _at_session:
                 await mark_turn_active(
@@ -2342,6 +2367,20 @@ class SlackApp:
         finally:
             if follow_lifecycle.status_ts is not None:
                 self._deregister_cancel(follow_lifecycle.status_ts)
+            if follow_lifecycle.final_ts is not None and follow_lifecycle.status_ts is not None:
+                try:
+                    async with self.runtime.sessionmaker() as intent_session:
+                        await retire_turn_card_intent(
+                            intent_session,
+                            id=card_intent.id,
+                            expected_message_id=follow_lifecycle.status_ts,
+                        )
+                        await intent_session.commit()
+                except SQLAlchemyError:
+                    log.exception(
+                        "slack.turn_card_intent.retire_failed",
+                        intent_id=str(card_intent.id),
+                    )
             if follow_prepared.mapping_id is not None:
                 with contextlib.suppress(SQLAlchemyError):
                     async with self.runtime.sessionmaker() as _clear_session:
