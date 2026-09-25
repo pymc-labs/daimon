@@ -476,6 +476,38 @@ async def test_post_initial_posts_the_card_and_registers_cancel_before_any_sse_e
     assert reg_author == "U_AUTHOR", "registered author_id must match the constructor arg"
 
 
+async def test_without_intent_id_cancel_value_still_uses_status_timestamp(
+    fake_slack_web_client: Any,
+) -> None:
+    """Omitting intent_id keeps the legacy status-ts value on later card edits."""
+    clock_now = [100.0]
+    lc = SlackTurnLifecycle(
+        client=fake_slack_web_client.client,
+        channel="C_TEST",
+        thread_ts="1700000000.000000",
+        cancel=asyncio.Event(),
+        author_id="U_AUTHOR",
+        agent_name="test-agent",
+        model_id="claude-sonnet-4-6",
+        register=lambda ts, event, author: None,
+        deregister=lambda ts: None,
+        clock=lambda: clock_now[0],
+    )
+
+    await lc.post_initial()
+    clock_now[0] += 6.0
+    await lc.on_render(TurnState())
+
+    update_blocks = _last_update_blocks(fake_slack_web_client)
+    cancel_button = next(
+        element
+        for block in update_blocks
+        if block.get("type") == "actions"
+        for element in block.get("elements", [])
+    )
+    assert cancel_button["value"] == lc.status_ts
+
+
 async def test_status_ts_is_none_before_anything_is_posted(fake_slack_web_client: Any) -> None:
     """A freshly constructed lifecycle reports status_ts as None."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
