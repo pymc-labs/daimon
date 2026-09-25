@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.core._models import GitHubPushResync
 from daimon.core.config import GithubSettings
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skill_sync import resync_queue
-from daimon.core.skill_sync.resync import ResyncReport
+from daimon.core.skill_sync.resync import ResyncReport, resync_bound_repo
+from daimon.core.stores import agent_repo_binding as binding_store
 from daimon.core.stores import github_push_resync as store
+from daimon.core.stores.domain import RepoAccessProof
+from daimon.testing.crypto import make_fernet
+from daimon.testing.factories import make_cli_principal
+from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -133,6 +141,153 @@ async def test_queue_retries_only_retryable_binding_failures(
     assert row is not None and row.state == expected_state, (
         "only transient binding failures should retain durable queue work"
     )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "response_body", "response_headers", "expected_state", "wait_seconds"),
+    [
+        (
+            403,
+            {"message": "You have exceeded a secondary rate limit."},
+            {},
+            "pending",
+            59,
+        ),
+        (
+            403,
+            {"message": "API rate limit exceeded"},
+            {"retry-after": "90"},
+            "pending",
+            89,
+        ),
+        (
+            403,
+            {"message": "Forbidden"},
+            {
+                "retry-after": "30",
+                "x-ratelimit-remaining": "0",
+                "x-ratelimit-reset": "{reset}",
+            },
+            "pending",
+            119,
+        ),
+        (429, {"message": "rate limited"}, {"retry-after": "80"}, "pending", 79),
+        (403, {"message": "Resource not accessible by integration"}, {}, "done", 0),
+    ],
+)
+async def test_queue_classifies_rate_limit_and_permission_responses(
+    db_session: AsyncSession,
+    db_nullpool_engine: AsyncEngine,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    response_body: dict[str, str],
+    response_headers: dict[str, str],
+    expected_state: str,
+    wait_seconds: int,
+) -> None:
+    repo_full_name = f"owner/repo-{uuid.uuid4().hex}"
+    cli = await make_cli_principal(db_session, os_user="resync-rate-limit-queue")
+    tenant_id = cli.tenant_id
+    ma_handler = make_fake_ma_handler()
+    agent_ids: list[uuid.UUID] = []
+    async with build_fake_anthropic(ma_handler) as anthropic_client:
+        for agent_name in ("rate-limit-queue-agent-a", "rate-limit-queue-agent-b"):
+            agent = await anthropic_client.beta.agents.create(
+                name=agent_name,
+                model="claude-sonnet-4-6",
+                metadata={
+                    "daimon_tenant": str(tenant_id),
+                    "daimon_name": agent_name,
+                },
+            )
+            agent_ids.append(derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id))
+    for agent_id in agent_ids:
+        await binding_store.set_binding(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_url=repo_full_name,
+            default_branch="main",
+            ma_secret_ref="stub",
+            proof=RepoAccessProof(kind="public", at=datetime.now(UTC), account_id=None),
+        )
+    await db_session.commit()
+    await _enqueue(
+        db_session_factory,
+        delivery_id="rate-limit-not-before",
+        repo_full_name=repo_full_name,
+    )
+
+    if "{reset}" in response_headers.get("x-ratelimit-reset", ""):
+        response_headers["x-ratelimit-reset"] = str(int(time.time()) + 120)
+
+    github_request_count = 0
+
+    def github_rate_limit(request: httpx.Request) -> httpx.Response:
+        nonlocal github_request_count
+        github_request_count += 1
+        return httpx.Response(
+            status_code,
+            headers=response_headers,
+            json=response_body,
+        )
+
+    async def rate_limited_binding(
+        *,
+        repo_full_name: str,
+        ref: str,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        fernet: MultiFernet,
+        anthropic_client: AsyncAnthropic,
+        github_settings: GithubSettings,
+        http_client: object | None = None,
+    ) -> ResyncReport:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(github_rate_limit)) as client:
+            return await resync_bound_repo(
+                repo_full_name=repo_full_name,
+                ref=ref,
+                sessionmaker=sessionmaker,
+                fernet=make_fernet(),
+                anthropic_client=anthropic_client,
+                github_settings=github_settings,
+                http_client=client,
+            )
+
+    monkeypatch.setattr(resync_queue, "resync_bound_repo", rate_limited_binding)
+    started_at = datetime.now(UTC)
+    async with build_fake_anthropic(ma_handler) as anthropic_client:
+        processed = await resync_queue.drain_github_push_resync_queue(
+            engine=db_nullpool_engine,
+            sessionmaker=db_session_factory,
+            fernet=_fernet(),
+            anthropic_client=anthropic_client,
+            github_settings=GithubSettings(),
+        )
+
+    async with db_session_factory() as session:
+        row = await store.get_for_repo_ref(
+            session, repo_full_name=repo_full_name, ref="refs/heads/main"
+        )
+    assert processed == 1, "the scheduler should persist the provider response classification"
+    assert row is not None and row.state == expected_state, (
+        "rate limits retry durably while permission failures complete"
+    )
+    assert github_request_count == (1 if expected_state == "pending" else 2), (
+        "a rate-limited batch must defer its later binding, while a permission failure may continue"
+    )
+    if wait_seconds:
+        assert row.available_at >= started_at + timedelta(seconds=wait_seconds), (
+            "the next claim must respect GitHub's retry-after, reset, or minimum wait"
+        )
+        async with db_session_factory.begin() as session:
+            early = await store.claim_due(
+                session,
+                lease_owner=uuid.uuid4(),
+                lease_for=timedelta(minutes=2),
+                now=row.available_at - timedelta(microseconds=1),
+            )
+        assert early is None, "the durable queue must not claim before the provider deadline"
 
 
 async def test_expired_lease_recovers_after_process_dies_mid_binding_batch(

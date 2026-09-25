@@ -70,3 +70,11 @@ implementation are outside this model.
 The executable ambiguity tests assert the duplicate refusal is stored as a
 failed, non-retryable binding outcome (`retryable_bindings == 0`); an operator
 must archive the duplicate before retrying the resync.
+
+`RetryDeadline` abstracts time as integer ticks. Its provider wait is two ticks
+and ordinary queue backoff is one tick, so the provider deadline dominates.
+It does not model header parsing, wall-clock skew, simultaneous rate-limited
+bindings, or lease expiry; transport parsing and persisted scheduling are
+covered by the fetcher and PostgreSQL tests. The queue integration also checks
+that a rate-limited first binding defers a second binding until the later pass;
+the one-job model abstracts the binding batch.

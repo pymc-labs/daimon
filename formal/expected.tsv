@@ -151,3 +151,4 @@ skill_sync	BindingResult	BindingResultRetryAll	violates:PermanentFailureNotRetri
 skill_sync	BindingIdentity	BindingIdentitySafe	clean	17	-	exact MA identity, duplicate refusal, and no wrong-agent attach; bounded A/B roster
 skill_sync	BindingIdentity	BindingIdentityNameSubstitution	violates:NoWrongAgentAttach	18	-	pre-fix: same-name B appears after A bridge resolution, name-only attach selects B
 skill_sync	BindingIdentity	BindingIdentityTitleRace	violates:NoAmbiguousTitleWrite	13	-	residual: same-name B is present when A's shared-name title is written; collision risk only
+skill_sync	RetryDeadline	RetryDeadline	clean	6	-	provider not-before time dominates ordinary queue backoff before a retry claim

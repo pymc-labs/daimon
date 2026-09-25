@@ -22,6 +22,24 @@ exponential backoff capped at five minutes. Transient GitHub/MA transport
 errors, 429s, and 5xx responses retry; permanent credential, permission,
 repository, size-limit, validation, and attach errors complete the queue job
 while remaining visible in the binding's `last_sync_error` for operator action.
+For GitHub tarball downloads, explicit 429s and rate-limit-shaped 403s are
+retryable; other 403s remain permanent permission failures. A supplied
+`retry-after` header and an exhausted primary limit's `x-ratelimit-reset` are
+both honored; when both are present, the later deadline applies. Without either
+header, a secondary limit waits at least one minute. The queue's retry time is
+the later of the provider deadline and ordinary exponential backoff, even when
+it exceeds the five-minute backoff cap. This follows GitHub's [REST API
+rate-limit guidance](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+The binding batch stops after its first tarball rate limit and defers remaining
+bindings until that queued retry, since the provider may share the limit across
+credentials.
+
+This handling covers the repository tarball request. GitHub App installation
+token minting uses a separate call in `packages/core/daimon/core/github_app_auth.py`
+and still raises a raw `httpx.HTTPStatusError`; a 403 from that path is currently
+classified as non-retryable by `packages/core/daimon/core/skill_sync/resync.py`,
+even if GitHub rate-limited the request.
+
 Retries have no terminal attempt limit. A transient failure summary stays on
 the row until a new push or a successful pass, and a later clean binding sync
 clears its stored error. A bound resync resolves the binding to its exact

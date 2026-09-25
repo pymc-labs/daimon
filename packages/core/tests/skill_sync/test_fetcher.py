@@ -5,12 +5,15 @@ All tests use httpx.MockTransport — no real network, no method-level mocks.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 from daimon.core.skill_sync.fetcher import (
     GitHubAuthError,
+    GitHubRateLimitError,
     GitHubTarballFetcher,
     GitHubUnreachable,
     TarballTooLarge,
@@ -179,6 +182,68 @@ async def test_fetch_tarball_raises_GitHubAuthError_on_403() -> None:
     fetcher = GitHubTarballFetcher(client)
     with pytest.raises(GitHubAuthError):
         await fetcher.fetch_tarball(credential="t", url="o/r", branch="main")
+
+
+async def test_fetch_tarball_classifies_secondary_rate_limit_403_and_minimum_wait() -> None:
+    """A rate-limit 403 is retryable and defaults to GitHub's one-minute wait."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={"message": "You have exceeded a secondary rate limit."},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    fetcher = GitHubTarballFetcher(client)
+    with pytest.raises(GitHubRateLimitError) as caught:
+        await fetcher.fetch_tarball(credential="sensitive-token", url="o/r", branch="main")
+    assert caught.value.retry_after >= datetime.now(UTC) + timedelta(seconds=59), (
+        "secondary rate-limit responses without headers must wait at least one minute"
+    )
+    assert "sensitive-token" not in str(caught.value), "errors must not expose credentials"
+
+
+async def test_fetch_tarball_honors_retry_after_on_rate_limit_403() -> None:
+    """retry-after determines the not-before delay for a rate-limit response."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            headers={"retry-after": "90"},
+            json={"message": "API rate limit exceeded"},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    fetcher = GitHubTarballFetcher(client)
+    with pytest.raises(GitHubRateLimitError) as caught:
+        await fetcher.fetch_tarball(credential="t", url="o/r", branch="main")
+    assert caught.value.retry_after >= datetime.now(UTC) + timedelta(seconds=89), (
+        "retry-after must be honored"
+    )
+
+
+async def test_fetch_tarball_honors_primary_rate_limit_reset_on_403() -> None:
+    """A later primary reset is not undercut by a shorter retry-after."""
+    reset_at = int(time.time()) + 120
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            headers={
+                "retry-after": "30",
+                "x-ratelimit-remaining": "0",
+                "x-ratelimit-reset": str(reset_at),
+            },
+            json={"message": "Forbidden"},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    fetcher = GitHubTarballFetcher(client)
+    with pytest.raises(GitHubRateLimitError) as caught:
+        await fetcher.fetch_tarball(credential="t", url="o/r", branch="main")
+    assert caught.value.retry_after == datetime.fromtimestamp(reset_at, UTC), (
+        "an exhausted primary limit must wait through the advertised reset"
+    )
 
 
 async def test_fetch_tarball_raises_GitHubUnreachable_on_404() -> None:
