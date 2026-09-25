@@ -42,7 +42,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import aiohttp
 import structlog
@@ -124,6 +124,9 @@ class SlackTurnLifecycle:
     Constructor args are all keyword-only (mirrors DiscordTurnLifecycle's
     DI shape). register/deregister are injected as plain callables so the
     lifecycle never holds a reference to SlackApp's internal registry dict.
+    When ``intent_id`` is supplied, its hex value remains in the Cancel button
+    across every nonterminal render; Slack message timestamp remains the live
+    registry fallback after the initial post response.
     """
 
     def __init__(
@@ -142,6 +145,7 @@ class SlackTurnLifecycle:
         deregister_pending: Callable[[str], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         adopt_status_ts: str | None = None,
+        intent_id: UUID | None = None,
     ) -> None:
         self._client = client
         self._channel = channel
@@ -153,7 +157,8 @@ class SlackTurnLifecycle:
         self._deregister = deregister
         self._register_pending = register_pending
         self._deregister_pending = deregister_pending
-        self._cancel_key = uuid4().hex
+        self._cancel_key = intent_id.hex if intent_id is not None else uuid4().hex
+        self._intent_cancel_key = intent_id.hex if intent_id is not None else None
         self._pending_registered = False
         self._clock = clock
         self._state: State = State(
@@ -229,7 +234,12 @@ class SlackTurnLifecycle:
         if self._terminal:
             return
         now = self._clock()
-        cancel_key = self._cancel_key if self._status_ts is None else self._status_ts
+        if self._intent_cancel_key is not None:
+            cancel_key = self._intent_cancel_key
+        elif self._status_ts is None:
+            cancel_key = self._cancel_key
+        else:
+            cancel_key = self._status_ts
         blocks = to_blocks(self._state, now=now, cancel_key=cancel_key)
         text = f"{self._state.phase.value} …"
 

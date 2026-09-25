@@ -4278,6 +4278,100 @@ async def test_cancel_is_registered_while_visible_card_post_response_is_pending(
     )
 
 
+async def test_durable_intent_cancel_value_survives_updates_and_routes_by_status_ts(
+    fake_slack_web_client: Any,
+) -> None:
+    """A durable card token survives edits while live cancellation keeps routing by ts."""
+    app = _make_app()
+    cancel = asyncio.Event()
+    intent_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    status_ts = "1000000000.000001"
+    clock_now = [100.0]
+
+    async def hold_visible_post(url: URL, **kwargs: Any) -> CallbackResult:
+        del url
+        blocks = kwargs["json"]["blocks"]
+        button = next(
+            element
+            for block in blocks
+            if block.get("type") == "actions"
+            for element in block.get("elements", [])
+        )
+        assert button["value"] == intent_id.hex
+        assert intent_id.hex in app._cancel_registry  # pyright: ignore[reportPrivateUsage]
+        payload = _make_block_actions_payload(message_ts=status_ts)
+        payload["actions"] = [button]
+        await app._handle_block_action(payload)  # pyright: ignore[reportPrivateUsage]
+        return CallbackResult(payload={"ok": True, "ts": status_ts, "channel": "C_TEST"})
+
+    fake_slack_web_client.mock.clear()
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/chat.postMessage", callback=hold_visible_post
+    )
+    fake_slack_web_client.mock.post(
+        "https://slack.com/api/chat.update", payload={"ok": True}, repeat=True
+    )
+    lifecycle = SlackTurnLifecycle(
+        client=fake_slack_web_client.client,
+        channel="C_TEST",
+        thread_ts="1700000000.000000",
+        cancel=cancel,
+        author_id="U_AUTHOR",
+        agent_name="test-agent",
+        model_id="claude-sonnet-4-6",
+        register=app._register_cancel,  # pyright: ignore[reportPrivateUsage]
+        deregister=app._deregister_cancel,  # pyright: ignore[reportPrivateUsage]
+        register_pending=app._register_cancel,  # pyright: ignore[reportPrivateUsage]
+        deregister_pending=app._deregister_cancel,  # pyright: ignore[reportPrivateUsage]
+        intent_id=intent_id,
+        clock=lambda: clock_now[0],
+    )
+
+    await lifecycle.post_initial()
+    assert cancel.is_set(), "the pre-response UUID value must route to its pending turn"
+    assert intent_id.hex not in app._cancel_registry  # pyright: ignore[reportPrivateUsage]
+    assert status_ts in app._cancel_registry  # pyright: ignore[reportPrivateUsage]
+
+    cancel.clear()
+    clock_now[0] += 6.0
+    await lifecycle.on_render(TurnState())
+    update_calls = fake_slack_web_client.mock.requests[
+        ("POST", URL("https://slack.com/api/chat.update"))
+    ]
+    updated_blocks = update_calls[-1].kwargs["json"]["blocks"]
+    updated_button = next(
+        element
+        for block in updated_blocks
+        if block.get("type") == "actions"
+        for element in block.get("elements", [])
+    )
+    assert updated_button["value"] == intent_id.hex, (
+        "every nonterminal card edit must preserve the durable intent UUID"
+    )
+
+    later_click = _make_block_actions_payload(message_ts=status_ts)
+    later_click["actions"] = [updated_button]
+    await app._handle_block_action(later_click)  # pyright: ignore[reportPrivateUsage]
+    assert cancel.is_set(), (
+        "after pending UUID deregistration, the live click must route through registered status_ts"
+    )
+
+    await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
+    terminal_blocks = fake_slack_web_client.mock.requests[
+        ("POST", URL("https://slack.com/api/chat.update"))
+    ][-1].kwargs["json"]["blocks"]
+    terminal_action_ids = [
+        element.get("action_id")
+        for block in terminal_blocks
+        if block.get("type") == "actions"
+        for element in block.get("elements", [])
+    ]
+    assert "cancel_turn" not in terminal_action_ids, (
+        "terminal rendering must still remove the Cancel button"
+    )
+    assert app._cancel_registry == {}, "terminal cleanup must deregister the status timestamp"
+
+
 async def test_failed_initial_post_cleans_pending_cancel_registration(
     fake_slack_web_client: Any,
 ) -> None:

@@ -378,6 +378,52 @@ class ThreadSession(Base):
     )
 
 
+class TurnCardIntent(Base):
+    """Durable intent for a turn's initial status card."""
+
+    __tablename__ = "turn_card_intents"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "turn_token",
+            name="uq_turn_card_intents_tenant_token",
+        ),
+        CheckConstraint(
+            "status IN ('prepared', 'posted', 'retired')",
+            name="ck_turn_card_intents_status",
+        ),
+        CheckConstraint(
+            "(status = 'prepared' AND message_id IS NULL) OR "
+            "(status = 'posted' AND message_id IS NOT NULL AND message_id <> '') OR "
+            "(status = 'retired' AND (message_id IS NULL OR message_id <> ''))",
+            name="ck_turn_card_intents_message_state",
+        ),
+        Index("ix_turn_card_intents_recovery", "platform", "status", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    turn_token: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # Slack addresses a message by (channel, timestamp); Discord needs no channel.
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # NULL while prepared: the platform accepted no response yet, or the
+    # process died before it could persist the response's message identifier.
+    message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'prepared'"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class GitHubOauthState(Base):
     __tablename__ = "github_oauth_states"
 

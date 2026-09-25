@@ -209,6 +209,23 @@ class ThreadSessionRow(BaseModel):
     pending_unsaved_work: UnsavedWorkChoice | None = None
 
 
+class TurnCardIntentRow(BaseModel):
+    """Persisted intent for a turn's initial status card."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    platform: str
+    thread_id: str
+    turn_token: uuid.UUID
+    channel_id: str | None
+    message_id: str | None
+    status: Literal["prepared", "posted", "retired"]
+    created_at: datetime
+    updated_at: datetime
+
+
 class SessionPreparationRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
