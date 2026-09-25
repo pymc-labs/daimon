@@ -23,6 +23,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.scheduler.main import (
     _build_fire,  # pyright: ignore[reportPrivateUsage]  # test seam for balance gate + debit binding
     _CapsAdapter,  # pyright: ignore[reportPrivateUsage]  # named test seam for cap wiring
+    _sweep_retired_turn_card_intents,  # pyright: ignore[reportPrivateUsage]  # test seam for the card-intent sweep wrapper
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
     _sweep_wizard_sessions,  # pyright: ignore[reportPrivateUsage]  # test seam for the wizard sweep wrapper
     _validate_mcp_settings,  # pyright: ignore[reportPrivateUsage]  # boot-validation seam
@@ -821,3 +822,32 @@ async def test_sweep_slack_event_dedup_forwards_sessionmaker_and_returns_cleanly
     assert captured_now[0].tzinfo is not None, (
         "wrapper must pass a timezone-aware `now` to the core sweep"
     )
+
+
+async def test_sweep_retired_turn_card_intents_swallows_sqlalchemy_error(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with unittest.mock.patch(
+        "daimon.adapters.scheduler.main.sweep_retired_turn_card_intents",
+        side_effect=SQLAlchemyError("boom"),
+    ):
+        await _sweep_retired_turn_card_intents(db_session_factory)
+
+
+async def test_sweep_retired_turn_card_intents_forwards_sessionmaker_and_now(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: list[tuple[async_sessionmaker[AsyncSession], datetime]] = []
+
+    async def fake_sweep(sm: async_sessionmaker[AsyncSession], *, now: datetime) -> int:
+        captured.append((sm, now))
+        return 0
+
+    with unittest.mock.patch(
+        "daimon.adapters.scheduler.main.sweep_retired_turn_card_intents",
+        side_effect=fake_sweep,
+    ):
+        await _sweep_retired_turn_card_intents(db_session_factory)
+
+    assert captured[0][0] is db_session_factory
+    assert captured[0][1].tzinfo is not None

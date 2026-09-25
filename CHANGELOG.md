@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned message ID, and reconcile unresolved cards after a restart. A
   bounded TLA+ model retains the stale-edit, new-intent snapshot, and lossy
   history counterexamples.
+- The scheduler prunes retired initial-card intents after seven days, at most
+  500 rows per tick; active intents remain available for restart recovery.
 - GitHub push-triggered skill resyncs now persist before webhook acknowledgement,
   recover through scheduler leases, retry transient binding failures with
   backoff, and retain permanent binding errors for operator action. See
