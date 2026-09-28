@@ -312,3 +312,23 @@ nonempty targets, missing confirmation and corrupt dumps. It uses no deployment
 credentials. Also rehearse your real recovery set in an isolated environment:
 this small drill does not establish your production recovery time or prove that
 external stores, keys and MA mappings are complete.
+
+### Agent environment encryption
+
+Agent environment values in `agent_files.content` are encrypted with the same
+`DAIMON_CRYPTO__KEYS` MultiFernet key ring as other credentials. Names and
+attribution remain readable. Configure these keys before storing environment
+values. Reads and mounted `.env` files are decrypted transparently.
+
+Stop application writers before upgrading through `0028_agent_env_encryption`.
+Run the migration with the deployment's crypto keys; it encrypts existing rows
+in one transaction and refuses to migrate nonempty tables without keys. Empty
+tables need no key. The migration cannot run in offline SQL mode or downgrade
+to plaintext. Restart all processes on the new version after upgrading.
+
+To rotate keys, prepend a new key and retain older keys for reads. Rewriting an
+environment value encrypts it with the first key. Do not retire old keys until
+all stored credentials have been re-encrypted. Old database backups still
+contain plaintext environment values and need the same access restrictions as
+other secret backups. Application encryption protects database-only access;
+access to both the database and the key ring permits decryption.

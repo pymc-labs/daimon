@@ -559,7 +559,8 @@ class CryptoSettings(BaseModel):
         default=(),
         description=(
             "Ordered tuple of Fernet keys used to encrypt/decrypt stored "
-            "credentials. The first key encrypts new values; older keys "
+            "credentials, including agent environment values. The first key encrypts "
+            "new values; older keys "
             "remain valid for decrypting existing ciphertext during rotation."
         ),
     )
@@ -918,3 +919,17 @@ def load_settings(*, _env_file: str | None = ".env") -> Settings:
     (`_env_file=None`) so they only see `monkeypatch.setenv` values.
     """
     return Settings(_env_file=_env_file)  # pyright: ignore[reportCallIssue]
+
+
+class _CryptoSettingsSource(BaseSettings):
+    """Crypto-only settings for migrations and standalone store sessions."""
+
+    crypto: CryptoSettings = Field(default_factory=CryptoSettings)
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_", env_nested_delimiter="__", env_file=".env", extra="ignore"
+    )
+
+
+def load_crypto_settings() -> CryptoSettings:
+    """Load keys without requiring unrelated API or database configuration."""
+    return _CryptoSettingsSource().crypto

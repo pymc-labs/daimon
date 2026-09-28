@@ -841,7 +841,7 @@ class TenantLedger(Base):
 
 
 class AgentFile(Base):
-    """Per-(tenant, agent, key) text blob storage."""
+    """Per-(tenant, agent, key) encrypted environment value storage."""
 
     __tablename__ = "agent_files"
     __table_args__ = (PrimaryKeyConstraint("tenant_id", "agent_id", "key", name="pk_agent_files"),)

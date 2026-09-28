@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Encrypt agent environment values with rotatable deployment keys, including existing rows on upgrade.
+
 ### Added
 
 - Every turn now ends with a typed `TerminationReason` from the turn core,

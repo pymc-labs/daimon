@@ -34,10 +34,17 @@ def build_engine(url: str, *, echo: bool = False) -> AsyncEngine:
     return create_async_engine(url, echo=echo, pool_pre_ping=True, pool_recycle=1800)
 
 
-def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+def build_session_factory(
+    engine: AsyncEngine, *, crypto_keys: tuple[str, ...] | None = None
+) -> async_sessionmaker[AsyncSession]:
     """Build an `async_sessionmaker` bound to `engine`.
 
     `expire_on_commit=False` so Pydantic mapping in stores can read attributes
     after commit without a reload.
     """
-    return async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    return async_sessionmaker(
+        engine,
+        expire_on_commit=False,
+        class_=AsyncSession,
+        info={} if crypto_keys is None else {"crypto_keys": crypto_keys},
+    )
