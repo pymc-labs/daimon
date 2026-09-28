@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach the agent, output files are delivered with file consent cards, and
   `send_message`, `create_thread` and task handoffs work from Teams turns.
   Agent keys, MCP tokens and MCP sign-ins are collected privately through
-  Teams dialogs.
+  Teams dialogs, and with tool safety on, attached-tool writes wait on an
+  Approve/Deny card only the requester can answer.
   Builds on #220 by @jchu96. See `docs/teams.md`.
 - Record content-free turn outcomes across chat, headless, routines and MCP hub/agent-chat, including attributed admission refusals, with bounded best-effort persistence. MCP `ask` records its terminal reason; fire-and-forget `start_turn`/`continue_turn` record dispatch only (`unknown`), without a later terminal update. Pre-attribution and adapter readiness gates are outside coverage.
 - Routines can name an optional destination channel or thread

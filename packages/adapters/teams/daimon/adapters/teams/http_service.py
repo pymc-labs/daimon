@@ -18,6 +18,7 @@ from daimon.adapters.teams import (
     privacy_card,
     routines_card,
     setup_card,
+    tool_confirmation,
 )
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
@@ -213,6 +214,7 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(routines_card.VERB, routines.on_action)
     teams_app.on_card_action_execute(privacy_card.VERB, privacy.on_action)
     teams_app.on_card_action_execute(billing_panel.VERB, billing.on_action)
+    teams_app.on_card_action_execute(tool_confirmation.VERB, turns.confirmations.on_action)
     teams_app.on_dialog_open(routines_card.CREATE_DIALOG, routines.on_dialog_open)
     teams_app.on_dialog_submit(routines_card.CREATE_DIALOG, routines.on_dialog_submit)
     teams_app.on_card_action_execute(setup_card.VERB, setup.on_action)

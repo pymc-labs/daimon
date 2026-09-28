@@ -232,7 +232,7 @@ however the agent was written); reads then run, a write in a routine is
 refused unless the operator allowed it there, and a write in chat waits for
 the requester to press Approve on a confirmation card. The card is a platform
 hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
-(`packages/core/daimon/core/confirmation.py`), Discord and Slack each draw the
+(`packages/core/daimon/core/confirmation.py`), Discord, Slack and Teams each draw the
 shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
 and an adapter that passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call

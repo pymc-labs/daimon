@@ -98,6 +98,9 @@ MCP tools that need a chat platform work from Teams turns: `send_message` and
 conversation the requester belongs to), task handoff and fresh starts,
 `bind_public_repo` and the GitHub App install link. The MCP server posts
 through the Bot Framework REST API with the same app registration.
+With tool safety on (`DAIMON_TOOL_SAFETY__ENABLED`), an attached tool's write
+waits on an Approve/Deny card in the conversation that only the requester can
+answer.
 
 ### Capacity
 
