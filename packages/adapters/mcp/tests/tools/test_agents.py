@@ -371,6 +371,96 @@ async def test_get_agent_impl_raises_tool_error_not_found() -> None:
         await _get_agent_impl(_runtime(client), auth, "nope")
 
 
+def _get_one(tenant_id: uuid.UUID, metadata: dict[str, str], system: str | None) -> AsyncAnthropic:
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                ma_agent(
+                    name="a",
+                    system=system,
+                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "a", **metadata},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    return build_fake_anthropic(router.dispatch)
+
+
+async def test_get_agent_impl_returns_system_prompt_to_admin_on_editable_agent() -> None:
+    """Setup flows must save the prompt before replacing it; get_agent was the
+    only read path and it never returned ``system``."""
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "You are A.")
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    result = await _get_agent_impl(_runtime(client), auth, "a")
+
+    assert result.system == "You are A.", "admin must read the prompt it could replace"
+
+
+async def test_get_agent_impl_returns_empty_string_for_admin_when_agent_has_no_prompt() -> None:
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    client = _get_one(tenant_id, {"daimon_account": str(account_id)}, None)
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    result = await _get_agent_impl(_runtime(client), auth, "a")
+
+    assert result.system == "", "an empty prompt must be distinguishable from a withheld one"
+
+
+async def test_get_agent_impl_withholds_system_prompt_from_non_admin() -> None:
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "secret prompt")
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER)
+
+    result = await _get_agent_impl(_runtime(client), auth, "a")
+
+    assert result.system is None, "a non-admin caller must not read the system prompt"
+    assert result.name == "a", "the rest of get_agent stays open to non-admins"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        pytest.param({"daimon_managed": "true", "daimon_account": "x"}, id="defaults-managed"),
+        pytest.param({}, id="unstamped-system-agent"),
+    ],
+)
+async def test_get_agent_impl_withholds_system_prompt_of_uneditable_agent_even_from_admin(
+    metadata: dict[str, str],
+) -> None:
+    tenant_id = uuid.uuid4()
+    client = _get_one(tenant_id, metadata, "daimon prompt")
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+
+    result = await _get_agent_impl(_runtime(client), auth, "a")
+
+    assert result.system is None, (
+        "Daimon/defaults-managed prompts follow update_agent's no-edit rule"
+    )
+
+
+async def test_list_agents_impl_never_returns_system_prompt() -> None:
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "You are A.")
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    result = await _list_agents_impl(_runtime(client), auth, page=None)
+
+    assert [a.system for a in result] == [None], (
+        "list_agents is a summary; the prompt is get_agent-only"
+    )
+
+
 async def test_create_agent_impl_calls_ma_create(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

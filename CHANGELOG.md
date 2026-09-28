@@ -42,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `get_agent` now returns the agent's `system` prompt to an admin caller on
+  an agent chat tools may edit, so a setup flow can save the prompt before
+  replacing it and verify the change afterwards. Non-admin callers, and every
+  caller on Daimon or another defaults-managed agent, get `system: null`.
+
 - The seeded `pymc-artifact-style` skill now follows the live pymc-labs.com
   palette and type (re-derived from the site CSS on 2026-09-28): it adds the
   site's readable text accents (teal, indigo, dark orange) and navy-header,

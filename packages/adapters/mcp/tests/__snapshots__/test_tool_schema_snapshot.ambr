@@ -1849,6 +1849,8 @@
         Use ``list_agent_keys`` for stored key names. Configuration does not prove
         the answering session's access. Returns server names/URLs and skills; custom
         skills have a display name (null if deleted), Anthropic skills have a readable id.
+        For an admin on an editable agent, ``system`` is the full system prompt;
+        null means withheld (non-admin caller, or Daimon/defaults-managed agent).
       ''',
       'parameters': dict({
         'additionalProperties': False,
