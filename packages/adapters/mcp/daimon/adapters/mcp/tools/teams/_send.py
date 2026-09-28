@@ -3,7 +3,8 @@
 The bot is the sender, so a caller could otherwise speak through it in a
 conversation they cannot see: the requester's Entra id must be on the target's
 roster (the channel's, for a thread), and any failure to confirm that refuses
-the post, mirroring the Slack access check.
+the post, mirroring the Slack access check. Then the access policy: a protected
+channel, or a thread under one, refuses every post.
 
 The credential-request card is rendered by `daimon.core.posted_controls`, the
 same renderer the Teams adapter edits it with once the dialog is submitted.
@@ -17,6 +18,7 @@ import httpx
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_app_auth import build_app_install_url
@@ -69,20 +71,24 @@ def _check_text(content: str) -> None:
 async def _authorize(
     runtime: McpRuntime, auth: AuthIdentity, conversation_id: str
 ) -> TeamsBotClient:
-    """The client, once the requester is confirmed on the target's roster."""
+    """The client, once the requester is on the target's roster and it is writable."""
     client = runtime.teams_client
     if client is None:
         raise ToolError("Teams tools are not configured on this server")
     if auth.platform_user_id is None:
         raise ToolError("teams tools require a teams-bound identity")
+    channel = conversation_id.split(";", 1)[0]
     try:
-        is_member = await client.is_member(conversation_id.split(";", 1)[0], auth.platform_user_id)
+        is_member = await client.is_member(channel, auth.platform_user_id)
     except (httpx.HTTPError, ValueError) as err:
         raise ToolError(
             "could not confirm you are in that conversation, so nothing was posted"
         ) from err
     if not is_member:
         raise ToolError(_NOT_A_MEMBER)
+    await require_channel_writable(
+        runtime, auth, channel_id=conversation_id, parent_channel_id=channel
+    )
     return client
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
+from collections.abc import Awaitable, Callable
 from unittest.mock import MagicMock
 
 import httpx
@@ -17,6 +18,7 @@ from daimon.adapters.mcp.tools.teams._send import (
     _teams_create_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _teams_send_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -26,6 +28,7 @@ from daimon.core.config import (
 )
 from daimon.core.mcp_auth import mint_jwt
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.teams_threads import new_setup_thread_id
 from daimon.testing.asgi import call_mcp_tool
@@ -80,9 +83,12 @@ def _client(fake: _Fake, clock: list[float] | None = None) -> TeamsBotClient:
     )
 
 
-def _runtime(client: TeamsBotClient | None) -> McpRuntime:
+def _runtime(
+    client: TeamsBotClient | None, sessionmaker: async_sessionmaker[AsyncSession] | None = None
+) -> McpRuntime:
+    """`sessionmaker` is read for the access policy once membership is confirmed."""
     return McpRuntime(
-        session_factory=MagicMock(),  # type: ignore[arg-type]  # unused by the Teams impls
+        session_factory=sessionmaker or MagicMock(),  # type: ignore[arg-type]  # read by the policy
         client=MagicMock(),  # type: ignore[arg-type]  # unused by the Teams impls
         settings=MagicMock(),  # type: ignore[arg-type]  # unused by the Teams impls
         deployment_default=DeploymentDefault(),
@@ -90,10 +96,12 @@ def _runtime(client: TeamsBotClient | None) -> McpRuntime:
     )
 
 
-def _auth(platform_user_id: str | None = _CALLER) -> AuthIdentity:
+def _auth(
+    platform_user_id: str | None = _CALLER, tenant_id: uuid.UUID | None = None
+) -> AuthIdentity:
     return AuthIdentity(
         account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
+        tenant_id=tenant_id or uuid.uuid4(),
         role=Role.USER,
         platform="teams",
         external_id=_ENTRA,
@@ -149,21 +157,28 @@ async def test_is_member_matches_case_insensitively_and_404_is_no() -> None:
         await _client(_Fake(roster_status=500)).is_member(_CHANNEL, _CALLER)
 
 
-async def test_send_message_checks_the_channel_roster_then_posts() -> None:
+async def test_send_message_checks_the_channel_roster_then_posts(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     fake = _Fake()
     row = await _teams_send_message_impl(
-        _runtime(_client(fake)), _auth(), channel_id=_THREAD, content="hello"
+        _runtime(_client(fake), sessionmaker), _auth(), channel_id=_THREAD, content="hello"
     )
     assert (row.conversation_id, row.activity_id) == (_THREAD, "act-1")
     roster = next(r for r in fake.requests if "/members/" in str(r.url))
     assert str(roster.url) == f"{_BASE}/{_CHANNEL}/members/{_CALLER}", "thread → channel roster"
 
 
-async def test_send_message_to_a_setup_conversation_posts_to_its_chat() -> None:
+async def test_send_message_to_a_setup_conversation_posts_to_its_chat(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     fake = _Fake()
     chat = "a:chat-1"
     row = await _teams_send_message_impl(
-        _runtime(_client(fake)), _auth(), channel_id=new_setup_thread_id(chat), content="hi"
+        _runtime(_client(fake), sessionmaker),
+        _auth(),
+        channel_id=new_setup_thread_id(chat),
+        content="hi",
     )
     assert row.conversation_id == chat
     assert all(f"/{chat}/" in str(r.url) for r in fake.requests if "/v3/" in str(r.url))
@@ -227,16 +242,50 @@ async def test_send_message_needs_a_client_and_a_teams_user() -> None:
         )
 
 
-async def test_create_thread_posts_to_the_channel_and_refuses_a_thread_id() -> None:
+async def test_create_thread_posts_to_the_channel_and_refuses_a_thread_id(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     fake = _Fake()
     row = await _teams_create_thread_impl(
-        _runtime(_client(fake)), _auth(), channel_id=_CHANNEL, content="kickoff"
+        _runtime(_client(fake), sessionmaker), _auth(), channel_id=_CHANNEL, content="kickoff"
     )
     assert row.conversation_id == f"{_CHANNEL};messageid=9"
     with pytest.raises(ToolError, match="not into a thread"):
         await _teams_create_thread_impl(
             _runtime(_client(fake)), _auth(), channel_id=_THREAD, content="x"
         )
+
+
+@pytest.mark.parametrize(
+    ("protected", "tool", "target"),
+    [
+        (_CHANNEL, _teams_send_message_impl, _THREAD),
+        (_THREAD, _teams_send_message_impl, _THREAD),
+        (_CHANNEL, _teams_create_thread_impl, _CHANNEL),
+    ],
+    ids=["thread-under-protected-channel", "protected-thread", "create-thread"],
+)
+async def test_a_protected_channel_refuses_the_post_and_nothing_is_sent(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    protected: str,
+    tool: Callable[..., Awaitable[object]],
+    target: str,
+) -> None:
+    """SYS-048: protection covers a channel and every thread under it."""
+    tenant = await make_tenant(db_session, platform="teams", workspace_id=_ENTRA)
+    policy = TenantAccessPolicy(protected_channel_ids=(protected,))
+    await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+    await db_session.commit()
+    fake = _Fake()
+    with pytest.raises(ToolError, match="protected"):
+        await tool(
+            _runtime(_client(fake), sessionmaker),
+            _auth(tenant_id=tenant.id),
+            channel_id=target,
+            content="hi",
+        )
+    assert fake.posts() == [], "a protected channel must receive no post"
 
 
 async def test_teams_caller_reaches_only_teams_tagged_channel_tools(
