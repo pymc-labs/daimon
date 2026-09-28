@@ -54,6 +54,7 @@ from daimon.core.turn.prepare import (
     insert_mapping,
 )
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.termination import TerminationReason, termination_reason
 
 log = structlog.get_logger(__name__)
 
@@ -82,6 +83,11 @@ class RunOutcome:
     mapping_id: uuid.UUID | None
     recovered: bool
     continuity: ContinuityOutcome = ContinuityOutcome()
+
+    @property
+    def termination(self) -> TerminationReason:
+        """How the final attempt ended; the driver sets it on every exit."""
+        return self.state.termination or termination_reason(self.state.error)
 
 
 # MA's rejection when events.send targets a session it has terminated. The id
@@ -128,12 +134,18 @@ class _DeferredFailureLifecycle:
     async def on_interrupt_sent(self, source: InterruptSource) -> None:
         await self.inner.on_interrupt_sent(source)
 
-    async def flush_held_failure(self) -> None:
-        """Replay the withheld failure. Call on every path that does not recover."""
+    async def flush_held_failure(self, termination: TerminationReason | None = None) -> None:
+        """Replay the withheld failure. Call on every path that does not recover.
+
+        `termination` restates how the turn ended when the caller learned more
+        than the attempt did (the user stopped it before recovery ran).
+        """
         if self._held is None:
             return
         state, err = self._held
         self._held = None
+        if termination is not None:
+            state = replace(state, termination=termination)
         await self.inner.on_terminal_failure(state, err)
 
 
@@ -551,9 +563,9 @@ async def run_prepared_turn(
         # Abort recovery and surface the withheld first-attempt failure as
         # the final outcome, same shape as the non-recoverable branch above.
         if cancel.is_set():
-            await first_attempt.flush_held_failure()
+            await first_attempt.flush_held_failure(TerminationReason.RECOVERY_CANCELLED)
             return RunOutcome(
-                state=state,
+                state=replace(state, termination=TerminationReason.RECOVERY_CANCELLED),
                 ma_session_id=ma_session_id,
                 mapping_id=mapping_id,
                 recovered=False,
@@ -703,15 +715,16 @@ async def run_prepared_turn(
                 await mark_dead(session, id=active_mapping_id)
                 await session.commit()
 
+        ceiling_state = TurnState(error=err, termination=TerminationReason.CEILING)
         try:
-            await lifecycle.on_terminal_failure(TurnState(error=err), err)
+            await lifecycle.on_terminal_failure(ceiling_state, err)
         except Exception as render_err:
             # Rendering is delivery, not correctness -- a broken adapter hook
             # must not mask the ceiling error itself.
             log.warning("turn.ceiling_render_failed", error=str(render_err))
 
         return RunOutcome(
-            state=TurnState(error=err),
+            state=ceiling_state,
             ma_session_id=active_session_id,
             mapping_id=active_mapping_id,
             recovered=recovered,

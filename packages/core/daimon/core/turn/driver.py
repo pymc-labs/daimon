@@ -78,6 +78,7 @@ from daimon.core.turn.posture import (
 )
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.termination import TerminationReason, termination_reason
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 
 log = structlog.get_logger(__name__)
@@ -347,13 +348,14 @@ async def run_turn(
             deadline=deadline.isoformat(),
         )
         err = ceiling_error()
+        ceiling_state = TurnState(error=err, termination=TerminationReason.CEILING)
         try:
-            await lifecycle.on_terminal_failure(TurnState(error=err), err)
+            await lifecycle.on_terminal_failure(ceiling_state, err)
         except Exception as render_err:
             # Rendering is delivery, not correctness -- a broken adapter hook
             # must not mask the ceiling error itself.
             log.warning("turn.ceiling_render_failed", session_id=session_id, error=str(render_err))
-        return TurnState(error=err)
+        return ceiling_state
 
 
 async def _pump(
@@ -1058,7 +1060,9 @@ async def _finalize_success_or_error(
                     "feature; routines auto-approve tools."
                 )
         err = TurnError(kind="requires_action", message=message)
-        final_state = dataclasses.replace(final_state, error=err)
+        final_state = dataclasses.replace(
+            final_state, error=err, termination=TerminationReason.REQUIRES_ACTION
+        )
         state_cell[0] = final_state
     if final_state.error is None:
         # #79: an MCP failure the reducer kept out of `error` degrades a turn
@@ -1077,13 +1081,26 @@ async def _finalize_success_or_error(
                 message=degraded_failure_message(final_state.mcp_failures),
                 cause=final_state.mcp_failures[-1],
             )
-            final_state = dataclasses.replace(final_state, error=err)
+            final_state = dataclasses.replace(
+                final_state, error=err, termination=TerminationReason.MCP_DEGRADED_EMPTY
+            )
             state_cell[0] = final_state
         elif final_state.retrying_error is not None and (
             not final_state.content or retries_exhausted
         ):
-            final_state = dataclasses.replace(final_state, error=final_state.retrying_error)
+            final_state = dataclasses.replace(
+                final_state,
+                error=final_state.retrying_error,
+                termination=TerminationReason.RETRYING_UNSETTLED,
+            )
             state_cell[0] = final_state
+    if final_state.termination is None:
+        # The reducer names the ends only it can see (MA terminating the
+        # session); everything else follows from the error, or its absence.
+        final_state = dataclasses.replace(
+            final_state, termination=termination_reason(final_state.error)
+        )
+        state_cell[0] = final_state
     await render_once(final_state)  # guarded final render (§6)
     if final_state.error is not None:
         log.warning(
@@ -1116,7 +1133,12 @@ async def _finalize_connection_lost(
     renders_failed: int,
 ) -> TurnState:
     turn_err = TurnError(kind="connection_lost", message=str(err), cause=err)
-    state_cell[0] = dataclasses.replace(state_cell[0], error=turn_err, stop_reason=None)
+    state_cell[0] = dataclasses.replace(
+        state_cell[0],
+        error=turn_err,
+        stop_reason=None,
+        termination=TerminationReason.CONNECTION_LOST,
+    )
     await render_once(state_cell[0])
     log.warning("turn.reconnect.failed", session_id=session_id, error=str(err))
     log.warning(
@@ -1147,6 +1169,11 @@ async def _finalize_upstream(
         error=turn_err,
         stop_reason=None,  # Clear stale stop_reason -- prevents infinite loops in callers
         rate_limit_until=rate_limit_until or state_cell[0].rate_limit_until,
+        termination=(
+            TerminationReason.RATE_LIMITED
+            if isinstance(err, _anthropic.RateLimitError)
+            else TerminationReason.UPSTREAM
+        ),
     )
     await render_once(state_cell[0])
     log.warning(
@@ -1179,7 +1206,12 @@ async def _finalize_interrupted(
 ) -> TurnState:
     log.info("turn.interrupt.during_reconnect", session_id=session_id, phase=phase)
     turn_err = TurnError(kind="interrupted", message=f"interrupted during {phase}")
-    state_cell[0] = dataclasses.replace(state_cell[0], error=turn_err, stop_reason=None)
+    state_cell[0] = dataclasses.replace(
+        state_cell[0],
+        error=turn_err,
+        stop_reason=None,
+        termination=TerminationReason.INTERRUPTED,
+    )
     await render_once(state_cell[0])
     log.warning(
         "turn.failed",
@@ -1219,7 +1251,9 @@ async def _handle_interrupt_in_consume(
             session_id=session_id,
             timeout_s=interrupt_timeout_s,
         )
-        state_cell[0] = dataclasses.replace(state_cell[0], error=err)
+        state_cell[0] = dataclasses.replace(
+            state_cell[0], error=err, termination=termination_reason(err)
+        )
         await render_once(state_cell[0])
         log.warning(
             "turn.failed",
@@ -1235,6 +1269,7 @@ async def _handle_interrupt_in_consume(
     await lifecycle.on_interrupt_sent("cancel_event")
     log.info("turn.interrupt.acked", session_id=session_id)
     # Ack arrived -- partial state is "clean" (refinements §5).
+    state_cell[0] = dataclasses.replace(state_cell[0], termination=TerminationReason.INTERRUPTED)
     await render_once(state_cell[0])
     log.info(
         "turn.completed",
