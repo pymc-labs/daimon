@@ -368,6 +368,7 @@ class TeamsApp:
 
         lifecycle = new_lifecycle(asyncio.Event(), None)
         cancel = self._cancel_registry[cancel_key][0]
+        # Every attempt's lifecycle; dead-session recovery appends, the last is current.
         holder: list[TeamsTurnLifecycle] = [lifecycle]
         markers: set[uuid.UUID] = set()
         try:
@@ -393,12 +394,14 @@ class TeamsApp:
                     "teams.turn.failed", conversation_id=inbound.conversation_id, exc_info=exc
                 )
                 capture_exception_with_scope(exc)
-                await holder[0].close_with_notice(_FAILED)
+                await holder[-1].close_with_notice(_FAILED)
         finally:
             self._cancel_registry.pop(cancel_key, None)
+            closed = any(each.card_closed for each in holder)
             task = asyncio.current_task()
-            if task is None or task.cancelling() == 0:
-                await self._settle(intent.id, holder[0], markers)
+            # A closed card shows its outcome; the sweep must never overwrite it.
+            if closed or task is None or task.cancelling() == 0:
+                await asyncio.shield(self._settle(intent.id, lifecycle.message_id, closed, markers))
 
     async def _bind_and_run(
         self,
@@ -411,7 +414,7 @@ class TeamsApp:
         new_lifecycle: LifecycleFactory,
     ) -> None:
         deps = self.runtime.turn_deps
-        lifecycle = holder[0]
+        lifecycle = holder[-1]
         deadline = turn_deadline(now=datetime.now(UTC))
         try:
             prepared = await bind_session(
@@ -465,7 +468,7 @@ class TeamsApp:
             # Keep rendering into the card the person is already watching.
             adopted = new_lifecycle(fresh_cancel, lifecycle.message_id)
             adopted.answer_prefix = lifecycle.answer_prefix
-            holder[0] = adopted
+            holder.append(adopted)
             return adopted
 
         async def reseed() -> str:
@@ -487,7 +490,7 @@ class TeamsApp:
         )
         if outcome.mapping_id is not None:
             markers.add(outcome.mapping_id)
-        final = holder[0]
+        final = holder[-1]
         if outcome.continuity.state == "replaced_after_loss":
             kind: Literal["transcript", "history"] = (
                 "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
@@ -507,7 +510,11 @@ class TeamsApp:
             )
 
     async def _settle(
-        self, intent_id: uuid.UUID, lifecycle: TeamsTurnLifecycle, markers: set[uuid.UUID]
+        self,
+        intent_id: uuid.UUID,
+        message_id: str | None,
+        closed: bool,
+        markers: set[uuid.UUID],
     ) -> None:
         """Retire the intent of a closed card and clear the turn markers.
 
@@ -517,9 +524,9 @@ class TeamsApp:
         """
         try:
             async with self.runtime.sessionmaker() as session:
-                if lifecycle.card_closed:
+                if closed:
                     await retire_turn_card_intent(
-                        session, id=intent_id, expected_message_id=lifecycle.message_id
+                        session, id=intent_id, expected_message_id=message_id
                     )
                 for marker_id in markers:
                     await clear_active_turn(session, id=marker_id)

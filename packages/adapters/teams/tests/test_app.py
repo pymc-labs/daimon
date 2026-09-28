@@ -185,6 +185,31 @@ async def test_a_turn_cut_off_by_shutdown_keeps_its_intent_for_the_boot_sweep(
 
 
 @pytest.mark.asyncio
+async def test_shutdown_after_the_answer_still_retires_the_intent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Cut off while overflow chunks send, the delivered answer must not become a restart notice."""
+    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    teams = _app(db_session_factory, FakeSender())
+    answered = asyncio.Event()
+
+    async def _run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
+        await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="ok")]))
+        answered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    with patched_admission(), patch("daimon.core.turn.run.run_turn", side_effect=_run_turn):
+        task = asyncio.create_task(teams._run_turn(_inbound(), TENANT))
+        await answered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert await _open_intents(db_session_factory) == [], "a closed card is not left for the sweep"
+
+
+@pytest.mark.asyncio
 async def test_a_denied_turn_says_why_without_a_card(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
