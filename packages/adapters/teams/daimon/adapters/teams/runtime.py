@@ -28,7 +28,7 @@ class TeamsRuntime:
     anthropic: AsyncAnthropic
     sessionmaker: async_sessionmaker[AsyncSession]
     billing_config: BillingConfig | None
-    # File downloads and uploads. Redirects stay off: the adapter checks every hop's host.
+    # Outbound HTTP outside the SDK. Redirects stay off: callers check every hop.
     http_client: httpx.AsyncClient
     resolver_cache: ResolverCache
     turn_deps: TurnDeps

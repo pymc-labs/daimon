@@ -216,7 +216,7 @@ def build_teams_runtime(
 ) -> TeamsRuntime:
     """A runtime over the test DB and a fake MA transport, with real turn deps.
 
-    The file HTTP client never reaches the network: it answers 404 unless given.
+    Outbound HTTP never reaches the network: it answers 404 unless given.
     """
     settings = MagicMock()
     settings.teams = teams or teams_settings()

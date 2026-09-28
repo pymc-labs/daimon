@@ -52,4 +52,4 @@ async def test_help_command_replies_with_every_registered_command(
 
     card = json.dumps(teams_api_fake.activity_requests[-1].body)
     listed = [name for name in COMMAND_HELP if f'"title": "{name}"' in card]
-    assert set(listed) >= {"new", "routines", "memory", "help"}, "the wired commands are listed"
+    assert set(listed) == set(COMMAND_HELP) - {"setup"}, "every wired command is listed"
