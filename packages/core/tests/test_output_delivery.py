@@ -16,8 +16,10 @@ import pytest
 from anthropic.types.beta import FileMetadata
 from daimon.core.output_delivery import (
     DeliverableFile,
+    OutputDeliveryDeferred,
     OutputPostingUnavailable,
     SkippedFile,
+    render_oversize_notice,
     sweep_session_outputs,
 )
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
@@ -598,6 +600,73 @@ async def test_sweep_continues_when_post_fails_for_one_file() -> None:
     assert deletes == ["file_good"], (
         "the failed file must stay listed; only the posted file is deleted"
     )
+
+
+async def test_sweep_leaves_deferred_file_listed_without_counting_it() -> None:
+    """A poster that defers (a consent prompt) keeps the file listed for the
+    later step to delete, and the sweep carries on with the next file."""
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    deletes: list[str] = []
+
+    def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        return list_response(
+            [
+                FileMetadata(
+                    id="file_offered",
+                    created_at=NOW,
+                    filename="offered.txt",
+                    mime_type="text/plain",
+                    size_bytes=3,
+                    type="file",
+                    downloadable=True,
+                ).model_dump(mode="json"),
+                FileMetadata(
+                    id="file_posted",
+                    created_at=NOW,
+                    filename="posted.txt",
+                    mime_type="text/plain",
+                    size_bytes=4,
+                    type="file",
+                    downloadable=True,
+                ).model_dump(mode="json"),
+            ]
+        )
+
+    def on_delete(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        deletes.append(match.group(1))
+        return httpx.Response(200, json={"id": match.group(1), "type": "file_deleted"})
+
+    router = MARouter()
+    router.add("GET", r"/v1/files", on_list)
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda request, match: httpx.Response(200, content=b"txt"),
+    )
+    router.add("DELETE", r"/v1/files/([^/]+)", on_delete)
+    client = build_fake_anthropic(router.dispatch)
+
+    async def post(file: DeliverableFile) -> None:
+        if file.file_id == "file_offered":
+            raise OutputDeliveryDeferred(file.file_id)
+
+    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+
+    assert count == 1, "a deferred file is not counted as posted"
+    assert deletes == ["file_posted"], "the deferred file must stay listed"
+
+
+def test_oversize_notice_names_the_file_and_the_limit() -> None:
+    """The notice sanitizes the agent-supplied name and quotes both sizes."""
+    notice = render_oversize_notice(
+        SkippedFile(file_id="file_big", filename="big report.csv", size_bytes=25 * 1024 * 1024)
+    )
+    assert notice == (
+        "I couldn't attach `big_report.csv` — it is 25.0 MiB, over the 20 MiB delivery limit."
+    ), "notice text"
 
 
 async def test_sweep_aborts_and_deletes_nothing_when_posting_unavailable() -> None:
