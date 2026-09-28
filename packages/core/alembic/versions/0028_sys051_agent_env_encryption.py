@@ -14,7 +14,7 @@ from daimon.core.github_credentials import build_multifernet
 from sqlalchemy.engine import Connection
 
 revision: str = "0028_agent_env_encryption"
-down_revision: str | None = "0028_sys074_routine_catch_up"
+down_revision: str | None = "0029_sys047_access_policies"
 branch_labels: str | None = None
 depends_on: str | None = None
 
