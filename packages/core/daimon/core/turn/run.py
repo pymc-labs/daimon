@@ -43,7 +43,13 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn
-from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
+from daimon.core.turn.lifecycle import (
+    Acknowledgment,
+    InterruptSource,
+    ReconnectReason,
+    TurnLifecycle,
+    acknowledge,
+)
 from daimon.core.turn.posture import Billed
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
@@ -112,6 +118,9 @@ class _DeferredFailureLifecycle:
 
     inner: TurnLifecycle
     _held: tuple[TurnState, Exception] | None = None
+
+    async def on_acknowledgment(self, phase: Acknowledgment) -> None:
+        await acknowledge(self.inner, phase)
 
     async def on_render(self, state: TurnState) -> None:
         await self.inner.on_render(state)

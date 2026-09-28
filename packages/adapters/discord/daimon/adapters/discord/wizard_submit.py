@@ -614,7 +614,7 @@ async def run_wizard_submit_turn(
                 await retire_terminal_turn_card(
                     bot.runtime.sessionmaker,
                     intent_id=turn_card_intent.id,
-                    expected_message_id=lifecycle_holder[0].final_message_id,
+                    expected_message_id=lifecycle_holder[0].card_message_id,
                     no_post_confirmed=not lifecycle_holder[0].first_post_attempted,
                 )
 

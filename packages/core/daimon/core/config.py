@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import uuid
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -817,6 +818,16 @@ class ArtifactsSettings(BaseModel):
 
 
 class Settings(BaseSettings):
+    completion_pings: dict[uuid.UUID, bool] = Field(
+        default_factory=dict[uuid.UUID, bool],
+        description=(
+            "Per-tenant completion notification policy, keyed by tenant UUID. "
+            "True enables accepted/done reactions and posts the final answer as a fresh reply "
+            "mentioning only the requester "
+            "on Discord and Slack. Missing/false preserves in-place delivery. "
+            "Configure DAIMON_COMPLETION_PINGS as a JSON object."
+        ),
+    )
     database: DatabaseSettings
     anthropic: AnthropicSettings
     privacy_policy_url: HttpUrl = Field(

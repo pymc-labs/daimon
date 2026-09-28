@@ -70,9 +70,12 @@ call from inside the pump:**
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
+import structlog
 from anthropic.types import RawMessageStreamEvent
 from daimon.core.turn.state import TurnState
 
@@ -98,3 +101,24 @@ class TurnLifecycle(Protocol):
 
     async def on_interrupt_sent(self, source: InterruptSource) -> None:
         return None
+
+
+Acknowledgment = Literal["accepted", "done"]
+
+
+async def acknowledge(lifecycle: TurnLifecycle, phase: Acknowledgment) -> None:
+    """Optional, best-effort platform signal. Missing hooks safely do nothing.
+
+    Kept outside the structural TurnLifecycle contract so existing third-party
+    adapters need no changes. Network failures must never fail or stall a turn.
+    """
+    hook = getattr(lifecycle, "on_acknowledgment", None)
+    if hook is None:
+        return
+    try:
+        async with asyncio.timeout(3):
+            await cast(Callable[[Acknowledgment], Awaitable[None]], hook)(phase)
+    except Exception as exc:
+        structlog.get_logger(__name__).debug(
+            "turn.acknowledgment_failed", phase=phase, error_type=type(exc).__name__
+        )

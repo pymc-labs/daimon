@@ -52,12 +52,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 )
 from daimon.adapters.slack.blockkit import EmbedEvent, State, TurnPhase, to_blocks, update
 from daimon.adapters.slack.feedback import build_feedback_actions_block
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
+from daimon.adapters.slack.mrkdwn import escape_mrkdwn, escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.degraded import render_degraded_notice
-from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
+from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
@@ -143,10 +143,15 @@ class SlackTurnLifecycle:
         deregister: Callable[[str], None],
         register_pending: Callable[[str, asyncio.Event, str], None] | None = None,
         deregister_pending: Callable[[str], None] | None = None,
+        trigger_ts: str | None = None,
+        notify_on_completion: bool = False,
         clock: Callable[[], float] = time.monotonic,
         adopt_status_ts: str | None = None,
         intent_id: UUID | None = None,
     ) -> None:
+        self._trigger_ts = trigger_ts
+        self._notify_on_completion = notify_on_completion
+        self._answer_ts: str | None = None
         self._client = client
         self._channel = channel
         self._thread_ts = thread_ts
@@ -191,6 +196,24 @@ class SlackTurnLifecycle:
         # kept so a late notice can be edited in above them exactly once.
         self._revealed_first_chunk: str | None = None
         self._revealed_first_blocks: list[dict[str, Any]] | None = None
+
+    async def on_acknowledgment(self, phase: Acknowledgment) -> None:
+        # Admission already adds eyes; only opted-in completion replaces it.
+        if not self._notify_on_completion or phase == "accepted":
+            return
+        if self._trigger_ts is None or self.final_ts is None:
+            return
+        await self._client.reactions_add(  # pyright: ignore[reportUnknownMemberType]
+            channel=self._channel,
+            timestamp=self._trigger_ts,
+            name="white_check_mark",
+        )
+        if phase == "done":
+            await self._client.reactions_remove(  # pyright: ignore[reportUnknownMemberType]
+                channel=self._channel,
+                timestamp=self._trigger_ts,
+                name="eyes",
+            )
 
     @property
     def status_ts(self) -> str | None:
@@ -443,7 +466,11 @@ class SlackTurnLifecycle:
             degraded_notice = render_degraded_notice(state.mcp_failures)
             if degraded_notice is not None:
                 final_text = f"{final_text}\n\n{degraded_notice}"
-            chunks = split_for_slack_safe(escape_mrkdwn_preserving_mentions(final_text))
+            if self._notify_on_completion and self._author_id:
+                escaped = f"<@{self._author_id}>\n{escape_mrkdwn(final_text)}"
+            else:
+                escaped = escape_mrkdwn_preserving_mentions(final_text)
+            chunks = split_for_slack_safe(escaped)
             first_chunk = chunks[0]
             # First chunk + the cost/usage footer replace the status message
             # in place; the terminal footer carries elapsed/tokens/cost and drops
@@ -457,12 +484,24 @@ class SlackTurnLifecycle:
             ]
             if len(chunks) == 1:
                 first_blocks.append(build_feedback_actions_block())
-            await self._post_or_update(first_blocks, _notification_text(first_chunk))
+            if self._notify_on_completion:
+                await self._flush_terminal()
+                response = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=self._channel,
+                    thread_ts=self._thread_ts,
+                    blocks=first_blocks,
+                    text=_notification_text(first_chunk),
+                    link_names=False,
+                )
+                self._answer_ts = cast(str, response["ts"])
+            else:
+                await self._post_or_update(first_blocks, _notification_text(first_chunk))
+                self._answer_ts = self._status_ts
             self._revealed_first_chunk = first_chunk
             self._revealed_first_blocks = first_blocks
             surface_replaced = True
             assert self._status_ts is not None  # narrowing — _post_or_update always sets it
-            current_ts = self._status_ts
+            current_ts = self._answer_ts
 
             # Overflow chunks posted as new thread replies.
             for i, chunk in enumerate(chunks[1:], start=2):
@@ -515,7 +554,15 @@ class SlackTurnLifecycle:
         blocks = list(self._revealed_first_blocks)
         blocks[0] = {"type": "markdown", "text": updated}
         try:
-            await self._post_or_update(blocks, _notification_text(updated))
+            if self._notify_on_completion and self._answer_ts is not None:
+                await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+                    channel=self._channel,
+                    ts=self._answer_ts,
+                    blocks=blocks,
+                    text=_notification_text(updated),
+                )
+            else:
+                await self._post_or_update(blocks, _notification_text(updated))
         except _SLACK_SEND_ERRORS:
             log.warning("turn.answer_prefix.edit_failed", exc_info=True)
             return False

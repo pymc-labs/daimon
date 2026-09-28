@@ -327,3 +327,18 @@ or a deployment-provided Google MCP server.
 Existing static-bearer vault credentials are upgraded in place on the next
 session creation. Credential metadata records the identity version so subsequent
 creates leave the token stable; unrelated and OAuth credentials are preserved.
+### Completion signals
+
+The core driver calls an optional `on_acknowledgment` lifecycle hook with
+`accepted` after the initial event send and `done` after successful answer
+delivery. Missing hooks are no-ops; reaction failures are bounded and do not
+fail the turn. Opted-in Discord and Slack tenants react with eyes, then a check
+mark on success. Unprompted Discord turns stay silent; failures and cancellation
+do not get a completion marker. Continuations without a trigger message skip
+reactions.
+
+Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
+`{"00000000-0000-0000-0000-000000000001": true}`, to deliver that tenant's final
+answer as a fresh thread reply mentioning only the requester. Missing or false
+entries keep the existing in-place answer and reactions (none on Discord; Slack keeps its admission eyes). Slack admission adds eyes once; the lifecycle only replaces it on opted-in completion. Recovery lifecycles retain this policy;
+continuity notices and feedback target the new answer. Other adapters need no changes.

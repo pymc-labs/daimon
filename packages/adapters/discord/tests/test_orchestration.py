@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic as _anthropic
 import discord
+import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
@@ -246,6 +247,7 @@ class TestNewThreadCreation:
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    @pytest.mark.parametrize("completion_enabled", [False, True])
     async def test_mention_in_channel_creates_thread_and_runs_turn(
         self,
         mock_resolve: AsyncMock,
@@ -253,6 +255,7 @@ class TestNewThreadCreation:
         mock_run_turn: AsyncMock,
         mock_find_env: AsyncMock,
         mock_find_agent: AsyncMock,
+        completion_enabled: bool,
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
@@ -265,14 +268,37 @@ class TestNewThreadCreation:
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
+        runtime.settings.completion_pings = {tenant.id: True} if completion_enabled else {}
         bot = make_bot(runtime)
         message = _make_channel_message()
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9999
-        mock_thread.send = AsyncMock()
+        mock_thread.send = AsyncMock(
+            side_effect=[
+                types.SimpleNamespace(id=1000, edit=AsyncMock()),
+                types.SimpleNamespace(id=1001, edit=AsyncMock()),
+            ]
+        )
         message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
 
+        from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+        from daimon.core.turn.lifecycle import acknowledge
+        from daimon.core.turn.state import TextBlock, TurnState
+
+        async def finish_turn(*, lifecycle, **kwargs):
+            await acknowledge(lifecycle, "accepted")
+            state = TurnState(content=[TextBlock(kind="text", text="Done")])
+            await lifecycle.on_terminal_success(state)
+            await acknowledge(lifecycle, "done")
+            return state
+
+        mock_run_turn.side_effect = finish_turn
         await bot.on_message(message)
+        assert mock_thread.send.await_count == (2 if completion_enabled else 1)
+        if not completion_enabled:
+            message.add_reaction.assert_not_awaited()
+        async with db_session_factory() as session:
+            assert not await list_recoverable_turn_card_intents(session, platform="discord")
 
         message.create_thread.assert_called_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
             name="Chat with test-agent",

@@ -935,6 +935,7 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
         await s.commit()
 
     app, _ = make_orchestrate_app(db_session_factory)
+    app.runtime.settings.completion_pings = {}
 
     async def inspect_committed_intent_before_response(url: URL, **kwargs: Any) -> CallbackResult:
         del url
@@ -988,7 +989,23 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
                 TextBlock(kind="text", text="Hello!"),
             ]
         )
+        from daimon.core.turn.lifecycle import acknowledge
+
+        await acknowledge(lifecycle, "accepted")
         await lifecycle.on_terminal_success(state)
+        await acknowledge(lifecycle, "done")
+        posts = fake_slack_web_client.mock.requests[
+            ("POST", URL("https://slack.com/api/chat.postMessage"))
+        ]
+        assert len(posts) == 1, "missing tenant policy keeps the answer on its original card"
+        reactions = [
+            str(url)
+            for method, url in fake_slack_web_client.mock.requests
+            if "reactions." in str(url)
+        ]
+        assert len(reactions) == 1
+        assert "reactions.add" in reactions[0] and "name=eyes" in reactions[0]
+
         return state
 
     event: dict[str, Any] = {

@@ -151,6 +151,8 @@ def _make_lifecycle(
     model_id: str = "claude-sonnet-4-6",
     agent_name: str = "test-agent",
     adopt_status_ts: str | None = None,
+    notify_on_completion: bool = False,
+    trigger_ts: str | None = None,
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
 
@@ -170,6 +172,8 @@ def _make_lifecycle(
         deregistered.append(ts)
 
     lc = SlackTurnLifecycle(
+        notify_on_completion=notify_on_completion,
+        trigger_ts=trigger_ts,
         client=fake.client,
         channel="C_TEST",
         thread_ts="1700000000.000000",
@@ -1257,3 +1261,43 @@ async def test_tool_only_turn_posts_the_failed_mcp_server_notice_on_its_own(
     post_calls = fake_slack_web_client.mock.requests.get(("POST", _POST_URL), [])
     assert len(post_calls) == initial_posts + 1, "exactly one notice is posted"
     assert "notion" in post_calls[-1].kwargs["json"]["text"], "the dropped server is named"
+
+
+async def test_completion_ping_is_fresh_and_only_mentions_requester(fake_slack_web_client):
+    fake = fake_slack_web_client
+    lifecycle, _, _, _ = _make_lifecycle(fake, notify_on_completion=True)
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(
+        TurnState(content=[TextBlock(kind="text", text="Done <@U_OTHER> <!channel>")])
+    )
+    calls = fake.mock.requests[("POST", _POST_URL)]
+    assert len(calls) == 2
+    body = calls[-1].kwargs["json"]
+    assert "&lt;@U_OTHER&gt;" in body["blocks"][0]["text"]
+    assert "&lt;!channel&gt;" in body["blocks"][0]["text"]
+    assert body["blocks"][0]["text"].startswith("<@")
+    assert lifecycle.final_ts is not None
+    assert await lifecycle.prepend_revealed_answer("Recovered files.")
+    assert _last_update_blocks(fake)[0]["text"].startswith("Recovered files.")
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_reactions_target_trigger_not_thread_root(fake_slack_web_client, enabled):
+    import re
+
+    fake = fake_slack_web_client
+    fake.mock.post(re.compile(r"https://slack\.com/api/reactions\.remove.*"), payload={"ok": True})
+    lifecycle, _, _, _ = _make_lifecycle(
+        fake, trigger_ts="1700000000.000999", notify_on_completion=enabled
+    )
+    # The app adds eyes at admission, before constructing the lifecycle.
+    await fake.client.reactions_add(channel="C_TEST", timestamp="1700000000.000999", name="eyes")
+    await lifecycle.on_acknowledgment("accepted")
+    await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
+    await lifecycle.on_acknowledgment("done")
+    urls = [str(url) for method, url in fake.mock.requests if "reactions." in str(url)]
+    assert len(urls) == (3 if enabled else 1)
+    assert all("timestamp=1700000000.000999" in url for url in urls)
+    assert any("name=eyes" in url and "reactions.add" in url for url in urls)
+    assert any("name=white_check_mark" in url for url in urls) is enabled
+    assert any("reactions.remove" in url for url in urls) is enabled
