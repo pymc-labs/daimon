@@ -12,9 +12,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic as _anthropic
 import discord
+import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -26,6 +28,7 @@ from daimon.core.session_snapshot import (
     snapshot_from_created_session,
 )
 from daimon.core.stores import tenant_ledger
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing import (
     DEFAULT_MODEL_ID,
@@ -246,6 +249,7 @@ class TestNewThreadCreation:
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    @pytest.mark.parametrize("completion_enabled", [False, True])
     async def test_mention_in_channel_creates_thread_and_runs_turn(
         self,
         mock_resolve: AsyncMock,
@@ -253,6 +257,7 @@ class TestNewThreadCreation:
         mock_run_turn: AsyncMock,
         mock_find_env: AsyncMock,
         mock_find_agent: AsyncMock,
+        completion_enabled: bool,
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
@@ -265,14 +270,37 @@ class TestNewThreadCreation:
         mock_find_env.return_value = "env_test"
 
         runtime = _make_runtime(tenant.id, db_session_factory)
+        runtime.settings.completion_pings = {tenant.id: True} if completion_enabled else {}
         bot = make_bot(runtime)
         message = _make_channel_message()
         mock_thread = MagicMock(spec=discord.Thread)
         mock_thread.id = 9999
-        mock_thread.send = AsyncMock()
+        mock_thread.send = AsyncMock(
+            side_effect=[
+                types.SimpleNamespace(id=1000, edit=AsyncMock()),
+                types.SimpleNamespace(id=1001, edit=AsyncMock()),
+            ]
+        )
         message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
 
+        from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+        from daimon.core.turn.lifecycle import acknowledge
+        from daimon.core.turn.state import TextBlock, TurnState
+
+        async def finish_turn(*, lifecycle, **kwargs):
+            await acknowledge(lifecycle, "accepted")
+            state = TurnState(content=[TextBlock(kind="text", text="Done")])
+            await lifecycle.on_terminal_success(state)
+            await acknowledge(lifecycle, "done")
+            return state
+
+        mock_run_turn.side_effect = finish_turn
         await bot.on_message(message)
+        assert mock_thread.send.await_count == (2 if completion_enabled else 1)
+        if not completion_enabled:
+            message.add_reaction.assert_not_awaited()
+        async with db_session_factory() as session:
+            assert not await list_recoverable_turn_card_intents(session, platform="discord")
 
         message.create_thread.assert_called_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
             name="Chat with test-agent",
@@ -874,7 +902,10 @@ class TestSetupHook:
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 7, "setup_hook should add exactly 7 Cogs"
+        from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+
+        assert len(add_cog_calls) == 8, "setup_hook should add exactly 8 Cogs"
+        assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
         mock_help_cog.assert_called_once_with(bot)
         mock_agent_setup_cog.assert_called_once_with(bot)
         mock_routines_cog.assert_called_once_with(bot)
@@ -882,6 +913,79 @@ class TestSetupHook:
         mock_privacy_cog.assert_called_once_with(bot)
         mock_memory_cog.assert_called_once_with(bot)
         mock_feedback_reaction_cog.assert_called_once_with(bot)
+
+
+class TestInvokerAccessPolicy:
+    """SYS-047: the tenant's invoker allowlist refuses at admission with a notice."""
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_mention_from_a_user_outside_the_allowlist_is_refused_with_a_notice(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await set_access_policy(
+            db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_user_ids=("999",))
+        )
+        await db_session.commit()
+
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message(author_id=111)
+
+        await bot.on_message(message)
+
+        mock_resolve.assert_not_called()
+        mock_find_agent.assert_not_called()
+        mock_create_session.assert_not_called()
+        mock_run_turn.assert_not_called()
+        message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        assert "can start a turn" in sent_text, sent_text
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_mention_from_an_allowlisted_user_passes_the_policy(
+        self,
+        mock_resolve: AsyncMock,
+        mock_is_over_cap: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await set_access_policy(
+            db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_user_ids=("111",))
+        )
+        await db_session.commit()
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_is_over_cap.return_value = True
+
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message(author_id=111)
+
+        await bot.on_message(message)
+
+        # Past the policy: the config cascade ran, and the cap gate is what stopped it.
+        mock_resolve.assert_awaited_once()
+        mock_is_over_cap.assert_awaited_once()
 
 
 class TestBillingAdmissionGate:

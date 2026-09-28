@@ -199,7 +199,7 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
             message = await channel.fetch_message(int(message_id))
         except discord.NotFound as e:
             raise ToolError("message not found") from e
-        return _to_message_row(message)
+        return _to_message_row(message).model_copy(update={"trust": "untrusted"})
 
 
 # ---------------------------------------------------------------------------

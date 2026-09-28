@@ -2,8 +2,8 @@
 
 Discord captures votes through seeded reactions; Slack captures them through
 buttons on the final answer message, chosen specifically so the bot token
-never needs the ``reactions:read`` and ``im:write`` scopes (adding either
-forces every installed workspace through re-authorization). Asserting both
+does not need ``reactions:read``. Agent-initiated DMs separately require
+``im:write`` and re-authorization. Asserting both
 halves here, rather than merely documenting them, makes drift fail loudly:
 a scope quietly growing without a reason, or the Slack surface disappearing
 while the core still claims both platforms are covered.
@@ -20,9 +20,9 @@ from daimon.core.slack_oauth import SLACK_BOT_SCOPES
 
 
 def test_slack_bot_scopes_still_lack_the_reaction_feedback_scopes() -> None:
-    assert "reactions:read" not in SLACK_BOT_SCOPES and "im:write" not in SLACK_BOT_SCOPES, (
+    assert "reactions:read" not in SLACK_BOT_SCOPES, (
         "Slack feedback deliberately uses buttons instead of reactions so the bot token "
-        "never needs reactions:read or im:write (either scope forces every installed "
+        "never needs reactions:read (adding it forces every installed "
         "workspace to re-authorize); if a scope grew, either the button path was replaced "
         "on purpose -- update this record -- or the scope is an accident and must go"
     )

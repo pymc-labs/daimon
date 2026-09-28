@@ -49,7 +49,8 @@ def build_multifernet(keys: tuple[str, ...]) -> MultiFernet:
     if not keys:
         raise ValueError(
             "settings.crypto.keys is empty — at least one Fernet key is required "
-            "for GitHub OAuth. Generate one with `cryptography.fernet.Fernet.generate_key()`."
+            "for credential and agent environment encryption; configure DAIMON_CRYPTO__KEYS. "
+            "Generate one with `cryptography.fernet.Fernet.generate_key()`."
         )
     return MultiFernet([Fernet(k.encode("utf-8")) for k in keys])
 

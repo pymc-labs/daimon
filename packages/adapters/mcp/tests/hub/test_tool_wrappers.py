@@ -11,9 +11,11 @@ import httpx
 import pytest
 from daimon.adapters.mcp.hub.app import build_hub_app
 from daimon.adapters.mcp.hub.claims import encode_hub_claims
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing import AGENT_ID, build_turn_router, ma_session
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
 from daimon.testing.ma import build_fake_anthropic, list_response, session_response
@@ -48,6 +50,7 @@ async def _hub_app(
     db_session_factory: async_sessionmaker[AsyncSession],
     *,
     funded: bool = True,
+    policy: TenantAccessPolicy | None = None,
 ) -> tuple[Any, str, HubTenant]:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     principal = await make_platform_principal(
@@ -55,6 +58,8 @@ async def _hub_app(
     )
     if funded:
         await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    if policy is not None:
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
     await db_session.commit()
 
     hub_tenant = HubTenant(
@@ -340,3 +345,25 @@ async def test_billed_tools_are_refused_before_the_turn_when_the_workspace_has_n
         f"{tool} must be refused for a workspace with no credit, got {payload!r}"
     )
     assert "credit is depleted" in str(payload.get("content")), f"got {payload!r}"
+
+
+@pytest.mark.parametrize("tool", ["ask", "start_turn", "continue_turn"])
+async def test_billed_tools_are_refused_for_a_member_outside_the_invoker_allowlist(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tool: str
+) -> None:
+    """SYS-047: logging into the hub doesn't get round the tenant's allowlist."""
+    mcp, daimon_id, _hub_tenant = await _hub_app(
+        db_session, db_session_factory, policy=TenantAccessPolicy(invoker_user_ids=("staff",))
+    )
+    app = mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
+    arguments: dict[str, str] = {"daimon_id": daimon_id, "message": "hi"}
+    if tool == "continue_turn":
+        arguments["handle"] = _HANDLE
+
+    result = await _call_tool(app, "/mcp", _TOKEN, name=tool, arguments=arguments)
+
+    payload = result.get("result", result)
+    assert isinstance(payload, dict) and payload.get("isError"), (
+        f"{tool} must be refused for a caller outside the allowlist, got {payload!r}"
+    )
+    assert "list of people" in str(payload.get("content")), f"got {payload!r}"

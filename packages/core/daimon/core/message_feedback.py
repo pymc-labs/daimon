@@ -33,10 +33,11 @@ workspace through a re-authorization flow. Slack instead renders vote
 buttons on the final answer message itself
 (`daimon.adapters.slack.feedback`) -- a button click is a block_actions
 payload whose `trigger_id` opens the feedback modal directly, so neither
-scope is needed and `vote_for_reaction`/`is_bot_authored` below have no
+scope is needed for feedback and `vote_for_reaction`/`is_bot_authored` below have no
 Slack callers. `tests/parity/test_message_feedback_discord_only.py` is the
-executable record of that split -- it fails if either scope quietly appears
-or the Slack button surface disappears.
+executable record of that split -- it fails if reactions:read quietly appears
+or the Slack button surface disappears. Agent-initiated direct messages now
+require im:write separately; that scope does not change feedback capture.
 """
 
 from __future__ import annotations

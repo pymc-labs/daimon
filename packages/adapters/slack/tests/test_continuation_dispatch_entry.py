@@ -840,3 +840,67 @@ async def test_mention_queued_during_a_continuation_dispatch_gets_its_own_turn(
     assert call.kwargs["team_id"] == "T_CONT_ENTRY_MENTION"
     assert _THREAD_ID not in app._pending  # pyright: ignore[reportPrivateUsage]
     assert _THREAD_ID not in app._processing  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_timer_set_with_another_agent_is_refused_before_bind(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The thread now resolves to `_AGENT_ID`; the timer was set with a different agent.
+
+    `_run_continuation_turn` must refuse after admission and before binding or
+    running anything. bind_session and run_prepared_turn are spies around the
+    real functions, not replacements.
+    """
+    from daimon.adapters.slack import app as app_module
+    from daimon.core.continuity.continuation import ResponderChanged
+
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_TIMER_REROUTED")
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("100.00"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    requester = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
+    )
+    await db_session.commit()
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
+    row = _make_continuation_row(
+        tenant_id=tenant.id, account_id=requester.account_id, reason="timer"
+    ).model_copy(update={"target_ma_agent_id": "agent_set_the_timer", "target_name": "old-agent"})
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_admin_status",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as resolve_agent,
+        patch(
+            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
+        ) as resolve_env,
+        patch.object(app_module, "bind_session", side_effect=app_module.bind_session) as bind,
+        patch.object(
+            app_module, "run_prepared_turn", side_effect=app_module.run_prepared_turn
+        ) as run_turn,
+        pytest.raises(ResponderChanged) as refused,
+    ):
+        resolve_agent.return_value = _AGENT_ID
+        resolve_env.return_value = _ENV_ID
+        await app._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
+            row,
+            "check the build",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant.id,
+            channel=_CHANNEL,
+            thread_id=_THREAD_ID,
+        )
+
+    bind.assert_not_called()
+    run_turn.assert_not_called()
+    assert "set with old-agent" in refused.value.message
+    assert "uat-agent answers in this thread now" in refused.value.message

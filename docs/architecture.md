@@ -102,22 +102,73 @@ config). The order is load-bearing and documented as such in the module:
 1. Resolve the platform user to an `accounts` row, via
    `get_or_create_platform_principal` in
    `packages/core/daimon/core/stores/identity.py`.
-2. Resolve config through the cascade
+2. Invoker policy — the tenant's access policy (below) may restrict who can
+   start a turn. A refused user raises `AdmissionDenied("invoker_not_allowed")`
+   before the cascade, so they learn nothing about the tenant's configuration
+   and no MA call is made.
+3. Resolve config through the cascade
    `thread → channel → tenant → deployment`, in
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are
    named by `ConfigTier` in `packages/core/daimon/core/scope.py`; the bottom
    one comes from `defaults/config.yaml`, see [defaults.md](defaults.md).
-3. Raise `MissingTurnConfigError` if no agent or environment resolved — before
+4. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a
    billing one.
-4. Resolve the agent and environment to live MA ids via
+5. Resolve the agent and environment to live MA ids via
    `packages/core/daimon/core/ma_resolver.py`, which self-heals by re-running
    defaults reconciliation when a tag no longer resolves, and rejects an agent
    whose `archived_at` is set.
-5. Balance gate — `tenant_balance.is_over_balance`.
-6. Monthly cap gate — `billing.is_over_cap`.
+6. Balance gate — `tenant_balance.is_over_balance`.
+7. Monthly cap gate — `billing.is_over_cap`.
 
-Either gate raises `AdmissionDenied`. See [billing.md](billing.md).
+The policy, balance and cap gates each raise `AdmissionDenied` with a
+reason literal; each adapter renders its own notice. See [billing.md](billing.md).
+
+**Tenant access policy — `packages/core/daimon/core/access_policy.py`.** One
+`TenantAccessPolicy` per tenant, stored as JSON in `tenant_access_policies`
+(`packages/core/daimon/core/stores/access_policy.py`). A tenant with no row
+gets the open default, so nothing changes until a policy is written; a present
+row that is not a valid policy object (JSON `null` included) raises
+`AccessPolicyUnreadable` and callers refuse rather than fall open. Unknown
+fields are rejected too, so rolling back past a release that added a field
+locks the tenant out until the row is rewritten.
+
+Who counts as an admin differs by path. `admit()` trusts only the live role the
+adapter passes; no role means non-admin. The MCP turn tools (`ask`,
+`start_turn`, `continue_turn`, on the hub and per agent, plus billed media)
+and routine fires have no live platform role, so they use the account's
+stored role, refreshed on every chat turn. The operator path
+(`platform_user_id` unset: CLI and internal tokens) is not a platform member
+and skips the policy, as it skips billing. Ids are the platform's own (Discord snowflakes, Slack ids):
+
+| Field | Empty means | Enforced by |
+| --- | --- | --- |
+| `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
+| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | not yet |
+| `sealed_channel_ids` | nothing is sealed | `admit()` sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
+| `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
+
+A sealed channel's content is readable only from a turn inside it (the channel
+or a thread under it). Operators edit it with the CLI:
+
+```bash
+daimon tenants access-policy get discord GUILD_ID [--json]
+daimon tenants access-policy set discord GUILD_ID --invoker USER_ID --invoker USER_ID \
+    --protected-channel CHANNEL_ID --protected-category CATEGORY_ID \
+    --sealed-channel CHANNEL_ID [--dm-memory-read-only]
+daimon tenants access-policy set discord GUILD_ID --clear   # back to open
+```
+
+Each flag given replaces that whole field (repeat it for several ids);
+fields not given keep their stored value, including concurrent CLI edits.
+Edits and clears lock the tenant row for their transaction, even when no policy
+row exists yet. Every supplied id is validated before writing: Discord ids are
+15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with
+`C`, `G` or `D`, followed by uppercase letters or digits. CLI ids must be
+non-blank. Invalid input names the field and value and writes nothing.
+To empty a single field, `--clear`
+and set the rest again. `set` refuses to overwrite an unreadable row, so
+`--clear` is also the way out of that state. There is no setup-panel editor.
 
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA
@@ -167,6 +218,83 @@ Every call must declare a billing posture, from
 `packages/core/daimon/core/turn/posture.py`: `Billed` meters each
 `span.model_request_end` event through the bound recorder, `BillingExempt`
 meters nothing and logs why.
+
+It also declares a tool-confirmation posture: what the driver does when MA
+pauses the session on a `requires_action` idle. `RequireApproval` ends the
+turn, `AutoApprove` allows every blocked call, and `PolicyApproval` asks a
+decider per call and sends each answer on the same stream. The decider comes
+from `packages/core/daimon/core/turn/approvals.py`, over the pure read/write
+model in `packages/core/daimon/core/tool_safety.py`. With
+`DAIMON_TOOL_SAFETY__ENABLED` on, `create_session` sends every attached
+third-party toolset as `always_ask` (a per-session override, so it holds
+however the agent was written); reads then run, a write in a routine is
+refused unless the operator allowed it there, and a write in chat waits for
+the requester to press Approve on a confirmation card. The card is a platform
+hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
+(`packages/core/daimon/core/confirmation.py`), Discord and Slack each draw the
+shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
+and an adapter that passes no hook gets `no_confirmation_surface`, which
+refuses the write. Plugins can build their own `ConfirmationPrompt` and call
+the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
+their `operation_policy` checks), but only as the deployment's verified
+endpoint: with the policy on, `create_session` re-points a `daimon-mcp` entry
+naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
+reserved name is gated like any other server. A pending card is owned by the
+turn: stopping the turn, a replayed pause, or the turn ceiling cancels the
+decision, refuses the call and retires the card, so an Approve that arrives
+after Stop never runs anything. That cleanup is best effort within a few
+seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
+answering cannot hold a turn past its ceiling or a Stop.
+
+### How a turn ended
+
+`packages/core/daimon/core/turn/termination.py` defines `TerminationReason`,
+one closed enum for every way a turn can end: it completed, the user stopped
+it, the stream or MA failed in one of several named ways, the ceiling fired, or
+admission or binding refused it before a driver ran. Each driver finalizer, and
+both ceiling handlers, set `TurnState.termination` before the terminal hook
+fires, so a lifecycle and the caller's `RunOutcome.termination` always agree.
+Refusals raise before any state exists; `termination_reason(err)` maps the
+exception the adapter caught to its member, and never raises: anything it does
+not recognise is `unknown`. Two members have no exception behind them and are
+set outside the mapper: `admission_concurrency_shed` by callers when
+`should_admit_turn` refuses, and `recovery_failed` by `run_prepared_turn` on
+the terminal hook when replacing a lost session raises (the exception it
+re-raises maps to `unknown`). A session MA reports terminated without any terminal
+event for this turn is `session_terminated`, never `completed`.
+`TurnError.kind` is unchanged, and
+every `TurnKind` value is also a `TerminationReason` value with the same
+string.
+
+`packages/core/daimon/core/turn/notices.py` turns a reason into a
+`TerminationNotice`: a short headline, the cause, the tool work still running
+and how much had finished, what survived, the next step, and a request id. The
+copy lives in core; Discord and Slack draw it in `on_terminal_failure` as the
+body of the red card, with the headline as the footer reason, and log the
+request id with the underlying error so it is the handle for the detail. No
+lifecycle hook carries it -- the reason rides on the state every lifecycle
+already receives -- so the CLI, headless routines and any new adapter keep
+their existing failure path, and `TerminationNotice.plain_text()` is the
+fallback wording for a surface without markup.
+
+### Outside text is data
+
+Anything daimon quotes into a turn from someone other than the person asking
+goes through one envelope, `packages/core/daimon/core/untrusted.py`: an
+element marked `trust="untrusted"`, opened by a fixed line saying the content
+is data, not instructions, with every value escaped so the content cannot
+close the element early. The Discord and Slack context builders wrap replayed
+thread history, deltas and channel backfill in it; `fetch_youtube_transcript`
+returns its transcript in it; the quoted transcript on a workspace
+replacement (`render_previous_session`) uses it too. The channel read and
+search tools return JSON rows, so their results carry the same marker as
+`trust` and `trust_note` fields instead. The paragraph in the agent guidance
+block (`packages/core/daimon/core/agent_guidance.py`) tells every agent what
+the marker means. Only the `<user_query>` is the request.
+
+Third-party MCP tool results travel from Managed Agents straight to the model
+without passing through daimon, so they carry no marker; the guidance
+paragraph covers them by name ("whatever a tool returns").
 
 ## Tenancy and isolation
 
@@ -224,7 +352,11 @@ against.
   `packages/core/daimon/core/headless_runner.py`, which creates a session with
   the same `create_session` the chat path uses and delegates the drain to the
   same driver under the same ceiling — but it calls neither `admit()` nor
-  `bind_session()`. See [routines.md](routines.md).
+  `bind_session()`. A routine with a destination is told where its result
+  goes; if the agent does not post there, the row's outbox goes `pending` and
+  the chat adapter for the tenant's platform posts the result tail through
+  its delivery poller (`daimon.core.routine_delivery`), after the access
+  policy's protected-channel and invoker checks. See [routines.md](routines.md).
 - **MCP agent-chat tools**, in
   `packages/adapters/mcp/daimon/adapters/mcp/tools/agent_chat.py`, let a caller
   drive a session directly. They do not use the chokepoint either; they re-run
@@ -234,8 +366,47 @@ against.
 - **`daimon run`**, in
   `packages/adapters/cli/daimon/adapters/cli/run/command.py`, is a single-turn
   subprocess entry point that calls `run_turn` directly with `BillingExempt`.
+- **Wakes** run a turn in an existing thread later, with nobody mentioning the
+  bot: a handoff's first turn for the new agent, work unblocked by a private
+  form, a one-shot timer (`daimon.core.continuity.timers`, the `create_timer`
+  tool), and anything else queued through `daimon.core.continuity.wakes`. A wake is
+  a `task_continuations` row. The Discord and Slack adapters each run a wake
+  poller (`run_wake_poller`) that opens threads with due rows and hands them
+  to the adapter's continuation dispatch. That dispatch takes the thread's
+  turn guard and goes through `admit()`, `bind_session()` and
+  `run_prepared_turn()` like a mention, so the balance and cap gates apply.
+  A claim holds a lease, and `started_at` is committed just before the turn
+  starts. If a claim's lease expires before `started_at` is set, the wake is
+  retried. If it expires after, the wake is settled `interrupted` and never
+  run again (`formal/continuation/WakeLease.tla`). Waiting on a busy thread
+  refunds the claim, so it never counts against the crash budget
+  (`WAKE_MAX_ATTEMPTS`). A thread the adapter cannot open (no token,
+  archived workspace, platform error) is pushed back five minutes, so it
+  cannot hold up other threads. An adapter that starts no poller leaves its
+  wakes pending. The scheduler process has no platform client, so it never
+  runs wakes.
 
-If you add a fourth, reuse `admit()` rather than re-deriving the gate order.
+  **Rollout order.** Migration `0028_feat003_wake_queue` first, then every
+  Discord and Slack adapter process, and only then anything that enqueues
+  wakes (timers). The pre-queue claim and list calls in the store skip rows
+  whose `available_at` is in the future. But an adapter binary built before
+  this change dispatches without leases or fences, and never polls, so its
+  wakes would only run at a turn tail. Downgrading the migration settles
+  every scheduled wake that has not run as `skipped/downgraded`, so none of
+  them runs early.
+
+  Timers add a reason (`timer`) that older code rejects when it reads a row.
+  A FEAT-003-only adapter or MCP process fails to load a batch containing a
+  timer row. So roll timers out in this order: migration `0029_feat084_timers`,
+  then every Discord, Slack and MCP process on a timer-aware build. Only then
+  may `create_timer` be called, and it is only exposed by that MCP build.
+  Downgrading `0029_feat084_timers` deletes every timer row, fired or not.
+  A timer only runs as the agent it was set with. If the thread answers to
+  another agent when the timer fires, the adapter refuses it after
+  `admit()` and before anything is bound or billed. It settles the row
+  `skipped/skip_target_changed` and posts a notice in the thread.
+
+If you add another, reuse `admit()` rather than re-deriving the gate order.
 
 ## Standalone apps
 
@@ -253,6 +424,11 @@ credential; they reach daimon over HTTP with capability tokens, and the
 - [defaults.md](defaults.md) — what is seeded and how reconciliation works.
 - [mcp-tools.md](mcp-tools.md) — every tool the agent can call.
 - [configuration.md](configuration.md) — every setting.
+
+The operator CLI also exposes `daimon tenants funding-mode PLATFORM EXTERNAL_ID
+MODE`. This stores a per-tenant `prepaid` or `operator_funded` policy. Shared
+balance admission emits a warning instead of a refusal for operator-funded
+tenants; usage recording and configured caps continue through the same path.
 
 ### Invocation context fragments
 
@@ -278,3 +454,274 @@ The spec converter stores this configuration in the agent's system field so it
 survives upload, forks and defaults fingerprints. Replacing that system field
 without the configuration removes the overrides. An empty replacement disables a
 fragment. These blocks affect prompting only and grant no extra permissions.
+
+Operator recovery tools: `daimon backup platform-export` exports the dedicated
+MA workspace through core; `scripts/backup/postgres.sh` backs up/restores Postgres.
+See [self-hosting](self-hosting.md#backup-and-disaster-recovery) for the recovery
+contract and limits.
+
+### Google tokens in ordinary chat
+
+Chat sessions attach a per-account, per-agent vault whose signed JWT carries
+`chat_agent_id`, derived from the tenant and Managed Agent ID. MCP resolves this
+as the executing agent identity for `get_cli_token(service="gcloud")`, while
+preserving the ordinary chat tool surface and live account-role checks. The
+separate `agent_id` claim still selects the restricted external agent-chat surface.
+Neither claim is supplied through tool arguments. Chat identity is stored separately
+from `AuthIdentity.agent_id` and is consumed only by the Google broker path. GitHub
+chat calls still resolve the account principal-default PAT; other identity gates
+and the two-tool search interface remain unchanged.
+
+The operator must configure `credentials.google_sa_json`, authorize domain-wide
+delegation, and bind the agent with `daimon agents bind-google <agent> <email>
+--scopes <scope>...`. The broker impersonates only that agent's bound Workspace
+user and scopes; an unbound agent receives a clear operator-binding error.
+Core does not ship curated Workspace tools. Agents may use the token themselves
+or a deployment-provided Google MCP server.
+
+Existing static-bearer vault credentials are upgraded in place on the next
+session creation. Credential metadata records the identity version so subsequent
+creates leave the token stable; unrelated and OAuth credentials are preserved.
+
+### Completion signals
+
+The core driver calls an optional `on_acknowledgment` lifecycle hook with
+`accepted` after the initial event send and `done` after successful answer
+delivery. Missing hooks are no-ops; reaction failures are bounded and do not
+fail the turn. Opted-in Discord and Slack tenants react with eyes, then a check
+mark on success. Unprompted Discord turns stay silent; failures and cancellation
+do not get a completion marker. Continuations without a trigger message skip
+reactions.
+
+Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
+`{"00000000-0000-0000-0000-000000000001": true}`, to deliver that tenant's final
+answer as a fresh thread reply mentioning only the requester. Missing or false
+entries keep the existing in-place answer and reactions (none on Discord; Slack keeps its admission eyes). Slack admission adds eyes once; the lifecycle only replaces it on opted-in completion. Recovery lifecycles retain this policy;
+continuity notices and feedback target the new answer. Other adapters need no changes.
+
+### Routine dispatch
+
+The scheduler owns a persistent, bounded routine dispatcher across ticks.
+Routine turns run independently of the tick; the same routine cannot overlap
+itself. Per-routine missed-run policy and the latest skipped range are exposed
+by the routine MCP tools. See [routines.md](routines.md) for catch-up and shutdown.
+
+### Agent-initiated direct messages
+
+The shared channel tool `send_direct_message(recipient_id, content)` dispatches
+to Discord or Slack under the authenticated tenant. Both sender and recipient
+are checked for current platform membership before a DM is opened. Discord bot
+recipients and Slack inactive, external, or bot users are rejected. Other
+platforms return unsupported. Channel tools continue to reject DM channel IDs.
+
+Default recipient policy is tenant members. `DAIMON_DIRECT_MESSAGE_POLICIES` is
+a JSON map keyed by tenant UUID, for example:
+
+```json
+{"00000000-0000-0000-0000-000000000001": {"mode": "allowlist", "recipient_ids": ["U123"]}}
+```
+
+Tenant UUID keys are normalized at settings load, including uppercase and
+unhyphenated UUIDs. Invalid keys fail settings validation.
+
+`mode` accepts `members`, `allowlist`, or `disabled`. All modes that allow sending
+still require live tenant membership. The tool sends at most 19000 characters
+as plain text in bounded chunks and returns every platform message ID. Partial
+failures state the number already sent; callers should not retry the whole text
+blindly. Attachments and cross-tenant delivery are outside this tool's scope.
+### Memory write policy
+
+Session memory mounts are read-only for sealed channels (including their threads),
+for DMs when the tenant access policy sets `dm_memory_read_only`, and for routines.
+Other chat turns retain writable memory. Admission carries the trusted decision;
+the mount mode is recorded in the session snapshot and checked before reuse.
+Tightening access replaces an idle writable session, including a legacy session
+whose mount can no longer be inspected. An active session refuses the restricted
+turn instead of deferring enforcement. Replacement
+when tightening memory access skips the old session's checkpoint, since that would execute
+with its previous permissions; platform history supplies the new turn's context.
+Uncommitted workspace files are not transferred on this restricted replacement.
+
+Memory content is managed directly by the MA memory store. This safeguard does not
+add per-memory author/origin records or rollback tooling.
+### Platform table rendering
+
+Enable per tenant with `DAIMON_TABLE_RENDERING`, a JSON map of tenant UUIDs to
+booleans. Missing/false preserves current plain-text delivery. UUID keys are
+validated at startup. Core `tables.render_tables` parses pipe-delimited Markdown tables outside fenced
+code and accepts an optional async platform hook. Without a hook the input is
+returned unchanged. Both adapter helpers also default to disabled. Hook failures
+and oversized tables retain their raw text. Rejected Discord attachment edits
+and Slack table blocks are logged and retried as the original Markdown; Slack
+keeps already-delivered chunks in place and retries only the rejected table.
+The shared bound is 20 columns, 100 rows including the header, and 10000 cell
+characters; at most ten tables render per answer.
+
+Discord renders final-answer tables off-thread as PNG attachments using bundled
+Inter fonts (including wizard submissions and their recovery turns), navy headers, light alternating rows, and horizontal rules. Wide
+cells wrap without truncation, all-numeric body columns align right even without
+an explicit `---:` marker, and a pixel budget
+prevents excessive allocations. Tables containing glyphs absent from the selected
+font, including CJK text, remain unchanged Markdown so no values are lost. Table markers preserve their position in the
+surrounding answer text. Slack final replies use native wrapped table blocks,
+with each table in a separate message so table budgets stay bounded and prose
+order is preserved. Feedback stays on the final delivery and continuity notices
+can be inserted before a leading table. See the [Slack table block reference](https://docs.slack.dev/reference/block-kit/blocks/table-block/).
+
+Streaming status previews and MCP `send_message` remain plain text. Tables inside
+code fences remain literal examples. Other adapters need no renderer changes.
+
+
+### Durable turn outcomes
+
+`turn_outcomes` stores one content-free terminal record per logical turn. A UUID
+follows admission, session binding and execution; a dead-session recovery remains
+one turn. Discord, Slack, their continuation/wizard paths, headless routines and
+CLI runs use the same recorder. Admission and concurrency refusals are recorded
+even when no model runs. The row contains tenant/account and agent identifiers,
+platform/channel/thread identifiers, the shared `TerminationReason`, UTC start/end
+and monotonic duration, recovery status, exception class, package release and
+observed usage-event keys. It contains no messages, prompts, answers, tool inputs,
+rendered error strings or credentials. Missing attribution stays null (for example,
+a CLI run against an existing MA session); no tenant is inferred from user text.
+
+The terminal path schedules a bounded background write and never awaits database
+I/O. Inserts are idempotent on the turn UUID. At most 256 writes are pending; each
+has a one-second timeout and owns its database connection. Failures and queue
+saturation log identifiers and exception class only. Runtime shutdown drains
+pending writes before disposing its engine. These are best-effort diagnostics:
+process crashes, queue saturation and database outages can lose an outcome. They
+are not a transactional audit log, and never change admission, billing or replies.
+Library-only headless calls without a session factory remain unrecorded; all
+production headless entrypoints provide one. Usage references are the natural
+`(managed_session_id, event_id)` keys, including calls observed during recovery;
+billing-exempt calls may have no corresponding `usage_events` row.
+
+
+MCP agent-chat and hub `ask` calls also record one outcome, attributed to tenant,
+account, agent and session with platform `mcp` and origin `chat`. A returned idle
+reply is `completed`, an observed terminated session is `session_terminated`, and
+the bounded polling deadline is `ceiling`. Shared admission gates record balance,
+cap and access-policy refusals. `start_turn` and `continue_turn` record the
+accepted dispatch with reason `unknown`: they return before model execution ends,
+so these records are dispatch observations, not claims of terminal completion.
+No follow-up terminal update or model-span usage capture is implemented for these
+SDK polling paths. Their usage fields remain null rather than implying zero
+model calls or cost. Channel/thread identifiers are unavailable on these calls.
+Identity resolution failures before tenant attribution and adapter readiness /
+draining gates before the turn boundary are outside this coverage. Library-only
+headless calls without a session factory remain unrecorded.
+
+The terminal outcome row also carries optional per-turn usage measurements:
+model-span token/cache totals, model IDs and estimated provider cost. The driver
+observes billed and exempt spans without changing metering; natural
+`(session_id, event_id)` keys deduplicate replay and retain recovery-attempt usage.
+The operator command `daimon usage turns` queries tenant-scoped rows and channel /
+origin summaries without upstream requests. See [billing](billing.md#per-turn-usage-telemetry)
+for unknown-cost and historical-row semantics.
+
+### Security audit trail
+
+Authenticated requests through the main JWT MCP application (`tools/call` and
+`tools/list`) produce one tenant-scoped
+`security_audit_events` row. The identity middleware records the tenant, account,
+platform user and agent identifiers, tool name, timestamp, outcome and a fixed
+reason code. Agent identity includes the signed external `agent_id` or ordinary
+chat `chat_agent_id` claim. The shared operation policy annotates that same request with the
+operation name and its decision; a policy denial remains a denial even if a tool
+catches it. Arguments, messages, credentials, response bodies and exception text
+are never copied into the row. Tool names outside the supported identifier syntax
+are recorded as `<invalid>`.
+
+The audit transaction is independent of the tool transaction. Request completion
+queues an immutable metadata snapshot without awaiting the database. Timestamps
+capture request completion, preserving chronology when inserts finish out of order.
+The middleware
+tracks at most 128 writes, with two database writes in flight and a two-second
+bound including queue wait. Shutdown drains tracked writes. Writes are best effort:
+timeouts, cancellation, overflow and database failures emit `security_audit.write_failed`
+with an error type, never the error body. An unavailable audit store does not delay
+the tool response or change authorization behavior. Tool failures use outcome
+`error`; authorization and policy rejections use `denied`. Calls rejected before the JWT verifier
+establishes a tenant cannot be safely attributed and are outside this trail.
+The policy remains synchronous and does no I/O outside an MCP audit scope;
+Discord/Slack setup-panel actions and the separate hub OAuth applications
+(`/discord/mcp` and `/slack/mcp`, which use `HubIdentityMiddleware`) are not
+audited in this version. This trail is not a complete record of hub tool activity.
+
+Operators can read records using `daimon audit list TENANT_UUID --since
+2026-09-28T00:00:00Z --json`. Use `--account ACCOUNT_UUID` to include that person's
+audit metadata in an operator-assisted privacy export. Results are chronological;
+`--limit` (1–1000) and `--offset` paginate retained records. Repeat per tenant for
+a person active in multiple workspaces. This operator command uses local database
+access; it is not an MCP tool and is not exposed to tenant users.
+
+Retention defaults to 90 days (`security_audit_retention_days`). Operators must
+schedule `daimon audit prune TENANT_UUID` for each tenant, for example daily. The
+command removes only that tenant's events older than the configured age; `0`
+explicitly opts into indefinite retention. Privacy erasure still applies. Include
+the schedule and backup expiry in the deployment's published retention policy.
+
+The shared account privacy purge clears account and platform-user identifiers in
+all of that account's audit tenants, even when no principal remains. Tenant deletion
+removes its audit rows in the same transaction. PostgreSQL AFTER DELETE triggers
+on accounts and tenants enforce these same erasure rules even when an older
+application binary issues the deletion during a rolling upgrade. The triggers
+restore the previous transaction-local maintenance flag after scoped erasure;
+rollback restores both data and flag on failure. Install the migration before
+starting audit-producing services; privacy workers need no coordinated upgrade.
+Queued writes lock live identity
+rows: after account deletion they omit personal identifiers, and after tenant
+deletion they are discarded, so delayed writes cannot restore erased data.
+
+Ordinary UPDATE, DELETE and TRUNCATE remain blocked by a statement trigger.
+Dedicated store maintenance functions enable a transaction-local GUC only within
+a savepoint, perform scoped erasure or expiry, then reset the GUC. Rollback also
+resets it; TRUNCATE is never allowed. This guards accidental application mutation,
+not a malicious database administrator or SQL caller able to set arbitrary GUCs.
+Existing privacy panels do not yet deliver a full audit export: operators include
+the CLI JSON export in the requested bundle.
+
+### Opt-in DM conversations
+
+DM conversations are disabled unless the tenant's separate `direct_message_policies`
+row enables them. Admins use `/dm enable` or `/dm disable`; the invoker allowlist
+still applies through `admit(is_dm=True)` on every move and every private turn.
+Discord uses a live guild-member lookup and Slack checks the current workspace
+membership and role. No stored admin role grants access.
+
+`/dm` in a server/channel moves recent text context into a new private scope. This
+selects the workspace explicitly; unselected DMs remain ignored. The scope uses a
+normal thread-agent binding, config cascade and per-account session mapping. Each
+new selection resets the scope, so a physical Discord DM shared across servers
+never contributes the previous server's private history. The live membership check
+is bound to that scope to prevent a concurrent selection from changing its authority.
+The context is escaped with the existing handoff builder and includes a source link.
+
+Turns use the shared billing/session/recovery pipeline. Row claims prevent overlapping
+or duplicate DM deliveries. The route retains bounded source context and private
+history; privacy preview and deletion include it. Memory restrictions inherited from
+a sealed source remain attached to its DM conversation, and current DM policy is
+checked on each admission. Session preparation enforces the selected memory mount access.
+Slack private turns register their physical DM destination under a random execution
+ID carried in a signed JWT in an isolated MA vault. The read guard resolves only
+that exact row for the authenticated tenant/account and removes it on completion
+or cancellation. Concurrent routine, headless, channel, MCP agent-chat and hub
+credentials have no execution grant and cannot inherit account activity.
+Each Slack DM turn starts a fresh MA session and vault; bounded source/private
+history preserves conversation context, but ephemeral workspace files and personal
+OAuth credentials stored only in the shared vault are not transferred. Old execution
+tokens cease granting DM reads when their row is removed; expired rows fail closed.
+Both platforms stamp private MA sessions with `daimon_private_dm`. Generic session,
+agent-chat and hub lists, transcript reads and mutation/cost tools default-deny
+these sessions even to the same account or an admin. Only a verified credential
+whose execution ID matches the stamp can access one. Discord retains session
+reuse but carries no transcript-browsing grant, so its private sessions are hidden
+from all MCP session tools. Ordinary unmarked sessions keep their ownership rules.
+Discord session reuse and ordinary shared vaults are unchanged.
+The provenance thread ID remains the private scope ID, matching session mapping.
+
+The first version delivers text replies after completion. Attachments, streaming
+cards, cancellation controls, and moving Slack thread replies are deferred; Slack's
+slash command carries recent channel messages. Run `/dm` again to reset or select
+another channel. Disabling DMs prevents new turns, without cancelling a running turn.

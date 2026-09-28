@@ -50,20 +50,32 @@ from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
-from daimon.adapters.slack.blockkit import EmbedEvent, State, TurnPhase, to_blocks, update
+from daimon.adapters.slack.blockkit import (
+    NOTICE_MAX_CHARS,
+    EmbedEvent,
+    State,
+    TurnPhase,
+    format_termination_notice,
+    to_blocks,
+    update,
+)
+from daimon.adapters.slack.errors import bound_request_id
 from daimon.adapters.slack.feedback import build_feedback_actions_block
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.split import split_for_slack_safe
+from daimon.adapters.slack.tables import render_slack_tables
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.degraded import render_degraded_notice
-from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
+from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
+from daimon.core.turn.notices import fit_notice, render_termination_notice
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
     extract_final_response,
     extract_sealed_responses,
 )
+from daimon.core.turn.termination import termination_reason
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -143,11 +155,20 @@ class SlackTurnLifecycle:
         deregister: Callable[[str], None],
         register_pending: Callable[[str, asyncio.Event, str], None] | None = None,
         deregister_pending: Callable[[str], None] | None = None,
+        trigger_ts: str | None = None,
+        notify_on_completion: bool = False,
+        render_tables: bool = False,
         clock: Callable[[], float] = time.monotonic,
         adopt_status_ts: str | None = None,
         intent_id: UUID | None = None,
+        request_id: Callable[[], str] = bound_request_id,
     ) -> None:
+        self._trigger_ts = trigger_ts
+        self._notify_on_completion = notify_on_completion
+        self._answer_ts: str | None = None
+        self._render_tables = render_tables
         self._client = client
+        self._request_id = request_id
         self._channel = channel
         self._thread_ts = thread_ts
         self._cancel = cancel
@@ -191,6 +212,24 @@ class SlackTurnLifecycle:
         # kept so a late notice can be edited in above them exactly once.
         self._revealed_first_chunk: str | None = None
         self._revealed_first_blocks: list[dict[str, Any]] | None = None
+
+    async def on_acknowledgment(self, phase: Acknowledgment) -> None:
+        # Admission already adds eyes; only opted-in completion replaces it.
+        if not self._notify_on_completion or phase == "accepted":
+            return
+        if self._trigger_ts is None or self.final_ts is None:
+            return
+        await self._client.reactions_add(  # pyright: ignore[reportUnknownMemberType]
+            channel=self._channel,
+            timestamp=self._trigger_ts,
+            name="white_check_mark",
+        )
+        if phase == "done":
+            await self._client.reactions_remove(  # pyright: ignore[reportUnknownMemberType]
+                channel=self._channel,
+                timestamp=self._trigger_ts,
+                name="eyes",
+            )
 
     @property
     def status_ts(self) -> str | None:
@@ -329,16 +368,18 @@ class SlackTurnLifecycle:
                 text=text,
             )
 
-    async def _flush_terminal(self) -> None:
+    async def _flush_terminal(self, fallback_text: str | None = None) -> None:
         """Unconditionally flush the terminal Block Kit surface, bypassing debounce.
 
         Sets _terminal=True so subsequent _maybe_flush calls become no-ops. The
         caller MUST have already transitioned the state to a terminal phase
         (done/error) so to_blocks emits the collapsed footer with no cancel button.
+        ``fallback_text`` replaces the generic top-level ``text`` that
+        notifications and screen readers show instead of the blocks.
         """
         self._terminal = True
         blocks = to_blocks(self._state, now=self._clock(), cancel_key=self._cancel_key)
-        await self._post_or_update(blocks, f"{self._state.phase.value} …")
+        await self._post_or_update(blocks, fallback_text or f"{self._state.phase.value} …")
 
     async def _flush_cancelled(self) -> None:
         """Replace the status message with a plain 'Turn cancelled.' notice.
@@ -443,39 +484,78 @@ class SlackTurnLifecycle:
             degraded_notice = render_degraded_notice(state.mcp_failures)
             if degraded_notice is not None:
                 final_text = f"{final_text}\n\n{degraded_notice}"
-            chunks = split_for_slack_safe(escape_mrkdwn_preserving_mentions(final_text))
-            first_chunk = chunks[0]
-            # First chunk + the cost/usage footer replace the status message
-            # in place; the terminal footer carries elapsed/tokens/cost and drops
-            # the cancel button. The feedback vote buttons ride the LAST chunk
-            # only, so a vote's message_id keys the same message final_ts (and
-            # the watermark) point at.
+            deliveries = await render_slack_tables(
+                final_text,
+                enabled=self._render_tables,
+                preserve_mentions=not self._notify_on_completion,
+            )
+            # Rejected tables become Markdown in the same delivery slot, leaving
+            # earlier answer chunks intact. The first successful delivery owns
+            # continuity notices, and only the last carries feedback controls.
             self._terminal = True
-            first_blocks: list[dict[str, Any]] = [
-                {"type": "markdown", "text": first_chunk},
-                *to_blocks(self._state, now=self._clock()),
-            ]
-            if len(chunks) == 1:
-                first_blocks.append(build_feedback_actions_block())
-            await self._post_or_update(first_blocks, _notification_text(first_chunk))
-            self._revealed_first_chunk = first_chunk
-            self._revealed_first_blocks = first_blocks
-            surface_replaced = True
-            assert self._status_ts is not None  # narrowing — _post_or_update always sets it
-            current_ts = self._status_ts
-
-            # Overflow chunks posted as new thread replies.
-            for i, chunk in enumerate(chunks[1:], start=2):
-                chunk_blocks: list[dict[str, Any]] = [{"type": "markdown", "text": chunk}]
-                if i == len(chunks):
-                    chunk_blocks.append(build_feedback_actions_block())
-                resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=self._channel,
-                    thread_ts=self._thread_ts,
-                    blocks=chunk_blocks,
-                    text=_notification_text(chunk),
+            if self._notify_on_completion:
+                await self._flush_terminal()
+            index = 0
+            first_markdown_prefixed = False
+            current_ts: str | None = self._status_ts
+            while index < len(deliveries):
+                chunk, block = deliveries[index]
+                mention = (
+                    f"<@{self._author_id}>"
+                    if self._notify_on_completion and self._author_id
+                    else None
                 )
-                current_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
+                if (
+                    index == 0
+                    and mention
+                    and block.get("type") == "markdown"
+                    and not first_markdown_prefixed
+                ):
+                    deliveries[0:1] = [
+                        (plain, {"type": "markdown", "text": plain})
+                        for plain in split_for_slack_safe(f"{mention}\n{chunk}")
+                    ]
+                    first_markdown_prefixed = True
+                    continue
+                blocks: list[dict[str, Any]] = [block]
+                notification_chunk = chunk
+                if index == 0:
+                    if mention and block.get("type") == "table":
+                        blocks.insert(0, {"type": "markdown", "text": mention})
+                        notification_chunk = f"{mention}\n{chunk}"
+                    blocks.extend(to_blocks(self._state, now=self._clock()))
+                if index == len(deliveries) - 1:
+                    blocks.append(build_feedback_actions_block())
+                try:
+                    if index == 0 and not self._notify_on_completion:
+                        await self._post_or_update(blocks, _notification_text(notification_chunk))
+                        current_ts = self._status_ts
+                    else:
+                        resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                            channel=self._channel,
+                            thread_ts=self._thread_ts,
+                            blocks=blocks,
+                            text=_notification_text(notification_chunk),
+                            link_names=False if self._notify_on_completion else None,
+                        )
+                        current_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
+                    if index == 0:
+                        self._answer_ts = current_ts
+                        self._revealed_first_chunk = notification_chunk
+                        self._revealed_first_blocks = blocks
+                        surface_replaced = True
+                except SlackApiError as exc:
+                    if block.get("type") != "table":
+                        raise
+                    log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
+                    # The renderer retains escaped original Markdown alongside
+                    # the native table. Avoid double-escaping it on retry.
+                    deliveries[index : index + 1] = [
+                        (plain, {"type": "markdown", "text": plain})
+                        for plain in split_for_slack_safe(chunk)
+                    ]
+                    continue
+                index += 1
 
             self.final_ts = current_ts
         except _SLACK_SEND_ERRORS as exc:
@@ -513,9 +593,22 @@ class SlackTurnLifecycle:
         if len(split_for_slack_safe(updated)) > 1:
             return False
         blocks = list(self._revealed_first_blocks)
-        blocks[0] = {"type": "markdown", "text": updated}
+        if any(block.get("type") == "table" for block in blocks):
+            blocks.insert(
+                0, {"type": "markdown", "text": escape_mrkdwn_preserving_mentions(notice)}
+            )
+        else:
+            blocks[0] = {"type": "markdown", "text": updated}
         try:
-            await self._post_or_update(blocks, _notification_text(updated))
+            if self._notify_on_completion and self._answer_ts is not None:
+                await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+                    channel=self._channel,
+                    ts=self._answer_ts,
+                    blocks=blocks,
+                    text=_notification_text(updated),
+                )
+            else:
+                await self._post_or_update(blocks, _notification_text(updated))
         except _SLACK_SEND_ERRORS:
             log.warning("turn.answer_prefix.edit_failed", exc_info=True)
             return False
@@ -530,12 +623,36 @@ class SlackTurnLifecycle:
         Does not re-raise — the lifecycle boundary absorbs all failures.
         """
         try:
-            log.warning("turn.terminal_failure", error=str(err))
+            label = str(err)[:100]
+            body = ""
+            fallback_text: str | None = None
+            reason = request_id = None
+            # The notice is words on top of the ❌ card, never a reason not to
+            # draw it: if building it fails, the card falls back to the raw label.
+            try:
+                reason = state.termination or termination_reason(err)
+                request_id = self._request_id()
+                notice = render_termination_notice(reason, state=state, request_id=request_id)
+                if notice is not None:
+                    label, body = notice.headline, format_termination_notice(notice)
+                    fallback_text = fit_notice(
+                        [notice.plain_text()], tail=None, limit=NOTICE_MAX_CHARS
+                    )
+            except Exception:
+                log.warning("turn.terminal_notice_failed", exc_info=True)
+            log.warning(
+                "turn.terminal_failure",
+                error=str(err),
+                reason=str(reason) if reason is not None else None,
+                request_id=request_id,
+            )
             # Transition to the ERROR phase so to_blocks renders the ❌ error
-            # footer (reason + usage) and removes the cancel button — Discord parity.
-            self._state = update(self._state, EmbedEvent(kind="error", label=str(err)[:100]))
+            # footer (reason + usage) under the notice and removes the cancel
+            # button — Discord parity.
+            self._state = update(self._state, EmbedEvent(kind="error", label=label))
+            self._state = dataclasses.replace(self._state, notice=body)
             self._apply_usage(state)
-            await self._flush_terminal()
+            await self._flush_terminal(fallback_text)
             self.final_ts = self._status_ts
         except Exception:
             log.warning("turn.terminal_failure.flush_failed", exc_info=True)

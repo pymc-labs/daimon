@@ -1,22 +1,39 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import uuid
 from io import StringIO
 from typing import cast
 
 import pytest
 import typer
 from anthropic import AsyncAnthropic
-from daimon.adapters.cli.commands.tenants import tenants_delete, tenants_list
+from click import Group, Option
+from daimon.adapters.cli import main as main_mod
+from daimon.adapters.cli.commands import tenants as tenants_mod
+from daimon.adapters.cli.commands.tenants import (
+    tenants_access_policy_get,
+    tenants_access_policy_set,
+    tenants_delete,
+    tenants_list,
+)
+from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import TenantScopeRef
 from daimon.core.stores import scoped_config_write
+from daimon.core.stores.access_policy import (
+    AccessPolicyUnreadable,
+    load_access_policy,
+)
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_tenant
 from rich.console import Console
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from typer.main import get_command
 
 from ..harness import build_cli_runtime
 
@@ -242,3 +259,429 @@ async def test_tenants_list_rejects_unknown_platform(
 
     with pytest.raises(typer.BadParameter, match="discord, cli, slack, teams"):
         await tenants_list(rt=rt, console=console, platform="matrix", as_json=True)
+
+
+async def test_tenants_funding_mode_changes_only_the_selected_tenant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    from daimon.adapters.cli.commands.tenants import tenants_funding_mode
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="funded")
+    other = await make_tenant(db_session, platform="slack", workspace_id="other")
+    await db_session.commit()
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await tenants_funding_mode(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="funded",
+        mode="operator_funded",
+    )
+    async with db_session_factory() as session:
+        row = await get_tenant(session, tenant.id)
+        untouched = await get_tenant(session, other.id)
+    assert row is not None and row.funding_mode == "operator_funded"
+    assert untouched is not None and untouched.funding_mode == "prepaid"
+    with pytest.raises(typer.BadParameter):
+        await tenants_funding_mode(
+            rt=rt, console=_make_console(), platform="discord", external_id="funded", mode="invalid"
+        )
+
+
+# --- access-policy -------------------------------------------------------------
+
+
+async def _policy(
+    sessionmaker: async_sessionmaker[AsyncSession], *, workspace_id: str
+) -> TenantAccessPolicy:
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=workspace_id)
+    async with sessionmaker() as s:
+        return await load_access_policy(s, tenant_id=tenant_id)
+
+
+def _output(console: Console) -> str:
+    return cast(StringIO, console.file).getvalue()
+
+
+@pytest.mark.asyncio
+async def test_access_policy_get_reports_a_tenant_without_a_policy_as_open(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    console = _make_console()
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-ap1")
+
+    await tenants_access_policy_get(
+        rt=rt, console=console, platform="discord", external_id="guild-ap1", as_json=False
+    )
+
+    assert "access policy: open" in _output(console), _output(console)
+
+
+@pytest.mark.asyncio
+async def test_access_policy_set_writes_given_fields_and_keeps_the_rest(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-ap2")
+
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="guild-ap2",
+        invoker=["111111111111111111", "222222222222222222", "111111111111111111"],
+        protected_channel=["444444444444444444"],
+    )
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="guild-ap2",
+        invoker=["333333333333333333"],
+        sealed_channel=["555555555555555555"],
+        dm_memory_read_only=True,
+    )
+
+    assert await _policy(db_session_factory, workspace_id="guild-ap2") == TenantAccessPolicy(
+        invoker_user_ids=("333333333333333333",),
+        protected_channel_ids=("444444444444444444",),
+        sealed_channel_ids=("555555555555555555",),
+        dm_memory_read_only=True,
+    ), "a given flag replaces its field; untouched fields keep their stored value"
+
+    console = _make_console()
+    await tenants_access_policy_get(
+        rt=rt, console=console, platform="discord", external_id="guild-ap2", as_json=True
+    )
+    assert json.loads(_output(console))["sealed_channel_ids"] == ["555555555555555555"]
+
+
+@pytest.mark.asyncio
+async def test_access_policy_set_clear_returns_the_tenant_to_open(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-ap3")
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="guild-ap3",
+        protected_category=["666666666666666666"],
+    )
+
+    await tenants_access_policy_set(
+        rt=rt, console=_make_console(), platform="discord", external_id="guild-ap3", clear=True
+    )
+
+    assert await _policy(db_session_factory, workspace_id="guild-ap3") == OPEN_ACCESS_POLICY
+
+
+@pytest.mark.asyncio
+async def test_access_policy_set_refuses_to_overwrite_an_unreadable_row_until_cleared(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    result = await provision_tenant(
+        db_session_factory, platform="discord", workspace_id="guild-ap4"
+    )
+    async with db_session_factory() as s, s.begin():
+        await s.execute(
+            text("INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, 'null')"),
+            {"t": result.tenant_id},
+        )
+
+    with pytest.raises(AccessPolicyUnreadable):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="discord",
+            external_id="guild-ap4",
+            invoker=["111111111111111111"],
+        )
+
+    await tenants_access_policy_set(
+        rt=rt, console=_make_console(), platform="discord", external_id="guild-ap4", clear=True
+    )
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="guild-ap4",
+        invoker=["111111111111111111"],
+    )
+    policy = await _policy(db_session_factory, workspace_id="guild-ap4")
+    assert policy.invoker_user_ids == ("111111111111111111",), (
+        "after --clear the policy can be set again"
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"clear": True, "invoker": ["111111111111111111"]}, {"invoker": [" ", ""]}],
+    ids=["nothing-to-set", "clear-with-flags", "blank-ids"],
+)
+@pytest.mark.asyncio
+async def test_access_policy_set_rejects_ambiguous_input_and_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+    kwargs: dict[str, object],
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-ap5")
+
+    with pytest.raises(typer.BadParameter):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="discord",
+            external_id="guild-ap5",
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    assert await _policy(db_session_factory, workspace_id="guild-ap5") == OPEN_ACCESS_POLICY
+
+
+@pytest.mark.asyncio
+async def test_access_policy_commands_refuse_an_unknown_tenant(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+
+    with pytest.raises(StoreError, match="no tenant"):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="discord",
+            external_id="guild-missing",
+            invoker=["111111111111111111"],
+        )
+
+
+def test_access_policy_set_is_registered_with_its_flags() -> None:
+    command = get_command(main_mod.app)
+    for name in ("tenants", "access-policy", "set"):
+        assert isinstance(command, Group)
+        command = command.commands[name]
+    flags = {
+        flag
+        for param in command.params
+        if isinstance(param, Option)
+        for flag in (*param.opts, *param.secondary_opts)
+    }
+    for flag in (
+        "--invoker",
+        "--protected-channel",
+        "--protected-category",
+        "--sealed-channel",
+        "--dm-memory-read-only",
+        "--clear",
+    ):
+        assert flag in flags, f"{flag} missing from registered options"
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+async def test_access_policy_get_refuses_null_row(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+    as_json: bool,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    tenant = await provision_tenant(db_session_factory, platform="discord", workspace_id="null-get")
+    async with db_session_factory() as session, session.begin():
+        await session.execute(
+            text("INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, 'null')"),
+            {"t": tenant.tenant_id},
+        )
+    console = _make_console()
+    with pytest.raises(AccessPolicyUnreadable):
+        await tenants_access_policy_get(
+            rt=rt, console=console, platform="discord", external_id="null-get", as_json=as_json
+        )
+    assert _output(console) == ""
+
+
+@pytest.mark.parametrize(
+    "platform,field,value",
+    [
+        ("discord", "invoker", "<@111111111111111111>"),
+        ("discord", "invoker", "alice"),
+        ("discord", "protected_channel", "#general"),
+        ("discord", "protected_category", "123"),
+        ("discord", "sealed_channel", "1" * 22),
+        ("slack", "invoker", "u123ABC"),
+        ("slack", "invoker", "C123ABC"),
+        ("slack", "protected_channel", "#general"),
+        ("slack", "protected_category", "category"),
+        ("slack", "sealed_channel", "c123ABC"),
+        ("teams", "invoker", "U123ABC"),
+        ("teams", "invoker", str(uuid.UUID(int=0xABCDEF)).upper()),
+        ("teams", "protected_channel", "C123ABC"),
+        ("teams", "sealed_channel", "19:abc@thread.tacv2;messageid=1"),
+        ("cli", "invoker", " "),
+        ("discord", "invoker", ""),
+    ],
+)
+async def test_access_policy_rejects_each_bad_id_without_writing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+    platform: str,
+    field: str,
+    value: str,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    tenant_id = derive_tenant_uuid(platform=platform, workspace_id="invalid-ids")  # type: ignore[arg-type]
+    async with db_session_factory() as session, session.begin():
+        await make_tenant(session, platform=platform, workspace_id="invalid-ids")  # type: ignore[arg-type]
+    valid = (
+        "111111111111111111"
+        if platform == "discord"
+        else (str(uuid.UUID(int=7)) if field == "invoker" else "19:ok@thread.tacv2")
+        if platform == "teams"
+        else "U123ABC"
+        if field == "invoker"
+        else "C123ABC"
+    )
+    with pytest.raises(typer.BadParameter) as error:
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform=platform,
+            external_id="invalid-ids",
+            **{field: [valid, value]},  # type: ignore[arg-type]
+        )
+    assert field in str(error.value)
+    assert repr(value) in str(error.value)
+    async with db_session_factory() as session:
+        count = await session.scalar(
+            text("SELECT count(*) FROM tenant_access_policies WHERE tenant_id=:t"), {"t": tenant_id}
+        )
+    assert count == 0
+
+
+@pytest.mark.usefixtures("db_clean")
+@pytest.mark.parametrize("existing", [False, True])
+async def test_concurrent_policy_edits_preserve_both_fields(
+    db_nullpool_engine: AsyncEngine,
+    stub_anthropic: AsyncAnthropic,
+    monkeypatch: pytest.MonkeyPatch,
+    existing: bool,
+) -> None:
+    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    rt = build_cli_runtime(factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    async with factory() as session, session.begin():
+        await make_tenant(session, platform="discord", workspace_id="race-policy")
+        await make_tenant(session, platform="discord", workspace_id="untouched-policy")
+    if existing:
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="discord",
+            external_id="race-policy",
+            invoker=["111111111111111111"],
+        )
+    loaded = asyncio.Event()
+    release = asyncio.Event()
+    second_lock_started = asyncio.Event()
+    original_load = tenants_mod.load_access_policy
+    original_lock = tenants_mod.lock_access_policy
+    calls = 0
+
+    async def held_load(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
+        nonlocal calls
+        policy = await original_load(session, tenant_id=tenant_id)
+        calls += 1
+        if calls == 1:
+            loaded.set()
+            await release.wait()
+        return policy
+
+    async def observed_lock(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+        if loaded.is_set():
+            second_lock_started.set()
+        await original_lock(session, tenant_id=tenant_id)
+
+    monkeypatch.setattr(tenants_mod, "load_access_policy", held_load)
+    monkeypatch.setattr(tenants_mod, "lock_access_policy", observed_lock)
+    first = asyncio.create_task(
+        tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="discord",
+            external_id="race-policy",
+            protected_channel=["444444444444444444"],
+        )
+    )
+    second = None
+    try:
+        await asyncio.wait_for(loaded.wait(), 5)
+        second = asyncio.create_task(
+            tenants_access_policy_set(
+                rt=rt,
+                console=_make_console(),
+                platform="discord",
+                external_id="race-policy",
+                sealed_channel=["555555555555555555"],
+            )
+        )
+        await asyncio.wait_for(second_lock_started.wait(), 5)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(second), 0.1)
+        assert calls == 1, "the second connection must not read stale policy"
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(first, *([second] if second else [])), 5)
+    policy = await _policy(factory, workspace_id="race-policy")
+    assert policy.protected_channel_ids == ("444444444444444444",)
+    assert policy.sealed_channel_ids == ("555555555555555555",)
+    assert policy.invoker_user_ids == (("111111111111111111",) if existing else ())
+    assert await _policy(factory, workspace_id="untouched-policy") == OPEN_ACCESS_POLICY
+    await tenants_access_policy_set(
+        rt=rt, console=_make_console(), platform="discord", external_id="race-policy", clear=True
+    )
+    assert await _policy(factory, workspace_id="untouched-policy") == OPEN_ACCESS_POLICY
+
+
+@pytest.mark.parametrize(
+    "platform,users,channels",
+    [
+        ("discord", ["1" * 15, "2" * 21], ["3" * 15, "4" * 21]),
+        ("slack", ["U123ABC", "W456DEF"], ["C123ABC", "G456DEF", "D789ABC"]),
+        ("cli", ["local-user"], ["local-channel"]),
+        ("teams", [str(uuid.UUID(int=7))], ["19:abc123@thread.tacv2", "19:x_y@thread.skype"]),
+    ],
+)
+async def test_access_policy_accepts_platform_ids(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+    platform: str,
+    users: list[str],
+    channels: list[str],
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform=platform, workspace_id="valid-ids")  # type: ignore[arg-type]
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform=platform,
+        external_id="valid-ids",
+        invoker=users,
+        protected_channel=channels,
+        protected_category=channels,
+        sealed_channel=channels,
+    )
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant.id)
+    assert policy.invoker_user_ids == tuple(users)
+    assert policy.protected_channel_ids == tuple(channels)
+    assert policy.protected_category_ids == tuple(channels)
+    assert policy.sealed_channel_ids == tuple(channels)

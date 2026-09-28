@@ -134,7 +134,7 @@ def _fake_ma(
                     "updated_at": "2026-09-01T00:00:00Z",
                     "archived_at": None,
                     "display_name": None,
-                    "metadata": None,
+                    "metadata": {"daimon_chat_identity": str(agent_id)},
                 }
             ]
         ),

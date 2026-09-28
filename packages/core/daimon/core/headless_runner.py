@@ -5,7 +5,7 @@ Open a fresh MA session, then delegate the drain to the core turn driver
 tail. A routine turn inherits the driver's full liveness story — status-
 checked eventless-cycle reconnect, the per-call read timeout, the cancel
 race, the hardened render error policy — instead of a bespoke bare drain
-loop, and still auto-approves tool confirmations via `AutoApprove()`.
+loop, and answers tool confirmations via `headless_tool_confirmation`.
 
 A routine/headless turn is bounded end to end by the core per-turn ceiling
 (`daimon.core.turn.ceiling`, ~45 minutes): one shared deadline covers BOTH
@@ -60,11 +60,13 @@ from cryptography.fernet import MultiFernet
 from daimon.core.config import McpSettings
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.sessions import create_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, trusted_servers_for
+from daimon.core.turn.approvals import headless_tool_confirmation
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.driver import run_turn as drive_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import (
-    AutoApprove,
     Billed,
     BillingExempt,
     BillingPosture,
@@ -133,6 +135,87 @@ async def run_turn(
     github_app_id: str | None = None,
     github_app_private_key: str | None = None,
     deadline: datetime | None = None,
+    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    on_state: Callable[[TurnState], None] | None = None,
+) -> str:
+    observation = current_outcome.get()
+    owns_observation = observation is None
+    if observation is None and session_factory is not None:
+        observation = TurnObservation(session_factory, tenant_id, "headless", origin=origin)
+    if observation is None:
+        return await run_turn_impl(
+            anthropic=anthropic,
+            agent_id=agent_id,
+            environment_id=environment_id,
+            trigger_message=trigger_message,
+            origin=origin,
+            mcp_settings=mcp_settings,
+            account_id=account_id,
+            usage_record_factory=usage_record_factory,
+            tenant_id=tenant_id,
+            agent_uuid=agent_uuid,
+            session_factory=session_factory,
+            fernet=fernet,
+            github_fallback_pat=github_fallback_pat,
+            github_app_id=github_app_id,
+            github_app_private_key=github_app_private_key,
+            deadline=deadline,
+            tool_safety=tool_safety,
+            on_state=on_state,
+        )
+    observation.agent_id = agent_id
+    observation.account_id = account_id
+    observation.origin = origin
+    try:
+        with observation.activate():
+            result = await run_turn_impl(
+                anthropic=anthropic,
+                agent_id=agent_id,
+                environment_id=environment_id,
+                trigger_message=trigger_message,
+                origin=origin,
+                mcp_settings=mcp_settings,
+                account_id=account_id,
+                usage_record_factory=usage_record_factory,
+                tenant_id=tenant_id,
+                agent_uuid=agent_uuid,
+                session_factory=session_factory,
+                fernet=fernet,
+                github_fallback_pat=github_fallback_pat,
+                github_app_id=github_app_id,
+                github_app_private_key=github_app_private_key,
+                deadline=deadline,
+                tool_safety=tool_safety,
+                on_state=on_state,
+            )
+    except BaseException as exc:
+        # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
+        if owns_observation or not isinstance(exc, asyncio.CancelledError):
+            observation.finish(error=exc)
+        raise
+    return result
+
+
+async def run_turn_impl(
+    *,
+    anthropic: AsyncAnthropic,
+    agent_id: str,
+    environment_id: str,
+    trigger_message: str,
+    origin: TurnContext = "routine",
+    mcp_settings: McpSettings | None = None,
+    account_id: uuid.UUID | None = None,
+    usage_record_factory: Callable[[str, str], Callable[..., Awaitable[None]]] | None = None,
+    tenant_id: uuid.UUID | None = None,
+    agent_uuid: uuid.UUID | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    fernet: MultiFernet | None = None,
+    github_fallback_pat: str | None = None,
+    github_app_id: str | None = None,
+    github_app_private_key: str | None = None,
+    deadline: datetime | None = None,
+    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    on_state: Callable[[TurnState], None] | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its tail.
 
@@ -154,8 +237,11 @@ async def run_turn(
        ``github_fallback_pat`` clones ``anon:`` (verified-public) bindings
        even without a per-agent PAT.
     3. The drain is delegated to ``daimon.core.turn.driver.run_turn`` with a
-       no-op lifecycle (nothing to render to), ``tool_confirmation=AutoApprove()``
-       (a routine still auto-allows tool calls), ``deadline=effective_deadline``
+       no-op lifecycle (nothing to render to), ``tool_confirmation`` from
+       ``headless_tool_confirmation(tool_safety)`` (``AutoApprove`` while the
+       tool-safety policy is off; with it on, reads run and third-party
+       writes are refused unless the operator allowed them in unattended
+       runs — nobody is here to press Approve), ``deadline=effective_deadline``
        (the same instant that bounded step 1/2's assembly, so the driver's own
        ``remaining_s`` naturally subtracts the time assembly already spent —
        one window, two disjoint legs, no double enforcement), and a billing
@@ -169,6 +255,9 @@ async def run_turn(
        the hardened render error policy — instead of a bespoke bare drain
        loop with no reconnect and stream-end-as-success.
     4. After the driver returns: ``extract_final_response(state.content)[:1000]``.
+       ``on_state``, when given, is called first with the final ``TurnState``
+       of a successful turn, for a caller that needs more than the tail (the
+       scheduler checks whether the agent posted a routine's result itself).
 
     Errors:
 
@@ -219,6 +308,8 @@ async def run_turn(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             billing_exempt=billing_exempt,
+            memory_read_only=origin == "routine",
+            tool_safety=tool_safety,
         )
 
     try:
@@ -235,6 +326,10 @@ async def run_turn(
             deadline=effective_deadline.isoformat(),
         )
         raise ceiling_error() from err
+
+    if (observation := current_outcome.get()) is not None:
+        observation.session_id = session.id
+        observation.model_by_session[session.id] = session.agent.model.id
 
     usage_record: Callable[..., Awaitable[None]] | None = None
     if usage_record_factory is not None:
@@ -262,11 +357,22 @@ async def run_turn(
         cancel=asyncio.Event(),  # never set — headless has no cancel source
         render_interval_s=2.0,  # nothing renders; do not spin the diff timer
         billing=billing,
-        tool_confirmation=AutoApprove(),
+        tool_confirmation=headless_tool_confirmation(
+            tool_safety,
+            trusted_servers=trusted_servers_for(
+                str(mcp_settings.public_url)
+                if mcp_settings is not None and mcp_settings.public_url is not None
+                else None
+            ),
+        ),
         deadline=effective_deadline,
     )
 
+    if (observation := current_outcome.get()) is not None:
+        observation.finish(state=state)
     if state.error is not None:
         raise state.error
 
+    if on_state is not None:
+        on_state(state)
     return extract_final_response(state.content)[:LAST_RESULT_TAIL_MAX]

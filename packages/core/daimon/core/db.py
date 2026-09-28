@@ -7,6 +7,8 @@ threads the `async_sessionmaker` into stores as an explicit parameter.
 
 from __future__ import annotations
 
+import structlog
+from daimon.core.config import load_crypto_settings
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -34,10 +36,21 @@ def build_engine(url: str, *, echo: bool = False) -> AsyncEngine:
     return create_async_engine(url, echo=echo, pool_pre_ping=True, pool_recycle=1800)
 
 
-def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+def build_session_factory(
+    engine: AsyncEngine, *, crypto_keys: tuple[str, ...] | None = None
+) -> async_sessionmaker[AsyncSession]:
     """Build an `async_sessionmaker` bound to `engine`.
 
     `expire_on_commit=False` so Pydantic mapping in stores can read attributes
     after commit without a reload.
     """
-    return async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    if crypto_keys is None:
+        crypto_keys = tuple(k.get_secret_value() for k in load_crypto_settings().keys)
+    if not crypto_keys:
+        structlog.get_logger(__name__).warning("agent_env.encryption_disabled")
+    return async_sessionmaker(
+        engine,
+        expire_on_commit=False,
+        class_=AsyncSession,
+        info={"crypto_keys": crypto_keys},
+    )

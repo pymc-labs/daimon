@@ -32,6 +32,7 @@ def test_routine_row_validates_from_orm_instance_with_all_fields_populated() -> 
         timezone="UTC",
         trigger_message="run morning standup",
         enabled=True,
+        catch_up_policy="skip",
         next_fire_at=next_fire,
         last_fired_at=fired,
         last_error=None,
@@ -69,6 +70,7 @@ def test_routine_row_handles_optional_fields_as_none() -> None:
         timezone="America/New_York",
         trigger_message="ping",
         enabled=True,
+        catch_up_policy="skip",
         next_fire_at=None,
         last_fired_at=None,
         last_error=None,
@@ -85,3 +87,7 @@ def test_routine_row_handles_optional_fields_as_none() -> None:
     assert row.last_error is None, "last_error None when never errored"
     assert row.last_result_tail is None, "last_result_tail None until first result"
     assert row.enabled is True, "enabled round-trips True"
+    assert row.catch_up_policy == "skip"
+    assert row.last_skipped_from is None
+    assert row.last_skipped_until is None
+    assert row.last_skip_reason is None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from daimon.adapters.mcp.tools._untrusted import UntrustedMarker, UntrustedResult
 from pydantic import BaseModel, ConfigDict
 
 SlackConversationType = Literal["public_channel", "private_channel", "im", "mpim"]
@@ -27,15 +28,17 @@ class SlackMessageRow(BaseModel):
     text: str
     thread_ts: str | None = None
     reply_count: int | None = None
+    trust: UntrustedMarker | None = None
+    """"untrusted" when this row was read back rather than just sent by daimon."""
 
 
-class SlackChannelResult(BaseModel):
+class SlackChannelResult(UntrustedResult):
     messages: list[SlackMessageRow]
     next_cursor: str | None = None
     hint: str | None = None
 
 
-class SlackThreadResult(BaseModel):
+class SlackThreadResult(UntrustedResult):
     channel_id: str
     thread_ts: str
     messages: list[SlackMessageRow]
@@ -53,7 +56,7 @@ class SlackSearchMatch(BaseModel):
     permalink: str | None = None
 
 
-class SlackSearchResult(BaseModel):
+class SlackSearchResult(UntrustedResult):
     model_config = ConfigDict(frozen=True)
 
     matches: list[SlackSearchMatch]

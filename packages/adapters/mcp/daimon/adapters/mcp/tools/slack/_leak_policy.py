@@ -4,8 +4,8 @@ Channel and group-DM (mpim) content produced from a user token follows the
 asking user's own visibility (their xoxp token is the authority) and may be
 answered wherever they asked. 1:1 direct-message content (im) is the
 exception: it may only be produced in a DM with daimon. The destination is
-resolved from slack_turn_contexts rows the Slack adapter maintains around
-run_turn; zero or ambiguous rows fail closed (DM content is withheld).
+resolved only from the slack_turn_contexts row named by a verified JWT claim.
+Account activity is never authority; missing or expired grants fail closed.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.core.stores.slack_turn_contexts import get_slack_turn_channels
+from daimon.core.stores.slack_turn_contexts import get_slack_turn_destination
 
 TURN_CONTEXT_TTL = timedelta(minutes=60)
 
@@ -34,32 +34,19 @@ def is_dm_destination(destination: str | None) -> bool:
 
 
 async def get_destination(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime) -> str | None:
-    """Resolve the caller's current conversation channel, or None (fail closed).
+    """Resolve the signed execution's destination; never borrow account activity.
 
-    IMPORTANT — this resolution is account-scoped, not turn-scoped: it reads
-    whatever slack_turn_contexts row(s) are live for (tenant_id, account_id)
-    right now, without regard to which turn is calling. Only interactive
-    Slack-adapter turns write those rows (around ``run_turn`` in
-    ``SlackApp._run_thread_turn``); a scheduler routine running as the same
-    account does NOT write one. So a routine executing concurrently with the
-    creator chatting in a DM would inherit that DM's destination here and pass
-    the DM gate — i.e. non-context-writing callers alias whatever destination
-    an interactive turn happens to be using at the time.
-
-    This is safe today only because Slack has no ``send_message`` /
-    broadcast-capable tool — a routine can read but never emit anywhere.
-    Before shipping Slack ``send_message`` or any other broadcast-capable
-    tool, this MUST be fixed: either resolve per-turn (thread a turn/request
-    id through instead of keying purely on account) or have the scheduler
-    write its own sentinel turn-context row so routines get a distinct,
-    correctly-scoped destination instead of aliasing a concurrent interactive
-    turn's.
+    Ordinary account, routine/headless and MCP agent-chat/hub credentials have
+    no execution grant. Missing, expired, cleaned-up or foreign rows fail closed.
+    The private-session vault is isolated, so no shared credential is restamped.
     """
+    if auth.slack_turn_context_id is None:
+        return None
     async with runtime.session_factory() as session:
-        channels = await get_slack_turn_channels(
+        return await get_slack_turn_destination(
             session,
+            id=auth.slack_turn_context_id,
             tenant_id=auth.tenant_id,
             account_id=auth.account_id,
             cutoff=now - TURN_CONTEXT_TTL,
         )
-    return resolve_destination(channels)

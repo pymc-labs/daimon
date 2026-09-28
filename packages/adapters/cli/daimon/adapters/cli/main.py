@@ -7,6 +7,8 @@ import importlib.metadata
 import rich.traceback
 import typer
 from daimon.adapters.cli.commands.agents import agents_app
+from daimon.adapters.cli.commands.audit import audit_app
+from daimon.adapters.cli.commands.backup import backup_app
 from daimon.adapters.cli.commands.config import config_app
 from daimon.adapters.cli.commands.defaults import defaults_app
 from daimon.adapters.cli.commands.environments import environments_app
@@ -20,12 +22,16 @@ from daimon.adapters.cli.commands.sessions import sessions_app
 from daimon.adapters.cli.commands.skills import skills_app
 from daimon.adapters.cli.commands.smoke import smoke_command
 from daimon.adapters.cli.commands.tenants import tenants_app
+from daimon.adapters.cli.commands.usage import usage_app
 from daimon.adapters.cli.run.command import run_command
 
 app = typer.Typer(help="Daimon CMA CLI")
 app.add_typer(agents_app, name="agents")
+app.add_typer(backup_app, name="backup")
 app.add_typer(environments_app, name="environments")
 app.add_typer(tenants_app, name="tenants")
+app.add_typer(usage_app, name="usage")
+app.add_typer(audit_app, name="audit")
 app.add_typer(sessions_app, name="sessions")
 app.add_typer(config_app, name="config")
 app.add_typer(defaults_app, name="defaults")

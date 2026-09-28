@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 85 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 89 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -87,6 +87,7 @@ Shared channel MCP tools with per-platform dispatch.
 | `read_thread` | Discord callers, Slack callers | Read messages from a thread, oldest-first. |
 | `rename_thread` | Discord callers | Rename a Discord thread; ``name`` is the new title (1-100 characters). |
 | `search_messages` | Discord callers, Slack callers | Search messages with server-side filters. |
+| `send_direct_message` | Discord callers, Slack callers | Privately message one human member of the current server/workspace. |
 | `send_message` | Discord callers, Slack callers, Teams callers | Post a message to a channel. |
 | `set_display_identity` | Discord callers | Change how daimon appears in this Discord server: its display name, its avatar, or both. |
 
@@ -259,6 +260,16 @@ Time tools: ``now`` and ``convert``.
 | --- | --- | --- |
 | `convert` | all callers | Convert an ISO-8601 ``time`` from ``from_tz`` to ``to_tz``. |
 | `now` | all callers | Return the current wall-clock time in the given IANA timezone as ISO-8601. |
+
+## `timers`
+
+One-shot timers: create, list and cancel.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `cancel_timer` | all callers | Cancel a pending timer by id (from `create_timer` or `list_timers`). |
+| `create_timer` | all callers | Come back to this conversation once, later: "remind me in two hours", "check back tomorrow at 9". |
+| `list_timers` | all callers | List the caller's pending timers in this workspace, soonest first. |
 
 ## `vault`
 

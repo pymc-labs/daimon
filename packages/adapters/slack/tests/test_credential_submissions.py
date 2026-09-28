@@ -50,7 +50,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, get_pat
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.posted_controls import RECEIVED_FOOTER
-from daimon.core.stores.agent_files import put_agent_file
+from daimon.core.stores.agent_files import get_agent_file, put_agent_file
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.agent_skill_repo_credentials import get_skill_repo_credential
 from daimon.core.stores.credential_requests import (
@@ -87,8 +87,15 @@ from .credential_helpers import (
 
 
 async def _agent_file_rows(session: AsyncSession) -> list[Any]:
-    result = await session.execute(text("SELECT key, content FROM agent_files ORDER BY key"))
-    return list(result.mappings())
+    result = await session.execute(
+        text("SELECT tenant_id, agent_id, key FROM agent_files ORDER BY key")
+    )
+    rows = []
+    for tenant_id, agent_id, key in result:
+        row = await get_agent_file(session, tenant_id=tenant_id, agent_id=agent_id, key=key)
+        assert row is not None
+        rows.append({"key": row.key, "content": row.content})
+    return rows
 
 
 @pytest.mark.asyncio

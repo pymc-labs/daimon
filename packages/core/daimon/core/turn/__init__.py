@@ -7,7 +7,13 @@ No I/O lives in this package. The driver that consumes these primitives
 
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent as SessionEvent
 from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
-from daimon.core.turn.approvals import build_confirmation_events, pending_confirmation_ids
+from daimon.core.turn.approvals import (
+    build_confirmation_events,
+    build_decision_events,
+    interactive_decider,
+    pending_confirmation_ids,
+    unattended_decider,
+)
 from daimon.core.turn.ceiling import (
     CEILING_MESSAGE,
     TURN_CEILING_S,
@@ -18,14 +24,18 @@ from daimon.core.turn.ceiling import (
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.notices import TerminationNotice, render_termination_notice
 from daimon.core.turn.posture import (
     AutoApprove,
     Billed,
     BillingExempt,
     BillingPosture,
     ExemptReason,
+    PolicyApproval,
     RequireApproval,
+    ToolCallDecider,
     ToolConfirmation,
+    ToolConfirmationResult,
     UsageRecorder,
 )
 from daimon.core.turn.prepare import PreparedTurn, bind_session
@@ -46,6 +56,7 @@ from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
 )
+from daimon.core.turn.termination import TerminationReason, termination_reason
 
 __all__ = [
     # SDK alias (re-exported for short imports in driver/test code)
@@ -65,10 +76,16 @@ __all__ = [
     "UsageRecorder",
     # tool-confirmation posture
     "AutoApprove",
+    "PolicyApproval",
     "RequireApproval",
+    "ToolCallDecider",
     "ToolConfirmation",
+    "ToolConfirmationResult",
     "build_confirmation_events",
+    "build_decision_events",
+    "interactive_decider",
     "pending_confirmation_ids",
+    "unattended_decider",
     # session preparation (D-01 stage two)
     "PreparedTurn",
     "bind_session",
@@ -88,6 +105,11 @@ __all__ = [
     "TextBlock",
     "ToolUseBlock",
     "TurnState",
+    # how a turn ended
+    "TerminationReason",
+    "termination_reason",
+    "TerminationNotice",
+    "render_termination_notice",
     # reducers
     "apply",
     # driver

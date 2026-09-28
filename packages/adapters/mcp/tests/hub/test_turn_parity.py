@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     BetaManagedAgentsSession,
@@ -124,8 +125,13 @@ def _fake_session_for(kwargs: dict[str, Any]) -> BetaManagedAgentsSession:
     )
 
 
-async def test_hub_ask_creates_session_under_callers_account_in_that_tenant(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+@pytest.mark.parametrize("tool_name", ["ask", "start_turn", "continue_turn"])
+@pytest.mark.parametrize("refused", [False, True])
+async def test_hub_turn_outcomes_and_account_attribution(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tool_name: str,
+    refused: bool,
 ) -> None:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     principal = await make_platform_principal(
@@ -133,7 +139,8 @@ async def test_hub_ask_creates_session_under_callers_account_in_that_tenant(
     )
     # A hub ask runs through the real admission gate (_admit), which denies a
     # zero-balance tenant. Top up so the turn actually reaches create_session.
-    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    if not refused:
+        await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     await db_session.commit()
 
     hub_tenant = HubTenant(
@@ -201,10 +208,43 @@ async def test_hub_ask_creates_session_under_callers_account_in_that_tenant(
             mcp.http_app(path="/mcp", stateless_http=True, json_response=True),
             "/mcp",
             _TOKEN,
-            name="ask",
-            arguments={"daimon_id": daimon_id, "message": "status?"},
+            name=tool_name,
+            arguments={
+                "daimon_id": daimon_id,
+                "message": "status?",
+                **({"handle": "existing"} if tool_name == "continue_turn" else {}),
+            },
         )
 
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+    from daimon.core.turn.termination import TerminationReason
+
+    await drain_outcomes()
+    async with db_session_factory() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert len(rows) == 1
+    outcome = rows[0]
+    assert outcome.platform == "mcp" and outcome.origin == "chat"
+    assert outcome.account_id == principal.account_id
+    assert "status?" not in str(outcome)
+    if refused:
+        assert outcome.model_calls == 0 and outcome.cost_usd == 0
+        assert outcome.reason == TerminationReason.ADMISSION_BALANCE_DEPLETED
+        assert outcome.session_id is None
+        create_session.assert_not_awaited()
+        assert result["result"]["isError"]
+        return
+    assert outcome.reason == (
+        TerminationReason.COMPLETED if tool_name == "ask" else TerminationReason.UNKNOWN
+    )
+    assert outcome.session_id is not None and outcome.agent_id == AGENT_ID
+    assert outcome.model_calls is None and outcome.cost_usd is None
+    assert outcome.input_tokens is None and outcome.billing_posture is None
+    if tool_name == "continue_turn":
+        create_session.assert_not_awaited()
+        assert outcome.session_id == "existing"
+        return
     payload = result.get("result", result)
     assert isinstance(payload, dict) and not payload.get("isError"), (
         f"ask tool call over the hub app failed: {payload!r}"
@@ -219,6 +259,8 @@ async def test_hub_ask_creates_session_under_callers_account_in_that_tenant(
         f"session must be tagged with the addressed daimon's derived uuid, got {kwargs!r}"
     )
 
+    if tool_name != "ask":
+        return
     structured = payload.get("structuredContent") or {}
     assert structured.get("message") == "Hello from the agent!", (
         f"ask must surface the agent's reply text, got {payload!r}"

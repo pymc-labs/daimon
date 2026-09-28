@@ -36,6 +36,7 @@ typo is silent — check the spelling here.
 - [Billing Policy](#billing-policy)
 - [Support](#support)
 - [Thread Naming](#thread-naming)
+- [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
 - [Notebook host (standalone service)](#notebook-host-standalone-service)
@@ -47,6 +48,41 @@ typo is silent — check the spelling here.
 
 Read from `daimon.core.config.Settings`. Prefix `DAIMON_`. Every other `DAIMON_*`
 section below is a nested block on this model, reached with the `__` delimiter.
+
+### `DAIMON_SECURITY_AUDIT_RETENTION_DAYS`
+
+`int` · optional · default `90`
+
+Security audit retention age in days, default 90. Operators must schedule daimon audit
+prune TENANT_UUID for each tenant (for example daily). The command deletes older events.
+Set 0 to explicitly retain events forever; privacy erasure and tenant deletion still
+apply.
+
+### `DAIMON_COMPLETION_PINGS`
+
+`dict[UUID, bool]` · optional · default `{}`
+
+Per-tenant completion notification policy, keyed by tenant UUID. True enables
+accepted/done reactions and posts the final answer as a fresh reply mentioning only the
+requester on Discord and Slack. Missing/false preserves in-place delivery. Configure
+DAIMON_COMPLETION_PINGS as a JSON object.
+
+### `DAIMON_DIRECT_MESSAGE_POLICIES`
+
+`dict[UUID, DirectMessagePolicy]` · optional · default `{}`
+
+Per-tenant DM recipient policies keyed by tenant UUID (normalized at load; invalid keys
+rejected). Default is members (live membership required). Set mode=disabled to disable
+DMs, or mode=allowlist with recipient_ids to restrict delivery to listed members.
+Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object.
+
+### `DAIMON_TABLE_RENDERING`
+
+`dict[UUID, bool]` · optional · default `{}`
+
+Per-tenant table rendering opt-in, keyed by tenant UUID. True renders final Markdown
+tables as PNG on Discord and native tables on Slack. Missing/false preserves plain text.
+Set DAIMON_TABLE_RENDERING to a JSON object.
 
 ### `DAIMON_PRIVACY_POLICY_URL`
 
@@ -566,9 +602,10 @@ deployments without any encrypted credentials boot without crypto config.
 
 `tuple[SecretStr, ...]` · optional · default unset · secret
 
-Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. The first key
-encrypts new values; older keys remain valid for decrypting existing ciphertext during
-rotation.
+Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. Agent
+environment values encrypt when keys are configured; without keys they remain plaintext.
+The first key encrypts new values; older keys remain valid for decrypting existing
+ciphertext during rotation.
 
 ## Credentials
 
@@ -786,6 +823,50 @@ Seconds to wait for the naming model before the thread opens under the static ti
 thread is created only after this call, so this is the most a mention can wait before
 anything appears.
 
+## Tool Safety
+
+Read from `daimon.core.config.ToolSafetyPolicy`. Prefix `DAIMON_TOOL_SAFETY__`.
+
+What the operator decided about attached tools.
+
+Keys name a server (`linear`) or one tool on it (`linear/create_issue`); a tool key is
+more specific than its server key and wins.
+
+Read/write classes and confirmation for attached third-party MCP tools. See
+ToolSafetyPolicy.
+
+### `DAIMON_TOOL_SAFETY__ENABLED`
+
+`bool` · optional · default `False`
+
+Classify attached (third-party) MCP tools as read or write and gate the writes: a write
+in chat waits for the requester to press Approve on a confirmation card, and a write in
+a routine or other unattended run is refused unless listed in unattended_writes. Applies
+to sessions created after it is set; a chat thread keeps its current session until that
+is replaced. Off keeps every tool auto-approved.
+
+### `DAIMON_TOOL_SAFETY__EFFECTS`
+
+`dict[str, 'read' | 'write']` · optional · default `{}`
+
+Override the read/write class, e.g. {"linear/get_team": "read", "notion": "write"}. Keys
+are a server name or server/tool. Unlisted tools are classified from their name: a plain
+get_, list_, search_ ... is a read; a compound name (get_or_create, search_and_replace,
+run_query) and anything unknown is a write.
+
+### `DAIMON_TOOL_SAFETY__DENIED`
+
+`tuple[str, ...]` · optional · default unset
+
+Servers or server/tool pairs that are always refused, e.g. ["hubspot/delete_deal"].
+
+### `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`
+
+`tuple[str, ...]` · optional · default unset
+
+Servers or server/tool pairs whose writes may run in routines and other unattended runs,
+e.g. ["linear/create_issue"]. "*" allows every write there.
+
 ## Artifacts
 
 Read from `daimon.core.config.ArtifactsSettings`. Prefix `DAIMON_ARTIFACTS__`.
@@ -856,14 +937,14 @@ Seconds between scheduler ticks (loop sleep).
 
 `float` · optional · default `900.0`
 
-Freshness window — rows whose next_fire_at slipped past now - max_age_s are advanced via
-advance_stale and not fired.
+Freshness window for routines with catch_up_policy=skip. Older slots are recorded as
+skipped and advanced; run-once routines ignore this window.
 
 ### `DAIMON_SCHEDULER__MAX_CONCURRENT_FIRES`
 
 `int` · optional · default `10`
 
-Global cap on simultaneously-dispatched routine fires within one tick. Conservative
+Global cap on simultaneously-dispatched routine fires across all ticks. Conservative
 against the shared Anthropic key's rate limit; per-tenant caps are enforced separately
 by the adapters.
 
@@ -876,10 +957,9 @@ ceiling (daimon.core.turn.ceiling) is enforced inside headless_runner.run_turn a
 first, producing a TurnError(kind='ceiling'). This bound only catches a fire that hangs
 OUTSIDE the ceiling's two legs (routine row bookkeeping, agent/environment resolution,
 the usage-recorder factory, record_result), and must stay strictly above TURN_CEILING_S
-or the core ceiling becomes unreachable for routines. run_one_tick awaits the full
-gather, so a fire running to this bound blocks the tick loop for that long, and cron
-slots that slip more than max_age_s (default 900s) behind during that window are
-advanced by advance_stale rather than fired.
+or the core ceiling becomes unreachable for routines. Each routine has its own timeout;
+continuous scheduler ticks do not await in-flight routines. Missed slots follow the
+routine's catch_up_policy.
 
 ### `DAIMON_SCHEDULER__ADVISORY_LOCK_KEY`
 

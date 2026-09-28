@@ -1,11 +1,15 @@
-"""Dispatch queued task-continuation turns after a turn completes in their thread.
+"""Dispatch queued task-continuation turns and due wakes in one thread.
 
 A handoff that carried work to continue queues a `task_continuations` row
-(`daimon.core.stores.task_continuations`). Nobody polls for it: the row is
-picked up the next time ANY turn finishes in that thread, right here, still
-inside the caller that just finished its own turn -- so the thread's
-concurrency guard (`DaimonBot._processing`) is still held and no second
-mention can race the dispatch.
+(`daimon.core.stores.task_continuations`); a wake (`daimon.core.continuity.
+wakes`) queues the same row with an `available_at`. Either is picked up here,
+the next time ANY turn finishes in that thread or when the wake poller opens
+the thread, always inside the thread's concurrency guard
+(`DaimonBot._processing`) so no second mention can race the dispatch.
+
+Every row is claimed under a lease and fenced (`start_wake`) right before its
+turn runs, so a process that dies mid-dispatch leaves a row the poller can
+either safely retry (never started) or settle as interrupted (started).
 
 This module only decides and settles (via `daimon.core.continuity.continuation`,
 the at-most-once contract) and drives Discord-specific reads (`thread.history`
@@ -27,16 +31,27 @@ from anthropic import AsyncAnthropic
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
     ContinuationRequest,
-    claim_continuation,
+    ResponderChanged,
     decide_continuation,
-    record_continuation,
-    settle_continuation,
+)
+from daimon.core.continuity.wakes import (
+    WAKE_RETRY_DELAY,
+    WakeClaim,
+    busy_retry_at,
+    claim_wake,
+    list_dispatchable_wakes,
+    release_wake,
+    settle_wake,
+    start_wake,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.stores.domain import TaskContinuationRow
-from daimon.core.stores.task_continuations import list_pending_continuations
 from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.turn.errors import SessionBusyError, SessionPreparationFailed
+from daimon.core.turn.errors import (
+    AdmissionDenied,
+    SessionBusyError,
+    SessionPreparationFailed,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -70,9 +85,10 @@ async def _dispatch_one(
     anthropic: AsyncAnthropic,
     *,
     row: TaskContinuationRow,
+    claim: WakeClaim,
     thread: discord.Thread,
     run_follow_up: RunFollowUp,
-    now: datetime,
+    now: Callable[[], datetime],
 ) -> None:
     request = ContinuationRequest(
         tenant_id=row.tenant_id,
@@ -102,70 +118,80 @@ async def _dispatch_one(
         sessionmaker,
         anthropic,
         request=request,
-        now=now,
+        now=now(),
         latest_user_message_at=latest_user_message_at,
         active_turn=active_turn,
     )
 
+    if decision.action == "skip_turn_running" and row.available_at is not None:
+        # A wake has no person waiting on a reply to be told anything; it
+        # simply runs after the turn in progress.
+        await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
+        return
     if decision.action != "dispatch":
         if decision.message is not None:
             await thread.send(decision.message)
-        await settle_continuation(
-            sessionmaker,
-            idempotency_key=row.idempotency_key,
-            status="skipped",
-            now=now,
-            skip_reason=decision.action,
+        await settle_wake(
+            sessionmaker, claim, status="skipped", now=now(), skip_reason=decision.action
         )
         return
 
+    if not await start_wake(sessionmaker, claim, now=now()):
+        # Another dispatcher took the row over while this one was deciding.
+        return
     try:
         await run_follow_up(row, decision)
     except SessionPreparationFailed:
         log.warning("continuation.dispatch_preparation_failed", thread_id=row.thread_id)
-        await settle_continuation(
+        await settle_wake(
             sessionmaker,
-            idempotency_key=row.idempotency_key,
+            claim,
             status="skipped",
-            now=now,
+            now=now(),
             skip_reason="blocked_preparation_failed",
         )
         return
-    except SessionBusyError:
+    except ResponderChanged as exc:
+        # A timer whose thread is answered by another agent now: say so and
+        # stop; the turn never started.
+        await thread.send(exc.message)
+        await settle_wake(
+            sessionmaker, claim, status="skipped", now=now(), skip_reason="skip_target_changed"
+        )
+        return
+    except AdmissionDenied as exc:
+        # The balance or cap gate said no: the turn never started, and a wake
+        # is held to the same policy as a mention. Not retried.
+        log.info("continuation.dispatch_admission_denied", thread_id=row.thread_id)
+        await settle_wake(
+            sessionmaker,
+            claim,
+            status="skipped",
+            now=now(),
+            skip_reason=f"admission_denied:{exc.reason}",
+        )
+        return
+    except SessionBusyError as busy:
         # Same outcome as `skip_turn_running`, reached one step later: a turn
         # was still running in this thread when the follow-up tried to bind, so
-        # the destination could not take the session over. The store has no
-        # "unclaim", so the claimed row is settled `skipped` and the SAME
-        # request is queued again under a NEW idempotency key. At-most-once
-        # still holds per key (the settled row can never dispatch again) while
-        # the work the person asked for is not dropped -- the next turn to
-        # finish in this thread picks the new row up.
+        # the destination could not take the session over. Nothing ran, so the
+        # SAME row goes back to pending with its claim refunded: a handoff
+        # waits for the next turn in this thread, as it always has; a wake is
+        # retried by the poller shortly. Only a claim can run it, so
+        # at-most-once holds, and waiting never uses up the crash budget.
         log.warning("continuation.dispatch_turn_running", thread_id=row.thread_id)
-        await settle_continuation(
-            sessionmaker,
-            idempotency_key=row.idempotency_key,
-            status="skipped",
-            now=now,
-            skip_reason="turn_running",
-        )
-        await record_continuation(
-            sessionmaker, request.model_copy(update={"idempotency_key": uuid.uuid4()})
+        await release_wake(
+            sessionmaker, claim, retry_at=busy_retry_at(row, now=now(), not_before=busy.retry_after)
         )
         return
     except (DaimonError, _anthropic.APIError, discord.HTTPException) as exc:
         log.warning("continuation.dispatch_failed", thread_id=row.thread_id, error=str(exc))
-        await settle_continuation(
-            sessionmaker,
-            idempotency_key=row.idempotency_key,
-            status="skipped",
-            now=now,
-            skip_reason="dispatch_failed",
+        await settle_wake(
+            sessionmaker, claim, status="skipped", now=now(), skip_reason="dispatch_failed"
         )
         return
 
-    await settle_continuation(
-        sessionmaker, idempotency_key=row.idempotency_key, status="delivered", now=now
-    )
+    await settle_wake(sessionmaker, claim, status="delivered", now=now())
 
 
 async def dispatch_pending_continuations(
@@ -175,33 +201,39 @@ async def dispatch_pending_continuations(
     tenant_id: uuid.UUID,
     thread: discord.Thread,
     run_follow_up: RunFollowUp,
-    now: datetime | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
-    """After a turn completes in `thread`, claim and run any pending continuations.
+    """Claim and run every continuation or due wake `thread` may run now.
 
-    Called from the turn-completion path, still inside the caller's
-    concurrency guard for this thread. Every pending row is claimed
-    (`claim_continuation` — an at-most-once conditional UPDATE, so a lost
-    race here means another caller already owns it and this one does
-    nothing), decided (`decide_continuation`), and either dispatched via
-    `run_follow_up` or settled as skipped with the decision's own copy.
+    Called inside the caller's concurrency guard for this thread. Every
+    dispatchable row is claimed under a lease (`claim_wake` — an at-most-once
+    conditional UPDATE, so a lost race here means another caller already owns
+    it and this one does nothing), decided (`decide_continuation`), and either
+    fenced and dispatched via `run_follow_up` or settled as skipped with the
+    decision's own copy.
+
+    `now` is a clock, read afresh for every claim, start, settle and release:
+    a row dispatched after a long turn for the row before it must not be
+    stamped with a time from before that turn (its lease would be born
+    expired). Tests inject a fixed or stepping clock.
     """
-    effective_now = now if now is not None else datetime.now(UTC)
-    async with sessionmaker() as session:
-        pending = await list_pending_continuations(
-            session, tenant_id=tenant_id, platform="discord", thread_id=str(thread.id)
-        )
+    pending = await list_dispatchable_wakes(
+        sessionmaker,
+        tenant_id=tenant_id,
+        platform="discord",
+        thread_id=str(thread.id),
+        now=now(),
+    )
     for row in pending:
-        claimed = await claim_continuation(
-            sessionmaker, idempotency_key=row.idempotency_key, now=effective_now
-        )
-        if not claimed:
+        claim = await claim_wake(sessionmaker, idempotency_key=row.idempotency_key, now=now())
+        if claim is None:
             continue
         await _dispatch_one(
             sessionmaker,
             anthropic,
             row=row,
+            claim=claim,
             thread=thread,
             run_follow_up=run_follow_up,
-            now=effective_now,
+            now=now,
         )

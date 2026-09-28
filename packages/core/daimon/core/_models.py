@@ -42,6 +42,9 @@ class Tenant(Base):
     __tablename__ = "tenants"
     __table_args__ = (
         UniqueConstraint("platform", "external_id", name="uq_tenants_platform_external_id"),
+        CheckConstraint(
+            "funding_mode IN ('prepaid', 'operator_funded')", name="ck_tenants_funding_mode"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -53,6 +56,9 @@ class Tenant(Base):
     external_id: Mapped[str] = mapped_column(Text, nullable=False)
     provision_status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'ready'")
+    )
+    funding_mode: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'prepaid'")
     )
     last_reconcile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -209,6 +215,30 @@ class TenantConfig(Base):
     mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'agent'"))
 
 
+class TenantAccessPolicyRecord(Base):
+    """A tenant's access policy (`daimon.core.access_policy.TenantAccessPolicy` as JSON).
+
+    No row means the open default, so tenants that never set one are unchanged.
+    """
+
+    __tablename__ = "tenant_access_policies"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", name="pk_tenant_access_policies"),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+            name="fk_tenant_access_policies_tenants",
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ChannelConfig(Base):
     __tablename__ = "channel_config"
     __table_args__ = (
@@ -252,6 +282,27 @@ class Routine(Base):
             postgresql_where=text("enabled AND next_fire_at IS NOT NULL"),
         ),
         Index("routines_tenant_idx", "tenant_id"),
+        CheckConstraint(
+            "catch_up_policy IN ('skip', 'run-once')", name="ck_routines_catch_up_policy"
+        ),
+        CheckConstraint(
+            "destination_kind IS NULL OR destination_kind IN ('channel', 'thread')",
+            name="ck_routines_destination_kind",
+        ),
+        CheckConstraint(
+            "(destination_kind IS NULL) = (destination_id IS NULL)",
+            name="ck_routines_destination_pair",
+        ),
+        CheckConstraint(
+            "delivery_status IS NULL OR delivery_status IN "
+            "('pending', 'claimed', 'delivered', 'skipped')",
+            name="ck_routines_delivery_status",
+        ),
+        Index(
+            "routines_delivery_due_idx",
+            "delivery_status",
+            postgresql_where=text("delivery_status IN ('pending', 'claimed')"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -271,10 +322,31 @@ class Routine(Base):
     timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="UTC")
     trigger_message: Mapped[str] = mapped_column(Text, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    catch_up_policy: Mapped[str] = mapped_column(Text, nullable=False, server_default="skip")
+    last_skipped_from: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_skipped_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     next_fire_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_result_tail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # FEAT-085: optional place the result goes, and the outbox that posts it.
+    destination_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    destination_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivery_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivery_lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivery_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    delivery_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The text a pending post carries: that fire's result, copied so a writer
+    # that only knows `last_result_tail` cannot change what gets posted.
+    delivery_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -800,10 +872,13 @@ class TenantLedger(Base):
 
 
 class AgentFile(Base):
-    """Per-(tenant, agent, key) text blob storage."""
+    """Per-(tenant, agent, key) encrypted environment value storage."""
 
     __tablename__ = "agent_files"
-    __table_args__ = (PrimaryKeyConstraint("tenant_id", "agent_id", "key", name="pk_agent_files"),)
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "key", name="pk_agent_files"),
+        CheckConstraint("encoding IN ('plain', 'fernet_v1')", name="ck_agent_files_encoding"),
+    )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -813,6 +888,7 @@ class AgentFile(Base):
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     key: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    encoding: Mapped[str] = mapped_column(Text, nullable=False, server_default="plain")
     # Attribution, not authorization: who first created the key and who last
     # replaced its value. No FK to accounts.id, matching CredentialRequest's
     # rationale — these rows are erased by the platform-user-scoped helper,
@@ -1797,21 +1873,27 @@ class SessionPreparation(Base):
 
 
 class TaskContinuation(Base):
-    """A queued first turn for an agent a task was just handed to.
+    """A queued turn owed to a thread: a handoff's first turn, or a later wake.
 
     `idempotency_key` plus the `status` ladder is the at-most-once guarantee:
     a dispatcher claims a row with a single conditional UPDATE, so a restart
     mid-dispatch can never post the same continuation twice.
+
+    The lease columns make it a durable wake queue (`daimon.core.continuity.
+    wakes`): a claim carries an owner and an expiry, and `started_at` is the
+    fence committed just before the turn begins. An expired claim is retried
+    only while `started_at` is NULL; once it is set, nobody can tell whether
+    the turn ran, so the row is settled instead of run again.
     """
 
     __tablename__ = "task_continuations"
     __table_args__ = (
         CheckConstraint(
-            "reason IN ('task_handoff', 'private_input_applied')",
+            "reason IN ('task_handoff', 'private_input_applied', 'timer')",
             name="ck_task_continuations_reason",
         ),
         CheckConstraint(
-            "status IN ('pending', 'claimed', 'delivered', 'skipped')",
+            "status IN ('pending', 'claimed', 'delivered', 'skipped', 'cancelled')",
             name="ck_task_continuations_status",
         ),
         UniqueConstraint("idempotency_key", name="uq_task_continuations_idempotency_key"),
@@ -1821,6 +1903,13 @@ class TaskContinuation(Base):
             "platform",
             "thread_id",
             "status",
+        ),
+        Index(
+            "task_continuations_due_idx",
+            "platform",
+            "status",
+            "available_at",
+            postgresql_where=text("available_at IS NOT NULL"),
         ),
     )
 
@@ -1849,3 +1938,128 @@ class TaskContinuation(Base):
     )
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # NULL: dispatched only at the tail of the next turn in the thread (a
+    # handoff). Set: also polled, and not claimable before this instant.
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+
+class TurnOutcome(Base):
+    """Content-free terminal diagnostics; one UUID per logical turn."""
+
+    __tablename__ = "turn_outcomes"
+    __table_args__ = (
+        CheckConstraint(
+            "origin IN ('chat', 'routine', 'relay', 'handoff')", name="ck_turn_outcomes_origin"
+        ),
+        CheckConstraint(
+            "reason IN ('completed', 'interrupted', 'interrupt_timeout', "
+            "'connection_lost', 'upstream', 'rate_limited', 'session_terminated', "
+            "'mcp_degraded_empty', 'retrying_unsettled', 'requires_action', 'ceiling', "
+            "'recovery_cancelled', 'recovery_failed', 'reducer_bug', "
+            "'admission_balance_depleted', 'admission_cap_exceeded', 'admission_denied', "
+            "'admission_concurrency_shed', 'missing_config', 'resolver_miss', "
+            "'session_preparation_failed', 'session_busy', 'session_agent_mismatch', "
+            "'unknown')",
+            name="ck_turn_outcomes_reason",
+        ),
+        CheckConstraint("duration_ms >= 0", name="ck_turn_outcomes_duration"),
+        Index("ix_turn_outcomes_tenant_started", "tenant_id", "started_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str | None] = mapped_column(Text)
+    thread_id: Mapped[str | None] = mapped_column(Text)
+    agent_id: Mapped[str | None] = mapped_column(Text)
+    session_id: Mapped[str | None] = mapped_column(Text)
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    duration_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    recovered: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    error_class: Mapped[str | None] = mapped_column(Text)
+    release: Mapped[str] = mapped_column(Text, nullable=False)
+    usage_refs: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+
+    # SYS-066: NULL distinguishes historical outcomes from measured zero usage.
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    cache_read_input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    cache_creation_input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    model_calls: Mapped[int | None] = mapped_column(Integer)
+    model_ids: Mapped[list[str] | None] = mapped_column(JSONB)
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    unpriced_calls: Mapped[int | None] = mapped_column(Integer)
+    billing_posture: Mapped[str | None] = mapped_column(Text)
+
+
+class SecurityAuditEvent(Base):
+    """Append-only security metadata with dedicated erasure and retention maintenance."""
+
+    __tablename__ = "security_audit_events"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('allowed', 'denied', 'error')", name="ck_security_audit_outcome"
+        ),
+        Index("ix_security_audit_tenant_time", "tenant_id", "occurred_at", "id"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    platform: Mapped[str | None] = mapped_column(Text)
+    platform_user_id: Mapped[str | None] = mapped_column(Text)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    operation: Mapped[str | None] = mapped_column(Text)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+
+
+class DirectMessagePolicy(Base):
+    """Explicit tenant opt-in; absence leaves existing DM behavior unchanged."""
+
+    __tablename__ = "direct_message_policies"
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+
+
+class DirectMessageConversation(Base):
+    """One user's selected workspace for a private platform conversation."""
+
+    __tablename__ = "direct_message_conversations"
+    platform: Mapped[str] = mapped_column(Text, primary_key=True)
+    route_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    external_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    context: Mapped[str] = mapped_column(Text, nullable=False)
+    memory_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    recent_message_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

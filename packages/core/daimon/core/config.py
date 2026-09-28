@@ -9,13 +9,15 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import uuid
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
 from daimon.core.thread_participation import ParticipationMode
-from pydantic import BaseModel, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
+from daimon.core.tool_safety import ToolSafetyPolicy
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -656,7 +658,9 @@ class CryptoSettings(BaseModel):
         default=(),
         description=(
             "Ordered tuple of Fernet keys used to encrypt/decrypt stored "
-            "credentials. The first key encrypts new values; older keys "
+            "credentials. Agent environment values encrypt when keys are configured; "
+            "without keys they remain plaintext. The first key encrypts "
+            "new values; older keys "
             "remain valid for decrypting existing ciphertext during rotation."
         ),
     )
@@ -914,7 +918,59 @@ class ArtifactsSettings(BaseModel):
     )
 
 
+class DirectMessagePolicy(BaseModel):
+    """Tenant recipient restrictions; platform membership is always required."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["members", "allowlist", "disabled"] = "members"
+    recipient_ids: list[str] = Field(default_factory=list[str])
+
+    def allows(self, recipient_id: str) -> bool:
+        return self.mode == "members" or (
+            self.mode == "allowlist" and recipient_id in self.recipient_ids
+        )
+
+
 class Settings(BaseSettings):
+    security_audit_retention_days: int = Field(
+        default=90,
+        ge=0,
+        description=(
+            "Security audit retention age in days, default 90. Operators must schedule "
+            "daimon audit prune TENANT_UUID for each tenant (for example daily). "
+            "The command deletes older events. Set 0 to explicitly retain events forever; "
+            "privacy erasure and tenant deletion still apply."
+        ),
+    )
+    completion_pings: dict[uuid.UUID, bool] = Field(
+        default_factory=dict[uuid.UUID, bool],
+        description=(
+            "Per-tenant completion notification policy, keyed by tenant UUID. "
+            "True enables accepted/done reactions and posts the final answer as a fresh reply "
+            "mentioning only the requester "
+            "on Discord and Slack. Missing/false preserves in-place delivery. "
+            "Configure DAIMON_COMPLETION_PINGS as a JSON object."
+        ),
+    )
+    direct_message_policies: dict[uuid.UUID, DirectMessagePolicy] = Field(
+        default_factory=dict[uuid.UUID, DirectMessagePolicy],
+        description=(
+            "Per-tenant DM recipient policies keyed by tenant UUID (normalized at load; "
+            "invalid keys rejected). Default is "
+            "members (live membership required). Set mode=disabled to disable DMs, "
+            "or mode=allowlist with recipient_ids to restrict delivery to listed "
+            "members. Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object."
+        ),
+    )
+    table_rendering: dict[uuid.UUID, bool] = Field(
+        default_factory=dict[uuid.UUID, bool],
+        description=(
+            "Per-tenant table rendering opt-in, keyed by tenant UUID. True renders "
+            "final Markdown tables as PNG on Discord and native tables on Slack. "
+            "Missing/false preserves plain text. Set DAIMON_TABLE_RENDERING to a JSON object."
+        ),
+    )
     database: DatabaseSettings
     anthropic: AnthropicSettings
     privacy_policy_url: HttpUrl = Field(
@@ -945,6 +1001,13 @@ class Settings(BaseSettings):
     billing: BillingSettings = Field(default_factory=BillingSettings)
     support: SupportSettings = Field(default_factory=SupportSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
+    tool_safety: ToolSafetyPolicy = Field(
+        default_factory=ToolSafetyPolicy,
+        description=(
+            "Read/write classes and confirmation for attached third-party MCP tools. "
+            "See ToolSafetyPolicy."
+        ),
+    )
     artifacts: ArtifactsSettings | None = Field(
         default=None,
         description=(
@@ -982,3 +1045,17 @@ def load_settings(*, _env_file: str | None = ".env") -> Settings:
     (`_env_file=None`) so they only see `monkeypatch.setenv` values.
     """
     return Settings(_env_file=_env_file)  # pyright: ignore[reportCallIssue]
+
+
+class _CryptoSettingsSource(BaseSettings):
+    """Crypto-only settings for migrations and standalone store sessions."""
+
+    crypto: CryptoSettings = Field(default_factory=CryptoSettings)
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_", env_nested_delimiter="__", env_file=".env", extra="ignore"
+    )
+
+
+def load_crypto_settings() -> CryptoSettings:
+    """Load keys without requiring unrelated API or database configuration."""
+    return _CryptoSettingsSource().crypto

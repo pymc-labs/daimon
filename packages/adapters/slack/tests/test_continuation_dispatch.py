@@ -11,13 +11,20 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 import pytest
+import yarl
+from daimon.adapters.slack import continuation_dispatch
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
+from daimon.core.continuity.wakes import (
+    WAKE_CLAIM_LEASE,
+    WAKE_RUN_LEASE,
+    abandon_interrupted_wakes,
+)
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
@@ -184,26 +191,18 @@ async def test_dispatch_skips_silently_when_no_work_was_requested(
     assert posts == [], "a silent skip must not post anything into the thread"
 
 
-async def test_a_busy_session_settles_skipped_and_requeues_under_a_new_key(
+async def _seed_request(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """A follow-up that cannot bind because a turn is still running is not lost.
-
-    `claim_continuation` has no inverse, so the claimed row is settled
-    `skipped`/`turn_running` and the same request is queued again under a NEW
-    idempotency key. At-most-once still holds per key -- the settled row can
-    never dispatch again -- while the work the person asked for survives to be
-    picked up by the next turn that finishes in this thread.
-    """
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_CONT_DISPATCH_BUSY")
+    *,
+    workspace_id: str,
+    thread_id: str,
+) -> ContinuationRequest:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=workspace_id)
     requester = await get_or_create_platform_principal(
         db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
     )
     await db_session.commit()
-
-    thread_id = "9200000003.000001"
     request = ContinuationRequest(
         tenant_id=tenant.id,
         platform="slack",
@@ -218,115 +217,233 @@ async def test_a_busy_session_settles_skipped_and_requeues_under_a_new_key(
         idempotency_key=uuid.uuid4(),
     )
     await record_continuation(db_session_factory, request)
+    return request
 
-    anthropic = build_fake_anthropic(_fake_target_agent_handler(str(tenant.id)))
 
-    async def _busy_follow_up(row: TaskContinuationRow, seed: str) -> None:
-        raise SessionBusyError(pending_reasons=("agent_identity",), retry_after=datetime.now(UTC))
+async def _read(
+    db_session_factory: async_sessionmaker[AsyncSession], key: uuid.UUID
+) -> TaskContinuationRow:
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None
+    return row
 
-    await dispatch_pending_continuations(
-        db_session_factory,
-        anthropic,
-        fake_slack_web_client.client,
-        tenant_id=tenant.id,
-        channel="C_CONT_DISPATCH",
-        thread_id=thread_id,
-        active_turn=False,
-        run_follow_up=_busy_follow_up,
-        now=lambda: datetime.now(UTC),
+
+async def test_a_handoff_survives_any_number_of_busy_binds_as_on_main(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Baseline parity: five busy binds, then a free session, delivers the handoff.
+
+    On main each busy bind settled the row and re-queued the request under a
+    new key for the next turn tail, without limit, so the sixth tail delivered
+    it. Here the same row is released with its claim refunded and
+    `available_at` left NULL: delivered on the sixth tail, exactly once.
+    """
+    thread_id = "9200000003.000001"
+    request = await _seed_request(
+        db_session, db_session_factory, workspace_id="T_CONT_DISPATCH_BUSY", thread_id=thread_id
     )
+    anthropic = build_fake_anthropic(_fake_target_agent_handler(str(request.tenant_id)))
+    now = datetime.now(UTC)
 
-    settled = await get_continuation(db_session, idempotency_key=request.idempotency_key)
-    assert settled is not None
-    assert settled.status == "skipped", "the claimed row must not be left claimed"
-    assert settled.skip_reason == "turn_running"
+    async def _no_newer_message(*_args: object, **_kwargs: object) -> None:
+        return None
 
+    monkeypatch.setattr(continuation_dispatch, "_latest_human_message_at", _no_newer_message)
+    tails = 0
+    delivered: list[str] = []
+
+    async def _busy_five_times(row: TaskContinuationRow, seed: str) -> None:
+        nonlocal tails
+        tails += 1
+        if tails <= 5:
+            raise SessionBusyError(pending_reasons=("agent_identity",), retry_after=now)
+        delivered.append(seed)
+
+    for tail in range(6):
+        at = now + timedelta(minutes=tail)
+        await dispatch_pending_continuations(
+            db_session_factory,
+            anthropic,
+            fake_slack_web_client.client,
+            tenant_id=request.tenant_id,
+            channel="C_CONT_DISPATCH",
+            thread_id=thread_id,
+            active_turn=False,
+            run_follow_up=_busy_five_times,
+            now=lambda at=at: at,
+        )
+        row = await _read(db_session_factory, request.idempotency_key)
+        if tail < 5:
+            assert row.status == "pending" and row.attempts == 0, "a busy wait is refunded"
+            assert row.available_at is None, "a handoff still waits for the next turn tail"
+
+    assert delivered == ["please pick up the migration"]
+    row = await _read(db_session_factory, request.idempotency_key)
+    assert row.status == "delivered" and row.attempts == 1
     pending = await list_pending_continuations(
-        db_session, tenant_id=tenant.id, platform="slack", thread_id=thread_id
+        db_session, tenant_id=request.tenant_id, platform="slack", thread_id=thread_id
     )
-    assert len(pending) == 1, f"the request must be re-queued exactly once, got {pending}"
-    requeued = pending[0]
-    assert requeued.idempotency_key != request.idempotency_key, (
-        "the re-queued row must carry a NEW key, so the settled row's at-most-once still holds"
+    assert pending == [], "no second row is ever queued"
+
+
+async def test_process_death_before_the_fence_is_retried_after_lease_expiry(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim whose holder died before starting the turn runs once, after its lease."""
+    thread_id = "9200000004.000002"
+    request = await _seed_request(
+        db_session, db_session_factory, workspace_id="T_CONT_CRASH_PRE", thread_id=thread_id
     )
-    assert requeued.requested_work == "please pick up the migration", (
-        "the person's own words must survive the requeue"
-    )
-    assert requeued.target_ma_agent_id == _TARGET_AGENT_ID
-    assert requeued.requester_account_id == requester.account_id
-    assert requeued.reason == "task_handoff"
+    anthropic = build_fake_anthropic(_fake_target_agent_handler(str(request.tenant_id)))
+    now = datetime.now(UTC)
+
+    async def _no_newer_message(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def _die_reading_history(*_args: object, **_kwargs: object) -> None:
+        raise _SimulatedProcessDeath
+
+    def _dispatch(
+        run_follow_up: Callable[[TaskContinuationRow, str], Awaitable[None]], at: datetime
+    ) -> Any:
+        return dispatch_pending_continuations(
+            db_session_factory,
+            anthropic,
+            fake_slack_web_client.client,
+            tenant_id=request.tenant_id,
+            channel="C_CONT_DISPATCH",
+            thread_id=thread_id,
+            active_turn=False,
+            run_follow_up=run_follow_up,
+            now=lambda: at,
+        )
+
+    calls, run_follow_up = _recorder()
+    monkeypatch.setattr(continuation_dispatch, "_latest_human_message_at", _die_reading_history)
+    with pytest.raises(_SimulatedProcessDeath):
+        await _dispatch(run_follow_up, now)
+    stranded = await _read(db_session_factory, request.idempotency_key)
+    assert stranded.status == "claimed" and stranded.started_at is None
+
+    monkeypatch.setattr(continuation_dispatch, "_latest_human_message_at", _no_newer_message)
+    await _dispatch(run_follow_up, now + timedelta(seconds=1))
+    assert calls == [], "the dead process's lease is still live"
+
+    await _dispatch(run_follow_up, now + WAKE_CLAIM_LEASE + timedelta(seconds=1))
+    assert len(calls) == 1, "an expired unstarted claim is retried exactly once"
+    delivered = await _read(db_session_factory, request.idempotency_key)
+    assert delivered.status == "delivered" and delivered.attempts == 2
 
 
 @pytest.mark.parametrize(
     "effect_before_crash", [False, True], ids=["before-effect", "after-effect"]
 )
-async def test_process_death_strands_claim_without_automatic_retry(
+async def test_process_death_after_the_fence_settles_interrupted_and_never_reruns(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
     effect_before_crash: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    tenant = await make_tenant(
-        db_session, platform="slack", workspace_id=f"T_CONT_CRASH_{effect_before_crash}"
-    )
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_CONT_CRASH"
-    )
-    await db_session.commit()
+    """A started claim is never run again, whichever side of its effect the process died on."""
     thread_id = "9200000004.000001"
-    request = ContinuationRequest(
-        tenant_id=tenant.id,
-        platform="slack",
-        parent_channel_id="C_CONT_CRASH",
+    request = await _seed_request(
+        db_session,
+        db_session_factory,
+        workspace_id=f"T_CONT_CRASH_{effect_before_crash}",
         thread_id=thread_id,
-        requester_account_id=requester.account_id,
-        requester_external_user_id="U_CONT_CRASH",
-        target_ma_agent_id=_TARGET_AGENT_ID,
-        target_name="receiving-agent",
-        requested_work="continue",
-        reason="task_handoff",
-        idempotency_key=uuid.uuid4(),
     )
-    await record_continuation(db_session_factory, request)
-    anthropic = build_fake_anthropic(_fake_target_agent_handler(str(tenant.id)))
+    anthropic = build_fake_anthropic(_fake_target_agent_handler(str(request.tenant_id)))
     visible_effects: list[str] = []
+    now = datetime.now(UTC)
+
+    async def _no_newer_message(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(continuation_dispatch, "_latest_human_message_at", _no_newer_message)
 
     async def _die_during_follow_up(row: TaskContinuationRow, seed: str) -> None:
         if effect_before_crash:
             visible_effects.append(seed)
         raise _SimulatedProcessDeath
 
-    def _dispatch(run_follow_up: Callable[[TaskContinuationRow, str], Awaitable[None]]) -> Any:
+    def _dispatch(
+        run_follow_up: Callable[[TaskContinuationRow, str], Awaitable[None]], at: datetime
+    ) -> Any:
         return dispatch_pending_continuations(
             db_session_factory,
             anthropic,
             fake_slack_web_client.client,
-            tenant_id=tenant.id,
-            channel="C_CONT_CRASH",
+            tenant_id=request.tenant_id,
+            channel="C_CONT_DISPATCH",
             thread_id=thread_id,
             active_turn=False,
             run_follow_up=run_follow_up,
-            now=lambda: datetime.now(UTC),
+            now=lambda: at,
         )
 
     with pytest.raises(_SimulatedProcessDeath):
-        await _dispatch(_die_during_follow_up)
+        await _dispatch(_die_during_follow_up, now)
 
-    claimed = await get_continuation(db_session, idempotency_key=request.idempotency_key)
-    assert claimed is not None and claimed.status == "claimed", (
-        "process death must leave the committed continuation claim unsettled"
-    )
-    assert len(visible_effects) == int(effect_before_crash), (
-        "the injected effect must match the selected crash boundary"
-    )
-
+    after_lease = now + WAKE_RUN_LEASE + timedelta(seconds=1)
     calls, run_follow_up = _recorder()
-    await _dispatch(run_follow_up)
-    assert calls == [], "a new dispatcher must not retry an already-claimed continuation"
+    await _dispatch(run_follow_up, after_lease)
+    assert calls == [], "a started claim must never be retried"
+
+    await abandon_interrupted_wakes(db_session_factory, platform="slack", now=after_lease)
+    settled = await _read(db_session_factory, request.idempotency_key)
+    assert settled.status == "skipped" and settled.skip_reason == "interrupted"
     assert len(visible_effects) == int(effect_before_crash), (
         "a later dispatch must not repeat the observable effect"
     )
-    still_claimed = await get_continuation(db_session, idempotency_key=request.idempotency_key)
-    assert still_claimed is not None and still_claimed.status == "claimed", (
-        "a later dispatch must leave the stranded claim unchanged"
+
+
+async def test_a_timer_refused_for_a_changed_responder_posts_why_and_settles_skipped(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.continuity.continuation import ResponderChanged
+
+    thread_id = "9200000005.000001"
+    request = await _seed_request(
+        db_session, db_session_factory, workspace_id="T_TIMER_TARGET", thread_id=thread_id
     )
+    anthropic = build_fake_anthropic(_fake_target_agent_handler(str(request.tenant_id)))
+
+    async def _no_newer_message(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(continuation_dispatch, "_latest_human_message_at", _no_newer_message)
+
+    async def _rerouted(row: TaskContinuationRow, seed: str) -> None:
+        raise ResponderChanged(target_name="receiving-agent", current_name="other-agent")
+
+    await dispatch_pending_continuations(
+        db_session_factory,
+        anthropic,
+        fake_slack_web_client.client,
+        tenant_id=request.tenant_id,
+        channel="C_CONT_DISPATCH",
+        thread_id=thread_id,
+        active_turn=False,
+        run_follow_up=_rerouted,
+    )
+
+    row = await _read(db_session_factory, request.idempotency_key)
+    assert row.status == "skipped" and row.skip_reason == "skip_target_changed"
+    posts = fake_slack_web_client.mock.requests.get(
+        ("POST", yarl.URL("https://slack.com/api/chat.postMessage")), []
+    )
+    texts = [
+        str((p.kwargs.get("json") or p.kwargs.get("data") or {}).get("text") or "") for p in posts
+    ]
+    assert any("other-agent answers in this thread now" in text for text in texts), texts

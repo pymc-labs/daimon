@@ -133,6 +133,7 @@ async def _ensure_agent_mcp_vault_locked(
     jwt_secret: bytes,
     public_url: str,
     now: dt.datetime,
+    slack_turn_context_id: uuid.UUID | None = None,
 ) -> str:
     """Core get-or-create body, assuming the caller already holds the
     per-(account_id, agent_id) advisory lock for this transaction.
@@ -144,6 +145,8 @@ async def _ensure_agent_mcp_vault_locked(
     would deadlock against the outer transaction's own held lock.
     """
     display_name = f"daimon-mcp:{account_id}:{agent_id}"
+    if slack_turn_context_id is not None:
+        display_name += f":slack-turn:{slack_turn_context_id}"
     oldest = await _find_vault_by_name(client, display_name=display_name)
     if oldest is not None:
         # Only act on URL mismatch: no credential at `public_url` — stale URL
@@ -158,17 +161,40 @@ async def _ensure_agent_mcp_vault_locked(
                 continue
             if same_server_url(cred.auth.mcp_server_url, public_url):
                 has_matching_url = True
+                # Bearer secrets cannot be read back. Version our own credential
+                # metadata so pre-identity vaults are upgraded once, in place.
+                if cred.auth.type == "static_bearer" and (cred.metadata or {}).get(
+                    "daimon_chat_identity"
+                ) != str(agent_id):
+                    await client.beta.vaults.credentials.update(
+                        cred.id,
+                        vault_id=oldest.id,
+                        auth={
+                            "type": "static_bearer",
+                            "token": mint_jwt(
+                                account_id=account_id,
+                                chat_agent_id=agent_id,
+                                slack_turn_context_id=slack_turn_context_id,
+                                secret=jwt_secret,
+                                now=now,
+                            ),
+                        },
+                        metadata={**(cred.metadata or {}), "daimon_chat_identity": str(agent_id)},
+                    )
                 break
         url_mismatch = not has_matching_url
         if url_mismatch:
             # No credential for the current URL yet — create fresh.
             await client.beta.vaults.credentials.create(
                 vault_id=oldest.id,
+                metadata={"daimon_chat_identity": str(agent_id)},
                 auth={
                     "type": "static_bearer",
                     "mcp_server_url": public_url,
                     "token": mint_jwt(
                         account_id=account_id,
+                        chat_agent_id=agent_id,
+                        slack_turn_context_id=slack_turn_context_id,
                         secret=jwt_secret,
                         now=now,
                     ),
@@ -179,11 +205,14 @@ async def _ensure_agent_mcp_vault_locked(
     vault = await client.beta.vaults.create(display_name=display_name)
     token = mint_jwt(
         account_id=account_id,
+        chat_agent_id=agent_id,
+        slack_turn_context_id=slack_turn_context_id,
         secret=jwt_secret,
         now=now,
     )
     await client.beta.vaults.credentials.create(
         vault_id=vault.id,
+        metadata={"daimon_chat_identity": str(agent_id)},
         auth={
             "type": "static_bearer",
             "mcp_server_url": public_url,
@@ -212,13 +241,18 @@ async def ensure_agent_mcp_vault(
     public_url: str,
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
+    slack_turn_context_id: uuid.UUID | None = None,
 ) -> str:
     """Return the ``ma_vault_id`` for this agent's daimon-mcp vault.
 
-    Creates the vault + credential on cold path. On warm path, only acts when
-    there is no credential matching the current ``public_url`` (URL-drift case,
-    e.g. cloudflare-tunnel → fly URL migration) — a fresh credential is created
-    at the new URL; the prior credential is left as an inert orphan.
+    A Slack DM execution ID selects a separate vault namespace and signed claim;
+    it never modifies the shared agent vault. Only sessions for that logical turn
+    receive the isolated vault. Completed execution rows revoke DM-read authority.
+
+    Creates the vault + credential on cold path. On warm path, upgrades legacy
+    static-bearer credentials once to carry ``chat_agent_id``. If no credential
+    matches ``public_url`` (URL drift), creates one at the new URL and leaves
+    the prior credential as an inert orphan. OAuth credentials are preserved.
 
     The long-lived credential is always non-admin and never carries the ``internal``
     discriminator claim — admin is resolved live from the DB ``role`` by the verifier
@@ -226,10 +260,12 @@ async def ensure_agent_mcp_vault(
     never elevates a non-admin caller at the MCP gate (#162 escalation closed).
 
     Per-turn delete+recreate (the old re-stamp limb) is intentionally removed (Phase
-    88-03 T-88-03-02): the credential is identity-stable (``sub`` = account, no
-    ``is_admin``, no ``internal``), so nothing per-turn needs to mutate it. Removing
-    the re-stamp limb eliminates the cross-thread race where an in-flight session
-    re-reads the shared per-(account,agent) vault credential mid-turn (A3).
+    88-03 T-88-03-02): the credential is identity-stable (``sub`` = account,
+    ``chat_agent_id`` = agent, no ``is_admin``, no ``internal``), so nothing per-turn
+    needs to mutate it. Removing the re-stamp limb eliminates the cross-thread race
+    where an in-flight session re-reads its shared vault credential mid-turn (A3).
+    The one-time legacy upgrade is an exception: an active session may observe
+    the new chat identity during the upgrade. Subsequent warm calls stay stable.
 
     We do NOT delete credentials on URL drift. The vault is shared with user-added
     external MCP credentials (``add_external_mcp_credential``) whose URLs we cannot
@@ -237,8 +273,8 @@ async def ensure_agent_mcp_vault(
     ``public_url`` would silently nuke user data on the first deploy-URL change.
     Cost: O(deploys-with-URL-change) orphan creds per agent, bounded and harmless.
 
-    The daimon-mcp JWT claims are account-scoped only — no agent claim is added (SC-4).
-    Only the vault's storage location is per-agent.
+    The JWT subject stays account-scoped. Its separate chat_agent_id claim is
+    consumed only by the Google broker; it does not confer agent-chat authority.
 
     The entire list-then-create body runs inside a blocking Postgres
     advisory-transaction lock keyed on ``(account_id, agent_id)`` (SYNC-01):
@@ -255,6 +291,7 @@ async def ensure_agent_mcp_vault(
             jwt_secret=jwt_secret,
             public_url=public_url,
             now=now,
+            slack_turn_context_id=slack_turn_context_id,
         )
 
 

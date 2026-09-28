@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.direct_messages import DirectMessageResult, send_direct_message_impl
 from daimon.adapters.mcp.tools.discord import (
     ChannelRow,
     DisplayIdentityRow,
@@ -70,6 +71,23 @@ def _slack_unsupported(tool_name: str) -> ToolError:
 
 
 def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    async def send_direct_message(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, recipient_id: str, content: str
+    ) -> DirectMessageResult:
+        """Privately message one human member of the current server/workspace.
+
+        Pass a platform user ID, not a channel or mention. Both sender and
+        recipient must still belong to this tenant. Tenant policy may disable
+        delivery or restrict recipients to an allowlist. Plain text only, up to
+        19000 characters, split into bounded messages. Returns all delivery IDs;
+        a partial failure states how many messages were already sent, so do not
+        blindly resend the whole message. No attachments or cross-tenant DMs.
+        """
+        return await send_direct_message_impl(
+            runtime, await _auth(ctx), recipient_id=recipient_id, content=content
+        )
+
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def list_channels(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,

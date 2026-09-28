@@ -10,7 +10,8 @@ any collaborator the caller supplied.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 import httpx
@@ -63,6 +64,7 @@ from daimon.adapters.mcp.tools.teams._client import build_teams_client
 from daimon.adapters.mcp.tools.thread_participation import (
     register_thread_participation_tools,
 )
+from daimon.adapters.mcp.tools.timers import register_timer_tools
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
@@ -175,7 +177,9 @@ def create_mcp_app(
     effective_sessionmaker = sessionmaker
     if effective_sessionmaker is None:
         engine = build_engine(str(effective_settings.database.url))
-        effective_sessionmaker = build_session_factory(engine)
+        effective_sessionmaker = build_session_factory(
+            engine, crypto_keys=tuple(k.get_secret_value() for k in effective_settings.crypto.keys)
+        )
 
     effective_auth = auth
     if effective_auth is None:
@@ -213,18 +217,25 @@ def create_mcp_app(
         # Stripe webhook route is only mounted when billing_config is not None (see below).
         effective_billing_config = load_billing_config()
 
-    mcp = FastMCP(name="daimon", auth=effective_auth)
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=effective_resolver,
-            tenant_resolver=effective_tenant_resolver,
-            role_resolver=effective_role_resolver,
-            agent_id_resolver=effective_agent_id_resolver,
-            is_admin_resolver=effective_is_admin_resolver,
-            internal_resolver=effective_internal_resolver,
-            sessionmaker=effective_sessionmaker,
-        )
+    identity_middleware = IdentityMiddleware(
+        subject_resolver=effective_resolver,
+        tenant_resolver=effective_tenant_resolver,
+        role_resolver=effective_role_resolver,
+        agent_id_resolver=effective_agent_id_resolver,
+        is_admin_resolver=effective_is_admin_resolver,
+        internal_resolver=effective_internal_resolver,
+        sessionmaker=effective_sessionmaker,
     )
+
+    @asynccontextmanager
+    async def audit_lifespan(_server: FastMCP) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            await identity_middleware.drain_audit()
+
+    mcp = FastMCP(name="daimon", auth=effective_auth, lifespan=audit_lifespan)
+    mcp.add_middleware(identity_middleware)
     # Tool-dispatch error boundary: convert upstream anthropic.APIError into a
     # structured ToolError instead of an opaque internal error (issue #14).
     mcp.add_middleware(MaErrorMiddleware())
@@ -301,6 +312,7 @@ def create_mcp_app(
     agent_chat.register_agent_chat_tools(mcp, runtime, billing_config=effective_billing_config)
     time.register_time_tools(mcp, runtime)
     routines.register_routines_tools(mcp, runtime)
+    register_timer_tools(mcp, runtime)  # one-shot timers on the wake queue
     register_cli_token_tool(mcp, runtime)
     if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
         register_channel_tools(mcp, runtime)

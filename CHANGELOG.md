@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Encrypt agent environment values with rotatable deployment keys when configured, including existing rows on upgrade. Store encoding separately from user text so every literal value, including `enc:v1:` prefixes, remains valid. A database trigger keeps writes from older code tagged as plaintext; decryption errors identify the affected row without exposing values.
+
+### Upgrade notes
+
+- Agent environment encryption is opt-in through `DAIMON_CRYPTO__KEYS`; keyless deployments retain plaintext storage and initialization still succeeds. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
+
 ### Added
 
 - Microsoft Teams adapter: answers in 1:1 chats and when @mentioned in
@@ -21,8 +29,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Agent keys, MCP tokens and MCP sign-ins are collected privately through
   Teams dialogs.
   Builds on #220 by @jchu96. See `docs/teams.md`.
+- Record content-free turn outcomes across chat, headless, routines and MCP hub/agent-chat, including attributed admission refusals, with bounded best-effort persistence. MCP `ask` records its terminal reason; fire-and-forget `start_turn`/`continue_turn` record dispatch only (`unknown`), without a later terminal update. Pre-attribution and adapter readiness gates are outside coverage.
+- Routines can name an optional destination channel or thread
+  (`create_routine`/`update_routine` `destination_kind` + `destination_id`,
+  `clear_destination`), validated on save against the caller's own server or
+  workspace. The run is told where its result goes, and if the agent does not
+  post there itself, the Discord or Slack adapter posts the result, at most
+  once, after checking the tenant's protected channels and invoker allowlist.
+  A protected or unreachable destination sends the result to the routine's
+  creator by direct message instead. Routines without a destination behave as
+  before.
+
+- Per-turn token, cache and estimated provider-cost telemetry shares the terminal outcome row; operators can query tenant usage by channel and origin with `daimon usage turns`. MCP SDK polling outcomes retain unknown usage rather than zero. Billing and admission behavior are unchanged.
+
+
+- Opt-in Discord and Slack DM conversations: admins enable with `/dm enable`;
+  `/dm` moves recent channel context into a private, resettable session. Every
+  private turn checks live membership and the tenant invoker policy. Privacy
+  preview and deletion include bounded local DM context. Slack checks IM scopes
+  before setup and uses signed execution grants in isolated session vaults.
+  Private session transcripts and controls require that exact grant, preventing
+  same-account routines, channel turns and MCP callers from borrowing access.
+  Slack private turns use fresh sessions with bounded history replay.
+
+- Every turn now ends with a typed `TerminationReason` from the turn core,
+  set on `TurnState.termination` and `RunOutcome.termination` for every driver
+  exit and derivable from admission and session-binding refusals with
+  `termination_reason(err)`. Notices and outcome records can build on one
+  vocabulary.
+- When a turn ends early, the red Discord card and the Slack error card now
+  explain it: what happened, which tools were still running, what was kept,
+  what to do next, and a request id to find the error in the logs. The raw,
+  truncated error text no longer appears in the card.
+
+- Memory mounts are read-only for sealed-channel turns, routines, and DMs when
+  the tenant policy requests it. Session reuse enforces policy changes before
+  another turn runs, including wizard submissions in sealed threads.
+- Security audit writes run in bounded background tasks. Privacy deletion erases user identifiers, tenant deletion removes audit rows, and `daimon audit prune` applies configurable retention (90 days by default). Tool errors are distinguished from authorization denials.
+- Database deletion triggers erase audit identifiers even when older privacy workers delete accounts or tenants during a rolling upgrade.
+- The security audit covers the main JWT MCP application. Separate hub OAuth applications (`/discord/mcp`, `/slack/mcp`) and adapter setup panels are excluded in this version.
+- Authenticated main-JWT MCP calls and listings now append tenant-scoped security audit metadata, including shared operation-policy decisions. Operators can query and export it with `daimon audit list`; database guards prevent ordinary updates, deletes and truncation.
+
 - Core selects chat, routine, relay and handoff prompt fragments per invocation.
   Agent specs can replace or extend each fragment; default chat is unchanged.
+- Per-tenant operator-funded mode replaces depleted-balance refusals with structured alerts while preserving usage metering and configured caps. Configure it with `daimon tenants funding-mode`.
+- Optional Postgres backup service, checksum-verified empty-database restore and
+  isolated restore drill; workspace-wide Managed Agents object export and a
+  state-by-state disaster recovery contract in the self-hosting guide.
+- Routine dispatch runs independently of scheduler ticks, with bounded in-flight tasks, per-routine `skip`/`run-once` catch-up policies, and visible skipped-slot ranges.
+- Tenants can opt into accepted/done reactions and a fresh final reply that pings
+  only the requester on Discord and Slack with `completion_pings`; defaults stay unchanged.
+- `daimon tenants access-policy get|set PLATFORM EXTERNAL_ID` shows and edits a
+  tenant's access policy (invoker allowlist, protected channels and
+  categories, sealed channels, DM memory); `--clear` puts the tenant back on
+  the open default. IDs are validated per platform before writing, and concurrent
+  edits preserve fields changed by other CLI commands.
+- Tenant access policy: a tenant can limit who may start a turn to a list of
+  platform user ids (admins are always allowed). Discord and Slack refuse
+  anyone else at admission with a notice, and so do the MCP and hub turn
+  tools; routines whose creator is no longer allowed skip with
+  `invoker_not_allowed`. Tenants without a policy are unchanged. The policy also carries protected and sealed channel lists for
+  the channel tools.
+- Opt-in write safety for attached third-party MCP tools
+  (`DAIMON_TOOL_SAFETY__ENABLED`, off by default). Each tool is classified read
+  or write (operator override, then MCP annotations, then its name; unknown
+  means write). In chat, a write waits for the requester to press Approve on a
+  Discord or Slack confirmation card showing the exact input; in routines,
+  writes are refused unless listed in `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`;
+  `DAIMON_TOOL_SAFETY__DENIED` blocks a server or tool everywhere. The
+  confirmation card is a reusable `ConfirmationHook`; surfaces without one
+  refuse the write.
+- `update_agent` now refuses to re-point the reserved `daimon-mcp` server or to
+  register the deployment's own MCP endpoint under another name, matching
+  `attach_mcp_server`.
+
+- `send_direct_message` delivers private agent messages to verified Discord/Slack
+  tenant members, with per-tenant disabled/allowlist policies and delivery receipts.
+- A durable wake queue runs a turn in an existing thread later, at most once,
+  through the same admission, bind and run path as a mention. The Discord and
+  Slack adapters poll for due wakes. A wake whose process dies before its turn
+  starts is retried when the lease expires. One that dies after the turn
+  starts is settled `interrupted` and never re-run. Migration
+  `0028_feat003_wake_queue` adds the lease columns to `task_continuations`.
+- Tenants can opt in to final replies rendering Markdown tables as readable PNG attachments on Discord
+  and native wrapped table blocks on Slack, with plain-text fallback for other adapters.
+  Discord wizard replies honor the same opt-in; unsupported font glyphs retain the original Markdown.
+  Rejected PNG uploads and Slack table blocks retry as plain Markdown without dropping the answer.
+
+- One-shot timers: `create_timer`, `list_timers` and `cancel_timer` let an agent
+  come back to a conversation once, at a set time, with a note it left itself
+  ("remind me in two hours"). A timer runs in the thread it was set in, as the
+  person who asked for it, and goes through the wake queue. A cancelled timer
+  never fires, and a timer whose thread now answers to a different agent is
+  skipped with a notice instead of running under that agent. Migration
+  `0029_feat084_timers` adds the `timer` reason; deploy it and timer-aware
+  Discord, Slack and MCP builds before anyone can create timers (see
+  `docs/architecture.md`). Downgrading it deletes all timer rows.
 - Added durable initial-card intent rows and bounded Discord and Slack history
   lookup. Both adapters now commit an intent before posting, record the
   returned message ID, and reconcile unresolved cards after a restart. A
@@ -56,6 +158,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A handoff or private-input continuation whose process dies mid-dispatch is
+  no longer stuck in `claimed`: it is retried if its turn had not started, and
+  settled `skipped/interrupted` if it had. When the session is busy, the same
+  row goes back to pending instead of being queued again under a new key. It
+  still waits for the next turn in the thread, and busy retries stay
+  unlimited. A continuation whose process dies five times before its turn
+  starts is settled `skipped/attempts_exhausted`, and nothing is posted to the
+  thread.
+
 - `get_agent` now returns the agent's `system` prompt to an admin caller on
   an agent chat tools may edit, so a setup flow can save the prompt before
   replacing it and verify the change afterwards. Non-admin callers, and every
@@ -82,6 +193,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - The checkout landing pages no longer tell every payer to return to Discord.
+- Direct-message policies normalize tenant UUID keys and reject invalid keys at
+  settings load, so restrictive policies cannot silently miss their tenant.
+
+- Ordinary chat sessions carry their executing agent identity to the Google token broker,
+  including existing vaults on the next session creation, while preserving chat tool
+  visibility and caller isolation.
+- Slack direct-message errors explain the required `im:write` scope and workspace
+  admin reinstall for missing scopes or invalid authorization, preserving the
+  count of messages already delivered.
+
 - A continuation turn (the follow-up after a private form or a task handoff)
   on Discord or Slack now runs with the requester's live role, re-read from
   the guild or workspace at dispatch, instead of always as a plain user. An
@@ -211,6 +332,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Slack top-ups sent the checkout route an internal admin token for the
   clicking account. They now send a plain account token, as Discord does;
   the route only needs the account.
+- Text daimon quotes from outside the request now arrives marked as data:
+  replayed thread and channel messages on Discord and Slack sit inside
+  `trust="untrusted"` envelopes, YouTube transcripts come back wrapped, and
+  the channel read and search tools mark their results. Every agent's
+  guidance block gains a paragraph saying such text is data, not
+  instructions; agents pick it up at their next reconcile or edit.
 - GitHub App installation tokens are minted for the one bound repository
   instead of every repository in the installation, and read-only when the
   binding was verified as a public repo or the token is used for skill sync.

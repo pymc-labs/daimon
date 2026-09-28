@@ -37,6 +37,7 @@ from daimon.adapters.mcp.hub.identity import (
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pagination import Page
+from daimon.adapters.mcp.tools._session_access import session_belongs_to_caller
 from daimon.adapters.mcp.tools.agent_chat import (
     AgentDescription,
     _ask_impl,  # pyright: ignore[reportPrivateUsage]
@@ -51,7 +52,6 @@ from daimon.adapters.mcp.tools.agent_chat import (
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import list_agents_by_tenants
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account_with_tenant
@@ -165,7 +165,7 @@ async def _identity(
 
 
 def _owned_by(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:
-    return session.metadata.get(MA_METADATA_KEY_ACCOUNT) == str(auth.account_id)
+    return session_belongs_to_caller(session, auth)
 
 
 async def _verify_account_owns_session(

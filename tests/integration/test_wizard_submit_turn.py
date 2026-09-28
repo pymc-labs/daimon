@@ -15,6 +15,7 @@ chokepoint runs on every test here, which is the whole point of this file.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from decimal import Decimal
 from typing import Any
@@ -23,16 +24,21 @@ from uuid import UUID
 
 import discord
 import httpx
+import pytest
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
 from daimon.adapters.discord.wizard_submit import WizardSubmitButton
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenant_ledger, usage_events
-from daimon.core.stores.accounts import get_account
-from daimon.core.stores.domain import TenantRow, WizardSessionRow
+from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.agent_memory_stores import insert_memory_store
+from daimon.core.stores.domain import Role, TenantRow, WizardSessionRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import get_live_thread_session, list_orphaned_turns
 from daimon.core.stores.wizard_session import get_wizard_session
@@ -443,8 +449,11 @@ async def test_two_concurrent_submits_bill_exactly_one_turn(
 # --- per-tenant concurrency cap ---------------------------------------------------
 
 
+@pytest.mark.parametrize("table_rendering", [False, True])
 async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    table_rendering: bool,
 ) -> None:
     """A wizard turn costs the same upstream capacity as a mention turn, so it
     counts against the same cap -- and must give the slot back."""
@@ -456,6 +465,7 @@ async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
     stream_hits: list[str] = []
     router = _build_router(str(tenant.id), sent_events=sent_events, stream_hits=stream_hits)
     runtime = _make_runtime(db_session_factory, router)
+    runtime.settings.table_rendering = {tenant.id: table_rendering}
     bot = _make_bot(runtime)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
 
@@ -468,6 +478,10 @@ async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
             marker.thread_id == str(channel.id) and marker.active_turn_message_id == "42"
             for marker in active
         ), "wizard turn marker must be durable before run_prepared_turn starts"
+        assert kwargs["lifecycle"]._render_tables is table_rendering
+        recovery = kwargs["recovery_lifecycle"](asyncio.Event())
+        assert recovery._render_tables is table_rendering
+        kwargs["lifecycle"] = recovery
         return await real_run_prepared_turn(*args, **kwargs)
 
     with (
@@ -599,6 +613,54 @@ async def test_a_submitter_over_balance_is_told_and_no_turn_runs(
     )
 
 
+async def test_a_demoted_admin_outside_the_allowlist_is_refused_on_submit(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """SYS-047: the stored role still says admin, but the live interaction does
+    not; the invoker policy must judge the live role and refuse the turn."""
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800007001")
+    async with db_session_factory() as session, session.begin():
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant.id, platform="discord", external_id=_REQUESTER_ID
+        )
+        await set_role(session, principal.account_id, Role.ADMIN)
+        await set_access_policy(
+            session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_user_ids=("staff",))
+        )
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+
+    channel = _make_channel(thread_id=7007, parent_id=6007)
+    stream_hits: list[str] = []
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=stream_hits)
+    bot = _make_bot(_make_runtime(db_session_factory, router))
+    # No spec=Member on the user -> the live role is non-admin.
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    with patch("daimon.core.turn.prepare.create_session") as mock_create_session:
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]  # drain the spawned turn
+        mock_create_session.assert_not_called()
+
+    assert stream_hits == [], "a refused submitter must never reach the turn stream"
+    posted_texts = [
+        call.args[0]
+        for call in channel.send.call_args_list
+        if call.args and isinstance(call.args[0], str)
+    ]
+    assert any("recorded" in t and "can start a turn" in t for t in posted_texts), (
+        f"the refusal must say the answers were recorded and why, got: {posted_texts}"
+    )
+    async with db_session_factory() as session:
+        account = await get_account(session, principal.account_id)
+    assert account is not None and account.role is Role.USER, (
+        "the live non-admin role must be persisted, replacing the stale admin one"
+    )
+
+
 # --- per-turn ceiling (19-04) -------------------------------------------------
 
 
@@ -705,3 +767,62 @@ async def test_a_bind_phase_ceiling_does_not_escape_the_background_task(
         if call.args and isinstance(call.args[0], str)
     ]
     assert posted_texts, "the bind-phase ceiling must render through the existing turn-failure path"
+
+
+@pytest.mark.parametrize(
+    "sealed_id", ["5001", "4001", None], ids=["sealed-thread", "sealed-parent", "open"]
+)
+async def test_wizard_origin_controls_the_actual_memory_mount(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    sealed_id: str | None,
+) -> None:
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800019001")
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(sealed_channel_ids=() if sealed_id is None else (sealed_id,)),
+    )
+    await insert_memory_store(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID),
+        memory_store_id="memstore_wizard_policy",
+    )
+    await db_session.commit()
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+    channel = _make_channel(thread_id=5001, parent_id=4001)
+    sent_events: list[dict[str, Any]] = []
+    stream_hits: list[str] = []
+    created: list[dict[str, Any]] = []
+    router = _build_router(str(tenant.id), sent_events=sent_events, stream_hits=stream_hits)
+
+    def create(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        body = json.loads(request.content)
+        created.append(body)
+        session = ma_session(
+            id="ses_wizard_policy",
+            agent_id=_AGENT_ID,
+            model=_MODEL_ID,
+            environment_id=_ENV_ID,
+            resources=body["resources"],
+        )
+        return httpx.Response(200, json=session.model_dump(mode="json"))
+
+    router.add("POST", r"/v1/sessions", create)
+    runtime = _make_runtime(db_session_factory, router)
+    bot = _make_bot(runtime)
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+    item = await WizardSubmitButton.from_custom_id(interaction, MagicMock(), _submit_match(row.id))
+    assert await item.interaction_check(interaction) is True
+    await item.callback(interaction)
+    await asyncio.gather(*list(bot._bg_tasks))
+
+    assert len(created) == 1
+    memory = next(
+        resource for resource in created[0]["resources"] if resource["type"] == "memory_store"
+    )
+    assert memory["access"] == ("read_write" if sealed_id is None else "read_only")
+    if sealed_id is not None:
+        assert "mounted read-only" in memory["instructions"]
+    assert stream_hits == ["ses_wizard_policy"]

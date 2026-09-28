@@ -55,6 +55,7 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionBusyError, SessionPreparationFailed
+from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.usage_recording import record_turn_usage
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -189,6 +190,10 @@ async def create_ma_session(
         github_app_id=deps.github_app_id,
         github_app_private_key=deps.github_app_private_key,
         extra_resources=extra_resources,
+        memory_read_only=admission.memory_read_only,
+        tool_safety=deps.tool_safety,
+        slack_turn_context_id=admission.slack_turn_context_id,
+        private_dm_id=admission.private_dm_id,
     )
 
     has_repo = any(
@@ -318,6 +323,8 @@ def bind_recorder(
     06-05's dead-session recovery cycle can re-invoke it against the NEW
     session id after a recreate, rather than reusing a stale binding.
     """
+    if (observation := current_outcome.get()) is not None:
+        observation.model_by_session[ma_session_id] = model_id
     pricing = MODEL_PRICING.get(model_id)
     if pricing is None:
         # The turn still runs and still records usage; only the debit is zero.
@@ -336,6 +343,54 @@ def bind_recorder(
 
 
 async def bind_session(
+    deps: TurnDeps,
+    admission: Admission,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    external_user_id: str,
+    thread_id: str,
+    session_account_id: uuid.UUID,
+    reuse_existing: bool,
+    capabilities: MaCapabilities = DEFAULT_MA_CAPABILITIES,
+    transfer: WorkspaceTransfer | None = None,
+    deadline: dt.datetime | None = None,
+    now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+) -> PreparedTurn:
+    if not isinstance(admission, Admission):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TypeError("bind_session requires an Admission instance")
+    observation = (
+        admission.observation
+        or current_outcome.get()
+        or TurnObservation(deps.sessionmaker, tenant_id, platform, thread_id=thread_id)
+    )
+    observation.thread_id = thread_id
+    observation.account_id = admission.account_id
+    observation.agent_id = admission.agent.id
+    try:
+        with observation.activate():
+            result = await bind_session_impl(
+                deps,
+                admission,
+                tenant_id=tenant_id,
+                platform=platform,
+                external_user_id=external_user_id,
+                thread_id=thread_id,
+                session_account_id=session_account_id,
+                reuse_existing=reuse_existing,
+                capabilities=capabilities,
+                transfer=transfer,
+                deadline=deadline,
+                now=now,
+            )
+    except BaseException as exc:
+        observation.finish(error=exc)
+        raise
+    observation.session_id = result.ma_session_id
+    return result
+
+
+async def bind_session_impl(
     deps: TurnDeps,
     admission: Admission,
     *,

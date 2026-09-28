@@ -18,6 +18,7 @@ from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -97,13 +98,16 @@ def build_turn_deps(
             else None
         ),
         public_url=public_url,
+        tool_safety=settings.tool_safety,
     )
 
 
 @asynccontextmanager
 async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
     engine = build_engine(str(settings.database.url))
-    sm = build_session_factory(engine)
+    sm = build_session_factory(
+        engine, crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys)
+    )
     deployment_default = parse_deployment_default(settings.defaults_root)
     # Shared, process-lifetime resolver cache (D-12) — Slack adopts Discord's
     # <=300s TTL semantics instead of building a fresh cache per turn.
@@ -138,4 +142,5 @@ async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
                 mcp_token_probe=probe_bearer_token,
             )
         finally:
+            await drain_outcomes()
             await engine.dispose()

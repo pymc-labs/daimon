@@ -553,3 +553,26 @@ async def test_list_sessions_hides_other_members_sessions() -> None:
         "listing must return only sessions this caller opened — not a "
         "co-member's, and not one that cannot be attributed"
     )
+
+
+@pytest.mark.parametrize("private_stamp", ["dm:discord-route", "", "malformed", "other-grant"])
+@pytest.mark.parametrize("admin", [False, True])
+def test_private_session_stamp_is_not_account_or_admin_authority(private_stamp, admin):
+    from daimon.adapters.mcp.tools.agent_chat import _owned_by_caller
+    from daimon.adapters.mcp.tools.hub import _owned_by
+    from daimon.adapters.mcp.tools.sessions import _session_belongs_to_caller
+
+    account_id = uuid.uuid4()
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=uuid.uuid4(),
+        role=Role.ADMIN if admin else Role.USER,
+        is_admin=admin,
+        slack_turn_context_id=uuid.uuid4(),
+    )
+    session = ma_session(
+        metadata={"daimon_account": str(account_id), "daimon_private_dm": private_stamp}
+    )
+    assert not _session_belongs_to_caller(session, auth)
+    assert not _owned_by_caller(session, auth)
+    assert not _owned_by(session, auth)

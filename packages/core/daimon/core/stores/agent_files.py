@@ -1,16 +1,68 @@
-"""Per-agent file store."""
+"""Per-agent environment values, encrypted at rest with deployment MultiFernet keys."""
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 
+import structlog
+from cryptography.fernet import MultiFernet
 from daimon.core._models import AgentFile
+from daimon.core.agent_env_crypto import decode_value, encode_value
+from daimon.core.config import load_crypto_settings
 from daimon.core.errors import StoreError
+from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores.domain import AgentFileRow
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+def _cipher(session: AsyncSession) -> MultiFernet | None:
+    """Use injected deployment keys; raw sessions resolve the same crypto settings."""
+    keys = session.info.get(
+        "crypto_keys", session.get_bind().get_execution_options().get("crypto_keys")
+    )
+    if keys is None:
+        keys = tuple(k.get_secret_value() for k in load_crypto_settings().keys)
+    return build_multifernet(keys) if keys else None
+
+
+def _row(cipher: MultiFernet | None, orm: AgentFile) -> AgentFileRow:
+    if cipher is not None and orm.encoding == "plain":
+        structlog.get_logger(__name__).warning(
+            "agent_env.legacy_plaintext",
+            tenant_id=str(orm.tenant_id),
+            agent_id=str(orm.agent_id),
+            key=orm.key,
+        )
+    return AgentFileRow.model_validate(orm).model_copy(
+        update={
+            "content": decode_value(
+                cipher,
+                orm.content,
+                encoding=orm.encoding,
+                tenant_id=orm.tenant_id,
+                agent_id=orm.agent_id,
+                key=orm.key,
+            )
+        }
+    )
+
+
+@asynccontextmanager
+async def _encoding_writer(session: AsyncSession) -> AsyncIterator[None]:
+    """Mark this statement as encoding-aware, without trusting later legacy SQL.
+
+    If the write fails, its transaction/savepoint must be rolled back as usual;
+    that also rolls back SET LOCAL. Do not mask the write error with cleanup SQL
+    against an aborted transaction.
+    """
+    await session.execute(text("SET LOCAL daimon.agent_env_writer = 'v1'"))
+    yield
+    await session.execute(text("SET LOCAL daimon.agent_env_writer = ''"))
 
 
 async def put_agent_file(
@@ -39,6 +91,8 @@ async def put_agent_file(
     if key == "":
         raise StoreError("key must not be empty")
 
+    cipher = _cipher(session)
+    content, encoding = encode_value(cipher, content)
     stmt = (
         pg_insert(AgentFile)
         .values(
@@ -46,6 +100,7 @@ async def put_agent_file(
             agent_id=agent_id,
             key=key,
             content=content,
+            encoding=encoding,
             created_by_account_id=set_by_account_id,
             last_set_by_account_id=set_by_account_id,
         )
@@ -53,16 +108,19 @@ async def put_agent_file(
             constraint="pk_agent_files",
             set_={
                 "content": content,
+                "encoding": encoding,
                 "updated_at": func.now(),
                 "last_set_by_account_id": set_by_account_id,
             },
         )
         .returning(AgentFile)
+        .execution_options(populate_existing=True)
     )
-    result = await session.execute(stmt)
+    async with _encoding_writer(session):
+        result = await session.execute(stmt)
     orm = result.scalar_one()
     await session.flush()
-    return AgentFileRow.model_validate(orm)
+    return _row(cipher, orm)
 
 
 async def put_agent_file_if_unchanged(
@@ -101,6 +159,8 @@ async def put_agent_file_if_unchanged(
     if key == "":
         raise StoreError("key must not be empty")
 
+    cipher = _cipher(session)
+    content, encoding = encode_value(cipher, content)
     if expected_updated_at is None:
         insert_stmt = (
             pg_insert(AgentFile)
@@ -109,13 +169,16 @@ async def put_agent_file_if_unchanged(
                 agent_id=agent_id,
                 key=key,
                 content=content,
+                encoding=encoding,
                 created_by_account_id=set_by_account_id,
                 last_set_by_account_id=set_by_account_id,
             )
             .on_conflict_do_nothing(constraint="pk_agent_files")
             .returning(AgentFile)
+            .execution_options(populate_existing=True)
         )
-        result = await session.execute(insert_stmt)
+        async with _encoding_writer(session):
+            result = await session.execute(insert_stmt)
     else:
         update_stmt = (
             update(AgentFile)
@@ -127,17 +190,20 @@ async def put_agent_file_if_unchanged(
             )
             .values(
                 content=content,
+                encoding=encoding,
                 updated_at=func.now(),
                 last_set_by_account_id=set_by_account_id,
             )
             .returning(AgentFile)
+            .execution_options(populate_existing=True)
         )
-        result = await session.execute(update_stmt)
+        async with _encoding_writer(session):
+            result = await session.execute(update_stmt)
     orm = result.scalar_one_or_none()
     await session.flush()
     if orm is None:
         return None
-    return AgentFileRow.model_validate(orm)
+    return _row(cipher, orm)
 
 
 async def get_agent_file(
@@ -151,7 +217,7 @@ async def get_agent_file(
     orm = await session.get(AgentFile, (tenant_id, agent_id, key))
     if orm is None:
         return None
-    return AgentFileRow.model_validate(orm)
+    return _row(_cipher(session), orm)
 
 
 async def list_agent_files(
@@ -169,7 +235,9 @@ async def list_agent_files(
         )
         .order_by(AgentFile.key)
     )
-    return [AgentFileRow.model_validate(o) for o in result.scalars().all()]
+    rows = result.scalars().all()
+    cipher = _cipher(session) if rows else None
+    return [_row(cipher, o) for o in rows]
 
 
 async def delete_agent_file(

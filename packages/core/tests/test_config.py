@@ -737,3 +737,47 @@ def test_teams_admin_user_ids_canonicalize_and_reject_non_uuids() -> None:
     assert TeamsSettings(**base, admin_user_ids=(admin.upper(),)).admin_user_ids == (admin,)
     with pytest.raises(ValidationError):
         TeamsSettings(**base, admin_user_ids=("alice",))
+
+
+def test_completion_policy_validates_and_normalizes_uuid_keys(monkeypatch):
+    import uuid
+
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    tenant = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
+    monkeypatch.setenv("DAIMON_COMPLETION_PINGS", '{"AAAAAAAA-0000-0000-0000-000000000001": true}')
+    assert load_settings(_env_file=None).completion_pings == {tenant: True}
+    monkeypatch.setenv("DAIMON_COMPLETION_PINGS", '{"typo": true}')
+    with pytest.raises(ValidationError):
+        load_settings(_env_file=None)
+
+
+def test_table_rendering_map_validates_and_normalizes_uuid_keys(monkeypatch):
+    import uuid
+
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    tenant = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
+    monkeypatch.setenv("DAIMON_TABLE_RENDERING", '{"AAAAAAAA-0000-0000-0000-000000000001": true}')
+    assert load_settings(_env_file=None).table_rendering == {tenant: True}
+    monkeypatch.setenv("DAIMON_TABLE_RENDERING", '{"not-a-uuid": true}')
+    with pytest.raises(ValidationError):
+        load_settings(_env_file=None)
+
+
+@pytest.mark.parametrize("days", ["90", "7", "0"])
+def test_security_audit_retention_environment(monkeypatch, days):
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", days)
+    assert load_settings(_env_file=None).security_audit_retention_days == int(days)
+
+
+def test_security_audit_retention_default_and_negative_rejection(monkeypatch):
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", raising=False)
+    assert load_settings(_env_file=None).security_audit_retention_days == 90
+    monkeypatch.setenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", "-1")
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        load_settings(_env_file=None)

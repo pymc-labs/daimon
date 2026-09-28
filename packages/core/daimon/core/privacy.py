@@ -28,6 +28,7 @@ import uuid
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import credential_requests as credential_requests_store
+from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import github_credentials as github_credentials_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
@@ -78,6 +79,7 @@ class PurgePreview(BaseModel):
     agent_github_binding: PurgePreviewRow
     slack_user_tokens: PurgePreviewRow
     slack_turn_contexts: PurgePreviewRow
+    direct_message_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
@@ -97,6 +99,7 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.agent_github_binding, "per-agent GitHub link(s)"),
         (preview.slack_user_tokens, "Slack user token(s)"),
         (preview.slack_turn_contexts, "Slack turn context(s)"),
+        (preview.direct_message_conversations, "private conversation(s)"),
     )
     parts = [f"{row.count} {label}" for row, label in categories if row.count > 0]
     return ", ".join(parts) if parts else "nothing visible to you yet"
@@ -367,6 +370,9 @@ async def collect_purge_preview(
             )
         )
         support_escalations = PurgePreviewRow(count=support_escalations_count, example=None)
+        direct_message_count = await direct_messages_store.count_conversations_for_account(
+            session, account_id=account_id
+        )
 
     return PurgePreview(
         linked_principals=linked_principals,
@@ -385,4 +391,5 @@ async def collect_purge_preview(
         wizard_sessions=wizard_sessions,
         message_feedback=message_feedback,
         support_escalations=support_escalations,
+        direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
     )

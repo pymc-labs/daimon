@@ -96,12 +96,14 @@ from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import credential_requests as credential_requests_store
+from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import github_credentials as github_credentials_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import routines as routines_store
+from daimon.core.stores import security_audit as security_audit_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
 from daimon.core.stores import support_escalation as support_escalation_store
@@ -135,6 +137,7 @@ class PurgeReport(BaseModel):
     agent_github_binding: int = 0
     slack_user_tokens: int = 0
     slack_turn_contexts: int = 0
+    direct_message_conversations: int = 0
     credential_requests: int = 0
     wizard_sessions: int = 0
     message_feedback: int = 0
@@ -155,6 +158,9 @@ class PurgeReport(BaseModel):
             agent_github_binding=self.agent_github_binding + other.agent_github_binding,
             slack_user_tokens=self.slack_user_tokens + other.slack_user_tokens,
             slack_turn_contexts=self.slack_turn_contexts + other.slack_turn_contexts,
+            direct_message_conversations=(
+                self.direct_message_conversations + other.direct_message_conversations
+            ),
             credential_requests=self.credential_requests + other.credential_requests,
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
             message_feedback=self.message_feedback + other.message_feedback,
@@ -421,6 +427,7 @@ async def purge_account(
     to — `principal_links` permits an account to span tenants.
     """
     async with sm() as session, session.begin():
+        await security_audit_store.erase_account_for_privacy(session, account_id=account_id)
         cli_list = await identity_store.list_cli_principals_for_account(
             session, account_id=account_id
         )
@@ -473,6 +480,9 @@ async def purge_account(
         user_cfg_count = await accounts_store.delete_user_config_for_account(
             session, account_id=account_id
         )
+        direct_message_count = await direct_messages_store.delete_conversations_for_account(
+            session, account_id=account_id
+        )
         account_count = await accounts_store.delete_account(session, account_id=account_id)
         db_report = report.merge(
             PurgeReport(
@@ -482,6 +492,7 @@ async def purge_account(
                 user_configs=user_cfg_count,
                 accounts=account_count,
                 slack_turn_contexts=slack_turn_contexts_count,
+                direct_message_conversations=direct_message_count,
             )
         )
 

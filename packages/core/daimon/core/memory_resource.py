@@ -43,6 +43,12 @@ MEMORY_INSTRUCTIONS = (
     "credentials, or transient conversation details."
 )
 
+READ_ONLY_MEMORY_INSTRUCTIONS = (
+    "This is shared persistent memory, mounted read-only for this conversation. "
+    "Consult it when useful, but do not create, update, rename, or delete memory files. "
+    "Do not attempt to save facts from this turn into persistent memory."
+)
+
 _STORE_DESCRIPTION = (
     "Persistent memory for the daimon agent '{agent_name}'. Written by the "
     "agent itself across sessions; managed by daimon."
@@ -56,6 +62,7 @@ async def ensure_memory_store_and_mount(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     agent_name: str,
+    read_only: bool = False,
 ) -> BetaManagedAgentsMemoryStoreResourceParam:
     """Return the memory-store session resource, provisioning on first use.
 
@@ -109,8 +116,8 @@ async def ensure_memory_store_and_mount(
     return {
         "type": "memory_store",
         "memory_store_id": store_id,
-        "access": "read_write",
-        "instructions": MEMORY_INSTRUCTIONS,
+        "access": "read_only" if read_only else "read_write",
+        "instructions": READ_ONLY_MEMORY_INSTRUCTIONS if read_only else MEMORY_INSTRUCTIONS,
     }
 
 

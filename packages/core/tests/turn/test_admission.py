@@ -12,12 +12,16 @@ from pathlib import Path
 
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.billing import BillingConfig
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
+from daimon.core.stores.domain import FundingMode, Role, TenantRow
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing.ma import (
@@ -28,6 +32,7 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from daimon.testing.factories import (  # isort: skip
@@ -91,10 +96,12 @@ def _deps(
     )
 
 
+@pytest.mark.parametrize("platform", ["discord", "slack"])
 async def test_admit_over_balance_tenant_raises_admission_denied_balance_depleted(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    platform: str,
 ) -> None:
     tenant = await make_tenant(db_session)
     await make_tenant_config(
@@ -117,7 +124,7 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
         await admit(
             deps,
             tenant_id=tenant.id,
-            platform="discord",
+            platform=platform,
             external_user_id="user-1",
             channel_id="chan-1",
             now=_NOW,
@@ -127,17 +134,36 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
         "an over-balance tenant must raise AdmissionDenied(reason='balance_depleted')"
     )
 
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
 
+    await drain_outcomes()
+    async with db_session_factory() as session:
+        outcomes = await list_for_tenant(session, tenant.id)
+    assert len(outcomes) == 1
+    assert outcomes[0].reason == "admission_balance_depleted"
+    assert outcomes[0].platform == platform
+    assert outcomes[0].agent_id == "ag_1"
+    assert outcomes[0].account_id is not None
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("funding_mode", ["prepaid", "operator_funded"])
 async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    platform: str,
+    funding_mode: FundingMode,
 ) -> None:
     tenant = await make_tenant(db_session)
     await make_tenant_config(
         db_session, tenant=tenant, agent_name="daimon", environment_name="default"
     )
-    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    if funding_mode == "prepaid":
+        await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    else:
+        await set_funding_mode(db_session, tenant_id=tenant.id, funding_mode=funding_mode)
     await make_tenant_user_cap(db_session, tenant=tenant, amount=Decimal("0"))
     await db_session.commit()
 
@@ -156,7 +182,7 @@ async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
         await admit(
             deps,
             tenant_id=tenant.id,
-            platform="discord",
+            platform=platform,
             external_user_id="user-1",
             channel_id="chan-1",
             now=_NOW,
@@ -165,6 +191,18 @@ async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
     assert exc_info.value.reason == "cap_exceeded", (
         "an over-cap user must raise AdmissionDenied(reason='cap_exceeded')"
     )
+
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
+    async with db_session_factory() as session:
+        outcomes = await list_for_tenant(session, tenant.id)
+    assert len(outcomes) == 1
+    assert outcomes[0].reason == "admission_cap_exceeded"
+    assert outcomes[0].platform == platform
+    assert outcomes[0].agent_id == "ag_1"
+    assert outcomes[0].account_id is not None
 
 
 async def test_admit_missing_agent_only_raises_missing_turn_config_error(
@@ -656,3 +694,227 @@ async def test_handoff_thread_refuses_an_agent_from_another_workspace(
             thread_id="HANDED_OVER",
             now=_NOW,
         )
+
+
+async def _seed_admittable_tenant(
+    db_session: AsyncSession, *, policy: TenantAccessPolicy | None
+) -> TenantRow:
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    if policy is not None:
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+    await db_session.commit()
+    return tenant
+
+
+def _admittable_router(tenant: TenantRow) -> MARouter:
+    return resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+
+
+async def test_admit_refuses_an_invoker_outside_the_allowlist_before_any_ma_call(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await _seed_admittable_tenant(
+        db_session, policy=TenantAccessPolicy(invoker_user_ids=("staff-1",))
+    )
+    # An empty router fails any MA call, so a refusal here proves none was made.
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=MARouter())
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="guest-1",
+            channel_id="chan-1",
+            now=_NOW,
+            role=Role.USER,
+        )
+
+    assert exc_info.value.reason == "invoker_not_allowed"
+
+
+@pytest.mark.parametrize(
+    ("policy", "external_user_id", "role"),
+    [
+        (None, "anyone", Role.USER),
+        (TenantAccessPolicy(invoker_user_ids=("staff-1",)), "staff-1", Role.USER),
+        (TenantAccessPolicy(invoker_user_ids=("staff-1",)), "owner-1", Role.ADMIN),
+    ],
+    ids=["no-policy-is-open", "allowlisted-user", "admin-not-listed"],
+)
+async def test_admit_admits_whoever_the_policy_allows(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    policy: TenantAccessPolicy | None,
+    external_user_id: str,
+    role: Role,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id=external_user_id,
+        channel_id="chan-1",
+        now=_NOW,
+        role=role,
+    )
+
+    assert isinstance(admission, Admission)
+
+
+async def test_admit_treats_a_missing_live_role_as_non_admin_even_for_a_stored_admin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A stored admin role may be stale (the user was demoted since), so only a
+    live role the adapter passes can exempt a caller from the allowlist."""
+    tenant = await _seed_admittable_tenant(
+        db_session, policy=TenantAccessPolicy(invoker_user_ids=("staff-1",))
+    )
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    # An earlier mention recorded the user as admin.
+    await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="ex-admin",
+        channel_id="chan-1",
+        now=_NOW,
+        role=Role.ADMIN,
+    )
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="ex-admin",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+
+    assert exc_info.value.reason == "invoker_not_allowed", "no live role must mean non-admin"
+
+
+async def test_admit_gate_order_invoker_refusal_wins_over_missing_config_and_balance(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A refused invoker must not learn the tenant is mis-configured or out of credit."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_user_ids=("staff-1",))
+    )
+    await db_session.commit()
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=MARouter())
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="slack",
+            external_user_id="guest-1",
+            channel_id="C1",
+            now=_NOW,
+        )
+
+    assert exc_info.value.reason == "invoker_not_allowed"
+
+
+@pytest.mark.parametrize("stored", ['{"bogus": true}', "null"], ids=["bad-object", "json-null"])
+async def test_admit_refuses_when_the_stored_policy_is_unreadable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    stored: str,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await db_session.execute(
+        text(
+            "INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, CAST(:p AS jsonb))"
+        ),
+        {"t": tenant.id, "p": stored},
+    )
+    await db_session.commit()
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=MARouter())
+
+    with pytest.raises(AccessPolicyUnreadable):
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="anyone",
+            channel_id="chan-1",
+            now=_NOW,
+            role=Role.ADMIN,
+        )
+
+
+@pytest.mark.parametrize(
+    ("policy", "channel_id", "thread_id", "is_dm", "expected"),
+    [
+        (None, "chan-1", None, False, False),
+        (TenantAccessPolicy(sealed_channel_ids=("vault",)), "vault", None, False, True),
+        (TenantAccessPolicy(sealed_channel_ids=("vault",)), "vault", "thr-1", False, True),
+        (TenantAccessPolicy(sealed_channel_ids=("vault",)), "chan-1", "thr-1", False, False),
+        (TenantAccessPolicy(dm_memory_read_only=True), "dm-1", None, True, True),
+        (TenantAccessPolicy(dm_memory_read_only=True), "chan-1", None, False, False),
+        (None, "dm-1", None, True, False),
+    ],
+    ids=[
+        "open",
+        "sealed-channel",
+        "thread-under-sealed",
+        "unsealed",
+        "dm-read-only",
+        "dm-flag-not-a-dm",
+        "dm-default",
+    ],
+)
+async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    policy: TenantAccessPolicy | None,
+    channel_id: str,
+    thread_id: str | None,
+    is_dm: bool,
+    expected: bool,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="anyone",
+        channel_id=channel_id,
+        thread_id=thread_id,
+        now=_NOW,
+        role=Role.USER,
+        is_dm=is_dm,
+    )
+
+    assert admission.memory_read_only is expected, "memory_read_only must follow the policy"

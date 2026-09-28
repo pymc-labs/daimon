@@ -109,6 +109,8 @@ def unwrap_nested_model(annotation: object) -> type[BaseModel] | None:
     `X | None` union wrapping one; otherwise None (leaf/scalar field)."""
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return annotation
+    if typing.get_origin(annotation) not in (types.UnionType, typing.Union):
+        return None
     for arg in typing.get_args(annotation):
         if isinstance(arg, type) and issubclass(arg, BaseModel):
             return arg

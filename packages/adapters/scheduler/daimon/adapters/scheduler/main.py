@@ -35,6 +35,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
+from daimon.core.access_policy import is_invoker_allowed, is_write_protected
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -59,15 +60,27 @@ from daimon.core.ma_resolver import (
 from daimon.core.observability import init_sentry
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.pricing import MODEL_PRICING
-from daimon.core.scheduler import FireFn, run_one_tick
+from daimon.core.routine_delivery import (
+    DirectPost,
+    agent_posted_to,
+    delivery_target,
+    placement_unknown_is_unsafe,
+    render_routine_controls,
+)
+from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
-from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.accounts import get_account
+from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import record_result, update_routine_agent_id
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_balance import is_over_balance
+from daimon.core.turn.outcomes import current_outcome, drain_outcomes
+from daimon.core.turn.state import TurnState
+from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
@@ -179,6 +192,7 @@ async def _build_fire(
             if tenant is None:
                 await record_result(s, row.id, tail=None, error="routine tenant not found")
                 return
+            platform = tenant.platform
             principal = await get_or_create_platform_principal(
                 s,
                 tenant_id=row.tenant_id,
@@ -189,9 +203,52 @@ async def _build_fire(
             )
             account_id = principal.account_id
 
+            # Invoker policy at fire time: someone taken off the allowlist
+            # stops running headless turns through routines they created. The
+            # stored role is the only admin signal a fire has. Unreadable
+            # policy fails closed.
+            direct_post: DirectPost = "allowed"
+            try:
+                policy = await load_access_policy(s, tenant_id=row.tenant_id)
+            except AccessPolicyUnreadable:
+                policy_error: str | None = "access_policy_unreadable"
+            else:
+                # FEAT-085: a destination protected since the routine was made
+                # is never offered to the agent as a place to post (SYS-048's
+                # guard is not on send_message yet). The poster re-checks with
+                # the parent channel and category it resolves.
+                # The scheduler cannot resolve a Discord thread's parent or
+                # a channel's category, so when the policy protects either,
+                # the agent is not invited to post directly at all.
+                target = delivery_target(row, platform=platform)
+                if target is not None:
+                    if is_write_protected(policy, channel_id=target.channel_id):
+                        direct_post = "protected"
+                    elif placement_unknown_is_unsafe(
+                        policy, platform=platform, kind=row.destination_kind
+                    ):
+                        direct_post = "unverified"
+                account = await get_account(s, account_id)
+                is_admin = account is not None and account.role is Role.ADMIN
+                allowed = is_invoker_allowed(
+                    policy, external_user_id=row.created_by_user_id, is_admin=is_admin
+                )
+                policy_error = None if allowed else "invoker_not_allowed"
+            if policy_error is not None:
+                log.info(
+                    "routine.skipped.invoker_policy",
+                    routine_id=str(row.id),
+                    tenant_id=str(row.tenant_id),
+                    reason=policy_error,
+                )
+                await record_result(s, row.id, tail=None, error=policy_error)
+                return
+
         # Admission gate: per-tenant balance — independent of Stripe config.
         # Keys on row.tenant_id (NOT NULL). Mirror run_one_tick's cap_exceeded skip.
         if await is_over_balance(sessionmaker=sm, tenant_id=row.tenant_id):
+            if (observation := current_outcome.get()) is not None:
+                observation.finish(reason=TerminationReason.ADMISSION_BALANCE_DEPLETED)
             log.info(
                 "routine.skipped.over_balance",
                 routine_id=str(row.id),
@@ -268,11 +325,23 @@ async def _build_fire(
             else None
         )
 
+        # FEAT-085: a routine with a destination opens with host-supplied
+        # controls naming it; one without sends its trigger message as before.
+        trigger_message = row.trigger_message
+        if row.destination_kind is not None:
+            trigger_message = (
+                render_routine_controls(row, platform=platform, direct_post=direct_post)
+                + "\n"
+                + row.trigger_message
+            )
+        final_state: list[TurnState] = []
+
         tail = await run_turn(
             anthropic=client,
             agent_id=resolved_agent_id,
             environment_id=resolved_env_id,
-            trigger_message=row.trigger_message,
+            trigger_message=trigger_message,
+            on_state=final_state.append,
             mcp_settings=settings.mcp,
             account_id=account_id,
             usage_record_factory=usage_record_factory,
@@ -283,10 +352,26 @@ async def _build_fire(
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
+            tool_safety=settings.tool_safety,
         )
 
+        if row.destination_kind is None:
+            async with sm() as s, s.begin():
+                await record_result(s, row.id, tail=tail, error=None)
+            return
+
+        # Fallback post: only when the agent did not deliver to the
+        # destination itself. The chat adapter for `platform` posts it.
+        posted = bool(final_state) and agent_posted_to(final_state[0], row)
         async with sm() as s, s.begin():
-            await record_result(s, row.id, tail=tail, error=None)
+            await record_result(
+                s,
+                row.id,
+                tail=tail,
+                error=None,
+                delivery="skipped" if posted else "pending",
+                delivery_note="agent_posted" if posted else None,
+            )
 
     return _fire
 
@@ -421,7 +506,9 @@ async def run(
     _validate_mcp_settings(settings)
 
     engine = _engine_override or build_engine(str(settings.database.url))
-    sm = build_session_factory(engine)
+    sm = build_session_factory(
+        engine, crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys)
+    )
 
     client = (
         await _anthropic_factory(settings)
@@ -442,6 +529,7 @@ async def run(
             key=scheduler_settings.advisory_lock_key,
         )
         await client.close()
+        await drain_outcomes()
         await engine.dispose()
         return 1
 
@@ -461,6 +549,7 @@ async def run(
         resolver_cache=resolver_cache,
     )
 
+    dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -481,6 +570,7 @@ async def run(
                 max_age=timedelta(seconds=scheduler_settings.max_age_s),
                 max_concurrent_fires=scheduler_settings.max_concurrent_fires,
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
+                wait_for_completion=True,
             )
             await _sweep_pending_files(client, sm)
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
@@ -507,6 +597,7 @@ async def run(
                 max_age=timedelta(seconds=scheduler_settings.max_age_s),
                 max_concurrent_fires=scheduler_settings.max_concurrent_fires,
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
+                dispatcher=dispatcher,
             )
             await _sweep_pending_files(client, sm)
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
@@ -529,6 +620,7 @@ async def run(
 
         return 0
     finally:
+        await dispatcher.close()
         health_server.close()
         await health_server.wait_closed()
         try:
@@ -540,6 +632,7 @@ async def run(
             log.exception("advisory unlock failed")
         await lock_conn.close()
         await client.close()
+        await drain_outcomes()
         if _engine_override is None:
             await engine.dispose()
 

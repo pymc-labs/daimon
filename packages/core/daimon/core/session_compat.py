@@ -42,6 +42,7 @@ type ChangeReason = Literal[
     "repo_url",
     "repo_branch",
     "memory_store",
+    "memory_access",
     "vault",
     "tools",
     "mcp_servers",
@@ -144,6 +145,7 @@ def identity_change_reasons(
         (recorded.repo_url != desired.repo_url, "repo_url"),
         (recorded.repo_branch != desired.repo_branch, "repo_branch"),
         (recorded.memory_store_id != desired.memory_store_id, "memory_store"),
+        (recorded.memory_read_only != desired.memory_read_only, "memory_access"),
         (recorded.vault_id != desired.vault_id, "vault"),
     )
     return tuple(reason for differs, reason in checks if differs)

@@ -18,6 +18,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import NoReturn
 
 import anthropic
 import httpx
@@ -50,6 +51,7 @@ from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLif
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_recorder
 from daimon.core.turn.run import RunOutcome, _is_dead_session, run_prepared_turn
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.termination import TerminationReason
 from daimon.testing.db import build_test_engine
 from daimon.testing.ma import (
     MARouter,
@@ -346,6 +348,7 @@ async def test_happy_path_runs_once_and_returns_recovered_false(
     assert outcome.ma_session_id == "sess_1", "must report the original session id"
     assert outcome.mapping_id == row.id, "must report the original mapping id"
     assert outcome.state.error is None, "a clean idle-end-turn run has no error"
+    assert outcome.termination is TerminationReason.COMPLETED
     assert len(session_bodies) == 0, "no create_session call on the happy path"
 
 
@@ -396,6 +399,7 @@ async def test_dead_session_recovers_once_and_rebinds_recorder(
         render_interval_s=0.001,
     )
 
+    assert outcome.termination is TerminationReason.COMPLETED, "the recovered run is what ended"
     assert outcome.recovered is True, "a dead-session signature must trigger exactly one recovery"
     assert outcome.ma_session_id != "sess_old", "the final session id must be the new one"
     assert outcome.mapping_id != row.id, "the final mapping id must be the new row"
@@ -1108,6 +1112,67 @@ async def test_recovered_turn_never_shows_the_user_a_failure(
     )
 
 
+async def test_a_failed_recovery_tells_the_caller_recovery_failed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When replacing the dead session raises, the held failure is replayed as
+    `recovery_failed`, not the first attempt's upstream error: that one would
+    tell the person their workspace was kept."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-recovery-fails",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    async def _replacement_fails(*_args: object, **_kwargs: object) -> NoReturn:
+        raise RuntimeError("replacement failed")
+
+    monkeypatch.setattr(run_module, "_replace_dead_session", _replacement_fails)
+    router = _router(session_bodies=[], dead_session_ids={"sess_old"})
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(account_id=account.id, agent=agent, env=env),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    caller_lifecycle = RecordingLifecycle()
+
+    with pytest.raises(RuntimeError, match="replacement failed"):
+        await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-recovery-fails",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=caller_lifecycle,
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+        )
+
+    assert len(caller_lifecycle.terminal_failures) == 1
+    assert caller_lifecycle.terminal_failures[0][0].termination is (
+        TerminationReason.RECOVERY_FAILED
+    )
+
+
 async def test_unrecovered_failure_is_still_delivered_to_the_caller(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1224,6 +1289,8 @@ async def test_ceiling_breach_on_first_attempt_returns_ceiling_error_and_marks_m
     assert outcome.state.error is not None
     assert outcome.state.error.kind == "ceiling"
     assert outcome.recovered is False, "a first-attempt breach never entered recovery"
+    assert outcome.termination is TerminationReason.CEILING
+    assert caller_lifecycle.terminal_failures[0][0].termination is TerminationReason.CEILING
     assert outcome.mapping_id == row.id, "must report the originally prepared mapping id"
     assert outcome.ma_session_id == "sess_1"
     assert len(session_bodies) == 0, "a first-attempt breach must never call create_session"
@@ -1522,6 +1589,7 @@ async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_hel
         billing: object,
         image_blocks: object,
         system_blocks: object = (),
+        tool_confirmation: object = None,
     ) -> TurnState:
         nonlocal call_count
         call_count += 1
@@ -1566,6 +1634,10 @@ async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_hel
     assert len(caller_lifecycle.terminal_failures) == 1, (
         "the withheld first-attempt failure must still be delivered exactly once"
     )
+    assert outcome.termination is TerminationReason.RECOVERY_CANCELLED
+    assert caller_lifecycle.terminal_failures[0][0].termination is (
+        TerminationReason.RECOVERY_CANCELLED
+    ), "the caller's hook and the outcome must agree on how the turn ended"
 
 
 async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interrupts_it(
@@ -1619,6 +1691,7 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
         billing: object,
         image_blocks: object,
         system_blocks: object = (),
+        tool_confirmation: object = None,
     ) -> TurnState:
         nonlocal call_count
         call_count += 1
@@ -1664,6 +1737,9 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
     assert outcome.recovered is True
     assert outcome.state.error is not None
     assert outcome.state.error.kind == "interrupted", "the mirror must have forwarded the cancel"
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
     assert _leaked_turn_task_names() == [], (
         "no turn.cancel_mirror task may linger after the call returns"
     )
@@ -1723,6 +1799,9 @@ async def test_recovery_happy_path_unaffected_by_the_cancel_mirror_and_leaks_no_
     assert outcome.ma_session_id != "sess_old"
     assert outcome.state.error is None
     assert len(session_bodies) == 1
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
     assert _leaked_turn_task_names() == [], (
         "no turn.cancel_mirror task may linger after a clean recovery"
     )
@@ -2661,3 +2740,80 @@ async def test_orphan_archive_second_cancel_preserves_the_unwinding_error(
     finally:
         finish.set()
         await anthropic_client.close()
+
+
+async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrapper(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SYS-038 x SYS-081: `run_prepared_turn` observes, `run_prepared_turn_impl`
+    runs; the adapter's card hook and `attended` must survive the hop."""
+    from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-hook-threading",
+        ma_session_id="sess_hook",
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_hook",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    postures: list[object] = []
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        postures.append(kwargs["tool_confirmation"])
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-hook-threading",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        confirm_write=card,
+    )
+
+    (posture,) = postures
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(
+        ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
+    )
+    assert result.allow and len(prompts) == 1, "the adapter's card hook answered the write"

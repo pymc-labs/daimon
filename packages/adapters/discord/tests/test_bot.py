@@ -2259,3 +2259,34 @@ class TestGuildInstallLifecycle:
         post.assert_not_awaited()
         assert sync.await_count == 2, "recovery must preserve guild and global command sync"
         clear_commands.assert_called_once(), "recovery must still clear guild-scoped commands"
+
+
+async def test_orchestrate_boundary_persists_one_terminal_outcome(
+    db_session: AsyncSession,
+    db_engine: AsyncEngine,
+) -> None:
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import current_outcome, drain_outcomes
+    from daimon.core.turn.termination import TerminationReason
+    from daimon.testing.factories import make_tenant
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    sm = async_sessionmaker(db_engine)
+    bot = make_bot(_make_runtime(sm))
+
+    async def pipeline(*args, **kwargs):
+        observation = current_outcome.get()
+        assert observation is not None
+        observation.finish(reason=TerminationReason.COMPLETED)
+
+    message = MagicMock(spec=discord.Message)
+    message.channel.id = 123
+    with patch.object(bot, "_orchestrate_observed", side_effect=pipeline):
+        await bot._orchestrate(message, "guild", tenant.id)
+    await drain_outcomes()
+    async with sm() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert len(rows) == 1
+    assert rows[0].reason == TerminationReason.COMPLETED
+    assert rows[0].platform == "discord" and rows[0].channel_id == "123"

@@ -27,6 +27,7 @@ from xml.sax.saxutils import escape, quoteattr
 from daimon.adapters.slack.attachments import ProxyUrlContext, build_proxy_url
 from daimon.adapters.slack.vision import SlackFile
 from daimon.core.turn_keys import render_keys_element
+from daimon.core.untrusted import untrusted_block
 from slack_sdk.web.async_client import AsyncWebClient
 
 # Slack's ceiling for non-Marketplace apps on conversations.replies (both the
@@ -36,8 +37,13 @@ from slack_sdk.web.async_client import AsyncWebClient
 THREAD_PAGE_LIMIT = 15
 
 
-def _open_tag(name: str, *, truncated: bool) -> str:
-    return f'<{name} truncated="true">' if truncated else f"<{name}>"
+def _history_attrs(*, truncated: bool) -> dict[str, str]:
+    """Replayed messages come from everyone in the thread, so they ride in the
+    shared untrusted envelope; only the `<user_query>` after it is the request."""
+    attrs = {"source": "slack"}
+    if truncated:
+        attrs["truncated"] = "true"
+    return attrs
 
 
 def _render_message(msg: dict[str, Any], *, proxy: ProxyUrlContext | None) -> list[str]:
@@ -134,12 +140,10 @@ async def build_context_xml(
         "<context>",
         f"<channel platform={quoteattr('slack')} id={quoteattr(channel)}/>",
         render_keys_element(key_names),
-        _open_tag("thread_history", truncated=truncated),
     ]
     lines = [line for line in lines if line]
-    for msg in messages:
-        lines.extend(_render_message(msg, proxy=proxy))
-    lines.append("</thread_history>")
+    body = [line for msg in messages for line in _render_message(msg, proxy=proxy)]
+    lines.extend(untrusted_block("thread_history", body, _history_attrs(truncated=truncated)))
     lines.append("</context>")
     lines.append("")
     lines.append(f"{_user_query_open_tag(author_id, is_admin)}{escape(user_query)}</user_query>")
@@ -186,12 +190,10 @@ async def build_delta_xml(
         "<context>",
         f"<channel platform={quoteattr('slack')} id={quoteattr(channel)}/>",
         render_keys_element(key_names),
-        _open_tag("thread_delta", truncated=truncated),
     ]
     lines = [line for line in lines if line]
-    for msg in messages:
-        lines.extend(_render_message(msg, proxy=proxy))
-    lines.append("</thread_delta>")
+    body = [line for msg in messages for line in _render_message(msg, proxy=proxy)]
+    lines.extend(untrusted_block("thread_delta", body, _history_attrs(truncated=truncated)))
     lines.append("</context>")
     lines.append("")
     lines.append(f"{_user_query_open_tag(author_id, is_admin)}{escape(user_query)}</user_query>")

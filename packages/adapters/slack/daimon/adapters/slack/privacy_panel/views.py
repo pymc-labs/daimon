@@ -76,6 +76,10 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
         will_happen_lines.append(
             f"• 💬 Remove *{preview.slack_turn_contexts.count}* Slack turn context(s)"
         )
+    if preview.direct_message_conversations.count > 0:
+        will_happen_lines.append(
+            f"• Remove *{preview.direct_message_conversations.count}* private conversation(s)"
+        )
     if preview.account.count > 0:
         will_happen_lines.append("• 🪪 Remove the account row itself")
 

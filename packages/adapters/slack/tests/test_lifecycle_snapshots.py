@@ -60,6 +60,7 @@ def _make_lifecycle(fake: Any, clock: Any) -> SlackTurnLifecycle:
         register=lambda ts, ev, author_id: None,
         deregister=lambda ts: None,
         clock=clock,
+        request_id=lambda: "01TESTREQUESTID0000000000",
     )
 
 

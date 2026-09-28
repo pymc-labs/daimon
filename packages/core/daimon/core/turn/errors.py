@@ -15,12 +15,12 @@ from typing import Literal
 from daimon.core.errors import DaimonError
 from daimon.core.scope import ConfigTier
 
-AdmissionDenialReason = Literal["balance_depleted", "cap_exceeded"]
+AdmissionDenialReason = Literal["balance_depleted", "cap_exceeded", "invoker_not_allowed"]
 MissingConfigPart = Literal["agent", "environment"]
 
 
 class AdmissionDenied(DaimonError):
-    """Raised by `admit()` when a balance or cap gate rejects the turn.
+    """Raised by `admit()` when the invoker policy, balance or cap gate rejects the turn.
 
     Carries only a closed reason literal — no rendered user-facing text.
     Denial copy stays adapter-side.

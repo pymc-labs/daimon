@@ -3,12 +3,38 @@
 One deployment runs on one Anthropic API key, and any number of Discord
 servers and Slack workspaces can install against it. The credit model is what
 makes that safe: every model call is priced in USD and debited from the
-tenant that caused it, and a turn cannot start unless that tenant has credit
-left.
+tenant that caused it. By default, a turn cannot start unless that tenant has
+credit left. Operators can explicitly fund individual tenants themselves.
 
 Metering and the balance gate work out of the box with no configuration.
 Stripe top-ups and the per-person monthly cap need setup — see
 [settings](#settings-that-turn-things-on) below.
+
+## Tenant funding mode
+
+Every tenant defaults to `prepaid`, including existing tenants after migration.
+Set one tenant's mode from the operator CLI:
+
+```bash
+daimon tenants funding-mode discord GUILD_ID operator_funded
+daimon tenants funding-mode slack TEAM_ID prepaid
+daimon tenants list --json
+```
+
+`operator_funded` permits turns at zero or negative balance. The provider bill
+belongs to the operator. Each depleted-balance admission emits the structured
+warning `billing.operator_funded_balance_alert` with `tenant_id` and
+`balance_usd`; route this event through your log alerting system. There is no
+chat notification or deduplication of these warnings.
+
+Usage events, ledger debits, markup and configured monthly caps still apply.
+The balance can become negative and remains visible as a spend signal. Funding
+mode does not enable or disable caps: they retain the billing configuration
+requirements described below. The policy applies to chat, MCP tools and routine
+admission through the shared balance gate. Other tenants stay prepaid.
+
+Switching back to `prepaid` immediately restores the positive-balance gate;
+it does not reset the ledger or add credit. Inspect the balance before switching.
 
 ## The unit of metering is a model call, not a turn
 
@@ -92,10 +118,11 @@ live in `packages/core/daimon/core/turn/admission.py`; the gate order there is
 load-bearing and documented as such.
 
 **Balance** — `is_over_balance` in
-`packages/core/daimon/core/tenant_balance.py` sums the tenant's ledger and
+`packages/core/daimon/core/tenant_balance.py` sums the tenant's ledger and (for prepaid tenants)
 denies unless the balance is strictly positive. It is independent of any
 payment configuration: a deployment with no Stripe setup still refuses a
-tenant whose trial credit is spent.
+prepaid tenant whose trial credit is spent. Operator-funded tenants instead
+emit the balance alert described above.
 
 **Cap** — `is_over_cap` in `packages/core/daimon/core/billing.py` compares the
 person's spend in the current calendar month, UTC, against their effective
@@ -314,3 +341,49 @@ For a single finished turn there is `get_turn_cost` in
 that turn's events into a raw pre-markup figure and returns it as a decimal
 string — never a float, and `None` rather than `0` for an unpriced model,
 because zero would falsely claim the turn was free.
+
+### Turn outcomes
+
+`turn_outcomes` records terminal reasons and timings separately from billing. Its
+content-free usage references join `usage_events` on `(managed_session_id,
+event_id)`; one outcome may refer to multiple model calls or recovered sessions.
+Refused turns have no usage references. The best-effort outcome writer never
+changes a balance, cap, price or ledger debit, and a missing diagnostic row does
+not mean no model work was billed. See the turn-outcome contract in
+[architecture](architecture.md#durable-turn-outcomes).
+
+
+## Per-turn usage telemetry
+
+`daimon usage turns TENANT_UUID --days 7 --json` lists content-free turn
+measurements. Add `--channel CHANNEL_ID` or `--origin routine` to filter;
+`--summary` groups by platform, channel and origin. The command reads the local
+database and makes no upstream API calls. `--limit` bounds the individual-turn
+listing (1–1000); summaries cover the whole selected date range.
+
+Each measurement shares its UUID and atomic database row with the terminal
+outcome. It includes model-call count, input/output tokens, cache read/write
+tokens, model IDs, and estimated provider cost using the existing static pricing
+table. Replayed span IDs are counted once per session; recovery attempts are
+summed into the same logical turn. Both billed and exempt turns are measured.
+`billing_posture` describes the observed billing path (`metered`, `exempt`,
+`mixed`, or `none`), not confirmation that a debit committed. The ledger remains
+authoritative for charges; telemetry changes no prices, debits, caps or gates.
+
+Unknown or unavailable session models produce null cost and an `unpriced_calls`
+count. Historical outcome rows retain null metrics; new refusals with no model
+calls record zero. A summary's `cost_usd` is null if any constituent turn has
+unknown cost; `known_cost_usd` is the subtotal of fully priced turns, and
+`measured_turns` distinguishes measured rows from history. Token totals include
+only measured rows. Existing-session CLI runs without model metadata can report
+tokens with unknown cost. Separately metered tool models and auxiliary API calls
+are not included in these model-span totals. MCP agent-chat and hub
+start/continue/ask calls record outcomes, but their SDK polling paths do not
+consume model spans: usage fields remain null and summaries do not count them
+as measured turns. Their admission refusals still record measured zero usage.
+Library headless calls without an outcome session factory are unobserved.
+
+Telemetry inherits the outcome writer's bounded best-effort delivery: database
+outages, saturation or abrupt process termination can lose rows. It is operational
+measurement, not an accounting reconciliation source. No prompts, answers, tool
+arguments, output text or error messages are persisted here.

@@ -213,6 +213,7 @@ async def test_create_session_calls_ensure_agent_mcp_vault_when_public_url_set(
                     "data": [
                         {
                             "id": "vcrd_existing",
+                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
                             "type": "credential",
                             "vault_id": "vlt_existing",
                             "auth": {
@@ -661,6 +662,7 @@ async def test_create_session_composes_resources_alongside_vault_ids(
                     "data": [
                         {
                             "id": "vcrd_existing",
+                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
                             "type": "credential",
                             "vault_id": "vlt_existing",
                             "auth": {
@@ -1144,6 +1146,7 @@ def _warm_vault_copilot_handler(
                     "data": [
                         {
                             "id": "vcrd_daimon_mcp",
+                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
                             "type": "credential",
                             "vault_id": "vlt_existing",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -1460,6 +1463,7 @@ def _warm_vault_copilot_500_handler(
                     "data": [
                         {
                             "id": "vcrd_daimon_mcp",
+                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
                             "type": "credential",
                             "vault_id": "vlt_existing",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -1920,6 +1924,7 @@ def _warm_vault_mirror_handler(
                     "data": [
                         {
                             "id": "vcrd_daimon_mcp",
+                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
                             "type": "credential",
                             "vault_id": "vlt_caller",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},

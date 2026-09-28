@@ -104,3 +104,24 @@ async def get_slack_turn_channels(
         .distinct()
     )
     return frozenset(str(channel_id) for channel_id in result.scalars().all())
+
+
+async def get_slack_turn_destination(
+    session: AsyncSession,
+    *,
+    id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    cutoff: datetime,
+) -> str | None:
+    """Resolve only the row named by a verified execution credential."""
+    return (
+        await session.execute(
+            select(SlackTurnContext.channel_id).where(
+                SlackTurnContext.id == id,
+                SlackTurnContext.tenant_id == tenant_id,
+                SlackTurnContext.account_id == account_id,
+                SlackTurnContext.started_at >= cutoff,
+            )
+        )
+    ).scalar_one_or_none()

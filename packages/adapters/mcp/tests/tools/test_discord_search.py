@@ -29,6 +29,7 @@ from daimon.core.config import (
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
+from daimon.core.untrusted import UNTRUSTED_NOTE
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
 
@@ -327,6 +328,7 @@ async def test_search_params_encoding_all_filters_server_side(
         "offset": 5,
     }, f"all filters must reach the wire as server-side params; got {captured_params}"
     assert result.total_results == 1
+    assert result.trust == "untrusted" and result.trust_note == UNTRUSTED_NOTE
 
 
 # ---------------------------------------------------------------------------

@@ -80,7 +80,7 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage, ma_session
 from pydantic import HttpUrl, SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 _NOW = dt.datetime(2026, 4, 1, 12, 0, 0, tzinfo=dt.UTC)
 _SESSION_ID = "ses_test"
@@ -180,7 +180,11 @@ def _build_client(
 
 
 @pytest.mark.parametrize("origin", ["chat", "routine", "relay", "handoff"])
-async def test_run_turn_returns_last_message_text(origin) -> None:
+async def test_run_turn_returns_last_message_text(origin, db_session, db_session_factory) -> None:
+    from daimon.testing.factories import make_tenant
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
     events: list[BetaManagedAgentsSessionEvent] = [
         BetaManagedAgentsAgentMessageEvent(
             id="evt_msg_1",
@@ -204,12 +208,26 @@ async def test_run_turn_returns_last_message_text(origin) -> None:
         environment_id="env_x",
         trigger_message="hi",
         origin=origin,
+        tenant_id=tenant.id,
+        session_factory=db_session_factory,
     )
 
     assert tail == "hello world", "run_turn should return the agent.message text"
     from daimon.core.context_prompt import context_prompt
 
     assert sent[0]["events"][0]["content"][0]["text"] == context_prompt(origin) + "hi"
+
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
+    async with db_session_factory() as session:
+        outcomes = await list_for_tenant(session, tenant.id)
+    assert len(outcomes) == 1
+    assert outcomes[0].origin == origin
+    assert outcomes[0].agent_id == "agent_x"
+    assert outcomes[0].reason == "completed"
+    assert "hello world" not in str(outcomes[0])
 
 
 async def test_tail_truncated_at_1000() -> None:
@@ -409,7 +427,10 @@ async def test_run_turn_calls_usage_record_for_span_model_request_end() -> None:
     assert call.kwargs["event"].id == "evt_span_1"
 
 
-async def test_run_turn_without_usage_record_factory_completes_unbilled() -> None:
+@pytest.mark.parametrize("model_id", [_MODEL_ID, "claude-sonnet-4-6"])
+async def test_run_turn_without_usage_record_factory_completes_unbilled(
+    db_session: AsyncSession, db_engine: AsyncEngine, model_id: str
+) -> None:
     """No usage_record_factory -> BillingExempt(reason="headless-unrecorded"):
     the turn still completes and returns its tail, and no span event is ever
     metered (there is no recorder to invoke)."""
@@ -434,17 +455,39 @@ async def test_run_turn_without_usage_record_factory_completes_unbilled() -> Non
             stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
         ),
     ]
-    client = _build_client(events)
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    sm = async_sessionmaker(db_engine)
+    client = _build_client(events, model_id=model_id)
 
     tail = await run_turn(
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
         trigger_message="hi",
+        tenant_id=tenant.id,
+        session_factory=sm,
         # usage_record_factory intentionally omitted
     )
 
     assert tail == "ok", "an unbilled turn still drains normally and returns its tail"
+
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
+    async with sm() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert len(rows) == 1
+    assert rows[0].billing_posture == "exempt"
+    assert rows[0].model_calls == 1
+    assert rows[0].input_tokens == 10 and rows[0].output_tokens == 5
+    assert rows[0].model_ids == [model_id]
+    if model_id == _MODEL_ID:  # This fixture uses a model absent from the price table.
+        assert rows[0].cost_usd is None and rows[0].unpriced_calls == 1
+    else:
+        assert rows[0].cost_usd is not None and rows[0].cost_usd > 0
+        assert rows[0].unpriced_calls == 0
 
 
 async def test_run_turn_reconnects_through_a_clean_close_and_returns_post_reconnect_tail() -> None:
@@ -1071,6 +1114,7 @@ async def test_run_turn_provisions_copilot_credential_from_pat(
                 "data": [
                     {
                         "id": "vcrd_daimon_mcp",
+                        "metadata": {"daimon_chat_identity": str(agent_uuid)},
                         "type": "credential",
                         "vault_id": "vlt_existing",
                         "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -1442,3 +1486,32 @@ async def test_run_turn_creates_a_fresh_session_per_fire_and_never_reuses_one() 
         "each routine fire must open its own MA session -- a reused session "
         "would let a prior turn's events reach the next fire's replay fold"
     )
+
+
+@pytest.mark.parametrize("origin", ["chat", "routine", "relay", "handoff"])
+async def test_memory_access_per_headless_origin(
+    origin, db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.stores.agent_memory_stores import insert_memory_store
+    from daimon.testing.factories import make_tenant
+
+    tenant = await make_tenant(db_session)
+    agent_id = uuid.uuid4()
+    await insert_memory_store(
+        db_session, tenant_id=tenant.id, agent_id=agent_id, memory_store_id="memstore_origin"
+    )
+    await db_session.commit()
+    bodies: list[dict[str, Any]] = []
+    client = _build_client(_idle_events(), session_create_capture=bodies)
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="hi",
+        tenant_id=tenant.id,
+        agent_uuid=agent_id,
+        session_factory=db_session_factory,
+        origin=origin,
+    )
+    memory = next(r for r in bodies[0]["resources"] if r["type"] == "memory_store")
+    assert memory["access"] == ("read_only" if origin == "routine" else "read_write")

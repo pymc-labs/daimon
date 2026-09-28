@@ -53,6 +53,7 @@ from urllib.parse import urlparse
 
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from daimon.core._models import Base
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -77,6 +78,7 @@ _DROP_CHUNK_SIZE = 4
 # nodeid of the last test that used the DB in this worker; named in the error
 # when the next test's wipe times out on a lock that test left behind.
 _last_db_test: str | None = None
+_TEST_CRYPTO_KEYS = (Fernet.generate_key().decode("ascii"),)
 
 
 def _require_test_dsn() -> str:
@@ -143,6 +145,7 @@ def build_test_engine(
                 "application_name": schema,
             }
         },
+        execution_options={"crypto_keys": _TEST_CRYPTO_KEYS},
         **engine_kwargs,
     )
 
@@ -383,6 +386,9 @@ async def db_clean(
     try:
         yield
     finally:
+        from daimon.core.turn.outcomes import drain_outcomes
+
+        await drain_outcomes()
         _last_db_test = item.nodeid
 
 

@@ -105,6 +105,7 @@ async def test_register_channel_tools_registers_shared_names() -> None:
         "get_message",
         "parse_link",
         "send_message",
+        "send_direct_message",
         "search_messages",
         "create_thread",
         "rename_thread",

@@ -69,6 +69,7 @@ import anthropic as _anthropic
 import sentry_sdk
 import structlog
 from daimon.adapters.discord.bot import (
+    INVOKER_NOT_ALLOWED_NOTICE,
     DaimonBot,
     _credit_depleted_message,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same balance-depleted copy the mention path shows
     _resolve_bot_display_name,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same bot-display-name resolution the mention path uses
@@ -77,6 +78,7 @@ from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.thread_send import safe_thread_send
+from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.turn_card_recovery import (
     post_initial_turn_card,
     retire_terminal_turn_card,
@@ -90,7 +92,6 @@ from daimon.adapters.discord.wizard import (
 from daimon.adapters.discord.wizard_render import build_wizard_view
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role, WizardSessionRow
 from daimon.core.stores.thread_sessions import (
     clear_active_turn_if_message_id,
@@ -102,6 +103,7 @@ from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, 
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.wizard.answers import format_answer_block
@@ -325,6 +327,25 @@ async def run_wizard_submit_turn(
     spec: WizardSpec,
     state: WizardState,
 ) -> None:
+    with observe_turn(
+        bot.runtime.sessionmaker,
+        tenant_id=row.tenant_id,
+        platform="discord",
+        channel_id=str(interaction.channel_id),
+    ):
+        return await run_wizard_submit_turn_observed(
+            bot=bot, interaction=interaction, row=row, spec=spec, state=state
+        )
+
+
+async def run_wizard_submit_turn_observed(
+    *,
+    bot: DaimonBot,
+    interaction: discord.Interaction[commands.Bot],
+    row: WizardSessionRow,
+    spec: WizardSpec,
+    state: WizardState,
+) -> None:
     """The background task `WizardSubmitButton.callback` spawns after winning
     the claim. An ordinary caller of the shared admission/session-binding/run
     chokepoint (`daimon.core.turn.admission.admit`,
@@ -376,15 +397,30 @@ async def run_wizard_submit_turn(
         if not should_admit_turn(
             current_in_flight=count, cap=discord_settings.max_concurrent_turns_per_tenant
         ):
+            record_refusal(
+                bot.runtime.sessionmaker,
+                tenant_id=row.tenant_id,
+                platform="discord",
+                channel_id=parent_channel_id,
+                thread_id=thread_id,
+            )
             _log.info("wizard_submit.skipped.over_cap", tenant_id=str(row.tenant_id))
             await channel.send(_OVER_CAP)
             return
         bot._inflight[row.tenant_id] = count + 1  # pyright: ignore[reportPrivateUsage]  # see the read above
         inflight_claimed = True
 
-        # --- Stage one: admission -- D-01 admit(). Same three branches
+        # --- Stage one: admission -- D-01 admit(). Same four branches
         # _orchestrate has, prefixed with a sentence saying the answers were
         # already recorded (the claim committed before this runs). ---
+        # The live role, read from the interaction before admission: the
+        # invoker policy's admin exemption must not rest on a stored role the
+        # user may have lost since. admit() persists it for the resumed turn's
+        # MCP calls. A non-Member author is treated as non-admin. ---
+        author = interaction.user
+        is_admin = isinstance(author, discord.Member) and is_member_guild_admin(
+            author, guild_owner_id=interaction.guild.owner_id if interaction.guild else None
+        )
         try:
             admission = await admit(
                 bot.runtime.turn_deps,
@@ -392,7 +428,9 @@ async def run_wizard_submit_turn(
                 platform="discord",
                 external_user_id=str(interaction.user.id),
                 channel_id=parent_channel_id,
+                thread_id=thread_id,
                 now=datetime.now(UTC),
+                role=Role.ADMIN if is_admin else Role.USER,
             )
         except MissingTurnConfigError as err:
             _log.info(
@@ -432,7 +470,12 @@ async def run_wizard_submit_turn(
             )
             return
         except AdmissionDenied as err:
-            if err.reason == "balance_depleted":
+            if err.reason == "invoker_not_allowed":
+                _log.info(
+                    "wizard_submit.skipped.invoker_not_allowed", user_id=str(interaction.user.id)
+                )
+                await channel.send("Your answers were recorded, but " + INVOKER_NOT_ALLOWED_NOTICE)
+            elif err.reason == "balance_depleted":
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
                 await channel.send(
                     "Your answers were recorded, but "
@@ -456,19 +499,6 @@ async def run_wizard_submit_turn(
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
 
         agent = admission.agent
-
-        # --- Per-turn role upsert -- unconditional, same rationale as
-        # _orchestrate: the live-role gate the resumed turn's MCP calls hit
-        # must read a fresh value. ---
-        author = interaction.user
-        is_admin = isinstance(author, discord.Member) and is_member_guild_admin(
-            author, guild_owner_id=interaction.guild.owner_id if interaction.guild else None
-        )
-        async with bot.runtime.sessionmaker() as role_session:
-            await set_role(
-                role_session, admission.account_id, Role.ADMIN if is_admin else Role.USER
-            )
-            await role_session.commit()
 
         if discord_settings.per_caller_thread_sessions:
             session_account_id = admission.account_id
@@ -516,6 +546,8 @@ async def run_wizard_submit_turn(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
+                render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
+                is True,
                 send=_send_embed,
                 edit=_edit_message,
                 agent_name=agent.name,
@@ -546,6 +578,8 @@ async def run_wizard_submit_turn(
 
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
+                render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
+                is True,
                 send=_send_embed,
                 edit=_edit_message,
                 agent_name=agent.name,
@@ -596,6 +630,7 @@ async def run_wizard_submit_turn(
                 recovery_lifecycle=_recovery_lifecycle,
                 render_interval_s=2.0,
                 deadline=turn_deadline_at,
+                confirm_write=discord_confirmation_hook(channel),
             )
         finally:
             if outcome is not None and outcome.mapping_id is not None:
@@ -614,7 +649,7 @@ async def run_wizard_submit_turn(
                 await retire_terminal_turn_card(
                     bot.runtime.sessionmaker,
                     intent_id=turn_card_intent.id,
-                    expected_message_id=lifecycle_holder[0].final_message_id,
+                    expected_message_id=lifecycle_holder[0].card_message_id,
                     no_post_confirmed=not lifecycle_holder[0].first_post_attempted,
                 )
 

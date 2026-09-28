@@ -37,6 +37,10 @@ from enum import Enum
 from typing import Any, Literal
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.core.turn.notices import TerminationNotice, fit_notice
+
+# Slack rejects a section block whose text exceeds 3,000 characters.
+NOTICE_MAX_CHARS = 2900
 
 # ---------------------------------------------------------------------------
 # Phase enum
@@ -105,6 +109,8 @@ class State:
     usage_out: int = 0
     cost_str: str | None = None
     text_preview: str | None = None
+    notice: str = ""
+    """Rendered termination notice (mrkdwn); drawn above the ERROR summary."""
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +250,8 @@ def to_blocks(
 
     Terminal (DONE / ERROR):
         - context  : {agent_name} · {elapsed}s · {in} in / {out} out [· {cost}]
-                     ERROR prepends ❌ {reason}
+                     ERROR prepends ❌ {reason}, under a section with the
+                     termination notice when one was rendered
         No actions block (cancel button removed on terminal).
     """
     if state.phase in _TERMINAL_PHASES:
@@ -260,12 +267,11 @@ def to_blocks(
             summary_text = f"{_EMOJI_CROSS} {reason} · {summary}"
         else:
             summary_text = summary
-        return [
-            {
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": summary_text}],
-            }
-        ]
+        blocks: list[dict[str, Any]] = []
+        if state.phase is TurnPhase.ERROR and state.notice:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": state.notice}})
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": summary_text}]})
+        return blocks
 
     # Non-terminal: build the status surface blocks.
     title = _PHASE_TITLE[state.phase]
@@ -333,3 +339,18 @@ def to_interrupted_blocks() -> list[dict[str, Any]]:
     gone by construction -- there is no live turn left to cancel.
     """
     return [{"type": "section", "text": {"type": "mrkdwn", "text": INTERRUPTED_NOTICE}}]
+
+
+def format_termination_notice(notice: TerminationNotice) -> str:
+    """Draw the core notice as mrkdwn for the ERROR card.
+
+    The headline is not repeated here: it is already the summary's reason.
+    """
+    lines = [escape_mrkdwn(notice.cause)]
+    work = notice.work_line(lambda name: f"`{escape_mrkdwn(name.replace('`', ''))}`")
+    if work is not None:
+        lines.append(work)
+    lines.append(notice.survived)
+    lines.append(f"*Next:* {notice.next_step}")
+    tail = f"`rid: {notice.request_id}`" if notice.request_id is not None else None
+    return fit_notice(lines, tail=tail, limit=NOTICE_MAX_CHARS)

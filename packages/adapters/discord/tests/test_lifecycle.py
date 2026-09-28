@@ -11,10 +11,12 @@ import dataclasses
 import time
 import types
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
 
+import daimon.adapters.discord.lifecycle as lifecycle_module
 import discord
 import pytest
+import structlog
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
@@ -23,9 +25,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 )
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.theme import COLOR_RED
+from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.reducers import apply
-from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
+from daimon.core.turn.termination import TerminationReason
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -38,6 +43,8 @@ def _make_lifecycle(
     agent_name: str = "test-agent",
     cancel_view: discord.ui.View | None = None,
     model_id: str = "claude-sonnet-4-6",
+    notify_on_completion: bool = False,
+    render_tables: bool = False,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
     """Create lifecycle with recorder callables.
 
@@ -57,6 +64,9 @@ def _make_lifecycle(
 
     lc = DiscordTurnLifecycle(
         send=fake_send,
+        notify_on_completion=notify_on_completion,
+        requester_id=123,
+        render_tables=render_tables,
         edit=fake_edit,
         agent_name=agent_name,
         model_id=model_id,
@@ -280,6 +290,120 @@ class TestCleanReplace:
 # ---------------------------------------------------------------------------
 # SPEC-R7: Error embed on terminal failure
 # ---------------------------------------------------------------------------
+
+
+_NOTICE_REASONS = [
+    TerminationReason.CONNECTION_LOST,
+    TerminationReason.UPSTREAM,
+    TerminationReason.INTERRUPTED,
+    TerminationReason.INTERRUPT_TIMEOUT,
+    TerminationReason.REQUIRES_ACTION,
+    TerminationReason.CEILING,
+    TerminationReason.MCP_DEGRADED_EMPTY,
+]
+
+
+@pytest.mark.parametrize("reason", _NOTICE_REASONS, ids=str)
+async def test_terminal_failure_card_carries_the_termination_notice(
+    reason: TerminationReason,
+) -> None:
+    """The red card explains the reason: headline in the footer, the rest in the body."""
+    lc, _, edits = _make_lifecycle()
+    await lc.on_render(TurnState())
+    state = TurnState(
+        termination=reason,
+        content=[
+            ToolUseBlock(
+                kind="tool_use", id="tu_1", type="agent.tool_use", name="fit_model", input={}
+            )
+        ],
+    )
+
+    await lc.on_terminal_failure(state, Exception("x" * 300))
+
+    embed = edits[-1][1]["embeds"][0]
+    notice = render_termination_notice(reason, state=state)
+    assert notice is not None
+    assert embed.footer.text.startswith(f"❌ {notice.headline} · ")
+    assert notice.cause in embed.description
+    assert notice.next_step in embed.description, "the next step is not truncated away"
+    assert "`fit_model`" in embed.description, "work in flight is named"
+    assert "`rid: " in embed.description
+    assert "xxx" not in embed.description + embed.footer.text, "raw error stays in the logs"
+
+
+async def test_terminal_failure_notice_fits_discord_limits_with_many_long_names() -> None:
+    """45 failed servers and 45 running tools, every name 100 characters: the
+    card still fits an embed description (4,096) and footer (2,048)."""
+    lc, _, edits = _make_lifecycle()
+    await lc.on_render(TurnState())
+    state = TurnState(
+        termination=TerminationReason.MCP_DEGRADED_EMPTY,
+        mcp_failures=tuple(
+            McpServerFailure(
+                server_name=f"{i:02d}" + "s" * 98,
+                error_type="mcp_connection_failed_error",
+                message="down",
+                retry_status="exhausted",
+            )
+            for i in range(45)
+        ),
+        content=[
+            ToolUseBlock(
+                kind="tool_use",
+                id=f"tu_{i}",
+                type="agent.tool_use",
+                name=f"{i:02d}" + "t" * 98,
+                input={},
+            )
+            for i in range(45)
+        ],
+    )
+
+    await lc.on_terminal_failure(state, Exception("x"))
+
+    embed = edits[-1][1]["embeds"][0]
+    assert len(embed.description) <= 4096
+    assert len(embed.footer.text) <= 2048
+    assert "and 42 more" in embed.description and "and 40 more" in embed.description
+    assert "`rid: " in embed.description
+
+
+async def test_a_notice_that_fails_to_build_still_turns_the_card_red(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _broken(*_args: object, **_kwargs: object) -> NoReturn:
+        raise RuntimeError("renderer broke")
+
+    monkeypatch.setattr(lifecycle_module, "render_termination_notice", _broken)
+    lc, _, edits = _make_lifecycle()
+    await lc.on_render(TurnState())
+
+    await lc.on_terminal_failure(TurnState(), Exception("upstream timeout"))
+
+    embed = edits[-1][1]["embeds"][0]
+    assert embed.colour.value == COLOR_RED
+    assert embed.footer.text.startswith("❌ upstream timeout · "), "falls back to the raw label"
+    assert not embed.description
+
+
+async def test_the_card_reuses_the_rid_bound_for_the_turn() -> None:
+    lc, _, edits = _make_lifecycle()
+    await lc.on_render(TurnState())
+
+    with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
+        await lc.on_terminal_failure(TurnState(), Exception("x"))
+
+    assert "`rid: 01BOUNDRID`" in edits[-1][1]["embeds"][0].description
+
+
+async def test_terminal_failure_without_a_reason_on_the_state_maps_the_error() -> None:
+    lc, _, edits = _make_lifecycle()
+    await lc.on_render(TurnState())
+
+    await lc.on_terminal_failure(TurnState(), TurnError(kind="connection_lost"))
+
+    assert edits[-1][1]["embeds"][0].footer.text.startswith("❌ Connection lost · ")
 
 
 class TestErrorEmbed:
@@ -1173,3 +1297,145 @@ class TestDegradedTurnNotice:
 
         notices = [s for s in sends if "`notion`" in str(s.get("content", ""))]
         assert len(notices) == 1, "the dropped server is named once, on its own line"
+
+
+async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
+    lifecycle, sends, edits = _make_lifecycle(notify_on_completion=True)
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(_make_success_state("Done <@456> @everyone"))
+    assert len(sends) == 2
+    assert sends[-1]["content"] == "<@123>\nDone <@456> @everyone"
+    mentions = sends[-1]["allowed_mentions"].to_dict()
+    assert mentions["users"] == [123]
+    assert "everyone" not in mentions["parse"]
+    assert "roles" not in mentions["parse"]
+    assert not any(e.get("content") == sends[-1]["content"] for _, e in edits)
+    assert await lifecycle.prepend_revealed_answer("Recovered files.")
+    assert edits[-1][1]["content"].startswith("Recovered files.")
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_reactions_replace_accepted_after_success(enabled):
+    calls = []
+
+    class Trigger:
+        guild = types.SimpleNamespace(me=object())
+
+        async def add_reaction(self, emoji):
+            calls.append(("add", emoji))
+
+        async def remove_reaction(self, emoji, user):
+            calls.append(("remove", emoji))
+
+    async def send(**kwargs):
+        return _SENTINEL_REF
+
+    async def edit(ref, **kwargs):
+        pass
+
+    lifecycle = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        agent_name="test",
+        model_id="claude-sonnet-4-6",
+        trigger_message=Trigger(),
+        notify_on_completion=enabled,
+    )
+    await lifecycle.on_acknowledgment("accepted")
+    await lifecycle.on_terminal_success(_make_success_state())
+    await lifecycle.on_acknowledgment("done")
+    assert calls == ([("add", "👀"), ("add", "✅"), ("remove", "👀")] if enabled else [])
+
+
+async def test_completion_preserves_original_card_id():
+    refs = iter([types.SimpleNamespace(id=1000), types.SimpleNamespace(id=1001)])
+
+    async def send(**kwargs):
+        return next(refs)
+
+    async def edit(ref, **kwargs):
+        pass
+
+    lifecycle = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        agent_name="test",
+        model_id="claude-sonnet-4-6",
+        requester_id=123,
+        notify_on_completion=True,
+    )
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(_make_success_state())
+    assert lifecycle.card_message_id == "1000"
+    assert lifecycle.final_message_id == "1001"
+
+
+@pytest.mark.parametrize("notify", [False, True])
+async def test_final_table_is_attached_to_answer(notify):
+    lifecycle, sends, edits = _make_lifecycle(render_tables=True, notify_on_completion=notify)
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(
+        _make_success_state("| Name | Value |\n| --- | ---: |\n| Example | 42 |")
+    )
+    answer = sends[-1] if notify else edits[-1][1]
+    attachment_key = "files" if notify else "attachments"
+    assert "table-1.png" in answer["content"]
+    assert "| ---" not in answer["content"]
+    assert len(answer[attachment_key]) == 1
+    assert answer[attachment_key][0].fp.read(8) == b"\x89PNG\r\n\x1a\n"
+    assert len(sends) == (2 if notify else 1)
+
+
+@pytest.mark.parametrize("status", [403, 413, 500])
+@pytest.mark.parametrize("notify", [False, True])
+async def test_rejected_table_upload_retries_original_answer_as_text(status, notify):
+    from daimon.adapters.discord.split import split_for_discord_safe
+    from structlog.testing import capture_logs
+
+    delivered = []
+    attempts = []
+    ref = types.SimpleNamespace(id=1000)
+
+    def reject_upload(kwargs):
+        attempts.append(kwargs)
+        if kwargs.get("attachments") or kwargs.get("files"):
+            response = types.SimpleNamespace(status=status, reason="Rejected upload")
+            error = discord.Forbidden if status == 403 else discord.HTTPException
+            raise error(response, "upload rejected")
+
+    async def send(**kwargs):
+        reject_upload(kwargs)
+        if "content" in kwargs:
+            delivered.append(kwargs)
+        return ref
+
+    async def edit(message, **kwargs):
+        reject_upload(kwargs)
+        if "content" in kwargs:
+            delivered.append(kwargs)
+
+    lifecycle = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        render_tables=True,
+        agent_name="test",
+        model_id="claude-sonnet-4-6",
+        notify_on_completion=notify,
+        requester_id=123,
+    )
+    lifecycle.answer_prefix = "Recovered files."
+    text = "| Name | Value |\n| --- | ---: |\n| Example | 42 |\n\n" + "Tail. " * 500
+    await lifecycle.post_initial()
+    with capture_logs() as logs:
+        await lifecycle.on_terminal_success(_make_success_state(text))
+    assert [part["content"] for part in delivered] == split_for_discord_safe(
+        ("<@123>\n" if notify else "") + "Recovered files.\n\n" + text
+    )
+    assert all("attachments" not in part and "files" not in part for part in delivered)
+    assert all(part["allowed_mentions"].to_dict()["parse"] == [] for part in delivered)
+    assert (
+        sum(bool(attempt.get("attachments") or attempt.get("files")) for attempt in attempts) == 1
+    )
+    assert delivered[0]["allowed_mentions"].to_dict().get("users", []) == ([123] if notify else [])
+    assert any(entry["event"] == "turn.table_delivery_failed" for entry in logs)
+    assert lifecycle.was_answered

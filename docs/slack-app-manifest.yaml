@@ -21,10 +21,16 @@ display_information:
   background_color: "#0b110e"
 
 features:
+  app_home:
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
   bot_user:
     display_name: daimon
     always_online: true
   slash_commands:
+    - command: /dm
+      description: Continue this channel privately (admin enable or disable)
+      should_escape: false
     - command: /help
       description: List commands and the @mention entrypoint
       should_escape: false
@@ -51,7 +57,9 @@ oauth_config:
     bot:
       - app_mentions:read
       - chat:write
+      - im:write
       - commands
+      - im:history
       - users:read
       - channels:history
       - groups:history
@@ -78,6 +86,7 @@ settings:
   event_subscriptions:
     bot_events:
       - app_mention
+      - message.im
       - message.channels
       - message.groups
       - channel_archive

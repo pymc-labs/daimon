@@ -24,6 +24,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.errors import TurnError
 from daimon.core.handoff_context import (
@@ -40,10 +41,19 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
     mark_dead,
 )
+from daimon.core.tool_safety import trusted_servers_for
+from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn
-from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
+from daimon.core.turn.lifecycle import (
+    Acknowledgment,
+    InterruptSource,
+    ReconnectReason,
+    TurnLifecycle,
+    acknowledge,
+)
+from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import Billed
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
@@ -54,6 +64,7 @@ from daimon.core.turn.prepare import (
     insert_mapping,
 )
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.termination import TerminationReason, termination_reason
 
 log = structlog.get_logger(__name__)
 
@@ -83,6 +94,11 @@ class RunOutcome:
     recovered: bool
     continuity: ContinuityOutcome = ContinuityOutcome()
 
+    @property
+    def termination(self) -> TerminationReason:
+        """How the final attempt ended; the driver sets it on every exit."""
+        return self.state.termination or termination_reason(self.state.error)
+
 
 # MA's rejection when events.send targets a session it has terminated. The id
 # is well-formed and the session exists — it is simply closed to new events, so
@@ -107,6 +123,9 @@ class _DeferredFailureLifecycle:
     inner: TurnLifecycle
     _held: tuple[TurnState, Exception] | None = None
 
+    async def on_acknowledgment(self, phase: Acknowledgment) -> None:
+        await acknowledge(self.inner, phase)
+
     async def on_render(self, state: TurnState) -> None:
         await self.inner.on_render(state)
 
@@ -128,12 +147,18 @@ class _DeferredFailureLifecycle:
     async def on_interrupt_sent(self, source: InterruptSource) -> None:
         await self.inner.on_interrupt_sent(source)
 
-    async def flush_held_failure(self) -> None:
-        """Replay the withheld failure. Call on every path that does not recover."""
+    async def flush_held_failure(self, termination: TerminationReason | None = None) -> None:
+        """Replay the withheld failure. Call on every path that does not recover.
+
+        `termination` restates how the turn ended when the caller learned more
+        than the attempt did (the user stopped it before recovery ran).
+        """
         if self._held is None:
             return
         state, err = self._held
         self._held = None
+        if termination is not None:
+            state = replace(state, termination=termination)
         await self.inner.on_terminal_failure(state, err)
 
 
@@ -459,6 +484,69 @@ async def run_prepared_turn(
     render_interval_s: float = 2.0,
     deadline: datetime | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    confirm_write: ConfirmationHook | None = None,
+    attended: bool | None = None,
+) -> RunOutcome:
+    observation = (
+        prepared.admission.observation
+        or current_outcome.get()
+        or TurnObservation(deps.sessionmaker, tenant_id, platform, thread_id=thread_id)
+    )
+    observation.thread_id = thread_id
+    observation.account_id = prepared.admission.account_id
+    observation.agent_id = prepared.admission.agent.id
+    observation.session_id = prepared.ma_session_id
+    observation.origin = origin
+    try:
+        with observation.activate():
+            result = await run_prepared_turn_impl(
+                deps,
+                prepared,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                external_user_id=external_user_id,
+                user_message=user_message,
+                lifecycle=lifecycle,
+                cancel=cancel,
+                reseed_user_message=reseed_user_message,
+                recovery_lifecycle=recovery_lifecycle,
+                origin=origin,
+                image_blocks=image_blocks,
+                render_interval_s=render_interval_s,
+                deadline=deadline,
+                now=now,
+                confirm_write=confirm_write,
+                attended=attended,
+            )
+    except BaseException as exc:
+        observation.finish(error=exc)
+        raise
+    observation.session_id = result.ma_session_id
+    observation.finish(state=result.state, recovered=result.recovered)
+    return result
+
+
+async def run_prepared_turn_impl(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    external_user_id: str,
+    user_message: str,
+    lifecycle: TurnLifecycle,
+    cancel: asyncio.Event,
+    reseed_user_message: Callable[[], Awaitable[str]],
+    recovery_lifecycle: Callable[[asyncio.Event], TurnLifecycle],
+    origin: TurnContext = "chat",
+    image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
+    render_interval_s: float = 2.0,
+    deadline: datetime | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    confirm_write: ConfirmationHook | None = None,
+    attended: bool | None = None,
 ) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
     signature, recover exactly once: mark the stale mapping dead, create a
@@ -485,6 +573,15 @@ async def run_prepared_turn(
     platform user id explicitly, exactly as `bind_session` did to build the
     original recorder.
 
+    `confirm_write` is the adapter's confirmation-card hook and `attended`
+    says whether a person is waiting on this turn (default: every origin but
+    `routine`). Both only matter while
+    `deps.tool_safety` is enabled: a third-party write then waits for the
+    requester to approve it on a card (`attended=True`) or is refused under
+    the unattended rules (`attended=False`). An adapter that passes no hook
+    gets `no_confirmation_surface`, so its writes are refused, never run
+    unseen. With the policy off the posture stays `RequireApproval`.
+
     `deadline`/`now` bound the WHOLE body -- first attempt, recovery setup,
     and the recovery re-run -- against the per-turn ceiling (D-08/D-09).
     `deadline=None` is fail-safe, not off: it computes
@@ -502,6 +599,13 @@ async def run_prepared_turn(
     breach can never loop into a second wall-clock-priced attempt.
     """
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
+    tool_confirmation = chat_tool_confirmation(
+        deps.tool_safety,
+        requester_platform_user_id=external_user_id,
+        confirm=confirm_write,
+        attended=attended if attended is not None else origin != "routine",
+        trusted_servers=trusted_servers_for(deps.public_url),
+    )
 
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
@@ -531,6 +635,7 @@ async def run_prepared_turn(
             cancel=cancel,
             render_interval_s=render_interval_s,
             billing=Billed(record=prepared._record),  # pyright: ignore[reportPrivateUsage]
+            tool_confirmation=tool_confirmation,
             image_blocks=image_blocks,
             system_blocks=prepared.continuity.system_blocks,
         )
@@ -551,9 +656,9 @@ async def run_prepared_turn(
         # Abort recovery and surface the withheld first-attempt failure as
         # the final outcome, same shape as the non-recoverable branch above.
         if cancel.is_set():
-            await first_attempt.flush_held_failure()
+            await first_attempt.flush_held_failure(TerminationReason.RECOVERY_CANCELLED)
             return RunOutcome(
-                state=state,
+                state=replace(state, termination=TerminationReason.RECOVERY_CANCELLED),
                 ma_session_id=ma_session_id,
                 mapping_id=mapping_id,
                 recovered=False,
@@ -660,6 +765,7 @@ async def run_prepared_turn(
                     cancel=fresh_cancel,
                     render_interval_s=render_interval_s,
                     billing=Billed(record=new_record),
+                    tool_confirmation=tool_confirmation,
                     image_blocks=image_blocks,
                     system_blocks=loss_system_blocks,
                 )
@@ -668,8 +774,10 @@ async def run_prepared_turn(
                     mirror_task.cancel()
                     with contextlib.suppress(BaseException):
                         await mirror_task
-        except Exception:
-            await first_attempt.flush_held_failure()
+        except Exception as exc:
+            if (observation := current_outcome.get()) is not None:
+                observation.finish(error=exc, reason=TerminationReason.RECOVERY_FAILED)
+            await first_attempt.flush_held_failure(TerminationReason.RECOVERY_FAILED)
             raise
 
         return RunOutcome(
@@ -703,15 +811,16 @@ async def run_prepared_turn(
                 await mark_dead(session, id=active_mapping_id)
                 await session.commit()
 
+        ceiling_state = TurnState(error=err, termination=TerminationReason.CEILING)
         try:
-            await lifecycle.on_terminal_failure(TurnState(error=err), err)
+            await lifecycle.on_terminal_failure(ceiling_state, err)
         except Exception as render_err:
             # Rendering is delivery, not correctness -- a broken adapter hook
             # must not mask the ceiling error itself.
             log.warning("turn.ceiling_render_failed", error=str(render_err))
 
         return RunOutcome(
-            state=TurnState(error=err),
+            state=ceiling_state,
             ma_session_id=active_session_id,
             mapping_id=active_mapping_id,
             recovered=recovered,

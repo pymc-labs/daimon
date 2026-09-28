@@ -490,6 +490,7 @@ async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vau
                 "data": [
                     {
                         "id": "vcrd_daimon_mcp",
+                        "metadata": {"daimon_chat_identity": str(agent_uuid)},
                         "type": "credential",
                         "vault_id": "vlt_caller",
                         "auth": {"type": "static_bearer", "mcp_server_url": public_url},

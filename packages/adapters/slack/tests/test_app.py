@@ -935,6 +935,7 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
         await s.commit()
 
     app, _ = make_orchestrate_app(db_session_factory)
+    app.runtime.settings.completion_pings = {}
 
     async def inspect_committed_intent_before_response(url: URL, **kwargs: Any) -> CallbackResult:
         del url
@@ -988,7 +989,23 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
                 TextBlock(kind="text", text="Hello!"),
             ]
         )
+        from daimon.core.turn.lifecycle import acknowledge
+
+        await acknowledge(lifecycle, "accepted")
         await lifecycle.on_terminal_success(state)
+        await acknowledge(lifecycle, "done")
+        posts = fake_slack_web_client.mock.requests[
+            ("POST", URL("https://slack.com/api/chat.postMessage"))
+        ]
+        assert len(posts) == 1, "missing tenant policy keeps the answer on its original card"
+        reactions = [
+            str(url)
+            for method, url in fake_slack_web_client.mock.requests
+            if "reactions." in str(url)
+        ]
+        assert len(reactions) == 1
+        assert "reactions.add" in reactions[0] and "name=eyes" in reactions[0]
+
         return state
 
     event: dict[str, Any] = {
@@ -3750,7 +3767,8 @@ async def test_run_thread_turn_pump_phase_ceiling_renders_terminal_error_in_thre
     on_terminal_failure sets final_ts to the status ts on its normal flush
     path, which is why that watermark write fires at all.
     """
-    from daimon.core.turn.ceiling import CEILING_MESSAGE
+    from daimon.core.turn.notices import render_termination_notice
+    from daimon.core.turn.termination import TerminationReason
 
     team_id = "T_PUMP_CEILING"
     channel = "C_TEST"
@@ -3824,14 +3842,16 @@ async def test_run_thread_turn_pump_phase_ceiling_renders_terminal_error_in_thre
     )
     last_blocks = update_calls[-1].kwargs["json"]["blocks"]
     rendered_text = " ".join(
-        element.get("text", "")
+        text if isinstance(text := element.get("text", ""), str) else text.get("text", "")
         for block in last_blocks
         for element in block.get("elements", [block])
         if isinstance(element, dict)
     )
     assert "❌" in rendered_text, "a ceiling breach must render the terminal error emoji"
-    assert CEILING_MESSAGE in rendered_text, (
-        "the rendered card must carry the shared CEILING_MESSAGE text -- no new "
+    ceiling_notice = render_termination_notice(TerminationReason.CEILING)
+    assert ceiling_notice is not None
+    assert ceiling_notice.headline in rendered_text and ceiling_notice.cause in rendered_text, (
+        "the rendered card must carry the core ceiling notice -- no new "
         "Slack-specific ceiling copy may be introduced"
     )
 
@@ -5733,3 +5753,140 @@ class TestPerTurnRoleUpsert:
             account = await get_account(s, principal.account_id)
         assert account is not None, "account must exist (identity resolution runs before the gate)"
         assert account.role == Role.USER, "verified role must persist before the balance gate"
+
+
+async def test_mention_from_a_user_outside_the_allowlist_is_refused_with_a_notice(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """SYS-047: the tenant's invoker allowlist refuses at admission, before any MA call."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    team_id = "T_INVOKER_REFUSED"
+    channel = "C_TEST"
+    thread_ts = "9000000030.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    async with db_session_factory() as s:
+        await set_access_policy(
+            s, tenant_id=tenant_id, policy=TenantAccessPolicy(invoker_user_ids=("U_STAFF",))
+        )
+        await s.commit()
+
+    app, _ = make_orchestrate_app(db_session_factory)
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": thread_ts,
+        "event_ts": thread_ts,
+        "channel": channel,
+        "user": "U_GUEST",
+        "text": "<@U_BOT> hello",
+    }
+
+    with (
+        patch(
+            "daimon.core.turn.admission.resolve_config", new_callable=AsyncMock
+        ) as mock_resolve_config,
+        patch(
+            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
+        ) as mock_resolve_agent,
+        patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
+        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+    ):
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event,
+            team_id=team_id,
+            channel=channel,
+            event_ts=thread_ts,
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+        mock_resolve_config.assert_not_called()
+        mock_resolve_agent.assert_not_called()
+        mock_create.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+        mock_run_turn.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+
+    post_url = URL("https://slack.com/api/chat.postMessage")
+    post_bodies = [
+        req.kwargs.get("json") or json.loads(req.kwargs.get("data") or "{}")
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == post_url
+        for req in reqs
+    ]
+    refusals = [b for b in post_bodies if "can start a turn" in str(b.get("text", ""))]
+    assert refusals, f"expected the invoker refusal notice in-thread, got: {post_bodies}"
+    assert refusals[0].get("thread_ts") == thread_ts
+
+
+async def test_thread_turn_boundary_persists_one_terminal_outcome(db_session, db_engine) -> None:
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import current_outcome, drain_outcomes
+    from daimon.core.turn.termination import TerminationReason
+    from daimon.testing.factories import make_tenant
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    tenant = await make_tenant(db_session, platform="slack")
+    await db_session.commit()
+    sm = async_sessionmaker(db_engine)
+    app, client = make_orchestrate_app(sm)
+
+    async def pipeline(*args, **kwargs):
+        observation = current_outcome.get()
+        assert observation is not None
+        observation.finish(reason=TerminationReason.UPSTREAM)
+
+    with patch.object(app, "_run_thread_turn_observed", side_effect=pipeline):
+        await app._run_thread_turn(
+            {},
+            channel="channel",
+            web_client=AsyncMock(),
+            tenant_id=tenant.id,
+            thread_id="thread",
+            team_id="team",
+        )
+    await drain_outcomes()
+    await client.close()
+    async with sm() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert len(rows) == 1
+    assert rows[0].reason == TerminationReason.UPSTREAM
+    assert rows[0].platform == "slack" and rows[0].channel_id == "channel"
+    assert rows[0].thread_id == "thread"
+
+
+@pytest.mark.parametrize("draining", [False, True])
+async def test_direct_messages_ack_first_and_respect_drain(monkeypatch, draining):
+    app = _make_app()
+    app.draining = draining
+    socket = _FakeSocketClient()
+
+    async def handle(runtime, event, *, team_id):
+        socket.call_log.append("dm")
+
+    monkeypatch.setattr("daimon.adapters.slack.app.handle_direct_message", handle)
+    request = _make_events_api_request(
+        event_type="message", channel="D42", extra_event={"channel_type": "im"}
+    )
+    await app.on_request(socket, request)
+    await asyncio.gather(*list(app._bg_tasks))
+    assert socket.call_log == (
+        ["send_socket_mode_response"] if draining else ["send_socket_mode_response", "dm"]
+    )
+
+
+async def test_dm_slash_command_dispatches_after_ack(monkeypatch):
+    app = _make_app()
+    socket = _FakeSocketClient()
+
+    async def handle(runtime, payload):
+        socket.call_log.append("dm-command")
+
+    monkeypatch.setattr("daimon.adapters.slack.app.handle_dm_command", handle)
+    request = SocketModeRequest(
+        type="slash_commands", envelope_id="dm-envelope", payload={"command": "/dm"}
+    )
+    await app.on_request(socket, request)
+    await asyncio.gather(*list(app._bg_tasks))
+    assert socket.call_log == ["send_socket_mode_response", "dm-command"]

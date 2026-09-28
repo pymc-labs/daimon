@@ -19,16 +19,21 @@ Tool handlers always read via `await ctx.get_state("auth")`.
 
 from __future__ import annotations
 
+import asyncio
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 
+import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
+from daimon.core.security_audit import capture_decision
 from daimon.core.stores.domain import Role
-from fastmcp.exceptions import AuthorizationError
+from daimon.core.stores.security_audit import SecurityAuditEntry, append_event
+from fastmcp.exceptions import AuthorizationError, NotFoundError, ToolError
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.transforms.visibility import disable_components, enable_components
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 ClaimResolver = Callable[[MiddlewareContext], Awaitable[str | None]]
 SubjectResolver = ClaimResolver
@@ -112,9 +117,129 @@ class IdentityMiddleware(Middleware):
         self._agent_id_resolver = agent_id_resolver
         self._is_admin_resolver = is_admin_resolver
         self._internal_resolver = internal_resolver
-        self._sessionmaker = sessionmaker
+        bind = sessionmaker.kw.get("bind")
+        # A caller may supply a factory bound to one transaction/connection.
+        # Background writes must acquire their own connection, never concurrently
+        # use the tool's connection or join its rollback scope.
+        self._audit_sessionmaker = (
+            async_sessionmaker(bind.engine, expire_on_commit=False)
+            if isinstance(bind, AsyncConnection)
+            else sessionmaker
+        )
+        self._audit_tasks: set[asyncio.Task[None]] = set()
+        self._audit_timeout = 2.0
+        self._audit_max_pending = 128
+        self._audit_slots = asyncio.Semaphore(2)
 
-    async def on_request(
+    async def on_request(self, context: MiddlewareContext, call_next: CallNext) -> object:
+        if context.method not in {"tools/call", "tools/list"}:
+            return await self._resolve_request(context, call_next)
+        # The verifier has already authenticated the tenant claim. Requests with
+        # no attributable tenant cannot be placed in another tenant's audit log.
+        tenant_id = _uuid_or_none(await self._tenant_resolver(context))
+        if tenant_id is None:
+            return await self._resolve_request(context, call_next)
+        account_id = _uuid_or_none(await self._subject_resolver(context))
+        agent_id = _uuid_or_none(await self._agent_id_resolver(context))
+        token = get_access_token()
+        claims = token.claims if token is not None else {}
+        chat_agent = claims.get("chat_agent_id")
+        if agent_id is None and isinstance(chat_agent, str):
+            agent_id = _uuid_or_none(chat_agent)
+        platform = claims.get("platform")
+        user_id = claims.get("platform_user_id")
+        name = (
+            getattr(context.message, "name", None)
+            if context.method == "tools/call"
+            else "tools/list"
+        )
+        tool_name = (
+            name
+            if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", name)
+            else "<invalid>"
+        )
+        with capture_decision() as decision:
+            try:
+                result = await self._resolve_request(context, call_next)
+                if getattr(result, "isError", False) is True and decision.reason in {
+                    "completed",
+                    "policy_allow",
+                }:
+                    decision.reason = "tool_error"
+                return result
+            except BaseException as exc:
+                if isinstance(exc, (AuthorizationError, NotFoundError)):
+                    decision.denied = True
+                if decision.reason in {"completed", "policy_allow"}:
+                    decision.reason = (
+                        "authorization_error"
+                        if isinstance(exc, (AuthorizationError, NotFoundError))
+                        else "tool_error"
+                        if isinstance(exc, ToolError)
+                        else "cancelled"
+                        if isinstance(exc, asyncio.CancelledError)
+                        else "request_error"
+                    )
+                raise
+            finally:
+                # Snapshot only metadata before leaving the request-local scope.
+                # Scheduling does no I/O and never waits for the database.
+                self._queue_audit(
+                    SecurityAuditEntry(
+                        tenant_id=tenant_id,
+                        account_id=account_id,
+                        agent_id=agent_id,
+                        platform=platform if isinstance(platform, str) else None,
+                        platform_user_id=user_id if isinstance(user_id, str) else None,
+                        tool_name=tool_name,
+                        operation=decision.operation,
+                        outcome=(
+                            "denied"
+                            if decision.denied
+                            else "error"
+                            if decision.reason in {"tool_error", "request_error", "cancelled"}
+                            else "allowed"
+                        ),
+                        reason=decision.reason,
+                    )
+                )
+
+    def _queue_audit(self, event: SecurityAuditEntry) -> None:
+        if len(self._audit_tasks) >= self._audit_max_pending:
+            structlog.get_logger(__name__).warning(
+                "security_audit.write_failed",
+                tenant_id=str(event.tenant_id),
+                error_type="QueueFull",
+            )
+            return
+        task = asyncio.create_task(self._write_audit(event), name="security-audit-write")
+        self._audit_tasks.add(task)
+        task.add_done_callback(self._audit_tasks.discard)
+
+    async def _write_audit(self, event: SecurityAuditEntry) -> None:
+        try:
+            async with (
+                asyncio.timeout(self._audit_timeout),
+                self._audit_slots,
+                self._audit_sessionmaker() as session,
+                session.begin(),
+            ):
+                await append_event(session, **event.model_dump())
+        except (Exception, asyncio.CancelledError) as exc:
+            structlog.get_logger(__name__).warning(
+                "security_audit.write_failed",
+                tenant_id=str(event.tenant_id),
+                error_type=type(exc).__name__,
+            )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+
+    async def drain_audit(self) -> None:
+        """Wait for tracked, timeout-bounded writes during orderly teardown."""
+        if self._audit_tasks:
+            await asyncio.gather(*tuple(self._audit_tasks), return_exceptions=True)
+
+    async def _resolve_request(
         self,
         context: MiddlewareContext,
         call_next: CallNext,
@@ -150,6 +275,15 @@ class IdentityMiddleware(Middleware):
         pu_claim = _token.claims.get("platform_user_id") if _token else None
         platform_user_id: str | None = pu_claim if isinstance(pu_claim, str) else None
         raw_agent_id = await self._agent_id_resolver(context)
+        # Keep chat execution identity separate from external agent credentials:
+        # agent_id controls tool visibility and several authorization gates.
+        raw_chat_agent_id = _token.claims.get("chat_agent_id") if _token else None
+        chat_agent_id: uuid.UUID | None = None
+        if isinstance(raw_chat_agent_id, str):
+            try:
+                chat_agent_id = uuid.UUID(raw_chat_agent_id)
+            except ValueError:
+                chat_agent_id = None  # Fail closed at the Google broker.
         agent_id: uuid.UUID | None
         if raw_agent_id is None:
             agent_id = None
@@ -168,6 +302,13 @@ class IdentityMiddleware(Middleware):
         # from Discord vault tokens (minted by mint_jwt, which never emits internal=True).
         # Gate: DB role == ADMIN  OR  (is_admin claim AND internal claim).
         is_admin = (role == Role.ADMIN) or (is_admin_claim and internal_claim)
+        slack_turn_context_id: uuid.UUID | None = None
+        raw_slack_context = _token.claims.get("slack_turn_context_id") if _token else None
+        if isinstance(raw_slack_context, str) and not internal_claim and agent_id is None:
+            try:
+                slack_turn_context_id = uuid.UUID(raw_slack_context)
+            except ValueError:
+                slack_turn_context_id = None  # Malformed claims fail closed.
         identity = AuthIdentity(
             account_id=account_id,
             tenant_id=tenant_id,
@@ -175,6 +316,8 @@ class IdentityMiddleware(Middleware):
             platform=platform,
             external_id=external_id,
             agent_id=agent_id,
+            chat_agent_id=chat_agent_id,
+            slack_turn_context_id=slack_turn_context_id,
             platform_user_id=platform_user_id,
             is_admin=is_admin,
         )
@@ -187,15 +330,17 @@ class IdentityMiddleware(Middleware):
         # the discord/slack-tagged tools without any special-casing here.
         if platform is not None:
             await enable_components(fastmcp_ctx, tags={platform})
-        # when agent_id is present (a verified
-        # derived per-agent UUID), narrow the session to agent-chat-tagged
-        # tools only. disable_components(match_all=True) then
-        # enable_components(tags={"agent-chat"}) — later marks override earlier
-        # so only the four agent-chat tools remain visible.
-        # Fail-closed: malformed/absent agent_id is silently nulled at
-        # l.141-144 above (T-19-04-07), so this branch is skipped entirely —
-        # the session does NOT gain admin or agent-chat visibility.
+        # Only dedicated external agent_id credentials select the restricted
+        # agent-chat surface. Chat execution identity leaves visibility intact.
+        # Malformed identity fails closed at tools that require an agent.
         if agent_id is not None:
             await disable_components(fastmcp_ctx, match_all=True)
             await enable_components(fastmcp_ctx, tags={"agent-chat"})
         return await call_next(context)
+
+
+def _uuid_or_none(raw: str | None) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(raw) if raw is not None else None
+    except ValueError:
+        return None

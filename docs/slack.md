@@ -49,3 +49,55 @@ Trust model notes for operators:
 `/agent-setup` opens the Agents roster, which pushes into either an agent's Details view or Who answers where. Setup conversations can be opened with **⚙️ Manage agents** from the Agents roster or from Details; creating a new agent lands on its Details view rather than a separate confirmation screen, and Details also offers **🧰 Use from your coding tools** to connect that agent over MCP. The channel gets a short launcher with a **Reply to Daimon** button; Daimon's welcome appears inside the shared thread. The panel also provides the reply button immediately after opening setup. Follow it, reply in that thread, and mention the bot. Daimon answers while the named agent is configured. Opening setup does not run a billed turn or change channel defaults. Each participant keeps a separate session.
 
 Existing Slack apps must update **Event Subscriptions → Subscribe to bot events** to match `docs/slack-app-manifest.yaml`, including `message.channels`, `message.groups`, channel/group archive, unarchive, and deletion events. These subscriptions track setup lifecycle only; messages still trigger conversation only through `app_mention`. Root deletion is delivered as the [`message_deleted` message subtype](https://docs.slack.dev/reference/events/message/message_deleted/).
+
+Completion notifications can be enabled per tenant with `DAIMON_COMPLETION_PINGS`
+(see [architecture](architecture.md#completion-signals)). Enabled turns post their
+final answer as a fresh thread reply and mention only the requester. Trigger
+messages replace admission eyes with a check on success; default tenants keep eyes.
+Reaction permission errors do not fail turns.
+Agent-initiated DMs use `send_direct_message` with a workspace user ID. Existing
+installations need to reauthorize the app with the `im:write` bot scope; the
+[app manifest](slack-app-manifest.yaml) includes it. The tool checks live workspace
+membership, then opens a one-person DM and posts using the bot token.
+See Slack's [conversations.open reference](https://docs.slack.dev/reference/methods/conversations.open/)
+and the tenant [recipient policy](architecture.md#agent-initiated-direct-messages).
+
+When a direct-message call fails because an install lacks `im:write`, the tool
+asks a workspace admin to reinstall or reauthorize daimon from the install link.
+Revoked, expired, or invalid bot authorizations give the same recovery direction.
+Errors include the number of chunks already delivered; a failure to open the DM
+sends no messages.
+With the tenant enabled in `DAIMON_TABLE_RENDERING`, final-answer Markdown tables use native table blocks with wrapped cells, up to
+20 columns and 100 rows including the header. Larger tables retain their Markdown
+text. Surrounding prose and multiple tables are delivered in order.
+
+
+### Private conversations
+
+Workspace admins opt in with `/dm enable` (and disable with `/dm disable`). Then use
+`/dm` in a channel to continue privately with its recent text context and a back-link.
+Send later messages directly to the app. Run `/dm` again to reset the private scope.
+Only current workspace members allowed by the tenant access policy can invoke it.
+
+Update the app from `docs/slack-app-manifest.yaml` and reinstall it to grant the new
+bot scopes `im:history` and `im:write`, subscribe to `message.im`, and enable the App
+Home messages tab. Existing installations remain DM-disabled until an admin opts in.
+This version moves recent channel text, not Slack thread replies or attachments.
+
+Before `/dm` moves a conversation or `/dm enable` changes policy, daimon checks the
+granted `x-oauth-scopes` for both IM scopes. Missing or unreadable grants refuse
+without saving a route; scope/token errors request reinstall or reauthorization.
+The scope header cannot verify event subscriptions: operators must also apply the
+manifest's `message.im` subscription and enable the Messages tab.
+
+Private turns use fresh MA sessions with isolated execution credentials. Recent
+private history is replayed, but ephemeral workspace files are not carried forward.
+External MCP OAuth grants held only in a shared vault are not copied into private
+turn vaults; stored shared agent credentials still follow ordinary assembly.
+
+Before enabling DM routing, upgrade **all MCP readers**, including session,
+agent-chat and hub endpoints. Keep DMs disabled throughout mixed-version rollouts
+and before rollback. Older readers ignore execution claims/private session stamps
+and can expose private content to another caller on the same account. Do not roll
+those reader guards back while private sessions remain: disabling routing does
+not erase existing transcripts. Drain active turns before changing versions.

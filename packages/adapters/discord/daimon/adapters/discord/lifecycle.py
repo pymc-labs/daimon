@@ -30,20 +30,25 @@ from daimon.adapters.discord.embed import (
     EmbedEvent,
     EmbedState,
     TurnPhase,
+    format_termination_notice,
     to_embed_data,
     to_preview_embed_data,
     update,
 )
+from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.split import split_for_discord_safe
+from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.degraded import render_degraded_notice
-from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
+from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
+from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
     extract_final_response,
     extract_sealed_responses,
 )
+from daimon.core.turn.termination import termination_reason
 
 import discord
 
@@ -124,13 +129,23 @@ class DiscordTurnLifecycle:
         agent_name: str,
         model_id: str,
         cancel_view: discord.ui.View | None = None,
+        requester_id: int | None = None,
+        trigger_message: discord.Message | None = None,
+        notify_on_completion: bool = False,
+        render_tables: bool = False,
         clock: Callable[[], float] = time.monotonic,
         adopt_message_ref: discord.Message | None = None,
         delete: DeleteFn | None = None,
         unprompted: bool = False,
         on_first_post: Callable[[discord.Message], Awaitable[None]] | None = None,
+        request_id: Callable[[], str] = bound_request_id,
     ) -> None:
+        self._requester_id = requester_id
+        self._trigger_message = trigger_message
+        self._notify_on_completion = notify_on_completion
+        self._render_tables = render_tables
         self._send = send
+        self._request_id = request_id
         self._edit = edit
         self._delete = delete
         # Nobody asked for an unprompted turn, so it stays invisible until it
@@ -155,6 +170,7 @@ class DiscordTurnLifecycle:
         # retracted. Adopting the ref means the recovered turn edits that embed
         # into the real answer, so a recovered turn looks like a normal one.
         self._message_ref: discord.Message | None = adopt_message_ref
+        self._card_message_ref: discord.Message | None = adopt_message_ref
         self._last_flush: float = 0.0
         self._terminal: bool = False
         self._cancel_view = cancel_view
@@ -172,6 +188,16 @@ class DiscordTurnLifecycle:
         # The first chunk actually rendered into the message, kept so a late
         # notice can be edited in above it exactly once.
         self._revealed_first_chunk: str | None = None
+
+    async def on_acknowledgment(self, phase: Acknowledgment) -> None:
+        if not self._notify_on_completion or self._trigger_message is None or self._unprompted:
+            return
+        if phase == "done" and not self._was_answered:
+            return
+        await self._trigger_message.add_reaction("👀" if phase == "accepted" else "✅")
+        if phase == "done" and self._trigger_message.guild is not None:
+            me = self._trigger_message.guild.me
+            await self._trigger_message.remove_reaction("👀", me)
 
     @property
     def message_ref(self) -> discord.Message | None:
@@ -241,6 +267,7 @@ class DiscordTurnLifecycle:
                 embeds=self._build_embeds(now), view=self._cancel_view
             )
             self._message_ref = message
+            self._card_message_ref = message
             self._last_flush = now
             if self._on_first_post is not None:
                 # Persist the returned message ID before the turn proceeds. If
@@ -297,6 +324,7 @@ class DiscordTurnLifecycle:
         embed = build_discord_embed(data)
         if self._message_ref is None:
             self._message_ref = await self._send_message(embeds=[embed], view=None)
+            self._card_message_ref = self._message_ref
         else:
             await self._edit(self._message_ref, embeds=[embed], view=None)
 
@@ -361,15 +389,50 @@ class DiscordTurnLifecycle:
         degraded_notice = render_degraded_notice(state.mcp_failures)
         if degraded_notice is not None:
             response_text = f"{response_text}\n\n{degraded_notice}"
-        chunks = split_for_discord_safe(response_text)
-        # Clean replace: first chunk replaces the embed
-        await self._edit(
-            self._message_ref,
-            content=chunks[0],
-            embed=None,
-            view=None,
-            allowed_mentions=discord.AllowedMentions.none(),
+        notify = (
+            self._notify_on_completion and self._requester_id is not None and not self._unprompted
         )
+        mentions = discord.AllowedMentions.none()
+        if notify:
+            assert self._requester_id is not None
+            mentions = discord.AllowedMentions(
+                users=[discord.Object(id=self._requester_id)],
+                roles=False,
+                everyone=False,
+                replied_user=False,
+            )
+            response_text = f"<@{self._requester_id}>\n{response_text}"
+        original_response_text = response_text
+        response_text, table_files = await render_discord_tables(
+            response_text, enabled=self._render_tables
+        )
+        chunks = split_for_discord_safe(response_text)
+
+        async def deliver_first(content: str, files: list[discord.File]) -> None:
+            if notify:
+                self._message_ref = await self._send_message(
+                    content=content,
+                    allowed_mentions=mentions,
+                    **({"files": files} if files else {}),
+                )
+            else:
+                await self._edit(
+                    self._message_ref,
+                    content=content,
+                    embed=None,
+                    view=None,
+                    allowed_mentions=mentions,
+                    **({"attachments": files} if files else {}),
+                )
+
+        try:
+            await deliver_first(chunks[0], table_files)
+        except discord.HTTPException as exc:
+            if not table_files:
+                raise
+            log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
+            chunks = split_for_discord_safe(original_response_text)
+            await deliver_first(chunks[0], [])
         self._revealed_first_chunk = chunks[0]
         # Overflow: subsequent chunks posted as new messages
         for chunk in chunks[1:]:
@@ -415,9 +478,28 @@ class DiscordTurnLifecycle:
             log.warning("turn.terminal_failure", error=str(err), unprompted=True)
             return
         self._apply_usage(state)
-        self._state = update(self._state, EmbedEvent(kind="error", label=str(err)[:100]))
+        label = str(err)[:100]
+        body = ""
+        reason = request_id = None
+        # The notice is words on top of the red card, never a reason not to
+        # draw it: if building it fails, the card falls back to the raw label.
+        try:
+            reason = state.termination or termination_reason(err)
+            request_id = self._request_id()
+            notice = render_termination_notice(reason, state=state, request_id=request_id)
+            if notice is not None:
+                label, body = notice.headline, format_termination_notice(notice)
+        except Exception:
+            log.warning("turn.terminal_notice_failed", exc_info=True)
+        self._state = update(self._state, EmbedEvent(kind="error", label=label))
+        self._state = dataclasses.replace(self._state, notice=body)
         await self._flush_terminal()
-        log.warning("turn.terminal_failure", error=str(err))
+        log.warning(
+            "turn.terminal_failure",
+            error=str(err),
+            reason=str(reason) if reason is not None else None,
+            request_id=request_id,
+        )
 
     async def on_render(self, state: TurnState) -> None:
         # Sole delivery path (D-11). Sealed answers first, then the embed
@@ -450,6 +532,11 @@ class DiscordTurnLifecycle:
 
     async def on_interrupt_sent(self, source: InterruptSource) -> None:
         pass
+
+    @property
+    def card_message_id(self) -> str | None:
+        """Original status card ID, used to retire its durable intent."""
+        return str(self._card_message_ref.id) if self._card_message_ref is not None else None
 
     @property
     def final_message_id(self) -> str | None:

@@ -33,8 +33,8 @@ PreparationStage = Literal["decided", "checkpointed", "uploaded", "created", "co
 # What the caller answered about uncommitted repository changes: carry them
 # into the successor's working files, or leave them in the old checkout.
 UnsavedWorkChoice = Literal["copy", "leave"]
-ContinuationReason = Literal["task_handoff", "private_input_applied"]
-ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped"]
+ContinuationReason = Literal["task_handoff", "private_input_applied", "timer"]
+ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
 
 
 class Role(enum.StrEnum):
@@ -99,6 +99,9 @@ class PrincipalLinkRow(BaseModel):
     linked_at: datetime
 
 
+FundingMode = Literal["prepaid", "operator_funded"]
+
+
 class TenantRow(BaseModel):
     """Canonical per-tenant identity + lifecycle row. Returned by stores.tenants.get_tenant.
 
@@ -112,6 +115,7 @@ class TenantRow(BaseModel):
     platform: str  # "discord" | "cli"
     external_id: str  # = folded workspace_id
     provision_status: str  # "ready" | "pending" | "failed"
+    funding_mode: FundingMode = "prepaid"
     last_reconcile_error: str | None = None
     archived_at: datetime | None = None
     registered_at: datetime
@@ -159,6 +163,13 @@ class TenantDependentCounts:
         )
 
 
+CatchUpPolicy = Literal["skip", "run-once"]
+
+
+RoutineDestinationKind = Literal["channel", "thread"]
+RoutineDeliveryStatus = Literal["pending", "claimed", "delivered", "skipped"]
+
+
 class RoutineRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -171,10 +182,20 @@ class RoutineRow(BaseModel):
     timezone: str
     trigger_message: str
     enabled: bool
+    catch_up_policy: CatchUpPolicy = "skip"
+    last_skipped_from: datetime | None = None
+    last_skipped_until: datetime | None = None
+    last_skip_reason: Literal["stale", "in_flight"] | None = None
     next_fire_at: datetime | None
     last_fired_at: datetime | None
     last_error: str | None
     last_result_tail: str | None
+    destination_kind: RoutineDestinationKind | None = None
+    destination_id: str | None = None
+    delivery_status: RoutineDeliveryStatus | None = None
+    delivery_note: str | None = None
+    delivery_payload: str | None = None
+    delivered_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -265,6 +286,11 @@ class TaskContinuationRow(BaseModel):
     created_at: datetime
     claimed_at: datetime | None
     delivered_at: datetime | None
+    available_at: datetime | None = None
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    started_at: datetime | None = None
+    attempts: int = 0
 
 
 class GitHubOauthStateRow(BaseModel):
