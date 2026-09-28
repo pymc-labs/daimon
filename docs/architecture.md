@@ -147,7 +147,20 @@ and skips the policy, as it skips billing. Ids are the platform's own (Discord s
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
 
 A sealed channel's content is readable only from a turn inside it (the channel
-or a thread under it). There is no editor yet; operators write the row directly.
+or a thread under it). Operators edit it with the CLI:
+
+```bash
+daimon tenants access-policy get discord GUILD_ID [--json]
+daimon tenants access-policy set discord GUILD_ID --invoker USER_ID --invoker USER_ID \
+    --protected-channel CHANNEL_ID --protected-category CATEGORY_ID \
+    --sealed-channel CHANNEL_ID [--dm-memory-read-only]
+daimon tenants access-policy set discord GUILD_ID --clear   # back to open
+```
+
+Each flag given replaces that whole field (repeat it for several ids);
+fields not given keep their stored value. To empty a single field, `--clear`
+and set the rest again. `set` refuses to overwrite an unreadable row, so
+`--clear` is also the way out of that state. There is no setup-panel editor.
 
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA

@@ -8,12 +8,13 @@ A missing row is the open default. A row that no longer validates raises
 from __future__ import annotations
 
 import uuid
+from typing import Any, cast
 
 from daimon.core._models import TenantAccessPolicyRecord
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.errors import DaimonError
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,3 +61,12 @@ async def set_access_policy(
         )
     )
     await session.flush()
+
+
+async def clear_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """Delete the tenant's row, putting it back on the open default. True if one existed."""
+    result = await session.execute(
+        delete(TenantAccessPolicyRecord).where(TenantAccessPolicyRecord.tenant_id == tenant_id)
+    )
+    await session.flush()
+    return cast(CursorResult[Any], result).rowcount > 0

@@ -6,6 +6,7 @@ import pytest
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
+    clear_access_policy,
     load_access_policy,
     set_access_policy,
 )
@@ -53,3 +54,16 @@ async def test_unreadable_row_raises_instead_of_falling_open(
 
     with pytest.raises(AccessPolicyUnreadable):
         await load_access_policy(db_session, tenant_id=tenant.id)
+
+
+async def test_clear_removes_the_row_and_reports_whether_one_existed(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_user_ids=("u1",))
+    )
+
+    assert await clear_access_policy(db_session, tenant_id=tenant.id) is True
+    assert await clear_access_policy(db_session, tenant_id=tenant.id) is False, "nothing left"
+    assert await load_access_policy(db_session, tenant_id=tenant.id) == OPEN_ACCESS_POLICY
