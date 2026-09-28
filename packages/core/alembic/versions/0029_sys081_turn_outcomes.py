@@ -8,7 +8,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "0029_sys081_turn_outcomes"
-down_revision = "0029_sys047_access_policies"
+down_revision = "0028_agent_env_encryption"
 branch_labels = None
 depends_on = None
 

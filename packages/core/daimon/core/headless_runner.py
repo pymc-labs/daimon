@@ -136,6 +136,7 @@ async def run_turn(
     deadline: datetime | None = None,
 ) -> str:
     observation = current_outcome.get()
+    owns_observation = observation is None
     if observation is None and session_factory is not None:
         observation = TurnObservation(session_factory, tenant_id, "headless", origin=origin)
     if observation is None:
@@ -181,7 +182,9 @@ async def run_turn(
                 deadline=deadline,
             )
     except BaseException as exc:
-        observation.finish(error=exc)
+        # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
+        if owns_observation or not isinstance(exc, asyncio.CancelledError):
+            observation.finish(error=exc)
         raise
     return result
 

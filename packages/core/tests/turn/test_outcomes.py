@@ -115,3 +115,34 @@ async def test_writer_timeout_and_queue_pressure_do_not_hold_turns(
     assert started.is_set()
     assert any(log["event"] == "turn.outcome_queue_full" for log in logs)
     assert any(log.get("error_class") == "TimeoutError" for log in logs)
+
+
+def test_model_and_migration_reason_constraints_match_the_enum() -> None:
+    import ast
+    import re
+    from pathlib import Path
+
+    from sqlalchemy import CheckConstraint
+
+    expected = {reason.value for reason in TerminationReason}
+    model = next(
+        c
+        for c in TurnOutcome.__table__.constraints
+        if isinstance(c, CheckConstraint) and c.name == "ck_turn_outcomes_reason"
+    )
+    assert set(re.findall(r"'([^']+)'", str(model.sqltext))) == expected
+    migration = Path(__file__).parents[2] / "alembic/versions/0029_sys081_turn_outcomes.py"
+    tree = ast.parse(migration.read_text())
+    checks = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "CheckConstraint"
+        and any(
+            kw.arg == "name" and ast.literal_eval(kw.value) == "ck_turn_outcomes_reason"
+            for kw in node.keywords
+        )
+    ]
+    assert len(checks) == 1
+    assert set(re.findall(r"'([^']+)'", ast.literal_eval(checks[0].args[0]))) == expected

@@ -533,3 +533,17 @@ Library-only headless calls without a session factory remain unrecorded; all
 production headless entrypoints provide one. Usage references are the natural
 `(managed_session_id, event_id)` keys, including calls observed during recovery;
 billing-exempt calls may have no corresponding `usage_events` row.
+
+
+MCP agent-chat and hub `ask` calls also record one outcome, attributed to tenant,
+account, agent and session with platform `mcp` and origin `chat`. A returned idle
+reply is `completed`, an observed terminated session is `session_terminated`, and
+the bounded polling deadline is `ceiling`. Shared admission gates record balance,
+cap and access-policy refusals. `start_turn` and `continue_turn` record the
+accepted dispatch with reason `unknown`: they return before model execution ends,
+so these records are dispatch observations, not claims of terminal completion.
+No follow-up terminal update or model-span usage capture is implemented for these
+SDK polling paths. Channel/thread identifiers are unavailable on these calls.
+Identity resolution failures before tenant attribution and adapter readiness /
+draining gates before the turn boundary are outside this coverage. Library-only
+headless calls without a session factory remain unrecorded.

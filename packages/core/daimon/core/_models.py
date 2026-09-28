@@ -1918,7 +1918,6 @@ class TaskContinuation(Base):
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
 
-
 class TurnOutcome(Base):
     """Content-free terminal diagnostics; one UUID per logical turn."""
 

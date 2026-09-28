@@ -615,11 +615,22 @@ async def test_ask_delivers_embedded_charts_without_artifact_settings() -> None:
     )
 
 
-async def test_ask_timeout_preserves_the_resumable_handle() -> None:
+async def test_ask_timeout_preserves_the_resumable_handle(db_session, db_engine) -> None:
     runtime = MagicMock()
     runtime.settings.artifacts = None
     runtime.artifact_store = None
-    auth = _auth()
+    from dataclasses import replace
+
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+    from daimon.core.turn.termination import TerminationReason
+    from daimon.testing.factories import make_tenant
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    runtime.session_factory = async_sessionmaker(db_engine)
+    auth = replace(_auth(), tenant_id=tenant.id)
     elapsed = 0.0
 
     async def advance(seconds: float) -> None:
@@ -654,10 +665,28 @@ async def test_ask_timeout_preserves_the_resumable_handle() -> None:
     assert get_session.await_count == 3
     list_events.assert_not_awaited()
 
+    await drain_outcomes()
+    async with runtime.session_factory() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert len(rows) == 1
+    assert rows[0].reason == TerminationReason.CEILING
+    assert rows[0].session_id == "ses_slow001"
 
-async def test_ask_surfaces_terminal_non_idle_status_without_waiting() -> None:
+
+async def test_ask_surfaces_terminal_non_idle_status_without_waiting(db_session, db_engine) -> None:
     runtime = MagicMock()
-    auth = _auth()
+    from dataclasses import replace
+
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+    from daimon.core.turn.termination import TerminationReason
+    from daimon.testing.factories import make_tenant
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    runtime.session_factory = async_sessionmaker(db_engine)
+    auth = replace(_auth(), tenant_id=tenant.id)
     sleep = AsyncMock()
 
     with (
@@ -679,6 +708,13 @@ async def test_ask_surfaces_terminal_non_idle_status_without_waiting() -> None:
 
     sleep.assert_not_awaited()
     list_events.assert_not_awaited()
+
+    await drain_outcomes()
+    async with runtime.session_factory() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert len(rows) == 1
+    assert rows[0].reason == TerminationReason.SESSION_TERMINATED
+    assert rows[0].session_id == "ses_terminated001"
 
 
 async def test_ask_tool_result_preserves_images_and_structured_urls() -> None:

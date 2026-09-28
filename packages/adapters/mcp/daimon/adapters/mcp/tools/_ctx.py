@@ -12,6 +12,8 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.tenant_balance import is_over_balance
+from daimon.core.turn.outcomes import TurnObservation
+from daimon.core.turn.termination import TerminationReason
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -74,6 +76,17 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       a deny event carrying only ids (tenant/user/tool/gate) — never prompt
       content or raw Gemini text (Pitfall 9).
     """
+
+    def refused(reason: TerminationReason) -> None:
+        if tool_name in {"ask", "start_turn", "continue_turn"}:
+            TurnObservation(
+                sessionmaker,
+                auth.tenant_id,
+                "mcp",
+                account_id=auth.account_id,
+                agent_id=str(auth.agent_id) if auth.agent_id is not None else None,
+            ).finish(reason=reason)
+
     if auth.platform_user_id is None:
         return auth
 
@@ -82,6 +95,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
             policy = await load_access_policy(session, tenant_id=auth.tenant_id)
             account = await get_account(session, auth.account_id)
     except AccessPolicyUnreadable as exc:
+        refused(TerminationReason.ADMISSION_DENIED)
         raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
     is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
     if not is_invoker_allowed(policy, external_user_id=auth.platform_user_id, is_admin=is_admin):
@@ -92,6 +106,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
             tool=tool_name,
             gate="invoker_policy",
         )
+        refused(TerminationReason.ADMISSION_DENIED)
         raise ToolError(
             "TERMINAL ERROR: You aren't on this workspace's list of people who can "
             "use daimon. A workspace admin can add you."
@@ -105,6 +120,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
             tool=tool_name,
             gate="balance",
         )
+        refused(TerminationReason.ADMISSION_BALANCE_DEPLETED)
         raise ToolError(
             "TERMINAL ERROR: This server's daimon credit is depleted. "
             "An admin can top up with /billing."
@@ -124,6 +140,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
             tool=tool_name,
             gate="cap",
         )
+        refused(TerminationReason.ADMISSION_CAP_EXCEEDED)
         raise ToolError(
             "TERMINAL ERROR: Monthly usage cap reached for this guild. "
             "An admin can adjust the cap with /billing."
