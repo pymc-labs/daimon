@@ -1,12 +1,8 @@
 """Teams' `ConfirmationHook`: post a confirmation card, wait for its button.
 
-The words and states come from `daimon.core.posted_controls.confirmation`;
-this module draws them as an Adaptive Card with Approve and Deny
-`Action.Execute` buttons, routes the click back to the waiting turn through
-`PendingConfirmations`, and answers the invoke with the updated card.
-
-The registry is in-process, like the cancel registry: the turn waiting on a
-card runs in this process, and a restart ends both together.
+Draws core's `posted_controls.confirmation` card as an Adaptive Card and routes
+the click to the waiting turn through `PendingConfirmations`. The registry is
+in-process, like the cancel registry: a restart ends the card and its turn together.
 """
 
 from __future__ import annotations

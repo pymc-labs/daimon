@@ -2,7 +2,7 @@
 
 The only place inbound activity fields are trusted. `parse_inbound` checks an
 authenticated activity is a channel @mention or a personal-chat message from
-the configured Entra tenant and reduces it to `TeamsInbound`. `resolve_tenant`
+the configured Entra tenant and reduces it to `TeamsInbound`. `live_tenant_id`
 then maps it to the organisation's live daimon tenant; a 1:1 chat names its
 organisation, so it needs no DM workspace choice. Group chats are refused for now.
 """
@@ -139,13 +139,6 @@ def parse_inbound(
         bot_name=activity.recipient.name,
         files=files,
     )
-
-
-async def resolve_tenant(
-    sessionmaker: async_sessionmaker[AsyncSession], inbound: TeamsInbound
-) -> uuid.UUID | None:
-    """The live tenant this message belongs to, or None to deny."""
-    return await live_tenant_id(sessionmaker, inbound.entra_tenant_id)
 
 
 async def live_tenant_id(

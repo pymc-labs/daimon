@@ -36,8 +36,8 @@ from daimon.adapters.teams.identity import (
     Refusal,
     TeamsInbound,
     canonical_uuid,
+    live_tenant_id,
     parse_inbound,
-    resolve_tenant,
 )
 from daimon.adapters.teams.lifecycle import (
     SEND_TIMEOUT_S,
@@ -204,11 +204,8 @@ class TeamsApp:
             raise ValueError("TeamsApp requires Teams settings")
         self.runtime = runtime
         self._teams = teams
-        # The tenant `resolve_tenant` derives, known before any read: the
-        # access policy is read with it first thing (see `_may_post`).
-        self._tenant_id = derive_tenant_uuid(
-            platform="teams", workspace_id=canonical_uuid(teams.tenant_id) or teams.tenant_id
-        )
+        # Known before any read, so `_may_post` can gate every post.
+        self._tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
         self._sender = TimedSender(sender)
         self._commands = commands
         self._bot_token = bot_token
@@ -269,12 +266,10 @@ class TeamsApp:
         return self._recovery
 
     async def _open_wake_thread(self, wake: WakeThread) -> bool:
-        """The wake poller's hook: run a chat's due wakes, spawned.
+        """The wake poller's hook: run a chat's due wakes via `dispatch_after_input`.
 
-        Goes through `dispatch_after_input`, so a wake takes the chat's guard and
-        the same admit -> bind -> run path as any continuation. A missing or
-        archived tenant returns False and the poller pushes its rows back. A wake
-        stores no service URL, so its sends use the SDK default, as the boot sweep's do.
+        False (a missing or archived tenant) makes the poller push the rows back.
+        A wake stores no service URL, so its sends use the SDK default.
         """
         if self.draining:
             return True
@@ -379,11 +374,7 @@ class TeamsApp:
         )
 
     async def _may_post(self, channel_id: str, thread_id: str) -> bool:
-        """The access policy's may-post decision; never raises.
-
-        Only an unprotected target may be posted to. A protected one, or one
-        whose protection can't be read, gets nothing, not even an error.
-        """
+        """True only for an unprotected target; a protected or unreadable one gets nothing."""
         state = await protection_state(
             self.runtime.sessionmaker,
             tenant_id=self._tenant_id,
@@ -402,8 +393,7 @@ class TeamsApp:
     async def _handle(self, inbound: TeamsInbound) -> None:
         """Error boundary around tenant lookup, routing, commands and the turn loop.
 
-        May-post is decided first, before any read that can fail: every post
-        below (denial, pointer, shed notice, errors) only happens after it.
+        May-post is decided first, so no post below (denial, pointer, shed, error) skips it.
         """
         if not await self._may_post(inbound.channel_id, inbound.thread_id):
             return
@@ -418,7 +408,7 @@ class TeamsApp:
     async def _route(self, inbound: TeamsInbound) -> None:
         if self._recovery is not None:
             await asyncio.shield(self._recovery)
-        tenant_id = await resolve_tenant(self.runtime.sessionmaker, inbound)
+        tenant_id = await live_tenant_id(self.runtime.sessionmaker, inbound.entra_tenant_id)
         if tenant_id is None:
             await self._say(inbound, DENIED)
             return

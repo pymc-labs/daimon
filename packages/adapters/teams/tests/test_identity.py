@@ -1,4 +1,4 @@
-"""parse_inbound and resolve_tenant: fail-closed identity for channels and 1:1 chats."""
+"""parse_inbound and live_tenant_id: fail-closed identity for channels and 1:1 chats."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from daimon.adapters.teams.identity import (
     TEXT_ONLY,
     Refusal,
     TeamsInbound,
+    live_tenant_id,
     parse_inbound,
-    resolve_tenant,
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -126,18 +126,18 @@ def test_oversize_input_is_refused() -> None:
     assert _parse(make_message_activity(text=text)) == Refusal(INPUT_TOO_LONG)
 
 
-async def test_resolve_tenant_accepts_a_live_tenant_for_dms_and_channels(
+async def test_live_tenant_id_accepts_a_live_tenant_for_dms_and_channels(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     for payload in (make_message_activity(), make_channel_activity()):
         inbound = _parse(payload)
         assert isinstance(inbound, TeamsInbound)
-        assert await resolve_tenant(db_session_factory, inbound) == TENANT_UUID
+        assert await live_tenant_id(db_session_factory, inbound.entra_tenant_id) == TENANT_UUID
 
 
 @pytest.mark.parametrize("state", ["missing", "pending", "archived"])
-async def test_resolve_tenant_denies_a_tenant_that_is_not_live(
+async def test_live_tenant_id_denies_a_tenant_that_is_not_live(
     db_session_factory: async_sessionmaker[AsyncSession], state: str
 ) -> None:
     if state != "missing":
@@ -151,4 +151,4 @@ async def test_resolve_tenant_denies_a_tenant_that_is_not_live(
     for payload in (make_message_activity(), make_channel_activity()):
         inbound = _parse(payload)
         assert isinstance(inbound, TeamsInbound)
-        assert await resolve_tenant(db_session_factory, inbound) is None
+        assert await live_tenant_id(db_session_factory, inbound.entra_tenant_id) is None

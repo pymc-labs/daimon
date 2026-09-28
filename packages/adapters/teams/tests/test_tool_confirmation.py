@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from daimon.adapters.teams.tool_confirmation import VERB, TeamsConfirmationCards
 from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt, prompt_for_tool_call
 from daimon.core.posted_controls.confirmation import NO_LONGER_PENDING_MESSAGE, NOT_YOURS_MESSAGE
@@ -58,32 +59,29 @@ async def _post(
     return waiting, token.group(1)
 
 
-async def test_the_requesters_approve_answers_approved_and_replaces_the_card() -> None:
+@pytest.mark.parametrize(
+    ("op", "answer", "headline"),
+    [("approve", "approved", "✅ Approved"), ("deny", "denied", "🛡️ Denied")],
+)
+async def test_only_the_requesters_click_answers_and_replaces_the_card(
+    op: str, answer: ConfirmationAnswer, headline: str
+) -> None:
     sender = FakeSender()
     cards = TeamsConfirmationCards(sender)
     waiting, token = await _post(cards, sender)
 
-    refused = await cards.on_action(_click(token, "approve", OTHER_AAD_OBJECT_ID))
+    refused = await cards.on_action(_click(token, op, OTHER_AAD_OBJECT_ID))
     assert refused.value == NOT_YOURS_MESSAGE
     assert not waiting.done(), "a stranger's click answers nothing"
 
-    answered = await cards.on_action(_click(token, "approve", AAD_OBJECT_ID.upper()))
+    answered = await cards.on_action(_click(token, op, AAD_OBJECT_ID.upper()))
 
-    assert await asyncio.wait_for(waiting, timeout=1) == "approved"
+    assert await asyncio.wait_for(waiting, timeout=1) == answer
     assert isinstance(answered, AdaptiveCardActionCardResponse)
     body = answered.value.model_dump_json(by_alias=True)
-    assert "✅ Approved" in body and f"Approved by {USER_NAME}" in body
+    assert headline in body, "the card shows the answer"
+    assert (f"Approved by {USER_NAME}" in body) is (op == "approve"), "an approval names who"
     assert "Action.Execute" not in body, "an answered card has no live buttons"
-
-
-async def test_the_requesters_deny_answers_denied() -> None:
-    sender = FakeSender()
-    cards = TeamsConfirmationCards(sender)
-    waiting, token = await _post(cards, sender)
-
-    await cards.on_action(_click(token, "deny", AAD_OBJECT_ID))
-
-    assert await asyncio.wait_for(waiting, timeout=1) == "denied"
 
 
 async def test_an_unanswered_card_expires_and_is_retired() -> None:

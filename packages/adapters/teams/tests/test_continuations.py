@@ -83,46 +83,28 @@ async def _hand_off(
     account_id: uuid.UUID,
     thread_id: str = CONVERSATION_ID,
     parent: str = CONVERSATION_ID,
+    *,
+    timer: bool = False,
 ) -> uuid.UUID:
-    """What hand_off_task records mid-turn."""
-    key = uuid.uuid4()
-    await record_continuation(
-        db,
-        ContinuationRequest(
-            tenant_id=TENANT,
-            platform="teams",
-            parent_channel_id=parent,
-            thread_id=thread_id,
-            requester_account_id=account_id,
-            requester_external_user_id=AAD_OBJECT_ID,
-            target_ma_agent_id=_TARGET,
-            target_name="stats-bot",
-            requested_work="finish the writeup",
-            reason="task_handoff",
-            idempotency_key=key,
-        ),
-    )
-    return key
-
-
-async def _set_timer(db: async_sessionmaker[AsyncSession], account_id: uuid.UUID) -> uuid.UUID:
-    """What create_timer records, already due."""
-    key = uuid.uuid4()
+    """What hand_off_task records mid-turn, or with `timer` what create_timer records, due."""
     request = ContinuationRequest(
         tenant_id=TENANT,
         platform="teams",
-        parent_channel_id=CONVERSATION_ID,
-        thread_id=CONVERSATION_ID,
+        parent_channel_id=parent,
+        thread_id=thread_id,
         requester_account_id=account_id,
         requester_external_user_id=AAD_OBJECT_ID,
         target_ma_agent_id=_TARGET,
         target_name="stats-bot",
-        requested_work="check the deploy",
-        reason="timer",
-        idempotency_key=key,
+        requested_work="check the deploy" if timer else "finish the writeup",
+        reason="timer" if timer else "task_handoff",
+        idempotency_key=uuid.uuid4(),
     )
-    await enqueue_wake(db, request, available_at=datetime.now(UTC) - timedelta(seconds=1))
-    return key
+    if timer:
+        await enqueue_wake(db, request, available_at=datetime.now(UTC) - timedelta(seconds=1))
+    else:
+        await record_continuation(db, request)
+    return request.idempotency_key
 
 
 async def _poll(db: async_sessionmaker[AsyncSession], teams: TeamsApp) -> int:
@@ -284,7 +266,7 @@ async def test_the_poller_opens_a_due_timer_and_runs_it_once(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     teams, account_id = await _app(db_session_factory, FakeSender())
-    key = await _set_timer(db_session_factory, account_id)
+    key = await _hand_off(db_session_factory, account_id, timer=True)
     calls: list[tuple[TeamsInbound, dict[str, Any]]] = []
 
     async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID, **kw: Any) -> None:
@@ -314,7 +296,7 @@ async def test_a_timer_whose_chat_changed_responder_says_so_and_never_runs(
 ) -> None:
     sender = FakeSender()
     teams, account_id = await _app(db_session_factory, sender)
-    key = await _set_timer(db_session_factory, account_id)
+    key = await _hand_off(db_session_factory, account_id, timer=True)
 
     with patched_admission():
         await _poll(db_session_factory, teams)

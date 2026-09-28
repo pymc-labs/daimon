@@ -13,7 +13,7 @@ from daimon.adapters.teams.http_service import (
     TeamsHttpService,
     create_teams_http_service,
 )
-from daimon.adapters.teams.identity import TeamsInbound, parse_inbound, resolve_tenant
+from daimon.adapters.teams.identity import TeamsInbound, live_tenant_id, parse_inbound
 from daimon.adapters.teams.lifecycle import TeamsSender, TeamsTurnLifecycle
 from daimon.adapters.teams.runtime import TeamsRuntime, build_runtime
 
@@ -27,6 +27,6 @@ __all__ = [
     "TeamsTurnLifecycle",
     "build_runtime",
     "create_teams_http_service",
+    "live_tenant_id",
     "parse_inbound",
-    "resolve_tenant",
 ]
