@@ -239,18 +239,6 @@ async def test_a_wake_behind_a_running_turn_is_released_without_a_notice(
     assert row.available_at >= before + WAKE_RETRY_DELAY, "retried after the turn in progress"
 
 
-async def test_a_changed_timer_responder_posts_the_notice_and_settles(
-    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
-) -> None:
-    key = await _queue(
-        db_session_factory, caller, "w", reason="timer", available_at=datetime.now(UTC)
-    )
-    changed = ResponderChanged(target_name="stats-bot", current_name="daimon")
-    _, notices = await _dispatch(db_session_factory, caller, run=changed)
-    assert notices == [changed.message], "the thread is told the timer did not run"
-    assert await _status(db_session_factory, key) == ("skipped", "skip_target_changed")
-
-
 @pytest.mark.parametrize("path", ["responder_changed", "target_gone"])
 @pytest.mark.parametrize("target", ["protected", "unknown", "open"])
 async def test_notices_reach_only_a_thread_the_agent_may_post_in(

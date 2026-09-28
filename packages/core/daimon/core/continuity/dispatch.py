@@ -63,30 +63,6 @@ async def _settle(
     )
 
 
-async def _notify(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    post_notice: PostNotice,
-    row: TaskContinuationRow,
-    text: str,
-    *,
-    reason: str,
-) -> None:
-    # Posted outside any gated turn (wake poller, saved input), so the may-post
-    # decision is asked right before each post; the row settles either way.
-    state = await protection_state(
-        sessionmaker,
-        tenant_id=row.tenant_id,
-        channel_id=row.parent_channel_id,
-        thread_id=row.thread_id,
-    )
-    if not state.may_post:
-        log.info(
-            "continuation.notice_withheld", row_id=str(row.id), reason=reason, state=state.value
-        )
-        return
-    await post_notice(text)
-
-
 async def dispatch_pending_continuations(
     sessionmaker: async_sessionmaker[AsyncSession],
     anthropic: AsyncAnthropic,
@@ -110,6 +86,23 @@ async def dispatch_pending_continuations(
     `DaimonError`, `anthropic.APIError` or one of `dispatch_errors` settles
     `dispatch_failed`.
     """
+
+    async def notify(row: TaskContinuationRow, text: str, *, reason: str) -> None:
+        # Posted outside any gated turn (wake poller, saved input), so may-post is
+        # asked right before each post; the row settles either way.
+        state = await protection_state(
+            sessionmaker,
+            tenant_id=row.tenant_id,
+            channel_id=row.parent_channel_id,
+            thread_id=row.thread_id,
+        )
+        if state.may_post:
+            await post_notice(text)
+            return
+        log.info(
+            "continuation.notice_withheld", row_id=str(row.id), reason=reason, state=state.value
+        )
+
     rows = await list_dispatchable_wakes(
         sessionmaker,
         tenant_id=tenant_id,
@@ -162,7 +155,7 @@ async def dispatch_pending_continuations(
             reason = decision.action if decision.action != "dispatch" else "missing_seed"
             await _settle(sessionmaker, claim, reason)
             if decision.message is not None:
-                await _notify(sessionmaker, post_notice, row, decision.message, reason=reason)
+                await notify(row, decision.message, reason=reason)
             continue
         if not await start_wake(sessionmaker, claim, now=datetime.now(UTC)):
             continue  # Another dispatcher took the row over while this one decided.
@@ -173,7 +166,7 @@ async def dispatch_pending_continuations(
         except ResponderChanged as exc:
             # A timer whose thread another agent answers now; the turn never started.
             await _settle(sessionmaker, claim, "skip_target_changed")
-            await _notify(sessionmaker, post_notice, row, exc.message, reason="skip_target_changed")
+            await notify(row, exc.message, reason="skip_target_changed")
         except AdmissionDenied as exc:
             # Held to the same gates as a mention, and not retried.
             await _settle(sessionmaker, claim, f"admission_denied:{exc.reason}")
