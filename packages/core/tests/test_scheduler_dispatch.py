@@ -193,19 +193,23 @@ async def test_capacity_remains_bounded_across_ticks_and_shutdown_joins_fires(
         await tick()
         await asyncio.wait_for(started.wait(), timeout=10)
         await tick()
-        assert fired == [first.id]
+        assert len(fired) == 1
+        # UPDATE RETURNING does not promise claim order. Check whichever fire
+        # acquired the semaphore, without relying on physical row ordering.
+        running, waiting = (first, pending) if fired[0] == first.id else (pending, first)
+        assert fired == [running.id]
         async with db_session_factory() as session:
-            row = await get_routine(session, pending.id, tenant_id=pending.tenant_id)
+            row = await get_routine(session, waiting.id, tenant_id=waiting.tenant_id)
         assert row is not None and row.last_fired_at == NOW
         await dispatcher.close()
         assert not dispatcher.in_flight_ids
         async with db_session_factory() as session:
-            stopped = await get_routine(session, first.id, tenant_id=first.tenant_id)
+            stopped = await get_routine(session, running.id, tenant_id=running.tenant_id)
         assert stopped is not None and stopped.last_error == "scheduler_shutdown"
         async with db_session_factory() as session:
-            cancelled = await get_routine(session, pending.id, tenant_id=pending.tenant_id)
+            cancelled = await get_routine(session, waiting.id, tenant_id=waiting.tenant_id)
         assert cancelled is not None and cancelled.last_error == "scheduler_shutdown"
-        assert fired == [first.id]
+        assert fired == [running.id]
     finally:
         release.set()
         await dispatcher.close()
