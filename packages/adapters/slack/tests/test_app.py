@@ -5892,9 +5892,6 @@ async def test_dm_slash_command_dispatches_after_ack(monkeypatch):
     assert socket.call_log == ["send_socket_mode_response", "dm-command"]
 
 
-@pytest.mark.parametrize("in_thread", [False, True], ids=["channel", "thread-under-protected"])
-
-
 @pytest.mark.parametrize(
     ("in_thread", "guest"),
     [(False, False), (True, False), (False, True)],
