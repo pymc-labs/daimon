@@ -24,7 +24,7 @@ from typing import Literal
 
 from daimon.core._models import TaskContinuation
 from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -520,3 +520,58 @@ async def abandon_interrupted_wake_rows(
         settled.extend(TaskContinuationRow.model_validate(row) for row in rows)
     await session.flush()
     return settled
+
+
+async def list_pending_timer_rows(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    requester_account_id: _uuid.UUID,
+) -> list[TaskContinuationRow]:
+    """One person's timers that have not been claimed, settled or cancelled, soonest first."""
+    rows = (
+        await session.execute(
+            select(TaskContinuation)
+            .where(
+                TaskContinuation.tenant_id == tenant_id,
+                TaskContinuation.requester_account_id == requester_account_id,
+                TaskContinuation.reason == "timer",
+                TaskContinuation.status == "pending",
+            )
+            .order_by(TaskContinuation.available_at, TaskContinuation.id)
+        )
+    ).scalars()
+    return [TaskContinuationRow.model_validate(row) for row in rows]
+
+
+async def lock_timer_quota(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, account_id: _uuid.UUID
+) -> None:
+    """Serialize timer creation for one person until this transaction ends.
+
+    The pending-timer cap is a count followed by an insert; without this lock
+    two concurrent creators both read 24 and both insert. Transaction-scoped,
+    so it is released on commit or rollback.
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"timer_quota:{tenant_id}:{account_id}"},
+    )
+
+
+async def count_pending_timer_rows(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, requester_account_id: _uuid.UUID
+) -> int:
+    """How many timers this person has that have not been claimed, settled or cancelled."""
+    return (
+        await session.execute(
+            select(func.count())
+            .select_from(TaskContinuation)
+            .where(
+                TaskContinuation.tenant_id == tenant_id,
+                TaskContinuation.requester_account_id == requester_account_id,
+                TaskContinuation.reason == "timer",
+                TaskContinuation.status == "pending",
+            )
+        )
+    ).scalar_one()

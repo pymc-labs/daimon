@@ -32,7 +32,11 @@ from datetime import datetime
 from typing import Final, Literal
 
 from anthropic import AsyncAnthropic
-from daimon.core.continuity.messages import render_current_work_must_finish
+from daimon.core.continuity.messages import (
+    render_current_work_must_finish,
+    render_timer_seed,
+    render_timer_target_changed,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.setup_conversations import get_setup_agent
 from daimon.core.stores.domain import ContinuationReason, CredentialRequestRow
@@ -57,7 +61,9 @@ __all__ = [
     "ContinuationAction",
     "ContinuationDecision",
     "ContinuationRequest",
+    "ResponderChanged",
     "build_input_continuation",
+    "check_wake_responder",
     "claim_continuation",
     "decide_continuation",
     "record_continuation",
@@ -139,6 +145,39 @@ class ContinuationDecision(BaseModel):
     action: ContinuationAction
     message: str | None = None
     seed_user_message: str | None = None
+
+
+class ResponderChanged(DaimonError):
+    """A timer is due, but a different agent answers its thread now.
+
+    Raised by an adapter after `admit()` and before anything is posted or
+    bound, so the timer never runs under an agent it was not set with.
+    `message` is the person-facing notice to post in the thread.
+    """
+
+    def __init__(self, *, target_name: str, current_name: str) -> None:
+        self.message = render_timer_target_changed(target_name, current_name)
+        super().__init__(self.message)
+
+
+def check_wake_responder(
+    *,
+    reason: ContinuationReason,
+    target_ma_agent_id: str,
+    target_name: str,
+    admitted_ma_agent_id: str,
+    admitted_name: str,
+) -> None:
+    """Refuse a timer whose thread is now answered by a different agent.
+
+    A timer can wait up to 90 days while a thread's routing changes, and its
+    note is the old agent's own brief; running it as whoever answers now
+    would hand one agent another's work. Handoffs and private-input
+    continuations are not checked here: they run moments after they are
+    queued, against the agent their own flow just bound.
+    """
+    if reason == "timer" and admitted_ma_agent_id != target_ma_agent_id:
+        raise ResponderChanged(target_name=target_name, current_name=admitted_name)
 
 
 def build_input_continuation(
@@ -261,6 +300,7 @@ async def decide_continuation(
        substitute a namesake; say the target changed and stop.
     3. The person has spoken again since. Their newer message supersedes the
        queued work; running it would answer a stale request out of order.
+       Not for a timer, which is meant to fire whatever was said since.
     4. A turn is already running in this thread. The continuation waits for it
        rather than racing it, and the person is told so.
 
@@ -294,7 +334,13 @@ async def decide_continuation(
             action="skip_target_changed", message=_render_target_changed(request.target_name)
         )
 
-    if latest_user_message_at is not None and latest_user_message_at > row.created_at:
+    # A timer is the agent's own appointment: the person talking in the
+    # meantime is expected, not a newer request that replaces it.
+    if (
+        request.reason != "timer"
+        and latest_user_message_at is not None
+        and latest_user_message_at > row.created_at
+    ):
         return ContinuationDecision(action="skip_superseded")
 
     if active_turn:
@@ -305,4 +351,9 @@ async def decide_continuation(
             ),
         )
 
+    if request.reason == "timer":
+        return ContinuationDecision(
+            action="dispatch",
+            seed_user_message=render_timer_seed(request.requested_work, set_at=row.created_at),
+        )
     return ContinuationDecision(action="dispatch", seed_user_message=request.requested_work)

@@ -1858,7 +1858,7 @@ class TaskContinuation(Base):
     __tablename__ = "task_continuations"
     __table_args__ = (
         CheckConstraint(
-            "reason IN ('task_handoff', 'private_input_applied')",
+            "reason IN ('task_handoff', 'private_input_applied', 'timer')",
             name="ck_task_continuations_reason",
         ),
         CheckConstraint(

@@ -15,6 +15,11 @@ interactive Slack turn uploads to the thread, are **not** swept for a routine;
 [slack.md](slack.md) says so, and the code agrees: the headless path installs a
 no-op lifecycle with nothing to render to.
 
+A one-off "remind me in two hours" or "check back tomorrow at nine" is not a
+routine. Use a timer (`create_timer`, see [mcp-tools.md](mcp-tools.md#timers))
+instead: it fires once and runs in the conversation it was set in, so the
+conversation's context carries over. Nothing has to be deleted afterwards.
+
 ## The row
 
 `routines`, declared in `packages/core/daimon/core/_models.py` and read

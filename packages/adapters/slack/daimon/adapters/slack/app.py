@@ -99,6 +99,7 @@ from daimon.adapters.slack.vision import (
     download_as_image_blocks,
     is_vision_image,
 )
+from daimon.core.continuity.continuation import check_wake_responder
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
@@ -2334,6 +2335,15 @@ class SlackApp:
             thread_id=thread_id,
             role=role,
             now=datetime.now(UTC),
+        )
+        # A timer runs only as the agent it was set with; a thread rerouted in
+        # the meantime refuses it here, before any card, bind or billed turn.
+        check_wake_responder(
+            reason=row.reason,
+            target_ma_agent_id=row.target_ma_agent_id,
+            target_name=row.target_name,
+            admitted_ma_agent_id=follow_admission.agent.id,
+            admitted_name=follow_admission.agent.name,
         )
         follow_deadline = turn_deadline(now=datetime.now(UTC))
         follow_prepared = await bind_session(
