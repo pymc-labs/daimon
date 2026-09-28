@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import yaml
+from daimon.adapters.teams.help import COMMAND_HELP
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 # Top-level properties from the versioned Microsoft schema (offline test):
@@ -58,5 +59,6 @@ def test_manifest_offers_what_the_adapter_answers() -> None:
     manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
     [bot] = manifest["bots"]
     assert bot["scopes"] == ["personal", "team"], "group chats are refused, so not offered"
+    assert bot["supportsFiles"] is True
     [commands] = bot["commandLists"]
-    assert [c["title"] for c in commands["commands"]] == ["new"]
+    assert {c["title"] for c in commands["commands"]} == set(COMMAND_HELP)

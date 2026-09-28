@@ -54,9 +54,21 @@ bots:
       - scopes:
           - personal
         commands:
+          - title: help
+            description: List the commands.
           - title: new
             description: Start a fresh conversation.
-    supportsFiles: false
+          - title: setup
+            description: See your agents and who answers where.
+          - title: routines
+            description: Show and manage scheduled routines.
+          - title: memory
+            description: Show what the agent remembers.
+          - title: privacy
+            description: See, export or delete your data.
+          - title: billing
+            description: Usage this month and top-ups.
+    supportsFiles: true                 # files shared in 1:1 chats, file consent cards
     isNotificationOnly: false
 permissions:
   - identity

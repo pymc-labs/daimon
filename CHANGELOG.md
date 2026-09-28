@@ -12,8 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Microsoft Teams adapter: answers in 1:1 chats and when @mentioned in
   channels, with an in-place status card, author-only Cancel, per-thread
   queueing, feedback buttons and restart recovery. The configured Entra
-  organisation is provisioned at boot. Builds on #220 by @jchu96. See
-  `docs/teams.md`.
+  organisation is provisioned at boot. The 1:1 chat offers `help`, `new`,
+  `setup` (with setup conversations), `routines`, `memory`, `privacy` and
+  `billing`; admins are listed in
+  `DAIMON_TEAMS__ADMIN_USER_IDS`. Pasted images and files shared in 1:1 chats
+  reach the agent, output files are delivered with file consent cards, and
+  `send_message`, `create_thread` and task handoffs work from Teams turns.
+  Builds on #220 by @jchu96. See `docs/teams.md`.
 - Platform-neutral DM tenant routing in core: a direct message resolves to the
   one tenant the sender shares with the bot, or asks the adapter for a picker
   and remembers the choice. Only Teams uses it so far.
@@ -75,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The checkout landing pages no longer tell every payer to return to Discord.
 - A continuation turn (the follow-up after a private form or a task handoff)
   on Discord or Slack now runs with the requester's live role, re-read from
   the guild or workspace at dispatch, instead of always as a plain user. An
