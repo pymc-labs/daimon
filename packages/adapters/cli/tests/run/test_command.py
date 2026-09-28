@@ -213,3 +213,23 @@ async def test_run_conversation_past_deadline_exits_nonzero_with_a_ceiling_termi
     assert not any(line.get("status") == "end_turn" for line in lines), (
         "a breach must never also emit a success terminal"
     )
+
+
+@pytest.mark.asyncio
+async def test_run_conversation_passes_the_tool_posture_to_the_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The observing wrapper must forward the tool-safety posture to the turn."""
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.core.turn.approvals import unattended_decider
+    from daimon.core.turn.posture import PolicyApproval
+
+    captured: dict[str, Any] = {}
+    _install_run_turn(monkeypatch, state=TurnState(), captured=captured)
+    posture = PolicyApproval(decide=unattended_decider(ToolSafetyPolicy(enabled=True)))
+
+    await run_conversation(
+        rt=_make_rt(), session_id="s1", user_message="hello", tool_confirmation=posture
+    )
+
+    assert captured["tool_confirmation"] is posture
