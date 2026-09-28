@@ -160,6 +160,9 @@ class TenantDependentCounts:
         )
 
 
+CatchUpPolicy = Literal["skip", "run-once"]
+
+
 class RoutineRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -172,6 +175,10 @@ class RoutineRow(BaseModel):
     timezone: str
     trigger_message: str
     enabled: bool
+    catch_up_policy: CatchUpPolicy = "skip"
+    last_skipped_from: datetime | None = None
+    last_skipped_until: datetime | None = None
+    last_skip_reason: Literal["stale", "in_flight"] | None = None
     next_fire_at: datetime | None
     last_fired_at: datetime | None
     last_error: str | None

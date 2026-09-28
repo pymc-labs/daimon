@@ -59,7 +59,7 @@ from daimon.core.ma_resolver import (
 from daimon.core.observability import init_sentry
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.pricing import MODEL_PRICING
-from daimon.core.scheduler import FireFn, run_one_tick
+from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
@@ -461,6 +461,7 @@ async def run(
         resolver_cache=resolver_cache,
     )
 
+    dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -481,6 +482,7 @@ async def run(
                 max_age=timedelta(seconds=scheduler_settings.max_age_s),
                 max_concurrent_fires=scheduler_settings.max_concurrent_fires,
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
+                wait_for_completion=True,
             )
             await _sweep_pending_files(client, sm)
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
@@ -507,6 +509,7 @@ async def run(
                 max_age=timedelta(seconds=scheduler_settings.max_age_s),
                 max_concurrent_fires=scheduler_settings.max_concurrent_fires,
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
+                dispatcher=dispatcher,
             )
             await _sweep_pending_files(client, sm)
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
@@ -529,6 +532,7 @@ async def run(
 
         return 0
     finally:
+        await dispatcher.close()
         health_server.close()
         await health_server.wait_closed()
         try:

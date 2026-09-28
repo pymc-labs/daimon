@@ -800,3 +800,33 @@ async def test_admin_update_and_delete_succeed_when_caller_is_non_owner_admin(
 
     result = await _delete_routine_impl(runtime, auth, routine_id=created.id)
     assert result.deleted is True, "an admin must be able to delete a routine they did not create"
+
+
+async def test_catch_up_policy_create_update_and_owner_gate(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="agent_policy", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(db_session_factory, client=client)
+    owner = _auth_identity(tenant_id=tenant.id, platform_user_id="owner")
+    row = await _create_routine_impl(
+        runtime,
+        owner,
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone="UTC",
+        trigger_message="run",
+        catch_up_policy="run-once",
+    )
+    assert row.catch_up_policy == "run-once"
+    intruder = _auth_identity(tenant_id=tenant.id, platform_user_id="other")
+    with pytest.raises(ToolError, match="routine not found"):
+        await _update_routine_impl(runtime, intruder, routine_id=row.id, catch_up_policy="skip")
+    updated = await _update_routine_impl(runtime, owner, routine_id=row.id, catch_up_policy="skip")
+    assert updated.catch_up_policy == "skip"
+    assert updated.next_fire_at == row.next_fire_at
+    await client.close()

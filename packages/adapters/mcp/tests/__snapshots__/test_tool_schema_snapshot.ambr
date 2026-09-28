@@ -1455,6 +1455,8 @@
       'description': '''
         Create a routine in the caller's tenant partition.
         
+        ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
+        
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
         ``"research-bot"``). It is NOT:
@@ -1482,6 +1484,14 @@
         'additionalProperties': False,
         'properties': dict({
           'agent_name': dict({
+            'type': 'string',
+          }),
+          'catch_up_policy': dict({
+            'default': 'skip',
+            'enum': list([
+              'skip',
+              'run-once',
+            ]),
             'type': 'string',
           }),
           'cron_expr': dict({
@@ -4727,6 +4737,8 @@
       'description': '''
         PATCH-update a routine. Only provided fields are changed.
         
+        ``catch_up_policy`` selects ``skip`` or one coalesced ``run-once`` after downtime.
+        
         ``agent_name`` reassigns the routine to a different daimon-tagged agent;
         the tool resolves it to a live MA agent id at the call boundary.
       ''',
@@ -4736,6 +4748,21 @@
           'agent_name': dict({
             'anyOf': list([
               dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'catch_up_policy': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'skip',
+                  'run-once',
+                ]),
                 'type': 'string',
               }),
               dict({
