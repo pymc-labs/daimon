@@ -98,6 +98,7 @@ source_modules = [
     "daimon.core.answering_map",
     "daimon.core.artifacts",
     "daimon.core.billing",
+    "daimon.core.billing_panel",
     "daimon.core.broker",
     "daimon.core.bundle_handle",
     "daimon.core.checkpoint_prompt",
