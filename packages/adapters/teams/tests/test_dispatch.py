@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 import pytest
+from daimon.adapters.teams.commands import fresh_start, parse_command
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.identity import DENIED
 from daimon.core._models import ThreadSession
@@ -142,3 +143,27 @@ async def test_command_in_a_channel_points_to_the_one_to_one_chat(
 
     assert turns == []
     assert "1:1 chat" in json.dumps(teams_api_fake.activity_requests[-1].body)
+
+
+@pytest.mark.parametrize(
+    ("text", "parsed"),
+    [
+        ("help", ("help", "")),
+        ("/Memory /notes.md", ("memory", "/notes.md")),
+        ("help me set up", None),
+        ("new idea: fit a GLM", None),
+        ("memory leak in prod", None),
+    ],
+)
+def test_only_a_bare_command_word_is_a_command(text: str, parsed: tuple[str, str] | None) -> None:
+    assert parse_command(text, {"help": fresh_start, "memory": fresh_start}) == parsed
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_prose_that_starts_with_a_command_word_runs_a_turn(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with _running(db_session_factory, teams_api_fake) as (service, turns):
+        await post_activity(service, make_message_activity(text="new idea: fit a GLM"))
+        await service.turns.drain(timeout=30)
+    assert len(turns) == 1 and "new idea: fit a GLM" in turns[0]["user_message"]

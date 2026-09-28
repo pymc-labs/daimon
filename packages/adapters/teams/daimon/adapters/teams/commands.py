@@ -42,10 +42,12 @@ CommandHandler = Callable[[CommandContext], Awaitable[None]]
 
 
 def parse_command(text: str, names: Mapping[str, CommandHandler]) -> tuple[str, str] | None:
-    """`(name, args)` when the message's first word is a known command."""
+    """`(name, args)` for a bare command word or `memory /<path>`; other prose is a turn."""
     word, _, args = text.strip().partition(" ")
-    name = word.lower().lstrip("/")
-    return (name, args.strip()) if name in names else None
+    name, args = word.lower().lstrip("/"), args.strip()
+    if name in names and (not args or (name == "memory" and args.startswith("/"))):
+        return name, args
+    return None
 
 
 async def fresh_start(context: CommandContext) -> None:
