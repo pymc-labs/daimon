@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Literal, cast
 
+from daimon.adapters.teams.card_actions import button
 from daimon.core.routines import PANEL_CAP, can_manage_routine, derive_glyph, routine_label
 from daimon.core.stores.domain import RoutineRow
 from microsoft_teams.api import (
@@ -53,8 +54,8 @@ Op = Literal["refresh", "pause", "resume", "output", "delete", "confirm_delete"]
 def _button(
     title: str, op: Op, row: RoutineRow | None = None, style: ActionStyle | None = None
 ) -> ExecuteAction:
-    data = {"action": VERB, "op": op} | ({"routine": str(row.id)} if row else {})
-    return ExecuteAction(title=title, verb=VERB, data=data, style=style)
+    extra = {"routine": str(row.id)} if row else {}
+    return button(VERB, title, op, style=style, **extra)
 
 
 def _routine(row: RoutineRow, *, can_manage: bool) -> Container:
