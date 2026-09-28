@@ -52,7 +52,6 @@ async def dispatch_pending_continuations(
     post_notice: PostNotice,
     latest_user_message_at: LatestMessageAt,
     dispatch_errors: tuple[type[Exception], ...] = (),
-    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
     """Claim and settle every pending continuation for one thread, oldest first.
 
@@ -68,7 +67,7 @@ async def dispatch_pending_continuations(
         )
     for row in rows:
         if not await claim_continuation(
-            sessionmaker, idempotency_key=row.idempotency_key, now=now()
+            sessionmaker, idempotency_key=row.idempotency_key, now=datetime.now(UTC)
         ):
             continue
         request = ContinuationRequest(
@@ -96,7 +95,7 @@ async def dispatch_pending_continuations(
             sessionmaker,
             anthropic,
             request=request,
-            now=now(),
+            now=datetime.now(UTC),
             latest_user_message_at=await latest_user_message_at(row),
             active_turn=live is not None and live.active_turn_message_id is not None,
         )
@@ -106,7 +105,7 @@ async def dispatch_pending_continuations(
                 sessionmaker,
                 idempotency_key=key,
                 status="delivered" if skip_reason is None else "skipped",
-                now=now(),
+                now=datetime.now(UTC),
                 skip_reason=skip_reason,
             )
 
