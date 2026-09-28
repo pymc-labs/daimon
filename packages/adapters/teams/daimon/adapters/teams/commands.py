@@ -57,7 +57,7 @@ async def fresh_start(context: CommandContext) -> None:
                 session,
                 tenant_id=context.tenant_id,
                 platform="teams",
-                thread_id=inbound.conversation_id,
+                thread_id=inbound.thread_id,
                 account_id=principal.account_id,
             )
         if live is not None:

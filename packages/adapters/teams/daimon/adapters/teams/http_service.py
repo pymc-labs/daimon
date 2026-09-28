@@ -8,16 +8,18 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import structlog
-from daimon.adapters.teams import billing_panel, card, privacy_card, routines_card
+from daimon.adapters.teams import billing_panel, card, privacy_card, routines_card, setup_card
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
-from daimon.adapters.teams.commands import CommandHandler, fresh_start
+from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.feedback import record_feedback
 from daimon.adapters.teams.help import send_help
 from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.privacy_panel import PrivacyPanel
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.adapters.teams.setup_conversation import new_command
+from daimon.adapters.teams.setup_panel import SetupPanel
 from daimon.core.config import TeamsSettings
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -190,8 +192,10 @@ def create_teams_http_service(
     routines = RoutinesPanel(runtime)
     privacy = PrivacyPanel(runtime)
     billing = BillingPanel(runtime)
+    setup = SetupPanel(runtime)
     commands: dict[str, CommandHandler] = {
-        "new": fresh_start,
+        "new": new_command,
+        "setup": setup.command,
         "routines": routines.command,
         "memory": show_memory,
         "privacy": privacy.command,
@@ -215,6 +219,11 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(billing_panel.VERB, billing.on_action)
     teams_app.on_dialog_open(routines_card.CREATE_DIALOG, routines.on_dialog_open)
     teams_app.on_dialog_submit(routines_card.CREATE_DIALOG, routines.on_dialog_submit)
+    teams_app.on_card_action_execute(setup_card.VERB, setup.on_action)
+    teams_app.on_dialog_open(setup_card.CREATE_DIALOG, setup.on_create_open)
+    teams_app.on_dialog_submit(setup_card.CREATE_DIALOG, setup.on_create_submit)
+    teams_app.on_dialog_open(setup_card.TOKEN_DIALOG, setup.on_token_open)
+    teams_app.on_dialog_submit(setup_card.TOKEN_DIALOG, setup.on_token_submit)
     teams_app.on_message_submit_feedback(handle_feedback)
     teams_app.on_file_consent(turns.outputs.handle_consent)
     holder["app"] = (teams_app, turns)

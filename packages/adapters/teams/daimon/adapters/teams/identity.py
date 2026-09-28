@@ -43,10 +43,12 @@ def canonical_uuid(value: object) -> str | None:
 class TeamsInbound:
     """Verified facts about one message. Content is never persisted by the adapter.
 
-    `conversation_id` is where replies go and doubles as the session's thread
-    key: a channel thread's id (`19:…;messageid=<root>`) or a personal chat's.
-    `channel_id` is the config-cascade channel: the channel for a thread, the
-    chat itself for a DM. `user_id` is the sender's Entra object id.
+    `conversation_id` is where replies go: a channel thread's id
+    (`19:…;messageid=<root>`) or a personal chat's. `thread_id` is the session
+    and routing key: the conversation, or the live setup conversation a
+    personal chat was switched into. `channel_id` is the config-cascade
+    channel: the channel for a thread, the chat itself for a DM. `user_id` is
+    the sender's Entra object id.
     """
 
     kind: Literal["dm", "channel"]
@@ -59,6 +61,11 @@ class TeamsInbound:
     service_url: str | None
     bot_name: str | None = None
     files: tuple[InboundFile, ...] = ()
+    setup_thread_id: str | None = None
+
+    @property
+    def thread_id(self) -> str:
+        return self.setup_thread_id or self.conversation_id
 
 
 @dataclass(frozen=True)

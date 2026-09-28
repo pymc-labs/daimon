@@ -46,6 +46,7 @@ from daimon.adapters.teams.lifecycle import (
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.adapters.teams.setup_conversation import route_to_setup
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -287,6 +288,7 @@ class TeamsApp:
         if tenant_id is None:
             await self._say(inbound, DENIED)
             return
+        inbound = await route_to_setup(self.runtime.sessionmaker, inbound, tenant_id)
         command = parse_command(inbound.text, self._commands)
         if command is not None:
             name, args = command
@@ -379,7 +381,7 @@ class TeamsApp:
                 platform="teams",
                 external_user_id=inbound.user_id,
                 channel_id=inbound.channel_id,
-                thread_id=inbound.conversation_id,
+                thread_id=inbound.thread_id,
                 role=self._role(inbound),
                 now=datetime.now(UTC),
             )
@@ -501,7 +503,7 @@ class TeamsApp:
                 tenant_id=tenant_id,
                 platform="teams",
                 external_user_id=inbound.user_id,
-                thread_id=inbound.conversation_id,
+                thread_id=inbound.thread_id,
                 session_account_id=admission.account_id,
                 reuse_existing=True,
                 deadline=deadline,
@@ -568,7 +570,7 @@ class TeamsApp:
             account_id=admission.account_id,
             platform="teams",
             parent_channel_id=inbound.channel_id,
-            thread_id=inbound.conversation_id,
+            thread_id=inbound.thread_id,
             responder_ma_agent_id=str(admission.agent.id),
             responder_name=config.agent_name or admission.agent.name,
             role=self._role(inbound),
@@ -598,7 +600,7 @@ class TeamsApp:
                 prepared,
                 tenant_id=tenant_id,
                 platform="teams",
-                thread_id=inbound.conversation_id,
+                thread_id=inbound.thread_id,
                 external_user_id=inbound.user_id,
                 user_message=message,
                 lifecycle=lifecycle,
