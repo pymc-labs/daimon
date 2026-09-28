@@ -124,11 +124,14 @@ async def test_send_posts_markdown_with_ai_label() -> None:
     assert body["entities"][0]["additionalType"] == ["AIGeneratedContent"]
 
 
-async def test_update_puts_to_the_activity() -> None:
+async def test_update_card_puts_to_the_activity() -> None:
     fake = _Fake()
-    await _client(fake).update(_THREAD, "act-1", "edited")
+    await _client(fake).update_card(_THREAD, "act-1", {"type": "AdaptiveCard"})
     (put,) = fake.posts()
-    assert (put.method, str(put.url)) == ("PUT", f"{_BASE}/{_THREAD}/activities/act-1")
+    assert (put.method, str(put.url)) == ("PUT", f"{_BASE}/{_THREAD}/activities/act-1"), (
+        "an edit replaces the posted activity in place"
+    )
+    assert json.loads(put.content)["id"] == "act-1", "the replacement names the activity it edits"
 
 
 async def test_create_thread_posts_a_channel_conversation() -> None:

@@ -1,4 +1,4 @@
-"""Bot Framework REST client for Teams: token, send, update, cards, thread, membership.
+"""Bot Framework REST client for Teams: token, send, cards, thread, membership.
 
 Plain httpx, so the MCP process needs no Teams SDK. The token comes from the
 client-credentials flow against the deployment's one Entra tenant and is cached
@@ -16,8 +16,8 @@ from daimon.core.config import TeamsSettings
 from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
 from pydantic import BaseModel, Field
 
-#: The Teams SDK's default service URL for proactive sends.
-DEFAULT_SERVICE_URL = "https://smba.trafficmanager.net/teams"
+# Under the Teams SDK's default service URL for proactive sends.
+_CONVERSATIONS_URL = "https://smba.trafficmanager.net/teams/v3/conversations"
 _SCOPE = "https://api.botframework.com/.default"
 _TIMEOUT_S = 15.0
 _REFRESH_MARGIN_S = 300.0
@@ -70,16 +70,12 @@ class TeamsBotClient:
         client_id: str,
         client_secret: str,
         tenant_id: str,
-        service_url: str = DEFAULT_SERVICE_URL,
-        timeout: float = _TIMEOUT_S,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._http = http
         self._client_id = client_id
         self._client_secret = client_secret
         self._tenant_id = tenant_id
-        self._base = f"{service_url.rstrip('/')}/v3/conversations"
-        self._timeout = timeout
         self._clock = clock
         self._token: tuple[str, float] | None = None
         self._lock = asyncio.Lock()
@@ -95,7 +91,7 @@ class TeamsBotClient:
                         "client_secret": self._client_secret,
                         "scope": _SCOPE,
                     },
-                    timeout=self._timeout,
+                    timeout=_TIMEOUT_S,
                 )
                 response.raise_for_status()
                 token = _Token.model_validate_json(response.content)
@@ -108,10 +104,10 @@ class TeamsBotClient:
     ) -> httpx.Response:
         response = await self._http.request(
             method,
-            f"{self._base}{path}",
+            f"{_CONVERSATIONS_URL}{path}",
             json=body,
             headers={"Authorization": f"Bearer {await self._bearer()}"},
-            timeout=self._timeout,
+            timeout=_TIMEOUT_S,
         )
         response.raise_for_status()
         return response
@@ -128,20 +124,11 @@ class TeamsBotClient:
         response = await self._request("POST", f"/{conversation_id}/activities", body)
         return _Sent.model_validate_json(response.content).id
 
-    async def update(self, conversation_id: str, activity_id: str, text: str) -> None:
-        """Replace a message the bot posted."""
-        await self._update(conversation_id, activity_id, _message(text))
-
     async def update_card(
         self, conversation_id: str, activity_id: str, card: Mapping[str, object]
     ) -> None:
         """Replace a card the bot posted."""
-        await self._update(conversation_id, activity_id, _card_message(card))
-
-    async def _update(
-        self, conversation_id: str, activity_id: str, body: dict[str, object]
-    ) -> None:
-        body = {**body, "id": activity_id}
+        body = {**_card_message(card), "id": activity_id}
         await self._request("PUT", f"/{conversation_id}/activities/{activity_id}", body)
 
     async def create_thread(self, channel_id: str, text: str) -> tuple[str, str]:
