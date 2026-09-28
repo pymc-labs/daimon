@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core selects chat, routine, relay and handoff prompt fragments per invocation.
   Agent specs can replace or extend each fragment; default chat is unchanged.
 - Per-tenant operator-funded mode replaces depleted-balance refusals with structured alerts while preserving usage metering and configured caps. Configure it with `daimon tenants funding-mode`.
+- Optional Postgres backup service, checksum-verified empty-database restore and
+  isolated restore drill; workspace-wide Managed Agents object export and a
+  state-by-state disaster recovery contract in the self-hosting guide.
 
 - Added durable initial-card intent rows and bounded Discord and Slack history
   lookup. Both adapters now commit an intent before posting, record the

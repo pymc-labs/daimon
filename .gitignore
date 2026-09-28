@@ -44,3 +44,6 @@ agents_err.txt
 download.html
 .playwright-mcp/
 formal/tla2tools.jar
+
+# Operator backups contain credentials and private data.
+/backups/

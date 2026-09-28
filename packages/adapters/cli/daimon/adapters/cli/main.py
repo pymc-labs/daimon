@@ -7,6 +7,7 @@ import importlib.metadata
 import rich.traceback
 import typer
 from daimon.adapters.cli.commands.agents import agents_app
+from daimon.adapters.cli.commands.backup import backup_app
 from daimon.adapters.cli.commands.config import config_app
 from daimon.adapters.cli.commands.defaults import defaults_app
 from daimon.adapters.cli.commands.environments import environments_app
@@ -24,6 +25,7 @@ from daimon.adapters.cli.run.command import run_command
 
 app = typer.Typer(help="Daimon CMA CLI")
 app.add_typer(agents_app, name="agents")
+app.add_typer(backup_app, name="backup")
 app.add_typer(environments_app, name="environments")
 app.add_typer(tenants_app, name="tenants")
 app.add_typer(sessions_app, name="sessions")
