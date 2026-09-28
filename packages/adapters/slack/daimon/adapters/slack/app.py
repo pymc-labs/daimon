@@ -150,7 +150,12 @@ from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_keys import list_mounted_key_names
-from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
+from daimon.core.turn_origin import (
+    SessionState,
+    build_handoff_notice,
+    render_turn_origin,
+    turn_origin,
+)
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
@@ -2264,26 +2269,13 @@ class SlackApp:
                 )
                 await _at_session.commit()
 
-        transfer_kind = follow_prepared.continuity.transfer_kind
-        workspace: Literal["transferred", "transcript_only", "history_only"]
-        not_carried: tuple[str, ...]
-        if transfer_kind == "full":
-            workspace, not_carried = "transferred", ()
-        elif transfer_kind == "transcript":
-            workspace, not_carried = "transcript_only", ("working files",)
-        else:
-            workspace, not_carried = (
-                "history_only",
-                ("working files", "earlier conversation"),
-            )
         handoff_notice = (
-            HandoffNotice(
-                from_name=from_name or "the previous agent",
-                from_ma_agent_id=from_ma_agent_id or "",
+            build_handoff_notice(
+                from_name=from_name,
+                from_ma_agent_id=from_ma_agent_id,
                 requested_by=f"<@{row.requester_external_user_id}>",
                 requested_work=seed_user_message,
-                workspace=workspace,
-                not_carried=not_carried,
+                transfer_kind=follow_prepared.continuity.transfer_kind,
             )
             if row.reason == "task_handoff"
             else None
