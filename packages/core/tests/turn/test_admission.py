@@ -96,10 +96,12 @@ def _deps(
     )
 
 
+@pytest.mark.parametrize("platform", ["discord", "slack"])
 async def test_admit_over_balance_tenant_raises_admission_denied_balance_depleted(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    platform: str,
 ) -> None:
     tenant = await make_tenant(db_session)
     await make_tenant_config(
@@ -122,7 +124,7 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
         await admit(
             deps,
             tenant_id=tenant.id,
-            platform="discord",
+            platform=platform,
             external_user_id="user-1",
             channel_id="chan-1",
             now=_NOW,
@@ -132,12 +134,26 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
         "an over-balance tenant must raise AdmissionDenied(reason='balance_depleted')"
     )
 
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
 
+    await drain_outcomes()
+    async with db_session_factory() as session:
+        outcomes = await list_for_tenant(session, tenant.id)
+    assert len(outcomes) == 1
+    assert outcomes[0].reason == "admission_balance_depleted"
+    assert outcomes[0].platform == platform
+    assert outcomes[0].agent_id == "ag_1"
+    assert outcomes[0].account_id is not None
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack"])
 @pytest.mark.parametrize("funding_mode", ["prepaid", "operator_funded"])
 async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    platform: str,
     funding_mode: FundingMode,
 ) -> None:
     tenant = await make_tenant(db_session)
@@ -166,7 +182,7 @@ async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
         await admit(
             deps,
             tenant_id=tenant.id,
-            platform="discord",
+            platform=platform,
             external_user_id="user-1",
             channel_id="chan-1",
             now=_NOW,
@@ -175,6 +191,18 @@ async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
     assert exc_info.value.reason == "cap_exceeded", (
         "an over-cap user must raise AdmissionDenied(reason='cap_exceeded')"
     )
+
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
+    async with db_session_factory() as session:
+        outcomes = await list_for_tenant(session, tenant.id)
+    assert len(outcomes) == 1
+    assert outcomes[0].reason == "admission_cap_exceeded"
+    assert outcomes[0].platform == platform
+    assert outcomes[0].agent_id == "ag_1"
+    assert outcomes[0].account_id is not None
 
 
 async def test_admit_missing_agent_only_raises_missing_turn_config_error(

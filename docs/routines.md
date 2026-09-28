@@ -240,3 +240,16 @@ it with `context_fragments.routine` in their YAML spec; see [architecture](archi
 
 Routine sessions always mount persistent agent memory read-only, regardless of the
 tenant's chat or DM policy. They can use saved memory but cannot change it.
+
+
+### Durable fire diagnostics
+
+Each dispatched routine owns one content-free `turn_outcomes` observation with
+origin `routine`. Headless execution borrows it; cancellation injected by the
+scheduler deadline leaves finalization to the scheduler, which records `ceiling`.
+This preserves the existing timeout/error handling and does not delay the turn
+for a database write. Cap refusals are recorded without running a model. A fire
+that returns before executing a turn (for example, a missing routine or agent)
+currently records `unknown`; shutdown cancellation can also be `unknown`.
+The bounded best-effort writer may lose diagnostics during outages, queue
+saturation or process crashes. Routine result/error fields remain unchanged.

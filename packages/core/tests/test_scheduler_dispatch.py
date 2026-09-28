@@ -378,3 +378,58 @@ async def test_claimed_queue_stays_bounded_across_ticks(
     finally:
         release.set()
         await dispatcher.close()
+
+
+async def test_dispatch_timeout_through_headless_records_ceiling(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    import httpx
+    from anthropic import AsyncAnthropic
+    from daimon.core.headless_runner import run_turn
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+    from daimon.core.turn.termination import TerminationReason
+
+    routine = await seed(db_session, due=NOW - timedelta(minutes=1))
+    started = asyncio.Event()
+
+    async def stall(request: httpx.Request) -> httpx.Response:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async with AsyncAnthropic(
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(stall))
+    ) as client:
+
+        async def fire(row: RoutineRow) -> None:
+            await run_turn(
+                anthropic=client,
+                agent_id=row.agent_id,
+                environment_id="env",
+                trigger_message=row.trigger_message,
+                tenant_id=row.tenant_id,
+                session_factory=db_session_factory,
+            )
+
+        dispatcher = await run_one_tick(
+            now=NOW,
+            sm=db_session_factory,
+            caps=NoCaps(),
+            fire=fire,
+            max_age=timedelta(minutes=15),
+            max_concurrent_fires=1,
+            dispatch_timeout_s=0.1,
+        )
+        await dispatcher.drain()
+        await dispatcher.close()
+    assert started.is_set()
+    await drain_outcomes()
+    async with db_session_factory() as session:
+        rows = await list_for_tenant(session, routine.tenant_id)
+        saved = await get_routine(session, routine.id, tenant_id=routine.tenant_id)
+    assert len(rows) == 1
+    assert rows[0].reason == TerminationReason.CEILING
+    assert rows[0].error_class == "TimeoutError"
+    assert saved is not None and saved.last_error is not None and "timeout" in saved.last_error

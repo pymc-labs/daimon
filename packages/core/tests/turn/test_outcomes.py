@@ -1,0 +1,148 @@
+"""Content-free outcomes are once-only and never put database I/O on a turn."""
+
+import asyncio
+from dataclasses import asdict
+
+import pytest
+from daimon.core._models import TurnOutcome
+from daimon.core.stores.turn_outcomes import list_for_tenant, record
+from daimon.core.turn.outcomes import TurnObservation, drain_outcomes, observe_turn, record_refusal
+from daimon.core.turn.termination import TerminationReason
+from daimon.testing.factories import make_tenant
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "scheduler", "headless"])
+async def test_refusal_written_once_and_no_content_columns(
+    db_session: AsyncSession, db_engine: AsyncEngine, platform: str
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    with observe_turn(
+        sm, tenant_id=tenant.id, platform=platform, channel_id="channel", thread_id="thread"
+    ):
+        record_refusal(
+            sm,
+            tenant_id=tenant.id,
+            platform=platform,
+            channel_id="channel",
+            reason=TerminationReason.ADMISSION_CAP_EXCEEDED,
+        )
+    await drain_outcomes()
+    async with sm() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert len(rows) == 1 and rows[0].reason == TerminationReason.ADMISSION_CAP_EXCEEDED
+    async with sm() as session, session.begin():
+        await record(session, rows[0])
+    async with sm() as session:
+        assert len(await list_for_tenant(session, tenant.id)) == 1
+    assert set(asdict(rows[0])) == set(TurnOutcome.__table__.columns.keys())
+    assert not {"content", "message", "prompt", "response", "error_message", "tool_input"} & set(
+        TurnOutcome.__table__.columns.keys()
+    )
+
+
+async def test_database_failure_is_logged_without_error_message_and_turn_does_not_wait(
+    db_session: AsyncSession, db_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import daimon.core.turn.outcomes as outcomes
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def failing_record(*args, **kwargs):
+        started.set()
+        await release.wait()
+        raise RuntimeError("PRIVATE VALUE MUST NOT BE LOGGED")
+
+    monkeypatch.setattr(outcomes, "record", failing_record)
+    observation = TurnObservation(async_sessionmaker(db_engine), tenant.id, "discord")
+    with capture_logs() as logs:
+        observation.finish(reason=TerminationReason.COMPLETED)
+        # finish returned while the DB operation has not even started.
+        assert not started.is_set()
+        await asyncio.wait_for(started.wait(), timeout=2)
+        release.set()
+        await drain_outcomes()
+    assert any(log["event"] == "turn.outcome_write_failed" for log in logs)
+    assert "PRIVATE VALUE" not in str(logs)
+
+
+async def test_error_between_pipeline_stages_is_recorded(
+    db_session: AsyncSession, db_engine: AsyncEngine
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    sm = async_sessionmaker(db_engine)
+    with (
+        pytest.raises(ValueError),
+        observe_turn(sm, tenant_id=tenant.id, platform="slack", origin="handoff"),
+    ):
+        raise ValueError("unpersisted message")
+    await drain_outcomes()
+    async with sm() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert len(rows) == 1
+    assert rows[0].reason == TerminationReason.UNKNOWN
+    assert rows[0].error_class == "ValueError" and rows[0].origin == "handoff"
+    assert "unpersisted" not in str(rows[0])
+
+
+async def test_writer_timeout_and_queue_pressure_do_not_hold_turns(
+    db_session: AsyncSession, db_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import daimon.core.turn.outcomes as outcomes
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    started = asyncio.Event()
+
+    async def hung_record(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(outcomes, "record", hung_record)
+    monkeypatch.setattr(outcomes, "_WRITE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(outcomes, "_MAX_PENDING", 1)
+    sm = async_sessionmaker(db_engine)
+    with capture_logs() as logs:
+        TurnObservation(sm, tenant.id, "discord").finish()
+        TurnObservation(sm, tenant.id, "slack").finish()
+        await asyncio.wait_for(drain_outcomes(), timeout=2)
+    assert started.is_set()
+    assert any(log["event"] == "turn.outcome_queue_full" for log in logs)
+    assert any(log.get("error_class") == "TimeoutError" for log in logs)
+
+
+def test_model_and_migration_reason_constraints_match_the_enum() -> None:
+    import ast
+    import re
+    from pathlib import Path
+
+    from sqlalchemy import CheckConstraint
+
+    expected = {reason.value for reason in TerminationReason}
+    model = next(
+        c
+        for c in TurnOutcome.__table__.constraints
+        if isinstance(c, CheckConstraint) and c.name == "ck_turn_outcomes_reason"
+    )
+    assert set(re.findall(r"'([^']+)'", str(model.sqltext))) == expected
+    migration = Path(__file__).parents[2] / "alembic/versions/0029_sys081_turn_outcomes.py"
+    tree = ast.parse(migration.read_text())
+    checks = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "CheckConstraint"
+        and any(
+            kw.arg == "name" and ast.literal_eval(kw.value) == "ck_turn_outcomes_reason"
+            for kw in node.keywords
+        )
+    ]
+    assert len(checks) == 1
+    assert set(re.findall(r"'([^']+)'", ast.literal_eval(checks[0].args[0]))) == expected

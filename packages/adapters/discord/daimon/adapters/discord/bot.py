@@ -88,6 +88,7 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn_keys import list_mounted_key_names
@@ -1145,6 +1146,13 @@ class DaimonBot(commands.Bot):
         cap = discord_settings.max_concurrent_turns_per_tenant
         count = self._inflight.get(tenant_id, 0)
         if not should_admit_turn(current_in_flight=count, cap=cap):
+            record_refusal(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="discord",
+                channel_id=str(thread_id),
+                thread_id=str(thread_id),
+            )
             log.info(
                 "turn.skipped.concurrency_shed",
                 tenant_id=str(tenant_id),
@@ -1281,6 +1289,13 @@ class DaimonBot(commands.Bot):
                 # Mirror of the Slack shed log — here the notice is a visible
                 # channel message, but the log keeps shed counts greppable
                 # across both adapters.
+                record_refusal(
+                    self.runtime.sessionmaker,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    channel_id=str(thread_id),
+                    thread_id=str(thread_id),
+                )
                 log.info(
                     "turn.skipped.concurrency_shed",
                     tenant_id=str(tenant_id),
@@ -1636,6 +1651,27 @@ class DaimonBot(commands.Bot):
         tenant_id: uuid.UUID,
         guild_id: str,
     ) -> None:
+        with observe_turn(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="discord",
+            channel_id=str(thread.parent_id),
+            thread_id=str(thread.id),
+            origin="handoff",
+        ):
+            return await self._run_continuation_turn_observed(
+                row, decision, thread=thread, tenant_id=tenant_id, guild_id=guild_id
+            )
+
+    async def _run_continuation_turn_observed(
+        self,
+        row: TaskContinuationRow,
+        decision: ContinuationDecision,
+        *,
+        thread: discord.Thread,
+        tenant_id: uuid.UUID,
+        guild_id: str,
+    ) -> None:
         """Run the destination agent's first turn for one dispatched continuation.
 
         Same admit -> bind_session -> run_prepared_turn path an ordinary
@@ -1937,6 +1973,33 @@ class DaimonBot(commands.Bot):
             await session.commit()
 
     async def _orchestrate(
+        self,
+        message: discord.Message,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        *,
+        content_override: str | None = None,
+        created_thread_ids: list[int] | None = None,
+        attachments_override: list[discord.Attachment] | None = None,
+        unprompted: bool = False,
+    ) -> None:
+        with observe_turn(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="discord",
+            channel_id=str(message.channel.id),
+        ):
+            return await self._orchestrate_observed(
+                message,
+                guild_id,
+                tenant_id,
+                content_override=content_override,
+                created_thread_ids=created_thread_ids,
+                attachments_override=attachments_override,
+                unprompted=unprompted,
+            )
+
+    async def _orchestrate_observed(
         self,
         message: discord.Message,
         guild_id: str,

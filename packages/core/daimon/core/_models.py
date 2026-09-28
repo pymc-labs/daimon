@@ -1916,3 +1916,47 @@ class TaskContinuation(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+
+class TurnOutcome(Base):
+    """Content-free terminal diagnostics; one UUID per logical turn."""
+
+    __tablename__ = "turn_outcomes"
+    __table_args__ = (
+        CheckConstraint(
+            "origin IN ('chat', 'routine', 'relay', 'handoff')", name="ck_turn_outcomes_origin"
+        ),
+        CheckConstraint(
+            "reason IN ('completed', 'interrupted', 'interrupt_timeout', "
+            "'connection_lost', 'upstream', 'rate_limited', 'session_terminated', "
+            "'mcp_degraded_empty', 'retrying_unsettled', 'requires_action', 'ceiling', "
+            "'recovery_cancelled', 'recovery_failed', 'reducer_bug', "
+            "'admission_balance_depleted', 'admission_cap_exceeded', 'admission_denied', "
+            "'admission_concurrency_shed', 'missing_config', 'resolver_miss', "
+            "'session_preparation_failed', 'session_busy', 'session_agent_mismatch', "
+            "'unknown')",
+            name="ck_turn_outcomes_reason",
+        ),
+        CheckConstraint("duration_ms >= 0", name="ck_turn_outcomes_duration"),
+        Index("ix_turn_outcomes_tenant_started", "tenant_id", "started_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str | None] = mapped_column(Text)
+    thread_id: Mapped[str | None] = mapped_column(Text)
+    agent_id: Mapped[str | None] = mapped_column(Text)
+    session_id: Mapped[str | None] = mapped_column(Text)
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    duration_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    recovered: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    error_class: Mapped[str | None] = mapped_column(Text)
+    release: Mapped[str] = mapped_column(Text, nullable=False)
+    usage_refs: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)

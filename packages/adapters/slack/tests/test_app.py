@@ -5818,3 +5818,39 @@ async def test_mention_from_a_user_outside_the_allowlist_is_refused_with_a_notic
     refusals = [b for b in post_bodies if "can start a turn" in str(b.get("text", ""))]
     assert refusals, f"expected the invoker refusal notice in-thread, got: {post_bodies}"
     assert refusals[0].get("thread_ts") == thread_ts
+
+
+async def test_thread_turn_boundary_persists_one_terminal_outcome(db_session, db_engine) -> None:
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import current_outcome, drain_outcomes
+    from daimon.core.turn.termination import TerminationReason
+    from daimon.testing.factories import make_tenant
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    tenant = await make_tenant(db_session, platform="slack")
+    await db_session.commit()
+    sm = async_sessionmaker(db_engine)
+    app, client = make_orchestrate_app(sm)
+
+    async def pipeline(*args, **kwargs):
+        observation = current_outcome.get()
+        assert observation is not None
+        observation.finish(reason=TerminationReason.UPSTREAM)
+
+    with patch.object(app, "_run_thread_turn_observed", side_effect=pipeline):
+        await app._run_thread_turn(
+            {},
+            channel="channel",
+            web_client=AsyncMock(),
+            tenant_id=tenant.id,
+            thread_id="thread",
+            team_id="team",
+        )
+    await drain_outcomes()
+    await client.close()
+    async with sm() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert len(rows) == 1
+    assert rows[0].reason == TerminationReason.UPSTREAM
+    assert rows[0].platform == "slack" and rows[0].channel_id == "channel"
+    assert rows[0].thread_id == "thread"

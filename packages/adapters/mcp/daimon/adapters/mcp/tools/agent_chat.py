@@ -72,6 +72,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _check_admission,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._pagination import Page
+from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
 from daimon.core.billing import BillingConfig
@@ -83,7 +84,9 @@ from daimon.core.scope import ScopeContext
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import ExemptReason
+from daimon.core.turn.termination import TerminationReason
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
@@ -300,6 +303,7 @@ async def _describe_agent_impl(
     )
 
 
+@observed_agent_turn
 async def _start_turn_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -416,6 +420,9 @@ async def _start_turn_impl(
             billing_exempt=billing_exempt,
         )
 
+    if (observation := current_outcome.get()) is not None:
+        observation.session_id = session.id
+        observation.agent_id = str(ma_agent.id)
     turn_started_at = now()
     sent = await runtime.client.beta.sessions.events.send(
         session.id,
@@ -435,6 +442,7 @@ async def _start_turn_impl(
     }
 
 
+@observed_agent_turn
 async def _continue_turn_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -453,7 +461,10 @@ async def _continue_turn_impl(
     used). ``_verify_agent_owns_session`` guards against cross-tenant AND
     same-tenant cross-agent handles (Tampering threat mitigation, WR-03).
     """
-    await _verify_agent_owns_session(runtime, auth, handle)
+    session = await _verify_agent_owns_session(runtime, auth, handle)
+    if (observation := current_outcome.get()) is not None:
+        observation.session_id = handle
+        observation.agent_id = str(session.agent.id)
     turn_started_at = now()
     sent = await runtime.client.beta.sessions.events.send(
         handle,
@@ -763,6 +774,7 @@ async def _deliver_turn_charts_impl(
     return result
 
 
+@observed_agent_turn
 async def _ask_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -789,6 +801,8 @@ async def _ask_impl(
     else:
         started = await _continue_turn_impl(runtime, auth, handle, message, now=now)
     handle = started["handle"]
+    if (observation := current_outcome.get()) is not None:
+        observation.session_id = handle
     turn_event_id = started["turn_event_id"]
     turn_started_at = dt.datetime.fromisoformat(started["turn_started_at"])
     deadline = clock() + timeout_seconds
@@ -800,6 +814,8 @@ async def _ask_impl(
         # transient status keeps polling until the deadline instead of
         # failing a turn that admission already billed.
         if current.status == "terminated":
+            if (observation := current_outcome.get()) is not None:
+                observation.finish(reason=TerminationReason.SESSION_TERMINATED)
             raise ToolError(
                 f"Daimon turn reached terminal status {current.status!r}; "
                 f"resume or inspect events with handle {handle}"
@@ -839,6 +855,8 @@ async def _ask_impl(
                     message=final_text,
                     store=runtime.artifact_store,
                 )
+                if (observation := current_outcome.get()) is not None:
+                    observation.finish(reason=TerminationReason.COMPLETED)
                 return AskResult(
                     handle=handle,
                     message=delivery.message,
@@ -848,6 +866,8 @@ async def _ask_impl(
 
         remaining = deadline - clock()
         if remaining <= 0:
+            if (observation := current_outcome.get()) is not None:
+                observation.finish(reason=TerminationReason.CEILING)
             raise ToolError(
                 f"Daimon turn did not become idle with a reply within "
                 f"{timeout_seconds:g} seconds; resume with handle {handle}"

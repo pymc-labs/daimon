@@ -341,3 +341,13 @@ For a single finished turn there is `get_turn_cost` in
 that turn's events into a raw pre-markup figure and returns it as a decimal
 string — never a float, and `None` rather than `0` for an unpriced model,
 because zero would falsely claim the turn was free.
+
+### Turn outcomes
+
+`turn_outcomes` records terminal reasons and timings separately from billing. Its
+content-free usage references join `usage_events` on `(managed_session_id,
+event_id)`; one outcome may refer to multiple model calls or recovered sessions.
+Refused turns have no usage references. The best-effort outcome writer never
+changes a balance, cap, price or ledger debit, and a missing diagnostic row does
+not mean no model work was billed. See the turn-outcome contract in
+[architecture](architecture.md#durable-turn-outcomes).

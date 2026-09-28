@@ -386,6 +386,9 @@ async def db_clean(
     try:
         yield
     finally:
+        from daimon.core.turn.outcomes import drain_outcomes
+
+        await drain_outcomes()
         _last_db_test = item.nodeid
 
 

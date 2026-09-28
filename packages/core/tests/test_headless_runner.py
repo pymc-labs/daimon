@@ -180,7 +180,11 @@ def _build_client(
 
 
 @pytest.mark.parametrize("origin", ["chat", "routine", "relay", "handoff"])
-async def test_run_turn_returns_last_message_text(origin) -> None:
+async def test_run_turn_returns_last_message_text(origin, db_session, db_session_factory) -> None:
+    from daimon.testing.factories import make_tenant
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
     events: list[BetaManagedAgentsSessionEvent] = [
         BetaManagedAgentsAgentMessageEvent(
             id="evt_msg_1",
@@ -204,12 +208,26 @@ async def test_run_turn_returns_last_message_text(origin) -> None:
         environment_id="env_x",
         trigger_message="hi",
         origin=origin,
+        tenant_id=tenant.id,
+        session_factory=db_session_factory,
     )
 
     assert tail == "hello world", "run_turn should return the agent.message text"
     from daimon.core.context_prompt import context_prompt
 
     assert sent[0]["events"][0]["content"][0]["text"] == context_prompt(origin) + "hi"
+
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
+    async with db_session_factory() as session:
+        outcomes = await list_for_tenant(session, tenant.id)
+    assert len(outcomes) == 1
+    assert outcomes[0].origin == origin
+    assert outcomes[0].agent_id == "agent_x"
+    assert outcomes[0].reason == "completed"
+    assert "hello world" not in str(outcomes[0])
 
 
 async def test_tail_truncated_at_1000() -> None:

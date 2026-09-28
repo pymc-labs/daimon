@@ -21,6 +21,7 @@ from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.config import load_settings
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.driver import run_turn
+from daimon.core.turn.outcomes import current_outcome, observe_turn
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
 
@@ -72,6 +73,19 @@ async def run_conversation(
     user_message: str,
     deadline: datetime | None = None,
 ) -> int:
+    with observe_turn(rt.sessionmaker, tenant_id=None, platform="cli"):
+        return await run_conversation_observed(
+            rt=rt, session_id=session_id, user_message=user_message, deadline=deadline
+        )
+
+
+async def run_conversation_observed(
+    *,
+    rt: CliRuntime,
+    session_id: str,
+    user_message: str,
+    deadline: datetime | None = None,
+) -> int:
     turn_id = f"turn_{uuid.uuid4().hex[:12]}"
     lifecycle = NdjsonLifecycle(stdout=sys.stdout, session_id=session_id, turn_id=turn_id)
     cancel = asyncio.Event()
@@ -95,6 +109,8 @@ async def run_conversation(
             deadline=effective_deadline,
         )
     except anthropic.APIError as err:
+        if (observation := current_outcome.get()) is not None:
+            observation.finish(error=err)
         _emit_failed_terminal(
             lifecycle,
             session_id=session_id,
@@ -103,6 +119,8 @@ async def run_conversation(
         )
         return 1
 
+    if (observation := current_outcome.get()) is not None:
+        observation.finish(state=state)
     return 0 if state.error is None else 1
 
 

@@ -102,6 +102,7 @@ from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, 
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.wizard.answers import format_answer_block
@@ -325,6 +326,25 @@ async def run_wizard_submit_turn(
     spec: WizardSpec,
     state: WizardState,
 ) -> None:
+    with observe_turn(
+        bot.runtime.sessionmaker,
+        tenant_id=row.tenant_id,
+        platform="discord",
+        channel_id=str(interaction.channel_id),
+    ):
+        return await run_wizard_submit_turn_observed(
+            bot=bot, interaction=interaction, row=row, spec=spec, state=state
+        )
+
+
+async def run_wizard_submit_turn_observed(
+    *,
+    bot: DaimonBot,
+    interaction: discord.Interaction[commands.Bot],
+    row: WizardSessionRow,
+    spec: WizardSpec,
+    state: WizardState,
+) -> None:
     """The background task `WizardSubmitButton.callback` spawns after winning
     the claim. An ordinary caller of the shared admission/session-binding/run
     chokepoint (`daimon.core.turn.admission.admit`,
@@ -376,6 +396,13 @@ async def run_wizard_submit_turn(
         if not should_admit_turn(
             current_in_flight=count, cap=discord_settings.max_concurrent_turns_per_tenant
         ):
+            record_refusal(
+                bot.runtime.sessionmaker,
+                tenant_id=row.tenant_id,
+                platform="discord",
+                channel_id=parent_channel_id,
+                thread_id=thread_id,
+            )
             _log.info("wizard_submit.skipped.over_cap", tenant_id=str(row.tenant_id))
             await channel.send(_OVER_CAP)
             return

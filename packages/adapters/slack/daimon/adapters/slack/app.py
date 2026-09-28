@@ -148,6 +148,7 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
@@ -1183,9 +1184,16 @@ class SlackApp:
         count = self._inflight.get(tenant_id, 0)
         if not should_admit_turn(current_in_flight=count, cap=cap):
             # The rejection below is an ephemeral — it appears in no channel
-            # history and no API read. This log line is the ONLY server-side
+            # history and no API read. The structured log and outcome row are the server-side
             # trace a shed turn leaves; without it a shed mention is
             # indistinguishable from a dropped event.
+            record_refusal(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                channel_id=channel,
+                thread_id=thread_id,
+            )
             log.info(
                 "turn.skipped.concurrency_shed",
                 tenant_id=str(tenant_id),
@@ -1363,6 +1371,36 @@ class SlackApp:
                 )
 
     async def _run_thread_turn(
+        self,
+        event: dict[str, Any],
+        *,
+        channel: str,
+        web_client: AsyncWebClient,
+        tenant_id: uuid.UUID,
+        thread_id: str,
+        team_id: str,
+        content_override: str | None = None,
+        files: list[SlackFile] | None = None,
+    ) -> None:
+        with observe_turn(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="slack",
+            channel_id=channel,
+            thread_id=thread_id,
+        ):
+            return await self._run_thread_turn_observed(
+                event,
+                channel=channel,
+                web_client=web_client,
+                tenant_id=tenant_id,
+                thread_id=thread_id,
+                team_id=team_id,
+                content_override=content_override,
+                files=files,
+            )
+
+    async def _run_thread_turn_observed(
         self,
         event: dict[str, Any],
         *,
@@ -2213,6 +2251,33 @@ class SlackApp:
                         await _clear_session.commit()
 
     async def _run_continuation_turn(
+        self,
+        row: TaskContinuationRow,
+        seed_user_message: str,
+        *,
+        web_client: AsyncWebClient,
+        tenant_id: uuid.UUID,
+        channel: str,
+        thread_id: str,
+    ) -> None:
+        with observe_turn(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="slack",
+            channel_id=channel,
+            thread_id=thread_id,
+            origin="handoff",
+        ):
+            return await self._run_continuation_turn_observed(
+                row,
+                seed_user_message,
+                web_client=web_client,
+                tenant_id=tenant_id,
+                channel=channel,
+                thread_id=thread_id,
+            )
+
+    async def _run_continuation_turn_observed(
         self,
         row: TaskContinuationRow,
         seed_user_message: str,

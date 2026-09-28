@@ -18,6 +18,8 @@ from daimon.core.stores.routines import (
     record_result,
     skip_slots_during_fire,
 )
+from daimon.core.turn.outcomes import TurnObservation
+from daimon.core.turn.termination import TerminationReason
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -159,6 +161,9 @@ async def run_one_tick(
                 log.exception("caps.is_over_cap failed", routine_id=str(row.id))
                 continue
         if over:
+            TurnObservation(
+                sm, row.tenant_id, "scheduler", origin="routine", agent_id=row.agent_id
+            ).finish(reason=TerminationReason.ADMISSION_CAP_EXCEEDED)
             try:
                 async with sm() as s, s.begin():
                     await record_result(s, row.id, tail=None, error="cap_exceeded")
@@ -176,25 +181,33 @@ async def run_one_tick(
         # fire — claim/advance/record-result and the turn body — carries a fresh
         # rid and the row's tenant_id. Unbind in finally so the context is clean
         # even on the error paths.
+        observation = TurnObservation(
+            sm, row.tenant_id, "scheduler", origin="routine", agent_id=row.agent_id
+        )
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid, tenant_id=str(row.tenant_id))
         try:
             async with sem:
                 try:
-                    await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
+                    with observation.activate():
+                        await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
                 except TimeoutError as err:
+                    observation.finish(error=err, reason=TerminationReason.CEILING)
                     # Capture to Sentry, then keep the existing swallow —
                     # sibling tasks continue and record_result still runs.
                     capture_exception_with_scope(err)
                     await _record_fire_error(sm, row.id, f"timeout: exceeded {dispatch_timeout_s}s")
                 except Exception as err:
+                    observation.finish(error=err)
                     capture_exception_with_scope(err)
                     await _record_fire_error(sm, row.id, f"{type(err).__name__}: {err}"[:500])
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as err:
+            observation.finish(error=err)
             # Includes cancellation while waiting for a dispatch slot.
             await _record_fire_error(sm, row.id, "scheduler_shutdown")
             raise
         finally:
+            observation.finish(reason=TerminationReason.UNKNOWN)
             try:
                 async with sm() as session, session.begin():
                     await skip_slots_during_fire(

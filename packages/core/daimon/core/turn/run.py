@@ -50,6 +50,7 @@ from daimon.core.turn.lifecycle import (
     TurnLifecycle,
     acknowledge,
 )
+from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import Billed
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
@@ -481,6 +482,63 @@ async def run_prepared_turn(
     deadline: datetime | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> RunOutcome:
+    observation = (
+        prepared.admission.observation
+        or current_outcome.get()
+        or TurnObservation(deps.sessionmaker, tenant_id, platform, thread_id=thread_id)
+    )
+    observation.thread_id = thread_id
+    observation.account_id = prepared.admission.account_id
+    observation.agent_id = prepared.admission.agent.id
+    observation.session_id = prepared.ma_session_id
+    observation.origin = origin
+    try:
+        with observation.activate():
+            result = await run_prepared_turn_impl(
+                deps,
+                prepared,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                external_user_id=external_user_id,
+                user_message=user_message,
+                lifecycle=lifecycle,
+                cancel=cancel,
+                reseed_user_message=reseed_user_message,
+                recovery_lifecycle=recovery_lifecycle,
+                origin=origin,
+                image_blocks=image_blocks,
+                render_interval_s=render_interval_s,
+                deadline=deadline,
+                now=now,
+            )
+    except BaseException as exc:
+        observation.finish(error=exc)
+        raise
+    observation.session_id = result.ma_session_id
+    observation.finish(state=result.state, recovered=result.recovered)
+    return result
+
+
+async def run_prepared_turn_impl(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    external_user_id: str,
+    user_message: str,
+    lifecycle: TurnLifecycle,
+    cancel: asyncio.Event,
+    reseed_user_message: Callable[[], Awaitable[str]],
+    recovery_lifecycle: Callable[[asyncio.Event], TurnLifecycle],
+    origin: TurnContext = "chat",
+    image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
+    render_interval_s: float = 2.0,
+    deadline: datetime | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
     signature, recover exactly once: mark the stale mapping dead, create a
     fresh session + mapping row, rebind the recorder to the NEW session id,
@@ -689,10 +747,9 @@ async def run_prepared_turn(
                     mirror_task.cancel()
                     with contextlib.suppress(BaseException):
                         await mirror_task
-        except Exception:
-            # The first attempt's reason (a dead-session upstream error) would
-            # tell the person their workspace was kept; it is gone, and so is
-            # the replacement that was meant to take over.
+        except Exception as exc:
+            if (observation := current_outcome.get()) is not None:
+                observation.finish(error=exc, reason=TerminationReason.RECOVERY_FAILED)
             await first_attempt.flush_held_failure(TerminationReason.RECOVERY_FAILED)
             raise
 
