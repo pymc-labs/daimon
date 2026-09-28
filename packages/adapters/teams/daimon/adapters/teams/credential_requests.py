@@ -27,7 +27,6 @@ from daimon.adapters.teams.card_actions import (
     dialog,
     dialog_message,
     error_text,
-    guarded,
     submitted_fields,
 )
 from daimon.adapters.teams.identity import DENIED
@@ -164,9 +163,13 @@ def oauthdialog(row: CredentialRequestRow, url: str) -> TaskModuleResponse:
 
 
 async def _guarded(work: Awaitable[TaskModuleResponse]) -> TaskModuleResponse:
-    """Invoke boundary. The submit payload is not logged, only the error."""
-    failed = dialog_message(FAILED)
-    return await guarded(work, failed, "teams.credential.failed", errors=SENDING_PANEL_ERRORS)
+    """Invoke boundary. The failing frames hold the submitted value, so only the
+    error's class name is recorded: no traceback, no Sentry event."""
+    try:
+        return await work
+    except SENDING_PANEL_ERRORS as err:
+        log.error("teams.credential.failed", err_type=type(err).__name__)
+        return dialog_message(FAILED)
 
 
 class TeamsCredentialRequests:

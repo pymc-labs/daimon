@@ -21,6 +21,7 @@ from daimon.adapters.teams import credential_requests as module
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.mcp_oauth.discovery import McpProbe
@@ -217,6 +218,27 @@ async def test_an_env_value_is_saved_once_and_resumes_the_work(
     assert "✅" in _edits(fake)[-1], "the card becomes the receipt"
     dispatch.assert_awaited_once_with(TENANT, CONVERSATION_ID, SERVICE_URL)
     assert SECRET not in json.dumps([r.body for r in fake.requests]) + repr(logs)
+
+
+async def test_a_failed_submit_reports_nothing_that_could_carry_the_value(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    row = await _request(db_session_factory, account_id)
+    boom = AsyncMock(side_effect=DaimonError("boom"))
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch.object(module, "find_agent_by_derived_uuid", boom),
+        patch("daimon.adapters.teams.card_actions.capture_exception_with_scope") as sentry,
+    ):
+        async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
+            failed = await post_activity(service, _submit(row.token))
+    assert failed["task"]["value"] == module.FAILED
+    sentry.assert_not_called()
+    assert logs[-1] == {
+        "event": "teams.credential.failed",
+        "err_type": "DaimonError",
+        "log_level": "error",
+    }
 
 
 async def test_a_member_cannot_replace_a_key_on_a_managed_agent(
