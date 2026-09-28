@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+import jwt
+import pytest
 from daimon.adapters.teams.http_service import (
     MAX_TEAMS_HTTP_BODY_BYTES,
     TeamsHttpService,
@@ -107,6 +109,35 @@ async def test_api_messages_is_sdk_owned_and_authenticated(
     async with asgi_lifespan(service.app):
         response = await _request(service, "POST", "/api/messages", json=make_message_activity())
     assert response.status_code in (200, 201, 202), response.text
+
+
+@pytest.mark.parametrize(
+    ("issuer", "refused"),
+    [
+        ("https://login.microsoftonline.com/any-tenant/v2.0", True),
+        ("https://sts.windows.net/t/", True),
+        ("https://api.botframework.com", False),
+    ],
+)
+async def test_only_a_bot_framework_token_reaches_the_sdk(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    entra_env: None,
+    stub_bot_token: None,
+    issuer: str,
+    refused: bool,
+) -> None:
+    """The SDK would take any tenant's Entra token and skip the serviceUrl check."""
+    token = jwt.encode({"iss": issuer, "aud": "app-id"}, "k" * 32, algorithm="HS256")
+    service = _service(db_session_factory)
+    async with asgi_lifespan(service.app):
+        response = await _request(
+            service,
+            "POST",
+            "/api/messages",
+            json=make_message_activity(),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert (response.status_code == 401) is refused, response.text
 
 
 async def test_unauthenticated_request_is_rejected_by_sdk(

@@ -9,7 +9,8 @@ The Teams adapter answers in 1:1 chats and in channel threads where it is
 Discord (gateway) and Slack (Socket Mode) dial out; Teams does not. The
 adapter runs a FastAPI listener on `DAIMON_TEAMS__PORT` (default `3978`). The
 Microsoft SDK owns `POST /api/messages` and validates the Bot Framework JWT
-before daimon code runs. The same listener serves `/healthz` and `/readyz`.
+before daimon code runs; tokens from any other issuer (such as Entra ID) are
+refused with 401 first. The same listener serves `/healthz` and `/readyz`.
 `DAIMON_TEAMS__ENABLED=false` makes `/api/messages` answer 503, and bodies over
 64 KiB are refused before parsing. The `teams` compose service (opt-in `teams`
 profile) publishes the port; the messaging endpoint must reach it.

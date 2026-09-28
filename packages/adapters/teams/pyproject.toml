@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.27",
     "microsoft-teams-apps>=2.1,<2.2",
     "pillow>=11,<13",
+    "pyjwt>=2.8",
     "sentry-sdk>=2.61",
     "sqlalchemy[asyncio]>=2",
     "structlog>=24",

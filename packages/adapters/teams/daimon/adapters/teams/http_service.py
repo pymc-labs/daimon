@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
+import jwt
 import structlog
 from daimon.adapters.teams import (
     billing_panel,
@@ -33,6 +34,7 @@ from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from microsoft_teams.api import MessageSubmitActionInvokeActivity
+from microsoft_teams.api.auth.cloud_environment import PUBLIC
 from microsoft_teams.apps import ActivityContext, App, FastAPIAdapter
 from microsoft_teams.common import Client, ClientOptions
 from sqlalchemy.exc import SQLAlchemyError
@@ -42,8 +44,28 @@ MAX_TEAMS_HTTP_BODY_BYTES = 64 * 1024
 log = structlog.get_logger(__name__)
 
 
+def _foreign_bearer(scope: Scope) -> bool:
+    """A bearer token some issuer other than Bot Framework signed.
+
+    The SDK also accepts Entra tokens (for Agent ID bots), checked against the
+    token's own tenant and without the `serviceurl` claim. A bot never gets one.
+    """
+    header = dict(scope["headers"]).get(b"authorization", b"").decode("latin-1")
+    token = header.removeprefix("Bearer ")
+    if not token:
+        return False
+    try:
+        claims = jwt.decode(token, options={"verify_signature": False})
+    except jwt.InvalidTokenError:
+        return False  # The SDK rejects it.
+    return claims.get("iss") != PUBLIC.token_issuer
+
+
 class _IngressGuard:
-    """Guards `/api/messages` before SDK parsing or auth: 503 while disabled, 413 when oversize."""
+    """Guards `/api/messages` before SDK parsing or auth.
+
+    503 while disabled, 401 for a non-Bot-Framework token, 413 when oversize.
+    """
 
     def __init__(self, app: ASGIApp, *, enabled: bool) -> None:
         self._app = app
@@ -56,6 +78,9 @@ class _IngressGuard:
         if not self._enabled:
             response = JSONResponse({"error": "Teams ingress disabled"}, status_code=503)
             await response(scope, receive, send)
+            return
+        if _foreign_bearer(scope):
+            await JSONResponse({"error": "Unauthorized"}, status_code=401)(scope, receive, send)
             return
         messages: list[Message] = []
         size = 0
