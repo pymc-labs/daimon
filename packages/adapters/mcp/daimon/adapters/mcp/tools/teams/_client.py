@@ -1,4 +1,4 @@
-"""Bot Framework REST client for Teams: token, send, update, thread, membership.
+"""Bot Framework REST client for Teams: token, send, update, cards, thread, membership.
 
 Plain httpx, so the MCP process needs no Teams SDK. The token comes from the
 client-credentials flow against the deployment's one Entra tenant and is cached
@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import httpx
 from daimon.core.config import TeamsSettings
+from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
 from pydantic import BaseModel, Field
 
 #: The Teams SDK's default service URL for proactive sends.
@@ -50,6 +51,13 @@ class _Member(BaseModel):
 
 def _message(text: str) -> dict[str, object]:
     return {"type": "message", "text": text, "textFormat": "markdown", "entities": [_AI_LABEL]}
+
+
+def _card_message(card: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "type": "message",
+        "attachments": [{"contentType": ADAPTIVE_CARD_TYPE, "content": card}],
+    }
 
 
 class TeamsBotClient:
@@ -110,12 +118,30 @@ class TeamsBotClient:
 
     async def send(self, conversation_id: str, text: str) -> str:
         """Post a markdown message; returns its activity id."""
-        response = await self._request("POST", f"/{conversation_id}/activities", _message(text))
+        return await self._send(conversation_id, _message(text))
+
+    async def send_card(self, conversation_id: str, card: Mapping[str, object]) -> str:
+        """Post one Adaptive Card; returns its activity id."""
+        return await self._send(conversation_id, _card_message(card))
+
+    async def _send(self, conversation_id: str, body: dict[str, object]) -> str:
+        response = await self._request("POST", f"/{conversation_id}/activities", body)
         return _Sent.model_validate_json(response.content).id
 
     async def update(self, conversation_id: str, activity_id: str, text: str) -> None:
         """Replace a message the bot posted."""
-        body = {**_message(text), "id": activity_id}
+        await self._update(conversation_id, activity_id, _message(text))
+
+    async def update_card(
+        self, conversation_id: str, activity_id: str, card: Mapping[str, object]
+    ) -> None:
+        """Replace a card the bot posted."""
+        await self._update(conversation_id, activity_id, _card_message(card))
+
+    async def _update(
+        self, conversation_id: str, activity_id: str, body: dict[str, object]
+    ) -> None:
+        body = {**body, "id": activity_id}
         await self._request("PUT", f"/{conversation_id}/activities/{activity_id}", body)
 
     async def create_thread(self, channel_id: str, text: str) -> tuple[str, str]:

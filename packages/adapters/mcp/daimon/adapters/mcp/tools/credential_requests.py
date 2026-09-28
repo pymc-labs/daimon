@@ -36,6 +36,10 @@ from daimon.adapters.mcp.tools.slack._credential_button import (
 from daimon.adapters.mcp.tools.slack._credential_button import (
     edit_card_replaced as edit_slack_card_replaced,
 )
+from daimon.adapters.mcp.tools.teams._send import (
+    _post_teams_credential_card_impl,  # pyright: ignore[reportPrivateUsage]
+    edit_teams_card_state,
+)
 from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.credential_requests import (
     DEFAULT_TTL,
@@ -319,6 +323,8 @@ async def _mint_and_post(
 ) -> RequestCredentialResult:
     # A tool-supplied channel cannot redirect a private-input request.
     channel_id = origin.parent_channel_id if auth.platform == "slack" else origin.thread_id
+    if auth.platform == "teams" and runtime.teams_client is None:
+        raise ToolError("Teams tools are not configured on this server")
     token = mint_request_token()
     now = datetime.now(UTC)
     expires_at = now + DEFAULT_TTL
@@ -348,7 +354,7 @@ async def _mint_and_post(
             origin_thread_id=origin.thread_id,
             now=now,
         )
-        await create_credential_request(
+        row = await create_credential_request(
             session,
             token=token,
             kind=kind,
@@ -387,6 +393,8 @@ async def _mint_and_post(
                 mcp_server_url=mcp_server_url,
                 branch=branch,
             )
+        elif auth.platform == "teams":
+            message_id = await _post_teams_credential_card_impl(runtime, auth, row=row)
         else:
             message_id = await _post_credential_button_impl(
                 runtime,
@@ -416,6 +424,8 @@ async def _mint_and_post(
     for old in retired:
         if auth.platform == "slack":
             await edit_slack_card_replaced(runtime, auth, row=old)
+        elif auth.platform == "teams":
+            await edit_teams_card_state(runtime, row=old, state="replaced")
         else:
             await edit_discord_card_replaced(runtime, row=old)
     return RequestCredentialResult(
@@ -449,6 +459,11 @@ async def _request_agent_key_impl(
         if named is not None:
             raise ToolError(
                 f"You named one key ({named}); pass it as `key` instead of requesting a file."
+            )
+        if auth.platform == "teams":
+            # A Teams dialog has no file input, so the upload form cannot exist here.
+            raise ToolError(
+                "Teams cannot take a .env file upload. Request each key by name with `key`."
             )
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     agent_id, ma_agent = await _resolve_agent_uuid(
@@ -695,7 +710,7 @@ async def _request_repo_binding_impl(
 
 
 def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def request_agent_key(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -745,7 +760,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             expected_ma_agent_id=expected_ma_agent_id,
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def request_mcp_token(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -794,7 +809,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
             expected_ma_agent_id=expected_ma_agent_id,
         )
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def request_mcp_oauth(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,

@@ -1,9 +1,12 @@
-"""Teams send_message, create_thread and the GitHub App install link.
+"""Teams send_message, create_thread, the GitHub App link and credential cards.
 
-Text only. The bot is the sender, so a caller could otherwise speak through it
-in a conversation they cannot see: the requester's Entra id must be on the
-target's roster (the channel's, for a thread), and any failure to confirm that
-refuses the post, mirroring the Slack access check.
+The bot is the sender, so a caller could otherwise speak through it in a
+conversation they cannot see: the requester's Entra id must be on the target's
+roster (the channel's, for a thread), and any failure to confirm that refuses
+the post, mirroring the Slack access check.
+
+The credential-request card is rendered by `daimon.core.posted_controls`, the
+same renderer the Teams adapter edits it with once the dialog is submitted.
 """
 
 from __future__ import annotations
@@ -11,13 +14,24 @@ from __future__ import annotations
 import re
 
 import httpx
+import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
+from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_app_auth import build_app_install_url
+from daimon.core.posted_controls import CardState, RefusalReason
+from daimon.core.posted_controls.teams_card import (
+    build_adaptive_card,
+    card_conversation_id,
+    card_for_request,
+)
+from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.teams_threads import conversation_of
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
+
+_log = structlog.get_logger()
 
 # Teams caps a message at about 28 KB; 6,000 four-byte characters stay under it.
 _MAX_CONTENT_CHARS = 6_000
@@ -133,3 +147,43 @@ async def _post_teams_app_install_link_impl(  # pyright: ignore[reportUnusedFunc
     )
     row = await _teams_send_message_impl(runtime, auth, channel_id=channel_id, content=text)
     return row.activity_id
+
+
+async def _post_teams_credential_card_impl(  # pyright: ignore[reportUnusedFunction]  # used by tools/credential_requests.py
+    runtime: McpRuntime, auth: AuthIdentity, *, row: CredentialRequestRow
+) -> str:
+    """Post the `requested` card into the request's origin conversation. Returns its id."""
+    conversation_id = card_conversation_id(row.channel_id)
+    client = await _authorize(runtime, auth, conversation_id)
+    card = build_adaptive_card(card_for_request(row, state="requested"), token=row.token)
+    try:
+        return await client.send_card(conversation_id, card)
+    except (httpx.HTTPError, ValueError) as err:
+        raise _post_failed(err) from err
+
+
+async def edit_teams_card_state(
+    runtime: McpRuntime,
+    *,
+    row: CredentialRequestRow,
+    state: CardState,
+    outcome: ConfigurationChange | None = None,
+    refusal: RefusalReason | None = None,
+) -> None:
+    """Edit one posted card into `state`. Never raises.
+
+    The outcome is already recorded when this runs (a newer form replaced the
+    card, or an OAuth callback finished), so a failed edit costs feedback only.
+    """
+    client = runtime.teams_client
+    if client is None or row.posted_message_id is None:
+        return
+    card = card_for_request(row, state=state, outcome=outcome, refusal=refusal)
+    try:
+        await client.update_card(
+            card_conversation_id(row.channel_id), row.posted_message_id, build_adaptive_card(card)
+        )
+    except (httpx.HTTPError, ValueError) as err:
+        _log.warning(
+            "posted_card.edit_failed", kind=row.kind, state=state, err_type=type(err).__name__
+        )
