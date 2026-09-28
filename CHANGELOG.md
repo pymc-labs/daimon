@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Microsoft Teams adapter: answers in 1:1 chats and when @mentioned in
+  channels, with an in-place status card, author-only Cancel, per-thread
+  queueing, feedback buttons and restart recovery. The configured Entra
+  organisation is provisioned at boot. Builds on #220 by @jchu96. See
+  `docs/teams.md`.
+- Platform-neutral DM tenant routing in core: a direct message resolves to the
+  one tenant the sender shares with the bot, or asks the adapter for a picker
+  and remembers the choice. Only Teams uses it so far.
 - Added durable initial-card intent rows and bounded Discord and Slack history
   lookup. Both adapters now commit an intent before posting, record the
   returned message ID, and reconcile unresolved cards after a restart. A

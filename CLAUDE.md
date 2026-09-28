@@ -1,7 +1,7 @@
 # Working in this repo
 
 Layout: `packages/core` (schema, stores, turn pipeline), `packages/adapters/*`
-(cli, discord, mcp, scheduler, slack — one platform each, never importing one
+(cli, discord, mcp, scheduler, slack, teams — one platform each, never importing one
 another), `packages/mux`, `packages/testing`, `apps/*` (standalone notebook and
 report hosts), `defaults/` (seeded agents, environments, skills), `docs/`,
 `scripts/`. `CONTRIBUTING.md` has the full tour, the dependency rules and the

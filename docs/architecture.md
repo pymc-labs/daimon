@@ -20,6 +20,7 @@ flowchart TB
         direction LR
         Discord
         Slack
+        Teams
         MCP
         Scheduler
         CLI
@@ -50,6 +51,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.core` | `packages/core/daimon/core/` | Schema and migrations, stores, MA helpers, the turn pipeline. Imports no adapter. |
 | `daimon.adapters.discord` | `packages/adapters/discord/` | Discord I/O, rendering, permissions, slash commands. |
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
+| `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
@@ -64,7 +66,7 @@ and CI:
 | Contract | Forbids |
 | --- | --- |
 | Core must not import adapters | `daimon.core` → `daimon.adapters` |
-| Adapters must not import each other | any of cli, mcp, discord, scheduler, slack → another |
+| Adapters must not import each other | any of cli, mcp, discord, scheduler, slack, teams → another |
 | ORM module is private to stores and defaults | anything but `daimon.core.stores.**` / `daimon.core.defaults.**` → `daimon.core._models` |
 | Core must not import testing | `daimon.core` → `daimon.testing` |
 | CLI admin commands and run must not import each other | `daimon.adapters.cli.commands` ⟂ `daimon.adapters.cli.run` |
@@ -88,7 +90,7 @@ credential, whatever a future contributor is tempted to do inside it.
 
 ## How a message becomes a turn
 
-Discord and Slack run the same two-stage chokepoint in `daimon.core.turn`.
+Discord, Slack and Teams run the same two-stage chokepoint in `daimon.core.turn`.
 The staging is deliberate — neither stage returns a boolean, both raise typed
 errors, so an adapter cannot forget a gate.
 
@@ -168,11 +170,17 @@ meters nothing and logs why.
 
 ## Tenancy and isolation
 
-One Discord guild or one Slack workspace is one tenant. The tenant UUID is
+One Discord guild, Slack workspace or Teams (Entra) organisation is one tenant. The tenant UUID is
 derived, not allocated: `derive_tenant_uuid(platform, workspace_id)` in
 `packages/core/daimon/core/ma_identity.py` is a UUID5 under a frozen
 namespace, so the same workspace maps to the same tenant across database
 resets and processes.
+
+A direct message names no workspace. `packages/core/daimon/core/dm_routing.py`
+picks its tenant before `admit()`: the adapter passes the workspaces the sender
+shares with the bot, one live match is used directly, and several raise
+`DmTenantSelectionRequired` for the adapter to render a picker. The choice is
+stored per platform user until they switch.
 
 Isolation is enforced in two places at once.
 
