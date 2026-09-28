@@ -35,7 +35,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.continuity.messages import render_current_work_must_finish
 from daimon.core.errors import DaimonError
 from daimon.core.setup_conversations import get_setup_agent
-from daimon.core.stores.domain import ContinuationReason, CredentialRequestRow
+from daimon.core.stores.domain import ChatPlatform, ContinuationReason, CredentialRequestRow
 from daimon.core.stores.task_continuations import (
     claim_continuation as _claim_continuation_row,
 )
@@ -113,7 +113,7 @@ class ContinuationRequest(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     tenant_id: uuid.UUID
-    platform: Literal["discord", "slack"]
+    platform: ChatPlatform
     parent_channel_id: str
     thread_id: str
     requester_account_id: uuid.UUID
@@ -142,7 +142,7 @@ class ContinuationDecision(BaseModel):
 
 
 def build_input_continuation(
-    row: CredentialRequestRow, *, platform: Literal["discord", "slack"]
+    row: CredentialRequestRow, *, platform: ChatPlatform
 ) -> ContinuationRequest | None:
     """The continuation a consumed private-input request owes, or None.
 
