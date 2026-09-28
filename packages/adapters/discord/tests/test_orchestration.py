@@ -884,6 +884,11 @@ class TestSetupHook:
         feedback_reactions_mod = types.ModuleType("daimon.adapters.discord.feedback_reactions")
         feedback_reactions_mod.FeedbackReactionCog = mock_feedback_reaction_cog  # type: ignore[attr-defined]
 
+        # Imported BEFORE patch.dict: it drops any module first imported inside
+        # the block when it exits, so importing DirectMessageCog afterwards would
+        # load a second copy whose class the bot's instance isn't an instance of.
+        from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+
         add_cog_calls: list[object] = []
 
         async def tracking_add_cog(cog: object, **kwargs: object) -> None:
@@ -905,8 +910,6 @@ class TestSetupHook:
             },
         ):
             await bot.setup_hook()
-
-        from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 
         assert len(add_cog_calls) == 8, "setup_hook should add exactly 8 Cogs"
         assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
