@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 import pytest
+from daimon.adapters.teams.attachments import InboundFile
 from daimon.adapters.teams.identity import (
     DENIED,
     GROUP_CHAT_UNSUPPORTED,
@@ -109,6 +110,15 @@ def test_tenant_comparison_ignores_case() -> None:
 
 def test_a_bare_mention_asks_for_text() -> None:
     assert _parse(make_channel_activity(text="")) == Refusal(TEXT_ONLY)
+
+
+def test_a_file_without_text_is_a_turn() -> None:
+    payload = make_message_activity(text="")
+    url = f"{SERVICE_URL}/v3/attachments/0-img/views/original"
+    payload["attachments"] = [{"contentType": "image/*", "contentUrl": url}]
+    inbound = _parse(payload)
+    assert isinstance(inbound, TeamsInbound)
+    assert inbound.files == (InboundFile("pasted_image", "image", url),)
 
 
 def test_oversize_input_is_refused() -> None:

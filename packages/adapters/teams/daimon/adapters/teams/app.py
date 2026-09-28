@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 import anthropic
 import structlog
+from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.commands import (
     CHANNEL_POINTER,
@@ -42,6 +43,7 @@ from daimon.adapters.teams.lifecycle import (
     TeamsTurnLifecycle,
     TimedSender,
 )
+from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.continuity.messages import (
@@ -76,6 +78,7 @@ from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_origin import SessionState, render_turn_origin, turn_origin
 from microsoft_teams.api import (
     AdaptiveCardActionMessageResponse,
@@ -121,7 +124,9 @@ def session_state(continuity: ContinuityOutcome) -> SessionState:
 
 def _compose_queued(items: list[TeamsInbound]) -> TeamsInbound:
     """One author's queued messages as one turn, replying where the last one came from."""
-    return dataclasses.replace(items[-1], text="\n\n".join(item.text for item in items))
+    text = "\n\n".join(item.text for item in items)
+    files = tuple(file for item in items for file in item.files)
+    return dataclasses.replace(items[-1], text=text, files=files)
 
 
 class TeamsApp:
@@ -133,6 +138,7 @@ class TeamsApp:
         runtime: TeamsRuntime,
         sender: TeamsSender,
         commands: Mapping[str, CommandHandler],
+        bot_token: BotToken,
     ) -> None:
         teams = runtime.settings.teams
         if teams is None:
@@ -141,6 +147,8 @@ class TeamsApp:
         self._teams = teams
         self._sender = TimedSender(sender)
         self._commands = commands
+        self._bot_token = bot_token
+        self.outputs = TeamsOutputDelivery(runtime=runtime, sender=self._sender, spawn=self._spawn)
         self._processing: set[str] = set()
         self._pending: dict[str, list[TeamsInbound]] = {}
         self._inflight: dict[uuid.UUID, int] = {}
@@ -492,6 +500,14 @@ class TeamsApp:
             holder.append(adopted)
             return adopted
 
+        attachments = await prepare_attachments(
+            self.runtime.http_client,
+            inbound.files,
+            bot_token=self._bot_token,
+            service_url=inbound.service_url,
+        )
+        if attachments.notice is not None:
+            await self._say(inbound, attachments.notice)
         config = admission.config
         async with turn_origin(
             self.runtime.sessionmaker,
@@ -515,6 +531,7 @@ class TeamsApp:
                     session_state=session_state(prepared.continuity),
                 )
                 + "\n"
+                + attachments.prefix
                 + inbound.text
             )
 
@@ -533,10 +550,14 @@ class TeamsApp:
                 cancel=cancel,
                 reseed_user_message=reseed,
                 recovery_lifecycle=recovery_lifecycle,
+                image_blocks=attachments.image_blocks or None,
                 deadline=deadline,
             )
         if outcome.mapping_id is not None:
             markers.add(outcome.mapping_id)
+        if any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
+            sweep = self.outputs.sweep(inbound, outcome.ma_session_id)
+            self._spawn(sweep, name="teams.output-sweep")
         final = holder[-1]
         if outcome.continuity.state == "replaced_after_loss":
             kind: Literal["transcript", "history"] = (

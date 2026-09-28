@@ -50,6 +50,10 @@ def _inbound(
     )
 
 
+async def _bot_token() -> str:
+    return "bot-token"
+
+
 def _app(
     db_factory: async_sessionmaker[AsyncSession], sender: FakeSender, cap: int = 3
 ) -> TeamsApp:
@@ -57,7 +61,9 @@ def _app(
     runtime.settings.teams = runtime.settings.teams.model_copy(
         update={"max_concurrent_turns_per_tenant": cap}
     )
-    return TeamsApp(runtime=runtime, sender=sender, commands={"new": fresh_start})
+    return TeamsApp(
+        runtime=runtime, sender=sender, commands={"new": fresh_start}, bot_token=_bot_token
+    )
 
 
 @pytest.mark.asyncio

@@ -212,8 +212,12 @@ def build_teams_runtime(
     *,
     anthropic: AsyncAnthropic | None = None,
     teams: TeamsSettings | None = None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> TeamsRuntime:
-    """A runtime over the test DB and a fake MA transport, with real turn deps."""
+    """A runtime over the test DB and a fake MA transport, with real turn deps.
+
+    The file HTTP client never reaches the network: it answers 404 unless given.
+    """
     settings = MagicMock()
     settings.teams = teams or teams_settings()
     settings.crypto.keys = ()
@@ -229,6 +233,8 @@ def build_teams_runtime(
         anthropic=client,
         sessionmaker=db_factory,
         billing_config=None,
+        http_client=http_client
+        or httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(404))),
         resolver_cache=resolver_cache,
         turn_deps=build_turn_deps(
             settings,

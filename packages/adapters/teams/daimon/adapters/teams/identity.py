@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal
 
+from daimon.adapters.teams.attachments import InboundFile, parse_attachments
 from daimon.core.dm_routing import NoDmTenantError, resolve_dm_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import get_tenant
@@ -24,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 DENIED = "This agent is not available for this account."
 GROUP_CHAT_UNSUPPORTED = "I answer in channels and in 1:1 chats, not in group chats yet."
 INPUT_TOO_LONG = "That message is too long for this agent. Please shorten it."
-TEXT_ONLY = "Send your question as text. I can't read attachments on Teams yet."
+TEXT_ONLY = "Send your question as text, an image or a file."
 MAX_INBOUND_MESSAGE_BYTES = 16 * 1024
 
 
@@ -57,6 +58,7 @@ class TeamsInbound:
     text: str
     service_url: str | None
     bot_name: str | None = None
+    files: tuple[InboundFile, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -109,7 +111,8 @@ def parse_inbound(
     text = strip_mentions_text(activity, bot_only) or ""
     others = activity.model_copy(update={"text": text})
     text = (strip_mentions_text(others, StripMentionsTextOptions(tag_only=True)) or "").strip()
-    if not text:
+    files = parse_attachments(activity.attachments or [], personal=kind == "personal")
+    if not text and not files:
         return Refusal(TEXT_ONLY)
     if len(text.encode("utf-8")) > MAX_INBOUND_MESSAGE_BYTES:
         return Refusal(INPUT_TOO_LONG)
@@ -129,6 +132,7 @@ def parse_inbound(
         text=text,
         service_url=service_url,
         bot_name=activity.recipient.name,
+        files=files,
     )
 
 

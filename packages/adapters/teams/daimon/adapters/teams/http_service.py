@@ -178,11 +178,16 @@ def create_teams_http_service(
         # in local development and tests.
     )
 
+    async def bot_token() -> str | None:
+        token = await teams_app.token_provider.get_app_token()
+        return str(token) if token is not None else None
+
     routines = RoutinesPanel(runtime)
     turns = TeamsApp(
         runtime=runtime,
         sender=teams_app,
         commands={"new": fresh_start, "routines": routines.command},
+        bot_token=bot_token,
     )
 
     async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]) -> None:
@@ -199,6 +204,7 @@ def create_teams_http_service(
     teams_app.on_dialog_open(routines_card.CREATE_DIALOG, routines.on_dialog_open)
     teams_app.on_dialog_submit(routines_card.CREATE_DIALOG, routines.on_dialog_submit)
     teams_app.on_message_submit_feedback(handle_feedback)
+    teams_app.on_file_consent(turns.outputs.handle_consent)
     holder["app"] = (teams_app, turns)
     return TeamsHttpService(
         app=fastapi_app,

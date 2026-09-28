@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
+import httpx
 from anthropic import AsyncAnthropic
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings
@@ -27,6 +28,8 @@ class TeamsRuntime:
     anthropic: AsyncAnthropic
     sessionmaker: async_sessionmaker[AsyncSession]
     billing_config: BillingConfig | None
+    # File downloads and uploads. Redirects stay off: the adapter checks every hop's host.
+    http_client: httpx.AsyncClient
     resolver_cache: ResolverCache
     turn_deps: TurnDeps
     # Bottom tier of the channel→tenant→deployment config cascade.
@@ -86,11 +89,14 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
     deployment_default = parse_deployment_default(settings.defaults_root)
     resolver_cache = new_resolver_cache()
     billing_config = load_billing_config()
-    async with AsyncAnthropic(
-        api_key=settings.anthropic.api_key.get_secret_value(),
-        base_url=str(settings.anthropic.base_url),
-        max_retries=MA_MAX_RETRIES,
-    ) as anthropic:
+    async with (
+        AsyncAnthropic(
+            api_key=settings.anthropic.api_key.get_secret_value(),
+            base_url=str(settings.anthropic.base_url),
+            max_retries=MA_MAX_RETRIES,
+        ) as anthropic,
+        httpx.AsyncClient(timeout=30.0) as http_client,
+    ):
         turn_deps = build_turn_deps(
             settings,
             anthropic,
@@ -105,6 +111,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
                 anthropic=anthropic,
                 sessionmaker=sessionmaker,
                 billing_config=billing_config,
+                http_client=http_client,
                 resolver_cache=resolver_cache,
                 turn_deps=turn_deps,
                 deployment_default=deployment_default,
