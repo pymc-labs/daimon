@@ -6,11 +6,11 @@ gate, and the per-user monthly cap gate -- returning a frozen `Admission` or
 raising a typed error. No boolean gate result crosses this boundary.
 
 Gate ORDER is load-bearing and must not be reordered: identity -> invoker
-policy -> cascade -> missing-config -> resolve/retrieve -> balance -> cap. A
-tenant that is both over-balance and mis-configured must see the config error
-(matches both adapters' inline sequences today). The invoker policy runs
-before the cascade so a refused user learns nothing about the tenant's
-configuration and never reaches an MA call.
+policy -> channel protection -> cascade -> missing-config -> resolve/retrieve
+-> balance -> cap. A tenant that is both over-balance and mis-configured must
+see the config error (matches both adapters' inline sequences today). The
+access policy gates run before the cascade so a refused turn learns nothing
+about the tenant's configuration and never reaches an MA call.
 
 Ported verbatim from `bot.py`'s inline pre-turn sequence (the reference
 implementation). Both the Discord and Slack adapters now call `admit()` as
@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from daimon.core.access_policy import is_invoker_allowed, is_sealed
+from daimon.core.access_policy import is_invoker_allowed, is_sealed, is_write_protected
 from daimon.core.billing import is_over_cap
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
@@ -73,6 +73,7 @@ async def admit(
     thread_id: str | None = None,
     role: Role | None = None,
     is_dm: bool = False,
+    category_id: str | None = None,
 ) -> Admission:
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
@@ -138,6 +139,17 @@ async def admit_impl(
 
     if (observation := current_outcome.get()) is not None:
         observation.account_id = principal.account_id
+    # --- Channel protection: the turn's reply would land in its thread or
+    # channel, so a protected target refuses the turn itself -- before any
+    # thread, reply or upload exists. Admins get no exemption. `category_id`
+    # is the Discord category the channel sits in, when the adapter has it. ---
+    if is_write_protected(
+        policy,
+        channel_id=thread_id or channel_id,
+        parent_channel_id=channel_id,
+        category_id=category_id,
+    ):
+        raise AdmissionDenied(reason="channel_protected")
 
     # --- Config resolution (per turn) ---
     scope = ScopeContext(

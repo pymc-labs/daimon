@@ -988,6 +988,59 @@ class TestInvokerAccessPolicy:
         mock_is_over_cap.assert_awaited_once()
 
 
+class TestProtectedChannelAdmission:
+    """SYS-048: a mention in a protected channel gets no thread, no reply, no upload."""
+
+    @pytest.mark.parametrize(
+        ("policy", "in_thread"),
+        [
+            (TenantAccessPolicy(protected_channel_ids=("789",)), False),
+            (TenantAccessPolicy(protected_channel_ids=("789",)), True),
+            (TenantAccessPolicy(protected_category_ids=("4242",)), False),
+        ],
+        ids=["protected-channel", "thread-under-protected", "protected-category"],
+    )
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_mention_in_a_protected_channel_is_dropped_without_posting(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        policy: TenantAccessPolicy,
+        in_thread: bool,
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+        await db_session.commit()
+
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        if in_thread:
+            message = _make_thread_message(parent_id=789)
+            message.channel.parent.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
+            posts = message.channel.send  # pyright: ignore[reportAttributeAccessIssue]
+        else:
+            message = _make_channel_message(channel_id=789)
+            message.channel.category_id = 4242  # pyright: ignore[reportAttributeAccessIssue]
+            posts = message.channel.send  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        mock_resolve.assert_not_called()
+        mock_find_agent.assert_not_called()
+        mock_create_session.assert_not_called()
+        mock_run_turn.assert_not_called()
+        posts.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+        if not in_thread:
+            message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+
 class TestBillingAdmissionGate:
     """is_over_cap admission gate + billing posture wiring."""
 

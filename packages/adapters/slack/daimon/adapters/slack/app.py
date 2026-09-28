@@ -1541,7 +1541,17 @@ class SlackApp:
             )
             return
         except AdmissionDenied as err:
-            if err.reason == "invoker_not_allowed":
+            if err.reason == "channel_protected":
+                # Nothing may be posted into a protected channel, a refusal
+                # included; the log is the only trace.
+                log.info(
+                    "turn.skipped.channel_protected",
+                    tenant_id=str(tenant_id),
+                    team_id=team_id,
+                    channel_id=channel,
+                    thread_id=thread_id,
+                )
+            elif err.reason == "invoker_not_allowed":
                 log.info(
                     "turn.skipped.invoker_not_allowed",
                     tenant_id=str(tenant_id),

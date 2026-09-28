@@ -36,6 +36,7 @@ from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
 
@@ -604,3 +605,27 @@ async def test_send_message_to_an_unprotected_channel_still_posts(
             runtime, auth, channel_id="C1", content="hi", attachments=None, file_handles=None
         )
     assert row.ts == "1700000001.000100", "a channel outside the policy must post normally"
+
+
+@pytest.mark.asyncio
+async def test_send_message_is_refused_when_the_policy_is_unreadable(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A present policy row that doesn't parse (JSON null here) refuses every
+    write rather than falling open."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    async with committing_sessionmaker() as session:
+        tenant = await make_tenant(session, platform="slack", workspace_id="T_TEST")
+        await session.execute(
+            text("INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, 'null')"),
+            {"t": tenant.id},
+        )
+        await session.commit()
+    auth = _auth(tenant_id=tenant.id)
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        with pytest.raises(ToolError, match="access policy could not be read"):
+            await _slack_send_message_impl(
+                runtime, auth, channel_id="C1", content="hi", attachments=None, file_handles=None
+            )
+        assert _POST_KEY not in m.requests, "an unreadable policy must let nothing be posted"

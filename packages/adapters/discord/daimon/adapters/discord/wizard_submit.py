@@ -71,6 +71,7 @@ import structlog
 from daimon.adapters.discord.bot import (
     INVOKER_NOT_ALLOWED_NOTICE,
     DaimonBot,
+    _category_id,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
     _credit_depleted_message,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same balance-depleted copy the mention path shows
     _resolve_bot_display_name,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same bot-display-name resolution the mention path uses
 )
@@ -431,6 +432,7 @@ async def run_wizard_submit_turn_observed(
                 thread_id=thread_id,
                 now=datetime.now(UTC),
                 role=Role.ADMIN if is_admin else Role.USER,
+                category_id=_category_id(channel),
             )
         except MissingTurnConfigError as err:
             _log.info(
@@ -470,7 +472,10 @@ async def run_wizard_submit_turn_observed(
             )
             return
         except AdmissionDenied as err:
-            if err.reason == "invoker_not_allowed":
+            if err.reason == "channel_protected":
+                # No post into a protected channel, not even a refusal.
+                _log.info("wizard_submit.skipped.channel_protected", short_id=row.id)
+            elif err.reason == "invoker_not_allowed":
                 _log.info(
                     "wizard_submit.skipped.invoker_not_allowed", user_id=str(interaction.user.id)
                 )

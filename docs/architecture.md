@@ -104,22 +104,26 @@ config). The order is load-bearing and documented as such in the module:
    start a turn. A refused user raises `AdmissionDenied("invoker_not_allowed")`
    before the cascade, so they learn nothing about the tenant's configuration
    and no MA call is made.
-3. Resolve config through the cascade
+3. Channel protection — a turn whose reply would land in a protected channel,
+   a thread under one or (Discord) a channel in a protected category raises
+   `AdmissionDenied("channel_protected")`, admins included. The adapters post
+   nothing in reply, not even a refusal; the log is the only trace.
+4. Resolve config through the cascade
    `thread → channel → tenant → deployment`, in
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are
    named by `ConfigTier` in `packages/core/daimon/core/scope.py`; the bottom
    one comes from `defaults/config.yaml`, see [defaults.md](defaults.md).
-4. Raise `MissingTurnConfigError` if no agent or environment resolved — before
+5. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a
    billing one.
-5. Resolve the agent and environment to live MA ids via
+6. Resolve the agent and environment to live MA ids via
    `packages/core/daimon/core/ma_resolver.py`, which self-heals by re-running
    defaults reconciliation when a tag no longer resolves, and rejects an agent
    whose `archived_at` is set.
-6. Balance gate — `tenant_balance.is_over_balance`.
-7. Monthly cap gate — `billing.is_over_cap`.
+7. Balance gate — `tenant_balance.is_over_balance`.
+8. Monthly cap gate — `billing.is_over_cap`.
 
-The policy, balance and cap gates each raise `AdmissionDenied` with a
+The policy, protection, balance and cap gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
 
 **Tenant access policy — `packages/core/daimon/core/access_policy.py`.** One
@@ -142,7 +146,7 @@ and skips the policy, as it skips billing. Ids are the platform's own (Discord s
 | Field | Empty means | Enforced by |
 | --- | --- | --- |
 | `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
-| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | every Discord and Slack write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
+| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord and Slack write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
 | `sealed_channel_ids` | nothing is sealed | `admit()` sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
 

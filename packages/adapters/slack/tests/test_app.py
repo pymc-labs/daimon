@@ -5890,3 +5890,68 @@ async def test_dm_slash_command_dispatches_after_ack(monkeypatch):
     await app.on_request(socket, request)
     await asyncio.gather(*list(app._bg_tasks))
     assert socket.call_log == ["send_socket_mode_response", "dm-command"]
+
+
+@pytest.mark.parametrize("in_thread", [False, True], ids=["channel", "thread-under-protected"])
+async def test_mention_in_a_protected_channel_is_dropped_without_posting(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    in_thread: bool,
+) -> None:
+    """SYS-048: the reply is an agent write, so a protected channel gets no reply,
+    no refusal notice and no upload -- the turn never starts."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    team_id = "T_PROTECTED"
+    channel = "C_CLIENT"
+    event_ts = "9000000040.000002"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    async with db_session_factory() as s:
+        await set_access_policy(
+            s, tenant_id=tenant_id, policy=TenantAccessPolicy(protected_channel_ids=(channel,))
+        )
+        await s.commit()
+
+    app, _ = make_orchestrate_app(db_session_factory)
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": event_ts,
+        "event_ts": event_ts,
+        "channel": channel,
+        "user": "U_ANY",
+        "text": "<@U_BOT> hello",
+    }
+    if in_thread:
+        event["thread_ts"] = "9000000040.000001"
+
+    with (
+        patch(
+            "daimon.core.turn.admission.resolve_config", new_callable=AsyncMock
+        ) as mock_resolve_config,
+        patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
+        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+    ):
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event,
+            team_id=team_id,
+            channel=channel,
+            event_ts=event_ts,
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+        mock_resolve_config.assert_not_called()
+        mock_create.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+        mock_run_turn.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+
+    writes = {
+        URL("https://slack.com/api/chat.postMessage"),
+        URL("https://slack.com/api/chat.postEphemeral"),
+        URL("https://slack.com/api/files.uploadV2"),
+        URL("https://slack.com/api/files.getUploadURLExternal"),
+        URL("https://slack.com/api/files.completeUploadExternal"),
+    }
+    posted = [url for (_, url) in fake_slack_web_client.mock.requests if url in writes]
+    assert posted == [], f"a protected channel must receive nothing; got {posted}"

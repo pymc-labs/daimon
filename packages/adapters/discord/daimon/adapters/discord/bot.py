@@ -149,6 +149,16 @@ def _setting_up_message(bot_display_name: str) -> str:
     return f"{bot_display_name.capitalize()} is setting up this server — try again in a moment."
 
 
+def _category_id(channel: object) -> str | None:
+    """The Discord category a channel, or a thread's parent, sits in -- for the
+    access policy's protected categories. None when there is none or the
+    thread's parent isn't cached."""
+    if isinstance(channel, discord.Thread):
+        channel = channel.parent
+    category_id = getattr(channel, "category_id", None)
+    return str(category_id) if category_id is not None else None
+
+
 INVOKER_NOT_ALLOWED_NOTICE = (
     "you aren't on this server's list of people who can start a turn. A server admin can add you."
 )
@@ -1758,6 +1768,7 @@ class DaimonBot(commands.Bot):
             thread_id=row.thread_id,
             role=role,
             now=datetime.now(UTC),
+            category_id=_category_id(thread),
         )
         # A timer runs only as the agent it was set with; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.
@@ -2094,6 +2105,7 @@ class DaimonBot(commands.Bot):
             author, guild_owner_id=message.guild.owner_id if message.guild else None
         )
         role = Role.ADMIN if is_admin else Role.USER
+        category_id = _category_id(message.channel)
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- D-01 admit(). ---
@@ -2107,6 +2119,7 @@ class DaimonBot(commands.Bot):
                 thread_id=str(thread.id) if thread else None,
                 role=role,
                 now=datetime.now(UTC),
+                category_id=category_id,
             )
         except MissingTurnConfigError as err:
             log.info(
@@ -2162,7 +2175,16 @@ class DaimonBot(commands.Bot):
                 )
                 return
             target = thread or message.channel
-            if err.reason == "invoker_not_allowed":
+            if err.reason == "channel_protected":
+                # Nothing may be posted into a protected channel, a refusal
+                # included; the log is the only trace.
+                log.info(
+                    "turn.skipped.channel_protected",
+                    guild_id=guild_id,
+                    channel_id=parent_channel_id,
+                    user_id=str(message.author.id),
+                )
+            elif err.reason == "invoker_not_allowed":
                 log.info(
                     "turn.skipped.invoker_not_allowed",
                     guild_id=guild_id,
