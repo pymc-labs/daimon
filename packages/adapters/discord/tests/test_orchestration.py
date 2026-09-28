@@ -902,7 +902,10 @@ class TestSetupHook:
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 7, "setup_hook should add exactly 7 Cogs"
+        from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+
+        assert len(add_cog_calls) == 8, "setup_hook should add exactly 8 Cogs"
+        assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
         mock_help_cog.assert_called_once_with(bot)
         mock_agent_setup_cog.assert_called_once_with(bot)
         mock_routines_cog.assert_called_once_with(bot)

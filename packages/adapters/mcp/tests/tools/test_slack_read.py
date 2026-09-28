@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
@@ -62,6 +63,7 @@ def _auth(**overrides: object) -> AuthIdentity:
         "platform": "slack",
         "external_id": "T_TEST",
         "platform_user_id": "U_CALLER",
+        "slack_turn_context_id": uuid.uuid4(),
     }
     base.update(overrides)
     return AuthIdentity(**base)  # type: ignore[arg-type]  # test kwargs are shape-correct
@@ -142,6 +144,7 @@ async def _seed_turn_context(
             account_id=auth.account_id,
             channel_id=channel_id,
             thread_ts="1.0",
+            id=auth.slack_turn_context_id,
             started_at=datetime.now(tz=UTC),
         )
         await session.commit()
@@ -1081,7 +1084,11 @@ async def test_list_channels_user_path_non_dm_destination_hides_only_im(
     auth = _auth()
     await _seed_user_token(runtime, committing_sessionmaker)
     await _seed_turn_context(committing_sessionmaker, auth, channel_id="C_OTHER_1")
-    await _seed_turn_context(committing_sessionmaker, auth, channel_id="C_OTHER_2")
+    await _seed_turn_context(
+        committing_sessionmaker,
+        replace(auth, slack_turn_context_id=uuid.uuid4()),
+        channel_id="C_OTHER_2",
+    )
     with aioresponses() as m:
         m.get(  # pyright: ignore[reportUnknownMemberType]
             _USERS_CONVERSATIONS,

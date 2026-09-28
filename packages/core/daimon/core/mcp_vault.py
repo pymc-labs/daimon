@@ -133,6 +133,7 @@ async def _ensure_agent_mcp_vault_locked(
     jwt_secret: bytes,
     public_url: str,
     now: dt.datetime,
+    slack_turn_context_id: uuid.UUID | None = None,
 ) -> str:
     """Core get-or-create body, assuming the caller already holds the
     per-(account_id, agent_id) advisory lock for this transaction.
@@ -144,6 +145,8 @@ async def _ensure_agent_mcp_vault_locked(
     would deadlock against the outer transaction's own held lock.
     """
     display_name = f"daimon-mcp:{account_id}:{agent_id}"
+    if slack_turn_context_id is not None:
+        display_name += f":slack-turn:{slack_turn_context_id}"
     oldest = await _find_vault_by_name(client, display_name=display_name)
     if oldest is not None:
         # Only act on URL mismatch: no credential at `public_url` — stale URL
@@ -171,6 +174,7 @@ async def _ensure_agent_mcp_vault_locked(
                             "token": mint_jwt(
                                 account_id=account_id,
                                 chat_agent_id=agent_id,
+                                slack_turn_context_id=slack_turn_context_id,
                                 secret=jwt_secret,
                                 now=now,
                             ),
@@ -190,6 +194,7 @@ async def _ensure_agent_mcp_vault_locked(
                     "token": mint_jwt(
                         account_id=account_id,
                         chat_agent_id=agent_id,
+                        slack_turn_context_id=slack_turn_context_id,
                         secret=jwt_secret,
                         now=now,
                     ),
@@ -201,6 +206,7 @@ async def _ensure_agent_mcp_vault_locked(
     token = mint_jwt(
         account_id=account_id,
         chat_agent_id=agent_id,
+        slack_turn_context_id=slack_turn_context_id,
         secret=jwt_secret,
         now=now,
     )
@@ -235,8 +241,13 @@ async def ensure_agent_mcp_vault(
     public_url: str,
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
+    slack_turn_context_id: uuid.UUID | None = None,
 ) -> str:
     """Return the ``ma_vault_id`` for this agent's daimon-mcp vault.
+
+    A Slack DM execution ID selects a separate vault namespace and signed claim;
+    it never modifies the shared agent vault. Only sessions for that logical turn
+    receive the isolated vault. Completed execution rows revoke DM-read authority.
 
     Creates the vault + credential on cold path. On warm path, upgrades legacy
     static-bearer credentials once to carry ``chat_agent_id``. If no credential
@@ -280,6 +291,7 @@ async def ensure_agent_mcp_vault(
             jwt_secret=jwt_secret,
             public_url=public_url,
             now=now,
+            slack_turn_context_id=slack_turn_context_id,
         )
 
 

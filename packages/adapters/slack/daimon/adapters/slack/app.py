@@ -58,6 +58,11 @@ from daimon.adapters.slack.credential_requests import (
     run_repo_bind_credential_submission,
     run_skill_repo_credential_submission,
 )
+from daimon.adapters.slack.direct_messages import (
+    handle_direct_message,
+    handle_dm_command,
+    is_direct_message_event,
+)
 from daimon.adapters.slack.errors import generate_request_id, render_error
 from daimon.adapters.slack.feedback import (
     evaluate_feedback_text_submission,
@@ -456,7 +461,9 @@ class SlackApp:
         event_for_ack: dict[str, Any] = (
             cast(dict[str, Any], raw_event) if isinstance(raw_event, dict) else {}
         )
-        is_app_mention = req.type == "events_api" and event_for_ack.get("type") == "app_mention"
+        is_app_mention = req.type == "events_api" and (
+            event_for_ack.get("type") == "app_mention" or is_direct_message_event(event_for_ack)
+        )
         received_before_drain = is_app_mention and not self.draining
 
         # view_submission acks WITH the computed response_action payload (Pattern 2).
@@ -784,6 +791,10 @@ class SlackApp:
                 )
                 self._mention_tasks.add(task)
                 task.add_done_callback(self._mention_tasks.discard)
+            elif is_direct_message_event(event) and received_before_drain:
+                task = self._spawn(handle_direct_message(self.runtime, event, team_id=team_id))
+                self._mention_tasks.add(task)
+                task.add_done_callback(self._mention_tasks.discard)
             elif etype in {
                 "channel_archive",
                 "channel_unarchive",
@@ -804,7 +815,9 @@ class SlackApp:
             # Log req.type for unknown commands so the envelope type can be
             # confirmed from staging logs.
             cmd: str = str(payload.get("command") or "")
-            if cmd == "/help":
+            if cmd == "/dm":
+                self._spawn(handle_dm_command(self.runtime, payload))
+            elif cmd == "/help":
                 self._spawn(handle_help_command(self.runtime, payload))
             elif cmd == "/routines":
                 self._spawn(handle_routines_command(self.runtime, payload))

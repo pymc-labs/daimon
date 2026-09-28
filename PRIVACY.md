@@ -31,9 +31,13 @@ bot), daimon stores:
 - **Agent credentials** — any bound external credentials (e.g. a GitHub
   personal access token used by `get_cli_token`), encrypted at rest.
 
-Conversation content itself (messages, agent responses) lives in Anthropic's
-Managed Agents service, not in daimon's own database. daimon's database holds
-identity, namespacing, and provenance metadata only.
+Conversation content lives in Anthropic's Managed Agents service. When an admin
+enables DM conversations, daimon also stores the selected workspace, a bounded
+source-context excerpt (up to 12 messages / 16,000 characters), and the most recent
+12 private user/agent messages (up to 16,000 characters). This supports private
+conversation recovery without mixing the history of different workspaces.
+Running `/dm` again replaces that local context. `/privacy` account deletion removes
+it along with the private routing record. Full JSON export remains unimplemented.
 
 ## Your rights via `/privacy`
 

@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Per-turn token, cache and estimated provider-cost telemetry shares the terminal outcome row; operators can query tenant usage by channel and origin with `daimon usage turns`. MCP SDK polling outcomes retain unknown usage rather than zero. Billing and admission behavior are unchanged.
 
 
+- Opt-in Discord and Slack DM conversations: admins enable with `/dm enable`;
+  `/dm` moves recent channel context into a private, resettable session. Every
+  private turn checks live membership and the tenant invoker policy. Privacy
+  preview and deletion include bounded local DM context. Slack checks IM scopes
+  before setup and uses signed execution grants in isolated session vaults.
+  Private session transcripts and controls require that exact grant, preventing
+  same-account routines, channel turns and MCP callers from borrowing access.
+  Slack private turns use fresh sessions with bounded history replay.
+
 - Every turn now ends with a typed `TerminationReason` from the turn core,
   set on `TurnState.termination` and `RunOutcome.termination` for every driver
   exit and derivable from admission and session-binding refusals with

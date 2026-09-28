@@ -7,6 +7,8 @@ import json
 import uuid
 from typing import Any
 
+MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
+
 MA_METADATA_KEY_TENANT = "daimon_tenant"
 MA_METADATA_KEY_NAME = "daimon_name"
 MA_METADATA_KEY_ACCOUNT = "daimon_account"

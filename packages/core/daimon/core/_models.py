@@ -1998,3 +1998,37 @@ class SecurityAuditEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
     )
+
+
+class DirectMessagePolicy(Base):
+    """Explicit tenant opt-in; absence leaves existing DM behavior unchanged."""
+
+    __tablename__ = "direct_message_policies"
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+
+
+class DirectMessageConversation(Base):
+    """One user's selected workspace for a private platform conversation."""
+
+    __tablename__ = "direct_message_conversations"
+    platform: Mapped[str] = mapped_column(Text, primary_key=True)
+    route_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    external_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    context: Mapped[str] = mapped_column(Text, nullable=False)
+    memory_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    recent_message_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

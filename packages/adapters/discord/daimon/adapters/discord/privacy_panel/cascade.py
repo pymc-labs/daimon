@@ -67,6 +67,10 @@ def build_cascade_preview_container(
         will_happen_rows.append(
             f"-# 💬 Remove **{preview.slack_turn_contexts.count}** Slack turn context(s)"
         )
+    if preview.direct_message_conversations.count > 0:
+        will_happen_rows.append(
+            f"-# Remove **{preview.direct_message_conversations.count}** private conversation(s)"
+        )
     if preview.account.count > 0:
         will_happen_rows.append("-# 🪪 Remove the account row itself")
 

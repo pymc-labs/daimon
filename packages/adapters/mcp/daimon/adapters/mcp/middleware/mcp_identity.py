@@ -302,6 +302,13 @@ class IdentityMiddleware(Middleware):
         # from Discord vault tokens (minted by mint_jwt, which never emits internal=True).
         # Gate: DB role == ADMIN  OR  (is_admin claim AND internal claim).
         is_admin = (role == Role.ADMIN) or (is_admin_claim and internal_claim)
+        slack_turn_context_id: uuid.UUID | None = None
+        raw_slack_context = _token.claims.get("slack_turn_context_id") if _token else None
+        if isinstance(raw_slack_context, str) and not internal_claim and agent_id is None:
+            try:
+                slack_turn_context_id = uuid.UUID(raw_slack_context)
+            except ValueError:
+                slack_turn_context_id = None  # Malformed claims fail closed.
         identity = AuthIdentity(
             account_id=account_id,
             tenant_id=tenant_id,
@@ -310,6 +317,7 @@ class IdentityMiddleware(Middleware):
             external_id=external_id,
             agent_id=agent_id,
             chat_agent_id=chat_agent_id,
+            slack_turn_context_id=slack_turn_context_id,
             platform_user_id=platform_user_id,
             is_admin=is_admin,
         )
