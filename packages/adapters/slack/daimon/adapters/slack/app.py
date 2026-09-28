@@ -162,6 +162,7 @@ from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
+from daimon.core.turn.protection import turn_target_protected
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_keys import list_mounted_key_names
@@ -1239,6 +1240,15 @@ class SlackApp:
                 in_flight=count,
                 cap=cap,
             )
+            # Even an ephemeral notice stays out of a protected channel. This
+            # branch always returns, so awaiting here can't race the queue check.
+            if await turn_target_protected(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                channel_id=channel,
+                thread_id=thread_id,
+            ):
+                return
             await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 user=str(event.get("user") or ""),
@@ -1254,6 +1264,25 @@ class SlackApp:
         # (3) Run turn + (4) drain loop, (5) finally release.
         self._processing.add(thread_id)
         try:
+            # A protected channel hears nothing from the agent: no reply, no
+            # acknowledgement, role, refusal or error notice. Checked right after
+            # the thread is claimed -- an await before the claim would let a
+            # second mention slip past the queue check -- and before anything
+            # is posted; the finally releases the claim.
+            if await turn_target_protected(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                channel_id=channel,
+                thread_id=thread_id,
+            ):
+                log.info(
+                    "turn.skipped.channel_protected",
+                    tenant_id=str(tenant_id),
+                    team_id=team_id,
+                    channel_id=channel,
+                    thread_id=thread_id,
+                )
+                return
             # Immediate ack: session cold-start (defaults reconcile + MA session
             # create) can take seconds before the first status message posts.
             # Inside the try/finally so a transport error here still releases

@@ -5893,10 +5893,18 @@ async def test_dm_slash_command_dispatches_after_ack(monkeypatch):
 
 
 @pytest.mark.parametrize("in_thread", [False, True], ids=["channel", "thread-under-protected"])
+
+
+@pytest.mark.parametrize(
+    ("in_thread", "guest"),
+    [(False, False), (True, False), (False, True)],
+    ids=["channel", "thread-under-protected", "guest-outside-the-allowlist"],
+)
 async def test_mention_in_a_protected_channel_is_dropped_without_posting(
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
     in_thread: bool,
+    guest: bool,
 ) -> None:
     """SYS-048: the reply is an agent write, so a protected channel gets no reply,
     no refusal notice and no upload -- the turn never starts."""
@@ -5910,7 +5918,13 @@ async def test_mention_in_a_protected_channel_is_dropped_without_posting(
     await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
     async with db_session_factory() as s:
         await set_access_policy(
-            s, tenant_id=tenant_id, policy=TenantAccessPolicy(protected_channel_ids=(channel,))
+            s,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(
+                protected_channel_ids=(channel,),
+                # A guest would otherwise get the invoker refusal notice.
+                invoker_user_ids=("U_STAFF",) if guest else (),
+            ),
         )
         await s.commit()
 
@@ -5955,3 +5969,47 @@ async def test_mention_in_a_protected_channel_is_dropped_without_posting(
     }
     posted = [url for (_, url) in fake_slack_web_client.mock.requests if url in writes]
     assert posted == [], f"a protected channel must receive nothing; got {posted}"
+
+
+async def test_the_shed_notice_is_not_posted_into_a_protected_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Even the ephemeral capacity notice stays out of a protected channel."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    team_id = "T_PROTECTED_SHED"
+    channel = "C_CLIENT"
+    event_ts = "9000000050.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    async with db_session_factory() as s:
+        await set_access_policy(
+            s, tenant_id=tenant_id, policy=TenantAccessPolicy(protected_channel_ids=(channel,))
+        )
+        await s.commit()
+    app, _ = make_orchestrate_app(db_session_factory, max_concurrent_turns_per_tenant=1)
+    app._inflight[tenant_id] = 1  # pyright: ignore[reportPrivateUsage]  # saturate the cap
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": event_ts,
+        "event_ts": event_ts,
+        "channel": channel,
+        "user": "U_ANY",
+        "text": "<@U_BOT> hello",
+    }
+
+    await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+        event,
+        team_id=team_id,
+        channel=channel,
+        event_ts=event_ts,
+        web_client=fake_slack_web_client.client,
+        tenant_id=tenant_id,
+    )
+
+    ephemeral = URL("https://slack.com/api/chat.postEphemeral")
+    assert not any(url == ephemeral for (_, url) in fake_slack_web_client.mock.requests), (
+        "no shed notice in a protected channel"
+    )

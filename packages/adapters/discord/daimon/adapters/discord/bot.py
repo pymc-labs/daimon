@@ -93,10 +93,12 @@ from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
+from daimon.core.turn.protection import turn_target_protected
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 from discord.ext import commands
@@ -149,14 +151,40 @@ def _setting_up_message(bot_display_name: str) -> str:
     return f"{bot_display_name.capitalize()} is setting up this server — try again in a moment."
 
 
-def _category_id(channel: object) -> str | None:
-    """The Discord category a channel, or a thread's parent, sits in -- for the
-    access policy's protected categories. None when there is none or the
-    thread's parent isn't cached."""
+async def _resolve_category(channel: object) -> tuple[str | None, bool]:
+    """``(category id, unresolved)`` for a channel, or for a thread's parent --
+    what the access policy's protected categories are matched against. An
+    uncached thread parent is fetched; if that fails the category is
+    unresolved, which fails closed when any category is protected."""
     if isinstance(channel, discord.Thread):
-        channel = channel.parent
+        parent: object = channel.parent
+        if parent is None:
+            try:
+                parent = await channel.guild.fetch_channel(channel.parent_id)
+            except discord.HTTPException:
+                return None, True
+        channel = parent
     category_id = getattr(channel, "category_id", None)
-    return str(category_id) if category_id is not None else None
+    return (str(category_id) if category_id is not None else None), False
+
+
+async def _turn_channel_protected(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, channel: object
+) -> bool:
+    """Whether a turn in this channel or thread must post nothing at all."""
+    category_id, category_unresolved = await _resolve_category(channel)
+    if isinstance(channel, discord.Thread):
+        channel_id, thread_id = str(channel.parent_id), str(channel.id)
+    else:
+        channel_id, thread_id = str(getattr(channel, "id", "")), None
+    return await turn_target_protected(
+        sessionmaker,
+        tenant_id=tenant_id,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        category_id=category_id,
+        category_unresolved=category_unresolved,
+    )
 
 
 INVOKER_NOT_ALLOWED_NOTICE = (
@@ -1284,6 +1312,20 @@ class DaimonBot(commands.Bot):
                 return
             # Only 'ready' proceeds.
 
+            # A protected channel hears nothing from the agent -- no reply, and
+            # no capacity, refusal or error notice either -- so this runs before
+            # every notice below. The log line is the only trace.
+            if await _turn_channel_protected(
+                self.runtime.sessionmaker, tenant_id=tenant_id, channel=message.channel
+            ):
+                log.info(
+                    "turn.skipped.channel_protected",
+                    guild_id=guild_id,
+                    channel_id=str(message.channel.id),
+                    user_id=str(message.author.id),
+                )
+                return
+
             log.info(
                 "mention_received",
                 guild_id=guild_id,
@@ -1759,6 +1801,7 @@ class DaimonBot(commands.Bot):
         # stands NOW -- re-read from the guild, never from anything the form
         # or the row recorded. A lookup that fails runs the turn as USER.
         role = await _requester_role(thread.guild, row.requester_external_user_id)
+        category_id, category_unresolved = await _resolve_category(thread)
         admission = await admit(
             self.runtime.turn_deps,
             tenant_id=tenant_id,
@@ -1768,7 +1811,8 @@ class DaimonBot(commands.Bot):
             thread_id=row.thread_id,
             role=role,
             now=datetime.now(UTC),
-            category_id=_category_id(thread),
+            category_id=category_id,
+            category_unresolved=category_unresolved,
         )
         # A timer runs only as the agent it was set with; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.
@@ -2105,7 +2149,7 @@ class DaimonBot(commands.Bot):
             author, guild_owner_id=message.guild.owner_id if message.guild else None
         )
         role = Role.ADMIN if is_admin else Role.USER
-        category_id = _category_id(message.channel)
+        category_id, category_unresolved = await _resolve_category(message.channel)
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- D-01 admit(). ---
@@ -2120,6 +2164,7 @@ class DaimonBot(commands.Bot):
                 role=role,
                 now=datetime.now(UTC),
                 category_id=category_id,
+                category_unresolved=category_unresolved,
             )
         except MissingTurnConfigError as err:
             log.info(

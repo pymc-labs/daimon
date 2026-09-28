@@ -989,3 +989,69 @@ async def test_admit_still_admits_outside_the_protected_channels(
     )
 
     assert isinstance(admission, Admission), "an unprotected channel must still be answered"
+
+
+async def test_admit_protection_wins_over_the_invoker_refusal(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The invoker refusal comes with a notice; in a protected channel the turn
+    must be refused as protected so the adapters post nothing at all."""
+    tenant = await _seed_admittable_tenant(
+        db_session,
+        policy=TenantAccessPolicy(invoker_user_ids=("staff",), protected_channel_ids=("client",)),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=MARouter())
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="guest",
+            channel_id="client",
+            now=_NOW,
+            role=Role.USER,
+        )
+
+    assert exc_info.value.reason == "channel_protected"
+
+
+@pytest.mark.parametrize(
+    ("policy", "refused"),
+    [
+        (TenantAccessPolicy(protected_category_ids=("cat-1",)), True),
+        (TenantAccessPolicy(protected_channel_ids=("elsewhere",)), False),
+    ],
+    ids=["categories-configured-fails-closed", "no-category-policy-admits"],
+)
+async def test_admit_with_an_unresolved_category(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    policy: TenantAccessPolicy,
+    refused: bool,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    call = admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="anyone",
+        channel_id="chan-1",
+        thread_id="thr-1",
+        now=_NOW,
+        role=Role.USER,
+        category_unresolved=True,
+    )
+
+    if refused:
+        with pytest.raises(AdmissionDenied) as exc_info:
+            await call
+        assert exc_info.value.reason == "channel_protected"
+    else:
+        assert isinstance(await call, Admission), "no category policy: nothing to check"

@@ -100,14 +100,16 @@ config). The order is load-bearing and documented as such in the module:
 1. Resolve the platform user to an `accounts` row, via
    `get_or_create_platform_principal` in
    `packages/core/daimon/core/stores/identity.py`.
-2. Invoker policy — the tenant's access policy (below) may restrict who can
+2. Channel protection — a turn whose reply would land in a protected channel,
+   a thread under one or (Discord) a channel in a protected category raises
+   `AdmissionDenied("channel_protected")`, admins included. It runs before the
+   invoker gate, whose refusal would otherwise be posted there. A Discord
+   thread's uncached parent is fetched to find its category; if that fails
+   while any category is protected, the turn is refused.
+3. Invoker policy — the tenant's access policy (below) may restrict who can
    start a turn. A refused user raises `AdmissionDenied("invoker_not_allowed")`
    before the cascade, so they learn nothing about the tenant's configuration
    and no MA call is made.
-3. Channel protection — a turn whose reply would land in a protected channel,
-   a thread under one or (Discord) a channel in a protected category raises
-   `AdmissionDenied("channel_protected")`, admins included. The adapters post
-   nothing in reply, not even a refusal; the log is the only trace.
 4. Resolve config through the cascade
    `thread → channel → tenant → deployment`, in
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are
@@ -125,6 +127,15 @@ config). The order is load-bearing and documented as such in the module:
 
 The policy, protection, balance and cap gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
+
+A protected channel hears nothing from the agent, not even a refusal. The
+adapters post some notices before admission (Discord's capacity notice,
+Slack's role-lookup failure), so each turn entry first asks
+`turn_target_protected` (`packages/core/daimon/core/turn/protection.py`) and
+drops the turn with only a log line when it says yes: Discord `on_message`,
+wizard submit, and Slack `_orchestrate` right after it claims the thread. A
+policy that can't be read counts as protected there. Slack's ephemeral shed
+notice checks it too.
 
 **Tenant access policy — `packages/core/daimon/core/access_policy.py`.** One
 `TenantAccessPolicy` per tenant, stored as JSON in `tenant_access_policies`

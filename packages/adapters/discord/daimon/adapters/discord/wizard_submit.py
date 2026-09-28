@@ -71,9 +71,9 @@ import structlog
 from daimon.adapters.discord.bot import (
     INVOKER_NOT_ALLOWED_NOTICE,
     DaimonBot,
-    _category_id,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
     _credit_depleted_message,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same balance-depleted copy the mention path shows
     _resolve_bot_display_name,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same bot-display-name resolution the mention path uses
+    _resolve_category,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
 )
 from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
@@ -106,6 +106,7 @@ from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
+from daimon.core.turn.protection import turn_target_protected
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.apply import apply
@@ -389,6 +390,20 @@ async def run_wizard_submit_turn_observed(
             "validate at boot"
         )
 
+        # --- A protected channel hears nothing: not the capacity notice below,
+        # not a refusal, not the reply. Checked first; the log is the trace. ---
+        category_id, category_unresolved = await _resolve_category(channel)
+        if await turn_target_protected(
+            bot.runtime.sessionmaker,
+            tenant_id=row.tenant_id,
+            channel_id=parent_channel_id,
+            thread_id=thread_id,
+            category_id=category_id,
+            category_unresolved=category_unresolved,
+        ):
+            _log.info("wizard_submit.skipped.channel_protected", short_id=row.id)
+            return
+
         # --- Per-tenant concurrency cap, claimed exactly as `on_message`
         # claims it: read-check-increment with no await in between, and one
         # matching release in this function's `finally`. The claim already
@@ -432,7 +447,8 @@ async def run_wizard_submit_turn_observed(
                 thread_id=thread_id,
                 now=datetime.now(UTC),
                 role=Role.ADMIN if is_admin else Role.USER,
-                category_id=_category_id(channel),
+                category_id=category_id,
+                category_unresolved=category_unresolved,
             )
         except MissingTurnConfigError as err:
             _log.info(

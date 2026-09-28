@@ -49,15 +49,20 @@ def is_write_protected(
     channel_id: str,
     parent_channel_id: str | None = None,
     category_id: str | None = None,
+    category_unresolved: bool = False,
 ) -> bool:
     """Whether the agent must refuse to write to `channel_id`.
 
     Pass the parent channel for a thread and the category for a Discord
-    channel; protection on either one covers the target.
+    channel; protection on either one covers the target. When the category
+    couldn't be looked up, `category_unresolved` fails closed as soon as the
+    policy protects any category.
     """
     if channel_id in policy.protected_channel_ids:
         return True
     if parent_channel_id is not None and parent_channel_id in policy.protected_channel_ids:
+        return True
+    if category_unresolved and policy.protected_category_ids:
         return True
     return category_id is not None and category_id in policy.protected_category_ids
 

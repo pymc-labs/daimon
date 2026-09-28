@@ -15,6 +15,7 @@ import discord
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
+from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, ThreadNamingSettings
@@ -1039,6 +1040,91 @@ class TestProtectedChannelAdmission:
         posts.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
         if not in_thread:
             message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+
+class TestProtectedChannelSilence:
+    """SYS-048: nothing at all is posted for a turn in a protected channel --
+    not the invoker refusal, not the capacity notice."""
+
+    async def _bot_for(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        policy: TenantAccessPolicy,
+    ) -> tuple[DaimonBot, uuid.UUID]:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+        await db_session.commit()
+        return make_bot(_make_runtime(tenant.id, db_session_factory)), tenant.id
+
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_guest_mention_in_a_protected_channel_gets_no_refusal_notice(
+        self,
+        mock_resolve: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        bot, _ = await self._bot_for(
+            db_session,
+            db_session_factory,
+            TenantAccessPolicy(invoker_user_ids=("999",), protected_channel_ids=("789",)),
+        )
+        message = _make_channel_message(channel_id=789, author_id=111)
+        message.channel.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        mock_resolve.assert_not_called()
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+    async def test_the_capacity_notice_is_not_posted_into_a_protected_channel(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        bot, tenant_id = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        bot._inflight[tenant_id] = 10_000  # pyright: ignore[reportPrivateUsage]  # saturate the cap
+        message = _make_channel_message(channel_id=789)
+        message.channel.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+    @pytest.mark.parametrize("fetch_fails", [False, True], ids=["fetched", "fetch-failed"])
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_an_uncached_thread_parent_is_fetched_before_judging_its_category(
+        self,
+        mock_resolve: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        fetch_fails: bool,
+    ) -> None:
+        """The parent's category is what's protected. An uncached parent is
+        fetched; if the fetch fails, a category policy fails closed."""
+        bot, _ = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_category_ids=("4242",))
+        )
+        message = _make_thread_message(parent_id=789)
+        thread = message.channel
+        thread.parent = None  # pyright: ignore[reportAttributeAccessIssue]
+        parent = MagicMock()
+        parent.category_id = 4242
+        thread.guild = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+        thread.guild.fetch_channel = AsyncMock(  # pyright: ignore[reportAttributeAccessIssue]
+            side_effect=discord.NotFound(MagicMock(status=404), "gone") if fetch_fails else None,
+            return_value=parent,
+        )
+
+        await bot.on_message(message)
+
+        thread.guild.fetch_channel.assert_awaited_once_with(789)  # pyright: ignore[reportAttributeAccessIssue]
+        mock_resolve.assert_not_called()
+        thread.send.assert_not_called()  # pyright: ignore[reportAttributeAccessIssue]
 
 
 class TestBillingAdmissionGate:
