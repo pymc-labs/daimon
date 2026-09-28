@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import structlog
+from daimon.adapters.teams import card
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.feedback import record_feedback
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -186,7 +187,7 @@ def create_teams_http_service(
             log.exception("teams.feedback.failed")
 
     teams_app.on_message(turns.handle_message)
-    teams_app.on_card_action_execute(turns.handle_card_action)
+    teams_app.on_card_action_execute(card.CANCEL_VERB, turns.handle_cancel)
     teams_app.on_message_submit_feedback(handle_feedback)
     holder["app"] = (teams_app, turns)
     return TeamsHttpService(

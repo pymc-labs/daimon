@@ -56,6 +56,7 @@ class TeamsInbound:
     activity_id: str
     text: str
     service_url: str | None
+    bot_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,7 @@ def parse_inbound(
         activity_id=activity.id,
         text=text,
         service_url=service_url,
+        bot_name=activity.recipient.name,
     )
 
 

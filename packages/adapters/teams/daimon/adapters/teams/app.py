@@ -11,16 +11,23 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 import anthropic
 import structlog
-from daimon.adapters.teams import card
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
+from daimon.adapters.teams.commands import (
+    CHANNEL_POINTER,
+    CommandContext,
+    CommandHandler,
+    fresh_start,
+    parse_command,
+)
 from daimon.adapters.teams.identity import (
     DENIED,
     Refusal,
@@ -40,7 +47,6 @@ from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
-    render_fresh_start,
     render_preparation_failed,
     render_replacement_summary,
     render_responder_changed_without_handoff,
@@ -49,11 +55,9 @@ from daimon.core.continuity.messages import (
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.stores.identity import find_platform_principal
-from daimon.core.stores.thread_session_lineage import request_fresh_start
+from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
-    get_live_thread_session,
     mark_turn_active,
     update_watermark,
 )
@@ -71,8 +75,9 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
-from daimon.core.turn.prepare import bind_session
+from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn_origin import SessionState, render_turn_origin, turn_origin
 from microsoft_teams.api import (
     AdaptiveCardActionMessageResponse,
     AdaptiveCardInvokeActivity,
@@ -85,7 +90,6 @@ from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
 
-NEW_COMMAND = "new"
 _SEEN_ACTIVITY_CAP = 10_000
 _RECOVERY_RETRY_DELAY_S = 1.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
@@ -106,6 +110,16 @@ _DENIAL_EVENTS = {"balance_depleted": "turn.skipped.over_balance", "cap": "turn.
 LifecycleFactory = Callable[[asyncio.Event, str | None], TeamsTurnLifecycle]
 
 
+def session_state(continuity: ContinuityOutcome) -> SessionState:
+    """The bind's continuity as turn-control facts. Duplicated from the Slack adapter."""
+    lost: tuple[str, ...] = ()
+    if continuity.transfer_kind == "transcript":
+        lost = ("working files",)
+    elif continuity.transfer_kind == "history":
+        lost = ("working files", "earlier conversation")
+    return SessionState(state=continuity.state, applied=tuple(continuity.applied), lost=lost)
+
+
 def _compose_queued(items: list[TeamsInbound]) -> TeamsInbound:
     """One author's queued messages as one turn, replying where the last one came from."""
     return dataclasses.replace(items[-1], text="\n\n".join(item.text for item in items))
@@ -114,13 +128,20 @@ def _compose_queued(items: list[TeamsInbound]) -> TeamsInbound:
 class TeamsApp:
     """Handlers the SDK app routes to, plus the turn state they share."""
 
-    def __init__(self, *, runtime: TeamsRuntime, sender: TeamsSender) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: TeamsRuntime,
+        sender: TeamsSender,
+        commands: Mapping[str, CommandHandler] | None = None,
+    ) -> None:
         teams = runtime.settings.teams
         if teams is None:
             raise ValueError("TeamsApp requires Teams settings")
         self.runtime = runtime
         self._teams = teams
         self._sender = TimedSender(sender)
+        self._commands: Mapping[str, CommandHandler] = commands or {"new": fresh_start}
         self._processing: set[str] = set()
         self._pending: dict[str, list[TeamsInbound]] = {}
         self._inflight: dict[uuid.UUID, int] = {}
@@ -203,6 +224,9 @@ class TeamsApp:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
+    def _role(self, inbound: TeamsInbound) -> Role:
+        return Role.ADMIN if inbound.user_id in self._teams.admin_user_ids else Role.USER
+
     def _first_delivery(self, conversation_id: str, activity_id: str) -> bool:
         key = (conversation_id, activity_id)
         if key in self._seen:
@@ -243,29 +267,26 @@ class TeamsApp:
         if tenant_id is None:
             await self._say(inbound, DENIED)
             return
-        if inbound.kind == "dm" and inbound.text.strip().lower() == NEW_COMMAND:
-            await self._fresh_start(inbound, tenant_id)
+        command = parse_command(inbound.text, self._commands)
+        if command is not None:
+            name, args = command
+            if inbound.kind != "dm":
+                await self._say(inbound, CHANNEL_POINTER.format(name=name))
+                return
+            await self._commands[name](
+                CommandContext(
+                    inbound=inbound,
+                    tenant_id=tenant_id,
+                    args=args,
+                    is_admin=self._role(inbound) is Role.ADMIN,
+                    runtime=self.runtime,
+                    send=functools.partial(
+                        self._sender.send, inbound.conversation_id, service_url=inbound.service_url
+                    ),
+                )
+            )
             return
         await self._orchestrate(inbound, tenant_id)
-
-    async def _fresh_start(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
-        """Mark the live session for replacement; the next message starts clean."""
-        async with self.runtime.sessionmaker.begin() as session:
-            principal = await find_platform_principal(
-                session, tenant_id=tenant_id, platform="teams", external_id=inbound.user_id
-            )
-            live = None
-            if principal is not None:
-                live = await get_live_thread_session(
-                    session,
-                    tenant_id=tenant_id,
-                    platform="teams",
-                    thread_id=inbound.conversation_id,
-                    account_id=principal.account_id,
-                )
-            if live is not None:
-                await request_fresh_start(session, id=live.id, at=datetime.now(UTC))
-        await self._say(inbound, render_fresh_start("the agent"))
 
     async def _orchestrate(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
         key = inbound.conversation_id
@@ -322,6 +343,7 @@ class TeamsApp:
                 external_user_id=inbound.user_id,
                 channel_id=inbound.channel_id,
                 thread_id=inbound.conversation_id,
+                role=self._role(inbound),
                 now=datetime.now(UTC),
             )
         except MissingTurnConfigError as err:
@@ -471,23 +493,49 @@ class TeamsApp:
             holder.append(adopted)
             return adopted
 
-        async def reseed() -> str:
-            return inbound.text
-
-        outcome = await run_prepared_turn(
-            deps,
-            prepared,
+        config = admission.config
+        async with turn_origin(
+            self.runtime.sessionmaker,
             tenant_id=tenant_id,
+            account_id=admission.account_id,
             platform="teams",
+            parent_channel_id=inbound.channel_id,
             thread_id=inbound.conversation_id,
-            external_user_id=inbound.user_id,
-            user_message=inbound.text,
-            lifecycle=lifecycle,
-            cancel=cancel,
-            reseed_user_message=reseed,
-            recovery_lifecycle=recovery_lifecycle,
-            deadline=deadline,
-        )
+            responder_ma_agent_id=str(admission.agent.id),
+            responder_name=config.agent_name or admission.agent.name,
+            role=self._role(inbound),
+            configuration_target_ma_agent_id=config.configuration_target_ma_agent_id,
+            configuration_target_name=config.configuration_target_name,
+            is_setup=config.thread_binding_kind == "setup",
+        ) as origin:
+            # The controls are server facts, rendered apart from the person's words.
+            message = (
+                render_turn_origin(
+                    origin,
+                    responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
+                    session_state=session_state(prepared.continuity),
+                )
+                + "\n"
+                + inbound.text
+            )
+
+            async def reseed() -> str:
+                return message
+
+            outcome = await run_prepared_turn(
+                deps,
+                prepared,
+                tenant_id=tenant_id,
+                platform="teams",
+                thread_id=inbound.conversation_id,
+                external_user_id=inbound.user_id,
+                user_message=message,
+                lifecycle=lifecycle,
+                cancel=cancel,
+                reseed_user_message=reseed,
+                recovery_lifecycle=recovery_lifecycle,
+                deadline=deadline,
+            )
         if outcome.mapping_id is not None:
             markers.add(outcome.mapping_id)
         final = holder[-1]
@@ -534,13 +582,11 @@ class TeamsApp:
         except SQLAlchemyError:
             log.exception("teams.turn.settle_failed", intent_id=str(intent_id))
 
-    async def handle_card_action(
+    async def handle_cancel(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
     ) -> AdaptiveCardInvokeResponse:
         """Cancel button: only the turn's author may stop it."""
         action = ctx.activity.value.action
-        if action.verb != card.CANCEL_VERB:
-            return AdaptiveCardActionMessageResponse(value=_CANCEL_TURN_ENDED)
         entry = self._cancel_registry.get(str(action.data.get("turn") or ""))
         if entry is None:
             return AdaptiveCardActionMessageResponse(value=_CANCEL_TURN_ENDED)

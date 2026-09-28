@@ -48,12 +48,13 @@ CHANNEL_ID = "19:channel-1@thread.tacv2"
 THREAD_ID = f"{CHANNEL_ID};messageid=1700000000001"
 
 
-def teams_settings(*, enabled: bool = True) -> TeamsSettings:
+def teams_settings(*, enabled: bool = True, admins: tuple[str, ...] = ()) -> TeamsSettings:
     return TeamsSettings(
         client_id=BOT_CLIENT_ID,
         client_secret=SecretStr("test-secret"),
         tenant_id=ENTRA_TENANT_ID,
         enabled=enabled,
+        admin_user_ids=admins,
     )
 
 
@@ -210,10 +211,11 @@ def build_teams_runtime(
     db_factory: async_sessionmaker[AsyncSession],
     *,
     anthropic: AsyncAnthropic | None = None,
+    teams: TeamsSettings | None = None,
 ) -> TeamsRuntime:
     """A runtime over the test DB and a fake MA transport, with real turn deps."""
     settings = MagicMock()
-    settings.teams = teams_settings()
+    settings.teams = teams or teams_settings()
     settings.crypto.keys = ()
     settings.mcp.public_url = None
     settings.defaults_root = MagicMock()

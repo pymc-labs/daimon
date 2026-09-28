@@ -475,6 +475,27 @@ class TeamsSettings(BaseModel):
             "re-enabled without a redeploy."
         ),
     )
+    admin_user_ids: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Entra object IDs of the people who administer this deployment "
+            "from Teams. Teams exposes no workspace-admin role to bots, so "
+            "this list is the admin check: admins create and delete routines "
+            "and agents and see tenant-wide settings. Everyone else is a "
+            "regular user."
+        ),
+    )
+
+    @field_validator("admin_user_ids")
+    @classmethod
+    def _canonicalize_admin_user_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Compare against the canonical lowercase form inbound ids arrive in."""
+        try:
+            return tuple(str(UUID(item)) for item in value)
+        except ValueError:
+            raise ValueError(
+                "DAIMON_TEAMS__ADMIN_USER_IDS must list Entra object ID UUIDs"
+            ) from None
 
     @field_validator("tenant_id")
     @classmethod

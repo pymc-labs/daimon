@@ -104,7 +104,7 @@ def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActi
                 ExecuteAction(
                     title="Cancel",
                     verb=CANCEL_VERB,
-                    data={"turn": cancel_key},
+                    data={"action": CANCEL_VERB, "turn": cancel_key},
                     style="destructive",
                 )
             ]

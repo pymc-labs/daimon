@@ -472,6 +472,15 @@ listener.
 When False, /api/messages answers 503 while the health endpoints stay live — the process
 keeps running so ingress can be re-enabled without a redeploy.
 
+### `DAIMON_TEAMS__ADMIN_USER_IDS`
+
+`tuple[str, ...]` · optional · default unset
+
+Entra object IDs of the people who administer this deployment from Teams. Teams exposes
+no workspace-admin role to bots, so this list is the admin check: admins create and
+delete routines and agents and see tenant-wide settings. Everyone else is a regular
+user.
+
 ## GitHub
 
 Read from `daimon.core.config.GithubSettings`. Prefix `DAIMON_GITHUB__`.

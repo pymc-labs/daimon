@@ -729,3 +729,11 @@ def test_teams_tenant_id_rejects_non_uuid() -> None:
             client_secret=SecretStr("test"),
             tenant_id="not-a-tenant-uuid",
         )
+
+
+def test_teams_admin_user_ids_canonicalize_and_reject_non_uuids() -> None:
+    base = {"client_id": "id", "client_secret": SecretStr("s"), "tenant_id": str(UUID(int=1))}
+    admin = str(UUID(int=7))
+    assert TeamsSettings(**base, admin_user_ids=(admin.upper(),)).admin_user_ids == (admin,)
+    with pytest.raises(ValidationError):
+        TeamsSettings(**base, admin_user_ids=("alice",))

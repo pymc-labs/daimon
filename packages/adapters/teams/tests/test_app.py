@@ -110,8 +110,8 @@ async def test_the_tenant_cap_sheds_a_new_thread(
     assert [(c, a.text) for c, a, _ in sender.sent] == [("a:conversation-2", app_module._SHED)]
 
 
-def _click(verb: str, key: str, clicker: str) -> Any:
-    action = SimpleNamespace(verb=verb, data={"turn": key})
+def _click(key: str, clicker: str) -> Any:
+    action = SimpleNamespace(data={"action": "cancel_turn", "turn": key})
     activity = SimpleNamespace(
         value=SimpleNamespace(action=action), from_=SimpleNamespace(aad_object_id=clicker)
     )
@@ -126,11 +126,11 @@ async def test_only_the_author_can_cancel(
     cancel = asyncio.Event()
     teams._cancel_registry["key-1"] = (cancel, AAD_OBJECT_ID)
 
-    refused = await teams.handle_card_action(_click("cancel_turn", "key-1", OTHER_AAD_OBJECT_ID))
+    refused = await teams.handle_cancel(_click("key-1", OTHER_AAD_OBJECT_ID))
     assert refused.value == app_module._CANCEL_NOT_AUTHOR and not cancel.is_set()
-    ended = await teams.handle_card_action(_click("cancel_turn", "key-2", AAD_OBJECT_ID))
+    ended = await teams.handle_cancel(_click("key-2", AAD_OBJECT_ID))
     assert ended.value == app_module._CANCEL_TURN_ENDED
-    accepted = await teams.handle_card_action(_click("cancel_turn", "key-1", AAD_OBJECT_ID.upper()))
+    accepted = await teams.handle_cancel(_click("key-1", AAD_OBJECT_ID.upper()))
     assert accepted.value == app_module._CANCELLING and cancel.is_set()
 
 
