@@ -46,6 +46,7 @@ from daimon.adapters.teams.lifecycle import (
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
@@ -56,9 +57,10 @@ from daimon.core.continuity.messages import (
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import Role, TaskContinuationRow
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
+    get_live_thread_session,
     mark_turn_active,
     update_watermark,
 )
@@ -79,7 +81,13 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
-from daimon.core.turn_origin import SessionState, render_turn_origin, turn_origin
+from daimon.core.turn_origin import (
+    HandoffNotice,
+    SessionState,
+    build_handoff_notice,
+    render_turn_origin,
+    turn_origin,
+)
 from microsoft_teams.api import (
     AdaptiveCardActionMessageResponse,
     AdaptiveCardInvokeActivity,
@@ -110,6 +118,8 @@ _TURN_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ER
 _DENIAL_EVENTS = {"balance_depleted": "turn.skipped.over_balance", "cap": "turn.skipped.over_cap"}
 
 LifecycleFactory = Callable[[asyncio.Event, str | None], TeamsTurnLifecycle]
+# Builds a continuation turn's handoff notice from what the bind carried across.
+HandoffFactory = Callable[[ContinuityOutcome], HandoffNotice]
 
 
 def session_state(continuity: ContinuityOutcome) -> SessionState:
@@ -159,6 +169,9 @@ class TeamsApp:
         # Not durable: a retry landing after a restart runs a second turn.
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._recovery: asyncio.Task[None] | None = None
+        # When each busy conversation last got a message: a newer one supersedes
+        # queued continuation work (Teams cannot list a conversation's history).
+        self._last_message_at: dict[str, datetime] = {}
         self.draining = False
 
     @property
@@ -298,6 +311,7 @@ class TeamsApp:
     async def _orchestrate(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
         key = inbound.conversation_id
         if key in self._processing:
+            self._last_message_at[key] = datetime.now(UTC)
             self._pending.setdefault(key, []).append(inbound)
             return
         cap = self._teams.max_concurrent_turns_per_tenant
@@ -310,16 +324,21 @@ class TeamsApp:
             return
         self._inflight[tenant_id] = count + 1
         self._processing.add(key)
+        self._last_message_at[key] = datetime.now(UTC)
         try:
             await self._run_turn_guarded(inbound, tenant_id)
+            await self._dispatch_continuations(inbound, tenant_id)
             while queued := self._pending.pop(key, []):
                 by_author: dict[str, list[TeamsInbound]] = {}
                 for item in queued:
                     by_author.setdefault(item.user_id, []).append(item)
                 for items in by_author.values():
-                    await self._run_turn_guarded(_compose_queued(items), tenant_id)
+                    composed = _compose_queued(items)
+                    await self._run_turn_guarded(composed, tenant_id)
+                    await self._dispatch_continuations(composed, tenant_id)
         finally:
             self._processing.discard(key)
+            self._last_message_at.pop(key, None)
             remaining = self._inflight.get(tenant_id, 1) - 1
             if remaining > 0:
                 self._inflight[tenant_id] = remaining
@@ -339,8 +358,19 @@ class TeamsApp:
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
                 await self._say(inbound, _FAILED)
 
-    async def _run_turn(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
-        """Turn body: admit → card → bind → marker → run → watermark. Mirrors Slack's."""
+    async def _run_turn(
+        self,
+        inbound: TeamsInbound,
+        tenant_id: uuid.UUID,
+        *,
+        handoff: HandoffFactory | None = None,
+        reraise: bool = False,
+    ) -> None:
+        """Turn body: admit → card → bind → marker → run → watermark. Mirrors Slack's.
+
+        `reraise` (continuations) re-raises a refusal or failure after telling
+        the person, so the dispatcher can settle or re-queue the work.
+        """
         deps = self.runtime.turn_deps
         try:
             admission = await admit(
@@ -357,16 +387,22 @@ class TeamsApp:
             log.info("teams.missing_config", missing=list(err.missing))
             missing = " or ".join(err.missing)
             await self._say(inbound, f"No {missing} configured here. Ask the operator to set one.")
+            if reraise:
+                raise
             return
         except MAResolverMissError as err:
             log.warning("teams.resolver.miss", kind=err.kind, daimon_tag=err.daimon_tag)
             await self._say(inbound, _RESOLVER_MISS)
+            if reraise:
+                raise
             return
         except AdmissionDenied as err:
             log.info(_DENIAL_EVENTS[err.reason], tenant_id=str(tenant_id))
             await self._say(
                 inbound, _BALANCE_DEPLETED if err.reason == "balance_depleted" else _CAP_REACHED
             )
+            if reraise:
+                raise
             return
 
         agent = admission.agent
@@ -413,7 +449,15 @@ class TeamsApp:
                 if not recorded:
                     raise DaimonError("Teams card intent could not record its message id")
                 await self._bind_and_run(
-                    inbound, tenant_id, admission, cancel, holder, markers, new_lifecycle
+                    inbound,
+                    tenant_id,
+                    admission,
+                    cancel,
+                    holder,
+                    markers,
+                    new_lifecycle,
+                    handoff=handoff,
+                    reraise=reraise,
                 )
             except asyncio.CancelledError:
                 raise
@@ -424,6 +468,8 @@ class TeamsApp:
                 )
                 capture_exception_with_scope(exc)
                 await holder[-1].close_with_notice(_FAILED)
+                if reraise:
+                    raise
         finally:
             self._cancel_registry.pop(cancel_key, None)
             closed = any(each.card_closed for each in holder)
@@ -441,6 +487,9 @@ class TeamsApp:
         holder: list[TeamsTurnLifecycle],
         markers: set[uuid.UUID],
         new_lifecycle: LifecycleFactory,
+        *,
+        handoff: HandoffFactory | None,
+        reraise: bool,
     ) -> None:
         deps = self.runtime.turn_deps
         lifecycle = holder[-1]
@@ -459,10 +508,14 @@ class TeamsApp:
             )
         except SessionPreparationFailed:
             await lifecycle.close_with_notice(render_preparation_failed(admission.agent.name))
+            if reraise:
+                raise
             return
         except SessionBusyError:
             text = render_current_work_must_finish(admission.agent.name, handoff=True)
             await lifecycle.close_with_notice(text)
+            if reraise:
+                raise
             return
         except SessionAgentMismatch as error:
             owner = "the previous agent"
@@ -524,11 +577,13 @@ class TeamsApp:
             is_setup=config.thread_binding_kind == "setup",
         ) as origin:
             # The controls are server facts, rendered apart from the person's words.
+            notice = handoff(prepared.continuity) if handoff is not None else None
             message = (
                 render_turn_origin(
                     origin,
                     responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
-                    session_state=session_state(prepared.continuity),
+                    session_state=None if notice else session_state(prepared.continuity),
+                    handoff=notice,
                 )
                 + "\n"
                 + attachments.prefix
@@ -576,6 +631,78 @@ class TeamsApp:
             await self._say(
                 inbound, render_current_work_must_finish(admission.agent.name, handoff=False)
             )
+
+    async def _dispatch_continuations(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        """Run what a handoff queued in this conversation. The caller holds its guard."""
+        key = inbound.conversation_id
+
+        async def notify(text: str) -> None:
+            with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                await self._say(inbound, text)
+
+        async def latest_message_at(_row: TaskContinuationRow) -> datetime | None:
+            return self._last_message_at.get(key)
+
+        async def run(row: TaskContinuationRow, seed: str) -> None:
+            await self._run_continuation(row, seed, tenant_id, inbound.service_url)
+
+        try:
+            await dispatch_pending_continuations(
+                self.runtime.sessionmaker,
+                self.runtime.anthropic,
+                tenant_id=tenant_id,
+                platform="teams",
+                thread_id=key,
+                run_follow_up=run,
+                post_notice=notify,
+                latest_user_message_at=latest_message_at,
+                # Any failure was already shown to the person; the row must still settle.
+                dispatch_errors=(Exception,),
+            )
+        except _TURN_ERRORS as exc:
+            log.error("teams.continuation.dispatch_failed", conversation_id=key, exc_info=exc)
+
+    async def _run_continuation(
+        self,
+        row: TaskContinuationRow,
+        seed: str,
+        tenant_id: uuid.UUID,
+        service_url: str | None,
+    ) -> None:
+        """The receiving agent's first turn, run as the requester on the ordinary path."""
+        handoff: HandoffFactory | None = None
+        if row.reason == "task_handoff":
+            # Read before the bind, which supersedes the outgoing agent's session.
+            async with self.runtime.sessionmaker() as session:
+                live = await get_live_thread_session(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="teams",
+                    thread_id=row.thread_id,
+                    account_id=row.requester_account_id,
+                )
+            config = live.effective_config if live is not None else None
+            from_name = config.agent_name if config is not None else None
+            from_id = live.ma_agent_id if live is not None else None
+            handoff = lambda continuity: build_handoff_notice(  # noqa: E731
+                from_name=from_name,
+                from_ma_agent_id=from_id,
+                requested_by="the requester",
+                requested_work=seed,
+                transfer_kind=continuity.transfer_kind,
+            )
+
+        inbound = TeamsInbound(
+            kind="dm" if row.thread_id == row.parent_channel_id else "channel",
+            entra_tenant_id=self._teams.tenant_id,
+            user_id=row.requester_external_user_id,
+            conversation_id=row.thread_id,
+            channel_id=row.parent_channel_id,
+            activity_id=str(row.id),
+            text=seed,
+            service_url=service_url,
+        )
+        await self._run_turn(inbound, tenant_id, handoff=handoff, reraise=True)
 
     async def _settle(
         self,
