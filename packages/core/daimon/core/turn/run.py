@@ -516,6 +516,8 @@ async def run_prepared_turn(
                 render_interval_s=render_interval_s,
                 deadline=deadline,
                 now=now,
+                confirm_write=confirm_write,
+                attended=attended,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -543,6 +545,8 @@ async def run_prepared_turn_impl(
     render_interval_s: float = 2.0,
     deadline: datetime | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    confirm_write: ConfirmationHook | None = None,
+    attended: bool | None = None,
 ) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
     signature, recover exactly once: mark the stale mapping dead, create a

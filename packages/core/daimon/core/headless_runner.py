@@ -159,6 +159,7 @@ async def run_turn(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             deadline=deadline,
+            tool_safety=tool_safety,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -182,6 +183,7 @@ async def run_turn(
                 github_app_id=github_app_id,
                 github_app_private_key=github_app_private_key,
                 deadline=deadline,
+                tool_safety=tool_safety,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -209,6 +211,7 @@ async def run_turn_impl(
     github_app_id: str | None = None,
     github_app_private_key: str | None = None,
     deadline: datetime | None = None,
+    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its tail.
 
