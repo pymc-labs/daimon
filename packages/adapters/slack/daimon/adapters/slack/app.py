@@ -162,7 +162,7 @@ from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
-from daimon.core.turn.protection import turn_target_protected
+from daimon.core.turn.protection import protection_state, turn_target_protected
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_keys import list_mounted_key_names
@@ -992,6 +992,8 @@ class SlackApp:
 
         Gate order (strict):
         1. Draining check (fast path — no I/O).
+        1b. MAY POST: the access-policy protection state; anything but
+            unprotected returns silently, before any other I/O can fail.
         2. DEDUP: insert_if_new before any other work.
         3. TOKEN RESOLVE: get_slack_bot_token; drop on None.
         4. PER-EVENT CLIENT: decrypt + AsyncWebClient(token=...) — never cached.
@@ -1015,6 +1017,26 @@ class SlackApp:
         channel: str = event.get("channel") or ""
         event_ts: str = event.get("event_ts") or event.get("ts") or ""
         client: AsyncWebClient | None = None
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+
+        # (0) MAY POST — decided FIRST, before dedup, the token read or any
+        # notice, and never raises. A protected channel, or one whose
+        # protection can't be established, hears nothing from this event: no
+        # rejection, no reply, not even the boundary's error post below.
+        post_state = await protection_state(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            channel_id=channel,
+            thread_id=event.get("thread_ts") or event.get("ts"),
+        )
+        if not post_state.may_post:
+            log.info(
+                "turn.skipped.channel_protected",
+                team_id=team_id,
+                channel_id=channel,
+                state=post_state.value,
+            )
+            return
 
         try:
             # (1) DEDUP — insert_if_new before any other work.
@@ -1058,8 +1080,7 @@ class SlackApp:
                 )
                 return
 
-            # (5) TENANT RESOLVE.
-            tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+            # (5) TENANT RESOLVE — derived above, before the may-post check.
 
             # (6) Orchestration seam — turn body is delegated here.
             await self._orchestrate(
@@ -1089,8 +1110,9 @@ class SlackApp:
             )
             capture_exception_with_scope(exc)
             # Before the per-event client exists there is no token to post
-            # with, so the log line is all that can be done.
-            if client is not None:
+            # with, so the log line is all that can be done. (post_state is
+            # always may-post here: anything else returned above.)
+            if client is not None and post_state.may_post:
                 with contextlib.suppress(SlackApiError):
                     await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                         channel=channel,

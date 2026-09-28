@@ -6013,3 +6013,106 @@ async def test_the_shed_notice_is_not_posted_into_a_protected_channel(
     assert not any(url == ephemeral for (_, url) in fake_slack_web_client.mock.requests), (
         "no shed notice in a protected channel"
     )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["dedup_insert", "token_read", "policy_read", "external_sender", "turn_body"],
+)
+async def test_nothing_is_posted_into_a_protected_channel_whatever_fails(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    failure: str,
+) -> None:
+    """SYS-048: the may-post state is decided before anything else in the event
+    handler. Whatever fails afterwards -- or while deciding it -- a protected
+    channel gets no rejection, reply or error post."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from sqlalchemy.exc import OperationalError
+
+    team_id = "T_PROTECTED_FAILS"
+    channel = "C_CLIENT"
+    event_ts = "9000000060.000001"
+    key = Fernet.generate_key().decode()
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    async with db_session_factory() as s:
+        await set_access_policy(
+            s, tenant_id=tenant_id, policy=TenantAccessPolicy(protected_channel_ids=(channel,))
+        )
+        await upsert_slack_bot_token(
+            s, team_id=team_id, encrypted_token=encrypt_token(build_multifernet((key,)), "xoxb-x")
+        )
+        await s.commit()
+    app, _ = make_orchestrate_app(db_session_factory, crypto_key=key)
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": event_ts,
+        "event_ts": event_ts,
+        "channel": channel,
+        "user": "U_ANY",
+        "text": "<@U_BOT> hello",
+    }
+    if failure == "external_sender":
+        event["user_team"] = "T_SOMEONE_ELSE"
+    db_error = OperationalError("SELECT", {}, Exception("pool gone"))
+    targets = {
+        "dedup_insert": "daimon.adapters.slack.app.insert_if_new",
+        "token_read": "daimon.adapters.slack.app.get_slack_bot_token",
+        "policy_read": "daimon.core.turn.protection.load_access_policy",
+        "turn_body": "daimon.adapters.slack.app.SlackApp._orchestrate",
+    }
+    breakage = (
+        contextlib.nullcontext()
+        if failure == "external_sender"
+        else patch(targets[failure], new=AsyncMock(side_effect=db_error))
+    )
+
+    with breakage:
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+
+    posts = {
+        URL("https://slack.com/api/chat.postMessage"),
+        URL("https://slack.com/api/chat.postEphemeral"),
+    }
+    posted = [url for (_, url) in fake_slack_web_client.mock.requests if url in posts]
+    assert posted == [], f"{failure}: a protected channel must receive nothing; got {posted}"
+
+
+async def test_an_unprotected_channel_still_gets_the_error_post(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Control for the test above: the same failure outside a protected channel
+    still reaches the user."""
+    from sqlalchemy.exc import OperationalError
+
+    team_id = "T_OPEN_FAILS"
+    key = Fernet.generate_key().decode()
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    async with db_session_factory() as s:
+        await upsert_slack_bot_token(
+            s, team_id=team_id, encrypted_token=encrypt_token(build_multifernet((key,)), "xoxb-x")
+        )
+        await s.commit()
+    app, _ = make_orchestrate_app(db_session_factory, crypto_key=key)
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": "9000000070.000001",
+        "event_ts": "9000000070.000001",
+        "channel": "C_OPEN",
+        "user": "U_ANY",
+        "text": "<@U_BOT> hello",
+    }
+
+    with patch(
+        "daimon.adapters.slack.app.SlackApp._orchestrate",
+        new=AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("pool gone"))),
+    ):
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+
+    post = URL("https://slack.com/api/chat.postMessage")
+    assert any(url == post for (_, url) in fake_slack_web_client.mock.requests), (
+        "an unprotected channel still hears about the failure"
+    )

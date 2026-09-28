@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import types
 import uuid
 from dataclasses import dataclass
@@ -1238,6 +1239,98 @@ class TestProtectedChannelBeforeAnyNotice:
             "fetch only when a category is protected, and never twice for one turn"
         )
         mock_resolve.assert_awaited_once()  # admitted past the protection gate
+
+
+class TestProtectedChannelWhateverFails:
+    """SYS-048 round 5: the may-post state is decided before anything else in
+    on_message; whatever fails afterwards -- or while deciding it -- nothing
+    is posted into a protected channel. A control proves the same failure
+    still reaches an unprotected channel."""
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            "liveness_read",
+            "policy_read",
+            "category_fetch_parent_protected",
+            "category_fetch_category_policy",
+            "provisioning",
+        ],
+    )
+    async def test_nothing_is_posted_into_a_protected_target(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        failure: str,
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        policy = (
+            TenantAccessPolicy(protected_category_ids=("4242",))
+            if failure == "category_fetch_category_policy"
+            else TenantAccessPolicy(
+                protected_channel_ids=("789",), protected_category_ids=("4242",)
+            )
+        )
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+        await db_session.commit()
+        if failure == "provisioning":
+            await set_provision_status(db_session_factory, tenant_id=tenant.id, status="pending")
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        db_error = OperationalError("SELECT", {}, Exception("pool gone"))
+
+        if failure.startswith("category_fetch"):
+            message = _make_thread_message(parent_id=789)
+            posts = message.channel.send  # pyright: ignore[reportAttributeAccessIssue]
+            message.channel.parent = None  # pyright: ignore[reportAttributeAccessIssue]
+            message.channel.guild = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+            message.channel.guild.fetch_channel = AsyncMock(side_effect=OSError("reset"))  # pyright: ignore[reportAttributeAccessIssue]
+        else:
+            message = _make_channel_message(channel_id=789)
+            message.channel.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
+            posts = message.channel.send  # pyright: ignore[reportAttributeAccessIssue]
+
+        breakage = {
+            "liveness_read": patch(
+                "daimon.adapters.discord.bot.get_tenant_liveness",
+                new=AsyncMock(side_effect=db_error),
+            ),
+            "policy_read": patch(
+                "daimon.core.turn.protection.load_access_policy",
+                new=AsyncMock(side_effect=db_error),
+            ),
+            "provisioning": patch.object(
+                bot, "_ensure_provisioning", new=AsyncMock(side_effect=db_error)
+            ),
+        }.get(failure, contextlib.nullcontext())
+        with breakage:
+            await bot.on_message(message)
+
+        posts.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+        if not failure.startswith("category_fetch"):
+            message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        if failure == "category_fetch_parent_protected":
+            message.channel.guild.fetch_channel.assert_not_awaited()  # pyright: ignore[reportAttributeAccessIssue]
+
+    async def test_an_unprotected_channel_still_gets_the_prologue_error(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await db_session.commit()
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message(channel_id=789)
+        message.channel.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
+
+        with patch(
+            "daimon.adapters.discord.bot.get_tenant_liveness",
+            new=AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("pool gone"))),
+        ):
+            await bot.on_message(message)
+
+        message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
 
 
 class TestBillingAdmissionGate:

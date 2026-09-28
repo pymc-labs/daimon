@@ -709,6 +709,42 @@ async def test_a_submit_in_a_protected_channel_posts_nothing_and_runs_no_turn(
     assert after is not None and after.status == "submitted", "the answers stay recorded"
 
 
+async def test_a_submit_whose_protection_cannot_be_read_posts_nothing(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Unknown protection is treated like protected: no capacity notice, no
+    refusal, no error render, no turn."""
+    from sqlalchemy.exc import OperationalError
+
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800009001")
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+    channel = _make_channel(thread_id=7009, parent_id=6009)
+    channel.parent = MagicMock()
+    channel.parent.category_id = None
+    stream_hits: list[str] = []
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=stream_hits)
+    bot = _make_bot(_make_runtime(db_session_factory, router))
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    with (
+        patch(
+            "daimon.core.turn.protection.load_access_policy",
+            new=AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("pool gone"))),
+        ),
+        patch("daimon.core.turn.prepare.create_session") as mock_create_session,
+    ):
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]  # drain the spawned turn
+        mock_create_session.assert_not_called()
+
+    assert stream_hits == []
+    channel.send.assert_not_called()
+
+
 # --- per-turn ceiling (19-04) -------------------------------------------------
 
 

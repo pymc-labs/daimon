@@ -128,19 +128,21 @@ config). The order is load-bearing and documented as such in the module:
 The policy, protection, balance and cap gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
 
-A protected channel hears nothing from the agent, not even a refusal. The
-adapters post some notices before admission (Discord's setup and capacity
-notices, Slack's role-lookup failure), so each turn entry first asks
-`turn_target_protected` (`packages/core/daimon/core/turn/protection.py`) and
-drops the turn with only a log line when it says yes: Discord `on_message`
-(for any tenant with a row, before the setup notice of a pending, failed or
-archived tenant), wizard submit, Discord continuations, and Slack
-`_orchestrate` right after it claims the thread; Slack's ephemeral shed notice
-checks it too. When protection can't be established -- the policy doesn't
-parse, or the database or pool fails reading it -- the answer is yes, so
-nothing is posted, not even an error. A Discord thread's uncached parent is
-fetched only when the policy protects a category, and cached so admission
-doesn't fetch it again.
+A protected channel hears nothing from the agent, not even a refusal or an
+error. Each turn entry decides FIRST, before tenant liveness, provisioning or
+any other read that can fail, whether the agent may post there:
+`protection_state` (`packages/core/daimon/core/turn/protection.py`) returns
+`unprotected`, `protected` or `unknown`, and never raises -- a policy that
+doesn't parse, a database or pool failure, or a failed category lookup all
+give `unknown`. The channel and its parent are checked first; a Discord
+thread's uncached parent is fetched for its category only when the policy
+protects a category and the channel isn't already protected, and cached so
+admission doesn't fetch it again. Anything but `unprotected` drops the turn
+with only a log line, and the entries' error boundaries post only when the
+state is `unprotected`. The entries are Discord `on_message`, organic thread
+participation, wizard submit and continuations, and Slack
+`_handle_app_mention` (with a second check in `_orchestrate` after it claims
+the thread, and on its ephemeral shed notice).
 
 **Tenant access policy — `packages/core/daimon/core/access_policy.py`.** One
 `TenantAccessPolicy` per tenant, stored as JSON in `tenant_access_policies`
