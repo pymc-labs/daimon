@@ -784,7 +784,7 @@ async def _bill_once(billing: BillingPosture, event: object, billed_event_ids: s
     if event.id in billed_event_ids:
         return
     if (observation := current_outcome.get()) is not None:
-        observation.note_usage(event)
+        observation.note_usage(event, metered=isinstance(billing, Billed))
     match billing:
         case Billed(record=record):
             await record(event=event)

@@ -555,7 +555,16 @@ cap and access-policy refusals. `start_turn` and `continue_turn` record the
 accepted dispatch with reason `unknown`: they return before model execution ends,
 so these records are dispatch observations, not claims of terminal completion.
 No follow-up terminal update or model-span usage capture is implemented for these
-SDK polling paths. Channel/thread identifiers are unavailable on these calls.
+SDK polling paths. Their usage fields remain null rather than implying zero
+model calls or cost. Channel/thread identifiers are unavailable on these calls.
 Identity resolution failures before tenant attribution and adapter readiness /
 draining gates before the turn boundary are outside this coverage. Library-only
 headless calls without a session factory remain unrecorded.
+
+The terminal outcome row also carries optional per-turn usage measurements:
+model-span token/cache totals, model IDs and estimated provider cost. The driver
+observes billed and exempt spans without changing metering; natural
+`(session_id, event_id)` keys deduplicate replay and retain recovery-attempt usage.
+The operator command `daimon usage turns` queries tenant-scoped rows and channel /
+origin summaries without upstream requests. See [billing](billing.md#per-turn-usage-telemetry)
+for unknown-cost and historical-row semantics.

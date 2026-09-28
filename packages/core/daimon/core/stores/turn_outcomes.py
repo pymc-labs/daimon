@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -36,6 +37,15 @@ class OutcomeRecord:
     error_class: str | None
     release: str
     usage_refs: list[dict[str, str]]
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    model_calls: int | None = None
+    model_ids: list[str] | None = None
+    cost_usd: Decimal | None = None
+    unpriced_calls: int | None = None
+    billing_posture: str | None = None
 
 
 async def record(session: AsyncSession, outcome: OutcomeRecord) -> None:

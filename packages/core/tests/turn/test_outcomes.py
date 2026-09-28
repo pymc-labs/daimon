@@ -34,6 +34,8 @@ async def test_refusal_written_once_and_no_content_columns(
     async with sm() as session:
         rows = await list_for_tenant(session, tenant.id)
     assert len(rows) == 1 and rows[0].reason == TerminationReason.ADMISSION_CAP_EXCEEDED
+    assert rows[0].model_calls == 0 and rows[0].input_tokens == 0
+    assert rows[0].cost_usd == 0 and rows[0].billing_posture == "none"
     async with sm() as session, session.begin():
         await record(session, rows[0])
     async with sm() as session:
