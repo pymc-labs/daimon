@@ -1,7 +1,8 @@
 """Code-fence-aware answer splitting for Teams messages.
 
-A Teams bot message is capped by payload size, not characters. 12 000
-characters keeps even four-byte text well inside that cap. A split inside a
+A Teams bot message is capped by payload size (about 28 KB), not characters.
+4 000 characters stays under it even when JSON escapes each one to six bytes,
+as it does non-ASCII text. A split inside a
 ``` fence closes it on the cut chunk and re-opens it, with its language, on
 the next. Duplicated from the Slack adapter: adapters never import each other.
 """
@@ -12,7 +13,7 @@ import re
 
 _FENCE_RE = re.compile(r"^```(\S*)\s*$")
 
-_TEAMS_LIMIT = 12_000
+_TEAMS_LIMIT = 4_000
 
 
 def _fence_state(text: str) -> tuple[bool, str]:

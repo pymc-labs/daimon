@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from daimon.adapters.teams import card
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsTurnLifecycle, TimedSender
+from daimon.adapters.teams.split import split_answer
 from daimon.core.errors import TurnError
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from microsoft_teams.api import MessageActivityInput, SentActivity
@@ -139,3 +141,8 @@ async def test_a_hung_send_times_out_as_a_send_error() -> None:
     sender = TimedSender(_HungSender(), timeout=0.01)
     with pytest.raises(TEAMS_SEND_ERRORS):
         await sender.send(CONVERSATION_ID, MessageActivityInput(text="hi"), service_url=None)
+
+
+def test_a_long_non_ascii_answer_splits_under_the_teams_payload_cap() -> None:
+    chunks = split_answer("统计" * 5_000)
+    assert len(chunks) > 1 and all(len(json.dumps(chunk)) < 28_000 for chunk in chunks)
