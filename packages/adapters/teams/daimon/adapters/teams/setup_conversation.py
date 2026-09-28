@@ -31,6 +31,7 @@ from daimon.core.stores.thread_agent_bindings import (
     list_active_bindings,
     update_lifecycle,
 )
+from daimon.core.teams_threads import new_setup_thread_id
 from microsoft_teams.api import MessageActivityInput, SentActivity
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -62,7 +63,7 @@ async def open_setup_conversation(
         runtime.anthropic, tenant_id=tenant_id, target_ma_agent_id=target_ma_agent_id
     )
     target_name = str(target.metadata.get(MA_METADATA_KEY_NAME) or target.name) if target else None
-    thread_id = f"{chat};setup={uuid.uuid4().hex}"
+    thread_id = new_setup_thread_id(chat)
     async with runtime.sessionmaker.begin() as session:
         principal = await get_or_create_platform_principal(
             session, tenant_id=tenant_id, platform="teams", external_id=actor.user_id

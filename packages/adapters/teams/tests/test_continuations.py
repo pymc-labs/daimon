@@ -17,6 +17,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.testing.factories import make_account
 from daimon.testing.ma import MARouter, build_fake_anthropic
@@ -40,7 +41,7 @@ async def _bot_token() -> str:
     return "bot-token"
 
 
-def _inbound(text: str) -> TeamsInbound:
+def _inbound(text: str, setup_thread_id: str | None = None) -> TeamsInbound:
     return TeamsInbound(
         kind="dm",
         entra_tenant_id=ENTRA_TENANT_ID,
@@ -50,6 +51,7 @@ def _inbound(text: str) -> TeamsInbound:
         activity_id=str(uuid.uuid4()),
         text=text,
         service_url=SERVICE_URL,
+        setup_thread_id=setup_thread_id,
     )
 
 
@@ -76,7 +78,9 @@ async def _app(
     return teams, account.id
 
 
-async def _hand_off(db: async_sessionmaker[AsyncSession], account_id: uuid.UUID) -> uuid.UUID:
+async def _hand_off(
+    db: async_sessionmaker[AsyncSession], account_id: uuid.UUID, thread_id: str = CONVERSATION_ID
+) -> uuid.UUID:
     """What hand_off_task records mid-turn."""
     key = uuid.uuid4()
     await record_continuation(
@@ -85,7 +89,7 @@ async def _hand_off(db: async_sessionmaker[AsyncSession], account_id: uuid.UUID)
             tenant_id=TENANT,
             platform="teams",
             parent_channel_id=CONVERSATION_ID,
-            thread_id=CONVERSATION_ID,
+            thread_id=thread_id,
             requester_account_id=account_id,
             requester_external_user_id=AAD_OBJECT_ID,
             target_ma_agent_id=_TARGET,
@@ -106,8 +110,9 @@ async def _status(db: async_sessionmaker[AsyncSession], key: uuid.UUID) -> tuple
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("setup", [None, new_setup_thread_id(CONVERSATION_ID)])
 async def test_a_handoff_runs_after_the_turn_as_the_requester(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession], setup: str | None
 ) -> None:
     teams, account_id = await _app(db_session_factory, FakeSender())
     calls: list[tuple[TeamsInbound, dict[str, Any]]] = []
@@ -116,17 +121,19 @@ async def test_a_handoff_runs_after_the_turn_as_the_requester(
     async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID, **kw: Any) -> None:
         calls.append((inbound, kw))
         if len(calls) == 1:
-            keys.append(await _hand_off(db_session_factory, account_id))
+            keys.append(await _hand_off(db_session_factory, account_id, inbound.thread_id))
 
     with patch.object(TeamsApp, "_run_turn", _turn):
-        await teams._orchestrate(_inbound("hand this to stats-bot"), TENANT)
+        await teams._orchestrate(_inbound("hand this to stats-bot", setup), TENANT)
 
     (_, _), (follow, kw) = calls
-    assert (follow.text, follow.user_id, follow.conversation_id) == (
+    assert (follow.text, follow.user_id, follow.conversation_id, follow.kind) == (
         "finish the writeup",
         AAD_OBJECT_ID,
         CONVERSATION_ID,
+        "dm",
     )
+    assert follow.thread_id == (setup or CONVERSATION_ID), "a setup handoff stays in setup"
     assert kw["reraise"] is True and kw["handoff"] is not None
     assert await _status(db_session_factory, keys[0]) == ("delivered", None)
 

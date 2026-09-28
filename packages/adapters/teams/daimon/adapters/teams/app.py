@@ -70,6 +70,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_message,
     retire_turn_card_intent,
 )
+from daimon.core.teams_threads import conversation_of
 from daimon.core.turn import turn_deadline
 from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.errors import (
@@ -635,7 +636,7 @@ class TeamsApp:
             )
 
     async def _dispatch_continuations(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
-        """Run what a handoff queued in this conversation. The caller holds its guard."""
+        """Run what a handoff queued in this thread. The caller holds the chat's guard."""
         key = inbound.conversation_id
 
         async def notify(text: str) -> None:
@@ -654,7 +655,7 @@ class TeamsApp:
                 self.runtime.anthropic,
                 tenant_id=tenant_id,
                 platform="teams",
-                thread_id=key,
+                thread_id=inbound.thread_id,
                 run_follow_up=run,
                 post_notice=notify,
                 latest_user_message_at=latest_message_at,
@@ -694,11 +695,13 @@ class TeamsApp:
                 transfer_kind=continuity.transfer_kind,
             )
 
+        conversation = conversation_of(row.thread_id)
         inbound = TeamsInbound(
-            kind="dm" if row.thread_id == row.parent_channel_id else "channel",
+            kind="dm" if conversation == row.parent_channel_id else "channel",
             entra_tenant_id=self._teams.tenant_id,
             user_id=row.requester_external_user_id,
-            conversation_id=row.thread_id,
+            conversation_id=conversation,
+            setup_thread_id=row.thread_id if row.thread_id != conversation else None,
             channel_id=row.parent_channel_id,
             activity_id=str(row.id),
             text=seed,

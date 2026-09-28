@@ -15,6 +15,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.github_app_auth import build_app_install_url
+from daimon.core.teams_threads import conversation_of
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
 
@@ -42,7 +43,7 @@ class TeamsMessageRow(BaseModel):
 def _conversation_id(value: str) -> str:
     if not _CONVERSATION_ID.fullmatch(value):
         raise ToolError("channel_id must be a Teams conversation id, e.g. a:… or 19:…@thread.tacv2")
-    return value
+    return conversation_of(value)
 
 
 def _check_text(content: str) -> None:

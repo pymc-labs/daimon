@@ -27,6 +27,7 @@ from daimon.core.config import (
 from daimon.core.mcp_auth import mint_jwt
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
+from daimon.core.teams_threads import new_setup_thread_id
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
@@ -153,6 +154,16 @@ async def test_send_message_checks_the_channel_roster_then_posts() -> None:
     assert (row.conversation_id, row.activity_id) == (_THREAD, "act-1")
     roster = next(r for r in fake.requests if "/members/" in str(r.url))
     assert str(roster.url) == f"{_BASE}/{_CHANNEL}/members/{_CALLER}", "thread → channel roster"
+
+
+async def test_send_message_to_a_setup_conversation_posts_to_its_chat() -> None:
+    fake = _Fake()
+    chat = "a:chat-1"
+    row = await _teams_send_message_impl(
+        _runtime(_client(fake)), _auth(), channel_id=new_setup_thread_id(chat), content="hi"
+    )
+    assert row.conversation_id == chat
+    assert all(f"/{chat}/" in str(r.url) for r in fake.requests if "/v3/" in str(r.url))
 
 
 @pytest.mark.parametrize(
