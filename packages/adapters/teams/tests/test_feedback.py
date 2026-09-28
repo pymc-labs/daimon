@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 from daimon.adapters.teams.feedback import feedback_text, record_feedback
 from daimon.core._models import MessageFeedback
+from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.tenants import set_provision_status
 from microsoft_teams.api import MessageSubmitActionInvokeActivity
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -58,12 +60,20 @@ async def test_a_dislike_with_text_is_stored_against_the_answer(
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
-async def test_feedback_from_another_organisation_is_dropped(
-    db_session_factory: async_sessionmaker[AsyncSession],
+@pytest.mark.parametrize("case", ["other organisation", "archived"])
+async def test_feedback_is_dropped_unless_from_the_live_organisation(
+    db_session_factory: async_sessionmaker[AsyncSession], case: str
 ) -> None:
-    other = "00000000-0000-0000-0000-000000000099"
+    tenant = ENTRA_TENANT_ID
+    if case == "archived":
+        tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+        await set_provision_status(db_session_factory, tenant_id=tenant_id, archive=True)
+    else:
+        tenant = "00000000-0000-0000-0000-000000000099"
     await record_feedback(
-        db_session_factory, _activity("like", "{}", tenant=other), configured_tenant=ENTRA_TENANT_ID
+        db_session_factory,
+        _activity("like", "{}", tenant=tenant),
+        configured_tenant=ENTRA_TENANT_ID,
     )
     async with db_session_factory() as session:
         assert (await session.execute(select(MessageFeedback))).scalars().all() == []

@@ -12,12 +12,10 @@ import json
 from typing import cast
 
 import structlog
-from daimon.adapters.teams.identity import canonical_uuid
-from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.adapters.teams.identity import canonical_uuid, live_tenant_id
 from daimon.core.message_feedback import Vote
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.message_feedback import attach_feedback_text, record_vote
-from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
 from microsoft_teams.api import MessageSubmitActionInvokeActivity
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -45,7 +43,7 @@ async def record_feedback(
     *,
     configured_tenant: str,
 ) -> None:
-    """Record one feedback submission from the configured organisation."""
+    """Record one feedback submission from the configured, live organisation."""
     conversation = activity.conversation
     user_id = canonical_uuid(activity.from_.aad_object_id)
     message_id = activity.reply_to_id
@@ -58,10 +56,11 @@ async def record_feedback(
         return
     vote: Vote = "up" if activity.value.action_value.reaction == "like" else "down"
     text = feedback_text(activity.value.action_value.feedback)
-    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=configured_tenant)
+    tenant_id = await live_tenant_id(sessionmaker, configured_tenant)
+    if tenant_id is None:
+        log.info("teams.feedback.dropped")
+        return
     async with sessionmaker.begin() as session:
-        if await get_tenant(session, tenant_id) is None:
-            return
         thread = await get_latest_thread_session(
             session, tenant_id=tenant_id, platform="teams", thread_id=conversation.id
         )
