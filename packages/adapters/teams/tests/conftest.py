@@ -381,6 +381,13 @@ def no_boot_provisioning() -> Iterator[AsyncMock]:
         yield provision
 
 
+@pytest.fixture(autouse=True)
+def no_wake_poller() -> Iterator[AsyncMock]:
+    """The wake poller would share the test connection with the turn under test."""
+    with patch("daimon.adapters.teams.app.run_wake_poller", new_callable=AsyncMock) as poller:
+        yield poller
+
+
 @pytest.fixture
 def teams_api_fake() -> TeamsApiFake:
     return TeamsApiFake()

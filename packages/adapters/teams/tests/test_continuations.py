@@ -1,10 +1,10 @@
-"""Teams continuations: work a handoff queued runs after the turn, as the requester."""
+"""Teams continuations: queued work and due wakes run as the requester, once."""
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -13,7 +13,12 @@ from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import fresh_start
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
+from daimon.core.continuity.continuation import (
+    ContinuationRequest,
+    ResponderChanged,
+    record_continuation,
+)
+from daimon.core.continuity.wakes import WakeThread, enqueue_wake, poll_wakes_once
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.task_continuations import get_continuation
@@ -24,7 +29,7 @@ from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.errors import AdmissionDenialReason, SessionAgentMismatch, SessionBusyError
 from daimon.testing.factories import make_account
 from daimon.testing.ma import MARouter, build_fake_anthropic
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -59,6 +64,9 @@ async def _app(
             id=_TARGET, name="stats-bot", model="m", tenant_id=TENANT, created_at=datetime.now(UTC)
         )
     )
+    # What `patched_admission` resolves: the chat's current responder.
+    router.add_agent(ma_agent(id="agent_test_id", name="daimon", model="m", tenant_id=TENANT))
+    router.add_environment(ma_environment(id="env_test_id", tenant_id=TENANT))
     runtime = build_teams_runtime(db, anthropic=build_fake_anthropic(router.dispatch))
     teams = TeamsApp(
         runtime=runtime, sender=sender, commands={"new": fresh_start}, bot_token=bot_token
@@ -88,6 +96,34 @@ async def _hand_off(
         ),
     )
     return key
+
+
+async def _set_timer(db: async_sessionmaker[AsyncSession], account_id: uuid.UUID) -> uuid.UUID:
+    """What create_timer records, already due."""
+    key = uuid.uuid4()
+    request = ContinuationRequest(
+        tenant_id=TENANT,
+        platform="teams",
+        parent_channel_id=CONVERSATION_ID,
+        thread_id=CONVERSATION_ID,
+        requester_account_id=account_id,
+        requester_external_user_id=AAD_OBJECT_ID,
+        target_ma_agent_id=_TARGET,
+        target_name="stats-bot",
+        requested_work="check the deploy",
+        reason="timer",
+        idempotency_key=key,
+    )
+    await enqueue_wake(db, request, available_at=datetime.now(UTC) - timedelta(seconds=1))
+    return key
+
+
+async def _poll(db: async_sessionmaker[AsyncSession], teams: TeamsApp) -> int:
+    opened = await poll_wakes_once(
+        db, platform="teams", open_thread=teams._open_wake_thread, now=datetime.now(UTC)
+    )
+    await asyncio.gather(*teams._tasks)
+    return opened
 
 
 async def _status(db: async_sessionmaker[AsyncSession], key: uuid.UUID) -> tuple[str, str | None]:
@@ -235,3 +271,64 @@ async def test_a_saved_input_runs_its_work_now_or_once_the_busy_turn_ends(
     assert len(ran) == 2, "the release re-runs the deferred dispatch"
     assert await _status(db_session_factory, idle) == ("delivered", None)
     assert await _status(db_session_factory, busy) == ("delivered", None)
+
+
+async def test_the_poller_opens_a_due_timer_and_runs_it_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    teams, account_id = await _app(db_session_factory, FakeSender())
+    key = await _set_timer(db_session_factory, account_id)
+    calls: list[tuple[TeamsInbound, dict[str, Any]]] = []
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID, **kw: Any) -> None:
+        calls.append((inbound, kw))
+
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        assert await _poll(db_session_factory, teams) == 1, "the chat with a due timer opens"
+        assert await _poll(db_session_factory, teams) == 0, "a delivered timer is not polled again"
+
+    [(follow, kw)] = calls
+    assert "check the deploy" in follow.text and follow.user_id == AAD_OBJECT_ID
+    assert follow.service_url is None, "a wake stores no service URL: the SDK default is used"
+    assert kw["continuation"].idempotency_key == key and kw["reraise"] is True
+    assert await _status(db_session_factory, key) == ("delivered", None)
+    gone = WakeThread(
+        tenant_id=uuid.uuid4(),
+        platform="teams",
+        parent_channel_id=CONVERSATION_ID,
+        thread_id=CONVERSATION_ID,
+        requester_account_id=account_id,
+    )
+    assert await teams._open_wake_thread(gone) is False, "a missing tenant is pushed back"
+
+
+async def test_a_timer_whose_chat_changed_responder_says_so_and_never_runs(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams, account_id = await _app(db_session_factory, sender)
+    key = await _set_timer(db_session_factory, account_id)
+
+    with patched_admission():
+        await _poll(db_session_factory, teams)
+
+    notice = ResponderChanged(target_name="stats-bot", current_name="daimon").message
+    assert [a.text for a in sender.activities] == [notice], "the notice, and no status card"
+    assert await _status(db_session_factory, key) == ("skipped", "skip_target_changed")
+
+
+async def test_start_runs_the_teams_wake_poller_until_drain(
+    db_session_factory: async_sessionmaker[AsyncSession], no_wake_poller: AsyncMock
+) -> None:
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+    )
+    await teams.start()
+    kwargs = no_wake_poller.call_args.kwargs
+    assert kwargs["platform"] == "teams" and kwargs["open_thread"] == teams._open_wake_thread
+    assert kwargs["should_stop"]() is False, "the poller runs while the app admits turns"
+    await teams.drain(timeout=1.0)
+    assert kwargs["should_stop"]() is True, "drain stops the poller"

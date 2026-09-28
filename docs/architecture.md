@@ -371,8 +371,8 @@ against.
   bot: a handoff's first turn for the new agent, work unblocked by a private
   form, a one-shot timer (`daimon.core.continuity.timers`, the `create_timer`
   tool), and anything else queued through `daimon.core.continuity.wakes`. A wake is
-  a `task_continuations` row. The Discord and Slack adapters each run a wake
-  poller (`run_wake_poller`) that opens threads with due rows and hands them
+  a `task_continuations` row. The Discord, Slack and Teams adapters each run
+  a wake poller (`run_wake_poller`) that opens threads with due rows and hands them
   to the adapter's continuation dispatch. That dispatch takes the thread's
   turn guard and goes through `admit()`, `bind_session()` and
   `run_prepared_turn()` like a mention, so the balance and cap gates apply.

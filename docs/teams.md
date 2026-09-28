@@ -96,7 +96,8 @@ work resumes. Replacing an existing key follows the same admin rules as Slack.
 MCP tools that need a chat platform work from Teams turns: `send_message` and
 `create_thread` (text only, up to 6,000 characters, and only into a
 conversation the requester belongs to), task handoff and fresh starts,
-`bind_public_repo` and the GitHub App install link. The MCP server posts
+timers (`create_timer`, `list_timers`, `cancel_timer`), `bind_public_repo`
+and the GitHub App install link. The MCP server posts
 through the Bot Framework REST API with the same app registration.
 
 ### Capacity
@@ -112,6 +113,12 @@ cancels them. The next boot edits every card a restart cut off to an
 interrupted notice before admitting new turns. Teams cannot list a
 conversation's messages, so a card whose send never returned an id cannot be
 found and is left as is.
+
+Handoffs, work waiting on a private input and timers are durable wake-queue
+rows, and a wake poller opens every chat with due work. They survive a
+restart, a timer fires at its time, and one whose turn had already started
+when the process died is not run twice. A timer whose chat now answers as a
+different agent posts a notice instead of running.
 
 ### Not supported yet
 

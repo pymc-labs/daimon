@@ -25,7 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `billing`; admins are listed in
   `DAIMON_TEAMS__ADMIN_USER_IDS`. Pasted images and files shared in 1:1 chats
   reach the agent, output files are delivered with file consent cards, and
-  `send_message`, `create_thread` and task handoffs work from Teams turns.
+  `send_message`, `create_thread`, task handoffs and timers work from Teams
+  turns; the wake poller runs handoffs and timers across restarts.
   Agent keys, MCP tokens and MCP sign-ins are collected privately through
   Teams dialogs.
   Builds on #220 by @jchu96. See `docs/teams.md`.

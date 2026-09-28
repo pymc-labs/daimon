@@ -3,7 +3,8 @@
 Mirrors `SlackApp`. One turn per conversation thread at a time; messages that
 arrive meanwhile queue silently (Teams bots cannot react) and run after it as
 one turn per author. A per-tenant cap sheds load, and no turn starts until the
-boot sweep has retired the previous process's turns.
+boot sweep has retired the previous process's turns. A wake poller opens chats
+with due handoffs and timers.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
+from daimon.core.continuity.continuation import check_wake_responder
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -57,10 +59,12 @@ from daimon.core.continuity.messages import (
     render_responder_changed_without_handoff,
     render_unexpected_loss,
 )
+from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.stores.domain import Role, TaskContinuationRow
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     get_live_thread_session,
@@ -214,6 +218,7 @@ class TeamsApp:
         # Not durable: a retry landing after a restart runs a second turn.
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._recovery: asyncio.Task[None] | None = None
+        self._wake_poller: asyncio.Task[None] | None = None
         # When each busy conversation last got a message: a newer one supersedes
         # queued continuation work (Teams cannot list a conversation's history).
         self._last_message_at: dict[str, datetime] = {}
@@ -237,11 +242,37 @@ class TeamsApp:
             log.error("teams.task_failed", task_name=task.get_name(), exc_info=task.exception())
 
     def start(self) -> asyncio.Task[None]:
-        """Start the boot sweep (turns wait for it) and tenant provisioning."""
+        """Start the boot sweep (turns wait for it), tenant provisioning and the wake poller."""
         if self._recovery is None:
             self._recovery = asyncio.create_task(self._recover(), name="teams.boot-sweep")
             self.spawn(self._provision(), name="teams.provision")
+            poller = run_wake_poller(
+                self.runtime.sessionmaker,
+                platform="teams",
+                open_thread=self._open_wake_thread,
+                should_stop=lambda: self.draining,
+            )
+            self._wake_poller = asyncio.create_task(poller, name="teams.wake-poller")
         return self._recovery
+
+    async def _open_wake_thread(self, wake: WakeThread) -> bool:
+        """The wake poller's hook: run a chat's due wakes, spawned.
+
+        Goes through `dispatch_after_input`, so a wake takes the chat's guard and
+        the same admit -> bind -> run path as any continuation. A missing or
+        archived tenant returns False and the poller pushes its rows back. A wake
+        stores no service URL, so its sends use the SDK default, as the boot sweep's do.
+        """
+        if self.draining:
+            return True
+        async with self.runtime.sessionmaker() as session:
+            tenant = await get_tenant(session, wake.tenant_id)
+        if tenant is None or tenant.archived_at is not None:
+            return False
+        self.spawn(
+            self.dispatch_after_input(wake.tenant_id, wake.thread_id, None), name="teams.wake"
+        )
+        return True
 
     async def _recover(self) -> None:
         delay = _RECOVERY_RETRY_DELAY_S
@@ -280,6 +311,10 @@ class TeamsApp:
         sweep edits its card to interrupted.
         """
         self.draining = True
+        if self._wake_poller is not None:
+            # Dispatches it spawned drain with the turns; due rows wait for the next boot.
+            self._wake_poller.cancel()
+            await asyncio.gather(self._wake_poller, return_exceptions=True)
         tasks = set(self._tasks)
         if self._recovery is not None and not self._recovery.done():
             tasks.add(self._recovery)
@@ -426,6 +461,7 @@ class TeamsApp:
         *,
         handoff: HandoffFactory | None = None,
         reraise: bool = False,
+        continuation: TaskContinuationRow | None = None,
     ) -> None:
         """Turn body: admit → card → bind → marker → run → watermark. Mirrors Slack's.
 
@@ -450,6 +486,15 @@ class TeamsApp:
             if reraise:
                 raise
             return
+        if continuation is not None:
+            # A timer runs only as the agent it was set with: refused before any card.
+            check_wake_responder(
+                reason=continuation.reason,
+                target_ma_agent_id=continuation.target_ma_agent_id,
+                target_name=continuation.target_name,
+                admitted_ma_agent_id=admission.agent.id,
+                admitted_name=admission.agent.name,
+            )
 
         agent = admission.agent
         # Committed before the post so a lost response still leaves a record.
@@ -687,7 +732,7 @@ class TeamsApp:
     async def dispatch_after_input(
         self, tenant_id: uuid.UUID, thread_id: str, service_url: str | None
     ) -> None:
-        """Run what a saved private input queued here, from outside a turn.
+        """Run what a saved private input or a due wake queued here, from outside a turn.
 
         A busy conversation is left to its turn's tail dispatch, and re-run on
         release in case that tail already passed. Messages queued meanwhile follow.
@@ -708,7 +753,7 @@ class TeamsApp:
     async def _dispatch_continuations(
         self, thread_id: str, tenant_id: uuid.UUID, service_url: str | None
     ) -> None:
-        """Run what a handoff or saved input queued in a thread. The caller holds its chat."""
+        """Run what a handoff, saved input or wake queued in a thread. The caller holds its chat."""
         key = conversation_of(thread_id)
 
         async def notify(text: str) -> None:
@@ -781,7 +826,7 @@ class TeamsApp:
             text=seed,
             service_url=service_url,
         )
-        await self._run_turn(inbound, tenant_id, handoff=handoff, reraise=True)
+        await self._run_turn(inbound, tenant_id, handoff=handoff, reraise=True, continuation=row)
 
     async def _settle(
         self,
