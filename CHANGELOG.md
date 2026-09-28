@@ -72,6 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   categories, sealed channels, DM memory); `--clear` puts the tenant back on
   the open default. IDs are validated per platform before writing, and concurrent
   edits preserve fields changed by other CLI commands.
+- Protected channels: the agent, including its own replies, never writes into
+  channels, threads and Discord categories the tenant access policy marks
+  protected, for admins as well. A mention there is dropped silently (no
+  thread, reply or upload), and the write tools (send message, create or
+  rename a thread, credential, wizard and app-install cards) refuse them.
+  When the policy can't be read (including a database outage) the agent
+  stays silent in that channel rather than posting an error there.
 - Tenant access policy: a tenant can limit who may start a turn to a list of
   platform user ids (admins are always allowed). Discord and Slack refuse
   anyone else at admission with a notice, and so do the MCP and hub turn

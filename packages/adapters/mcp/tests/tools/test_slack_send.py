@@ -19,6 +19,7 @@ from daimon.adapters.mcp.tools.slack._send import (  # pyright: ignore[reportPri
 from daimon.adapters.mcp.tools.slack._visibility import (
     MISSING_ACCESS,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
     CredentialsSettings,
@@ -29,10 +30,13 @@ from daimon.core.config import (
 )
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
 
@@ -542,3 +546,86 @@ async def test_create_thread_channel_access_validated_before_posting(
         assert _POST_KEY not in m.requests, (
             "the deny path must raise before ever reaching chat.postMessage"
         )
+
+
+async def _auth_for_protected_tenant(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], *, protected: tuple[str, ...]
+) -> AuthIdentity:
+    async with committing_sessionmaker() as session:
+        tenant = await make_tenant(session, platform="slack", workspace_id="T_TEST")
+        await set_access_policy(
+            session, tenant_id=tenant.id, policy=TenantAccessPolicy(protected_channel_ids=protected)
+        )
+        await session.commit()
+    return _auth(tenant_id=tenant.id, is_admin=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["C1", "C1:1700000000.000100"], ids=["channel", "thread"])
+async def test_send_message_into_a_protected_channel_is_refused_and_posts_nothing(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], target: str
+) -> None:
+    """SYS-048: protection covers the channel and its threads, even for an admin caller."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = await _auth_for_protected_tenant(committing_sessionmaker, protected=("C1",))
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        with pytest.raises(ToolError, match="protected"):
+            await _slack_send_message_impl(
+                runtime, auth, channel_id=target, content="hi", attachments=None, file_handles=None
+            )
+        assert _POST_KEY not in m.requests, "a protected channel must receive no post"
+
+
+@pytest.mark.asyncio
+async def test_create_thread_in_a_protected_channel_is_refused_and_posts_nothing(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = await _auth_for_protected_tenant(committing_sessionmaker, protected=("C1",))
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        with pytest.raises(ToolError, match="protected"):
+            await _slack_create_thread_impl(runtime, auth, channel_id="C1", content="hi")
+        assert _POST_KEY not in m.requests, "a protected channel must receive no thread root"
+
+
+@pytest.mark.asyncio
+async def test_send_message_to_an_unprotected_channel_still_posts(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = await _auth_for_protected_tenant(committing_sessionmaker, protected=("C_CLIENT",))
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            _CHAT_POST_MESSAGE, payload={"ok": True, "ts": "1700000001.000100"}
+        )
+        row = await _slack_send_message_impl(
+            runtime, auth, channel_id="C1", content="hi", attachments=None, file_handles=None
+        )
+    assert row.ts == "1700000001.000100", "a channel outside the policy must post normally"
+
+
+@pytest.mark.asyncio
+async def test_send_message_is_refused_when_the_policy_is_unreadable(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A present policy row that doesn't parse (JSON null here) refuses every
+    write rather than falling open."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    async with committing_sessionmaker() as session:
+        tenant = await make_tenant(session, platform="slack", workspace_id="T_TEST")
+        await session.execute(
+            text("INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, 'null')"),
+            {"t": tenant.id},
+        )
+        await session.commit()
+    auth = _auth(tenant_id=tenant.id)
+    with aioresponses() as m:
+        _mock_public_channel_access(m)
+        with pytest.raises(ToolError, match="access policy could not be read"):
+            await _slack_send_message_impl(
+                runtime, auth, channel_id="C1", content="hi", attachments=None, file_handles=None
+            )
+        assert _POST_KEY not in m.requests, "an unreadable policy must let nothing be posted"

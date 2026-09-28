@@ -661,6 +661,90 @@ async def test_a_demoted_admin_outside_the_allowlist_is_refused_on_submit(
     )
 
 
+@pytest.mark.parametrize(
+    ("policy", "saturate"),
+    [
+        (TenantAccessPolicy(protected_channel_ids=("7008",)), False),
+        (TenantAccessPolicy(protected_channel_ids=("6008",), invoker_user_ids=("staff",)), False),
+        (TenantAccessPolicy(protected_channel_ids=("6008",)), True),
+    ],
+    ids=["protected-thread-open-parent", "guest-in-protected-channel", "over-cap-in-protected"],
+)
+async def test_a_submit_in_a_protected_channel_posts_nothing_and_runs_no_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    policy: TenantAccessPolicy,
+    saturate: bool,
+) -> None:
+    """SYS-048: no reply, no refusal and no capacity notice in a protected
+    thread or channel; the answers stay recorded."""
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800008001")
+    async with db_session_factory() as session, session.begin():
+        await set_access_policy(session, tenant_id=tenant.id, policy=policy)
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+
+    channel = _make_channel(thread_id=7008, parent_id=6008)
+    channel.parent = MagicMock()
+    channel.parent.category_id = None
+    stream_hits: list[str] = []
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=stream_hits)
+    bot = _make_bot(_make_runtime(db_session_factory, router))
+    if saturate:
+        bot._inflight[tenant.id] = 10_000  # pyright: ignore[reportPrivateUsage]  # saturate the cap
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    with patch("daimon.core.turn.prepare.create_session") as mock_create_session:
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]  # drain the spawned turn
+        mock_create_session.assert_not_called()
+
+    assert stream_hits == [], "a protected target must never reach the turn stream"
+    channel.send.assert_not_called()
+    async with db_session_factory() as session:
+        after = await get_wizard_session(session, short_id=row.id)
+    assert after is not None and after.status == "submitted", "the answers stay recorded"
+
+
+async def test_a_submit_whose_protection_cannot_be_read_posts_nothing(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Unknown protection is treated like protected: no capacity notice, no
+    refusal, no error render, no turn."""
+    from sqlalchemy.exc import OperationalError
+
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800009001")
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+    channel = _make_channel(thread_id=7009, parent_id=6009)
+    channel.parent = MagicMock()
+    channel.parent.category_id = None
+    stream_hits: list[str] = []
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=stream_hits)
+    bot = _make_bot(_make_runtime(db_session_factory, router))
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    with (
+        patch(
+            "daimon.core.turn.protection.load_access_policy",
+            new=AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("pool gone"))),
+        ),
+        patch("daimon.core.turn.prepare.create_session") as mock_create_session,
+    ):
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]  # drain the spawned turn
+        mock_create_session.assert_not_called()
+
+    assert stream_hits == []
+    channel.send.assert_not_called()
+
+
 # --- per-turn ceiling (19-04) -------------------------------------------------
 
 

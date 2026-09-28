@@ -67,7 +67,12 @@ _SEND_MESSAGES = 1 << 11
 # ---------------------------------------------------------------------------
 
 
-def _runtime(*, with_discord: bool = True, app_slug: str | None = "acme-daimon") -> McpRuntime:
+def _runtime(
+    *,
+    with_discord: bool = True,
+    app_slug: str | None = "acme-daimon",
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> McpRuntime:
     settings = Settings(
         database=DatabaseSettings(url="postgresql+asyncpg://x/y"),  # pyright: ignore[reportArgumentType]
         anthropic=AnthropicSettings(api_key=SecretStr("k")),
@@ -75,7 +80,7 @@ def _runtime(*, with_discord: bool = True, app_slug: str | None = "acme-daimon")
         github=GithubSettings(app_slug=app_slug),
     )
     return McpRuntime(
-        session_factory=MagicMock(),  # type: ignore[arg-type]
+        session_factory=session_factory or MagicMock(),  # type: ignore[arg-type]
         client=MagicMock(),  # type: ignore[arg-type]
         settings=settings,
         deployment_default=DeploymentDefault(),
@@ -244,8 +249,9 @@ def _outbound_request_count(monkeypatch: pytest.MonkeyPatch) -> list[discord.htt
 
 async def test_post_app_install_link_posts_link_button_with_no_custom_id(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    runtime = _runtime(app_slug="acme-daimon")
+    runtime = _runtime(session_factory=db_session_factory, app_slug="acme-daimon")
     auth = _auth_identity()
     posted: dict[str, Any] = {}
     _patch_successful_post(monkeypatch, message_id="9301", posted=posted)

@@ -100,27 +100,53 @@ config). The order is load-bearing and documented as such in the module:
 1. Resolve the platform user to an `accounts` row, via
    `get_or_create_platform_principal` in
    `packages/core/daimon/core/stores/identity.py`.
-2. Invoker policy — the tenant's access policy (below) may restrict who can
+2. Channel protection — a turn whose reply would land in a protected channel,
+   a thread under one or (Discord) a channel in a protected category raises
+   `AdmissionDenied("channel_protected")`, admins included. It runs before the
+   invoker gate, whose refusal would otherwise be posted there. If a Discord
+   thread's category can't be resolved while any category is protected, the
+   turn is refused.
+3. Invoker policy — the tenant's access policy (below) may restrict who can
    start a turn. A refused user raises `AdmissionDenied("invoker_not_allowed")`
    before the cascade, so they learn nothing about the tenant's configuration
    and no MA call is made.
-3. Resolve config through the cascade
+4. Resolve config through the cascade
    `thread → channel → tenant → deployment`, in
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are
    named by `ConfigTier` in `packages/core/daimon/core/scope.py`; the bottom
    one comes from `defaults/config.yaml`, see [defaults.md](defaults.md).
-4. Raise `MissingTurnConfigError` if no agent or environment resolved — before
+5. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a
    billing one.
-5. Resolve the agent and environment to live MA ids via
+6. Resolve the agent and environment to live MA ids via
    `packages/core/daimon/core/ma_resolver.py`, which self-heals by re-running
    defaults reconciliation when a tag no longer resolves, and rejects an agent
    whose `archived_at` is set.
-6. Balance gate — `tenant_balance.is_over_balance`.
-7. Monthly cap gate — `billing.is_over_cap`.
+7. Balance gate — `tenant_balance.is_over_balance`.
+8. Monthly cap gate — `billing.is_over_cap`.
 
-The policy, balance and cap gates each raise `AdmissionDenied` with a
+The policy, protection, balance and cap gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
+
+A protected channel hears nothing from the agent, not even a refusal or an
+error. Each turn entry decides FIRST, before tenant liveness, provisioning or
+any other read that can fail, whether the agent may post there:
+`protection_state` (`packages/core/daimon/core/turn/protection.py`) returns
+`unprotected`, `protected` or `unknown`, and never raises -- a policy that
+doesn't parse, a database or pool failure, or a failed category lookup all
+give `unknown`. The channel and its parent are checked first; a Discord
+thread's uncached parent is fetched for its category only when the policy
+protects a category and the channel isn't already protected, and cached so
+admission doesn't fetch it again. Anything but `unprotected` drops the turn
+with only a log line, and the entries' error boundaries post only when the
+state is `unprotected`. The entries are Discord `on_message`, organic thread
+participation, wizard submit and continuation turns, and Slack
+`_handle_app_mention` (with a second check in `_orchestrate` after it claims
+the thread, and on its ephemeral shed notice). The continuation dispatchers on
+both platforms, which can post skip or responder-changed copy outside any
+turn (from the wake poller or a credential submission), ask the same decision
+right before each post and settle the row skipped without posting when it
+isn't `unprotected`.
 
 **Tenant access policy — `packages/core/daimon/core/access_policy.py`.** One
 `TenantAccessPolicy` per tenant, stored as JSON in `tenant_access_policies`
@@ -142,12 +168,15 @@ and skips the policy, as it skips billing. Ids are the platform's own (Discord s
 | Field | Empty means | Enforced by |
 | --- | --- | --- |
 | `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
-| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | not yet |
+| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord and Slack write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
 | `sealed_channel_ids` | nothing is sealed | `admit()` sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
 
-A sealed channel's content is readable only from a turn inside it (the channel
-or a thread under it). Operators edit it with the CLI:
+Protection covers threads under a protected channel and, on Discord, channels
+in a protected category; it applies to admins too, and runs after the caller's
+own permission check so it never reveals a channel the caller cannot see. A
+sealed channel's content is readable only from a turn inside it (the channel
+or a thread under it). Operators edit the policy with the CLI:
 
 ```bash
 daimon tenants access-policy get discord GUILD_ID [--json]

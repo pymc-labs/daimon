@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from daimon.adapters.slack.app import SlackApp
+from daimon.core.turn.protection import ProtectionState
 from sqlalchemy.exc import OperationalError
 
 
@@ -77,6 +78,10 @@ async def test_transient_orphan_recovery_failure_retries_before_admission(
         patch(
             "daimon.adapters.slack.app.snapshot_slack_card_intents",
             new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "daimon.adapters.slack.app.protection_state",
+            new=AsyncMock(return_value=ProtectionState.UNPROTECTED),
         ),
         patch("daimon.adapters.slack.app.insert_if_new", new=AsyncMock(return_value=True)),
         patch(

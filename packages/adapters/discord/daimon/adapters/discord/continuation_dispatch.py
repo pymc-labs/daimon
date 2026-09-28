@@ -13,7 +13,8 @@ either safely retry (never started) or settle as interrupted (started).
 
 This module only decides and settles (via `daimon.core.continuity.continuation`,
 the at-most-once contract) and drives Discord-specific reads (`thread.history`
-for the supersede check, `thread.send` for skip copy). Running the actual
+for the supersede check, `thread.send` for skip copy, only where the injected
+`may_post` allows). Running the actual
 follow-up turn is injected as `run_follow_up` so tests can assert dispatch
 happened without paying for a second real turn, and so this module never has
 to know how `DaimonBot` builds a lifecycle.
@@ -58,13 +59,18 @@ import discord
 
 log = structlog.get_logger(__name__)
 
-__all__ = ["RunFollowUp", "dispatch_pending_continuations"]
+__all__ = ["MayPost", "RunFollowUp", "dispatch_pending_continuations"]
 
 #: Runs the destination agent's first turn for one dispatched continuation.
 #: Raises `SessionPreparationFailed` (or any `DaimonError`/`anthropic.APIError`/
 #: `discord.HTTPException`) to signal the turn did not run; any other return
 #: is treated as delivered.
 RunFollowUp = Callable[[TaskContinuationRow, ContinuationDecision], Awaitable[None]]
+
+#: Whether the agent may post in the thread at all (the tenant access policy's
+#: may-post state, injected by the bot). Asked right before each post; a
+#: protected or unknown thread gets nothing and the row still settles.
+MayPost = Callable[[], Awaitable[bool]]
 
 
 async def _latest_human_message_at(thread: discord.Thread, *, after: datetime) -> datetime | None:
@@ -88,8 +94,15 @@ async def _dispatch_one(
     claim: WakeClaim,
     thread: discord.Thread,
     run_follow_up: RunFollowUp,
+    may_post: MayPost,
     now: Callable[[], datetime],
 ) -> None:
+    async def _post(text: str, *, reason: str) -> None:
+        if await may_post():
+            await thread.send(text)
+        else:
+            log.info("continuation.notice_withheld", thread_id=row.thread_id, reason=reason)
+
     request = ContinuationRequest(
         tenant_id=row.tenant_id,
         platform="discord",
@@ -130,7 +143,7 @@ async def _dispatch_one(
         return
     if decision.action != "dispatch":
         if decision.message is not None:
-            await thread.send(decision.message)
+            await _post(decision.message, reason=decision.action)
         await settle_wake(
             sessionmaker, claim, status="skipped", now=now(), skip_reason=decision.action
         )
@@ -154,7 +167,7 @@ async def _dispatch_one(
     except ResponderChanged as exc:
         # A timer whose thread is answered by another agent now: say so and
         # stop; the turn never started.
-        await thread.send(exc.message)
+        await _post(exc.message, reason="skip_target_changed")
         await settle_wake(
             sessionmaker, claim, status="skipped", now=now(), skip_reason="skip_target_changed"
         )
@@ -201,6 +214,7 @@ async def dispatch_pending_continuations(
     tenant_id: uuid.UUID,
     thread: discord.Thread,
     run_follow_up: RunFollowUp,
+    may_post: MayPost,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
     """Claim and run every continuation or due wake `thread` may run now.
@@ -235,5 +249,6 @@ async def dispatch_pending_continuations(
             claim=claim,
             thread=thread,
             run_follow_up=run_follow_up,
+            may_post=may_post,
             now=now,
         )
