@@ -14,6 +14,7 @@ from typing import Any, cast
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY, ChannelReadPolicy
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
@@ -30,7 +31,12 @@ _SEARCH_LIMIT_CAP = 25
 
 
 async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
-    runtime: McpRuntime, auth: AuthIdentity, *, content: str, limit: int
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    content: str,
+    limit: int,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> SlackSearchResult:
     user_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
@@ -56,6 +62,10 @@ async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
     for m in raw_matches:
         channel = cast(dict[str, Any], m.get("channel") or {})
         if not dm_ok and channel.get("is_im"):
+            continue
+        # A sealed channel's hits are withheld outside it, and drop out of the total.
+        if not read_policy.allows(str(channel.get("id", ""))):
+            total = max(0, total - 1)
             continue
         matches.append(
             SlackSearchMatch(

@@ -17,6 +17,7 @@ from typing import Literal
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY, ChannelReadPolicy
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -103,6 +104,7 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
     channel_id: str,
     limit: int = 50,
     before: str | None = None,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> ReadChannelResult:
     """Read channel messages, oldest-first, with before-cursor pagination.
 
@@ -124,6 +126,7 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
             raise ToolError("this is a thread — use read_thread")
 
         _check_view_permission(channel, member)
+        read_policy.require(str(channel.id))
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support message history")
         rows, next_before, hint = await _history_page(
@@ -174,6 +177,7 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
     *,
     channel_id: str,
     message_id: str,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> MessageRow:
     """Fetch a single message by id.
 
@@ -190,8 +194,10 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
 
         if isinstance(channel, discord.Thread):
             await _check_thread_view(c, channel, member, _require_discord_identity(auth))
+            read_policy.require(str(channel.id), str(channel.parent_id))
         else:
             _check_view_permission(channel, member)
+            read_policy.require(str(channel.id))
 
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support message history")
@@ -264,6 +270,7 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
     thread_id: str,
     limit: int = 50,
     before: str | None = None,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> ReadThreadResult:
     """Read messages from a thread, oldest-first, with before-cursor pagination.
 
@@ -285,6 +292,7 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
             raise ToolError("not a thread — use read_channel for channels")
 
         await _check_thread_view(c, channel, member, _require_discord_identity(auth))
+        read_policy.require(str(channel.id), str(channel.parent_id))
 
         rows, next_before, hint = await _history_page(
             channel, limit=bounded_limit, before=before_obj
@@ -302,6 +310,7 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
     auth: AuthIdentity,
     *,
     channel_id: str,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> list[ThreadRow]:
     """List active and archived public threads for a parent channel.
 
@@ -324,6 +333,8 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
             raise ToolError("channel does not support threads")
 
         _check_view_permission(parent, member)
+        # Thread names are content too.
+        read_policy.require(str(parent.id))
 
         # Active threads — guild-wide, filter by parent_id
         active_threads = await guild.active_threads()

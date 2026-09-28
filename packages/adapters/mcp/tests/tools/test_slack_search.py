@@ -14,10 +14,12 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.slack._search import (  # pyright: ignore[reportPrivateUsage]
     _slack_search_messages_impl,
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
     CredentialsSettings,
@@ -276,3 +278,57 @@ async def test_dispatch_slack_search_rejects_discord_only_filters(
     async with Client(mcp) as client:
         with pytest.raises(ToolError, match="slack"):
             await client.call_tool("search_messages", {"content": "q", "author_ids": ["U1"]})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("origin_channel_ids", "expected_texts", "expected_total"),
+    [
+        (frozenset(), ["open hit"], 1),
+        (frozenset({"C_SEALED"}), ["sealed hit", "open hit"], 2),
+    ],
+    ids=["outside-withheld", "inside-kept"],
+)
+async def test_search_withholds_sealed_channel_hits_outside_the_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    origin_channel_ids: frozenset[str],
+    expected_texts: list[str],
+    expected_total: int,
+) -> None:
+    """SYS-029: a sealed channel's hits reach only a turn inside it, and a
+    withheld hit drops out of the total too."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    await _seed_user_token(runtime, committing_sessionmaker)
+    await _seed_turn_context(committing_sessionmaker, auth, channel_id="C_OPEN")
+    read_policy = ChannelReadPolicy(
+        policy=TenantAccessPolicy(sealed_channel_ids=("C_SEALED",)),
+        origin_channel_ids=origin_channel_ids,
+    )
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _SEARCH_MESSAGES,
+            payload={
+                "ok": True,
+                "messages": {
+                    "paging": {"count": 20, "total": 2, "page": 1, "pages": 1},
+                    "matches": [
+                        {
+                            "channel": {"id": "C_SEALED", "name": "vault"},
+                            "ts": "1.0",
+                            "text": "sealed hit",
+                        },
+                        {
+                            "channel": {"id": "C_OPEN", "name": "general"},
+                            "ts": "2.0",
+                            "text": "open hit",
+                        },
+                    ],
+                },
+            },
+        )
+        result = await _slack_search_messages_impl(
+            runtime, auth, content="q", limit=10, read_policy=read_policy
+        )
+    assert [x.text for x in result.matches] == expected_texts, "sealed hits follow the origin"
+    assert result.total == expected_total, "a withheld hit must not be counted"

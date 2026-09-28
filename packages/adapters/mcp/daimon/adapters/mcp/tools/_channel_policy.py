@@ -5,21 +5,44 @@ channel id (plus parent channel and category where it has them) and calls
 `require_channel_writable` after its own caller-permission check, so the
 policy never reveals a channel the caller could not see anyway. Protection
 applies to admins too.
+
+Reads go through `ChannelReadPolicy`, which the channel dispatcher
+(`tools/channels.py`) loads once per call and hands to the platform impl. A
+sealed channel -- or a thread under one -- is readable only when the call
+names the origin of a turn inside that same channel; with no origin, or a
+foreign one, it is refused and its search hits are withheld.
 """
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.core.access_policy import TenantAccessPolicy, is_write_protected
+from daimon.core.access_policy import (
+    OPEN_ACCESS_POLICY,
+    TenantAccessPolicy,
+    is_write_protected,
+)
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp.exceptions import ToolError
 
 _PROTECTED_MSG = (
     "this channel is protected: the workspace does not let daimon post there. "
     "Tell the caller and offer to post somewhere else. Do not retry."
 )
-_UNREADABLE_MSG = "this workspace's access policy could not be read, so daimon won't post anywhere"
+_UNREADABLE_MSG = (
+    "this workspace's access policy could not be read, so daimon won't read or post channels"
+)
+_SEALED_MSG = (
+    "this channel is sealed: it can only be read from a conversation inside it. "
+    "If you are answering in that channel, pass this turn's origin_context_id; "
+    "otherwise tell the caller. Do not retry."
+)
 
 
 async def load_channel_policy(runtime: McpRuntime, auth: AuthIdentity) -> TenantAccessPolicy:
@@ -48,3 +71,70 @@ async def require_channel_writable(
         category_id=category_id,
     ):
         raise ToolError(_PROTECTED_MSG)
+
+
+class SealedChannelError(ToolError):
+    """A read of a sealed channel from outside it. Not an access problem the
+    caller can fix by connecting an account, so no connect hint follows it."""
+
+
+@dataclass(frozen=True)
+class ChannelReadPolicy:
+    """The tenant policy plus the channels the calling turn runs in."""
+
+    policy: TenantAccessPolicy
+    origin_channel_ids: frozenset[str] = frozenset()
+
+    def allows(self, channel_id: str, parent_channel_id: str | None = None) -> bool:
+        sealed = self.policy.sealed_channel_ids
+        if channel_id in sealed:
+            return channel_id in self.origin_channel_ids
+        if parent_channel_id is not None and parent_channel_id in sealed:
+            return parent_channel_id in self.origin_channel_ids
+        return True
+
+    def require(self, channel_id: str, parent_channel_id: str | None = None) -> None:
+        """Raise ToolError for a sealed target outside the calling turn.
+
+        Call after the platform's caller-permission check."""
+        if not self.allows(channel_id, parent_channel_id):
+            raise SealedChannelError(_SEALED_MSG)
+
+
+# What an impl reads with when no dispatcher loaded a policy (direct test calls).
+OPEN_READ_POLICY = ChannelReadPolicy(policy=OPEN_ACCESS_POLICY)
+
+
+async def load_read_policy(
+    runtime: McpRuntime, auth: AuthIdentity, *, origin_context_id: str | None
+) -> ChannelReadPolicy:
+    """Load the tenant policy and, if one was named, the caller's active turn origin.
+
+    An origin that is malformed, expired, another account's or another
+    responder's counts as no origin: the read is judged from outside.
+    """
+    policy = await load_channel_policy(runtime, auth)
+    if not policy.sealed_channel_ids or not origin_context_id or auth.platform is None:
+        return ChannelReadPolicy(policy=policy)
+    try:
+        origin_id = uuid.UUID(origin_context_id)
+    except ValueError:
+        return ChannelReadPolicy(policy=policy)
+    async with runtime.session_factory() as session:
+        origin = await get_active_origin(
+            session,
+            origin_id=origin_id,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=auth.platform,
+            now=datetime.now(UTC),
+        )
+    if origin is None or (
+        auth.agent_id is not None
+        and auth.agent_id
+        != derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
+    ):
+        return ChannelReadPolicy(policy=policy)
+    return ChannelReadPolicy(
+        policy=policy, origin_channel_ids=frozenset({origin.parent_channel_id, origin.thread_id})
+    )

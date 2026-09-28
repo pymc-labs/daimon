@@ -21,6 +21,11 @@ from typing import Any, cast
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import (
+    OPEN_READ_POLICY,
+    ChannelReadPolicy,
+    SealedChannelError,
+)
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
@@ -274,6 +279,7 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
     channel_id: str,
     limit: int,
     cursor: str | None = None,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> SlackChannelResult:
     user_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
@@ -283,6 +289,7 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
         try:
             channel = await _channel_info(rc.client, channel_id=channel_id)
             await _gate_user_source(runtime, auth, channel=channel)
+            read_policy.require(channel_id)
             return await _fetch_channel_history(
                 rc.client, channel_id=channel_id, limit=limit, cursor=cursor
             )
@@ -300,11 +307,12 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
     try:
         channel = await _channel_info(bot_client, channel_id=channel_id)
         await check_channel_access(bot_client, channel=channel, user_id=user_id)
+        read_policy.require(channel_id)
         return await _fetch_channel_history(
             bot_client, channel_id=channel_id, limit=limit, cursor=cursor
         )
     except ToolError as terr:
-        if rc.runs_as_user:
+        if rc.runs_as_user or isinstance(terr, SealedChannelError):
             raise  # user already has a token — a connect hint would be noise
         raise _with_connect_hint(runtime, terr, team_id=team_id, slack_user_id=user_id) from terr
     except SlackApiError as err:
@@ -361,7 +369,12 @@ async def _fetch_thread_replies(
 
 
 async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
-    runtime: McpRuntime, auth: AuthIdentity, *, thread_id: str, limit: int
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    thread_id: str,
+    limit: int,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> SlackThreadResult:
     channel_id, thread_ts = _split_thread_id(thread_id)
     user_id = _require_slack_identity(auth)
@@ -372,6 +385,7 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
         try:
             channel = await _channel_info(rc.client, channel_id=channel_id)
             await _gate_user_source(runtime, auth, channel=channel)
+            read_policy.require(channel_id)
             return await _fetch_thread_replies(
                 rc.client, channel_id=channel_id, thread_ts=thread_ts, limit=limit
             )
@@ -389,11 +403,12 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
     try:
         channel = await _channel_info(bot_client, channel_id=channel_id)
         await check_channel_access(bot_client, channel=channel, user_id=user_id)
+        read_policy.require(channel_id)
         return await _fetch_thread_replies(
             bot_client, channel_id=channel_id, thread_ts=thread_ts, limit=limit
         )
     except ToolError as terr:
-        if rc.runs_as_user:
+        if rc.runs_as_user or isinstance(terr, SealedChannelError):
             raise
         raise _with_connect_hint(runtime, terr, team_id=team_id, slack_user_id=user_id) from terr
     except SlackApiError as err:
@@ -438,7 +453,12 @@ async def _fetch_single_message(
 
 
 async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
-    runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str, message_id: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    message_id: str,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> SlackMessageRow:
     user_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
@@ -448,6 +468,7 @@ async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
         try:
             channel = await _channel_info(rc.client, channel_id=channel_id)
             await _gate_user_source(runtime, auth, channel=channel)
+            read_policy.require(channel_id)
             return await _fetch_single_message(
                 rc.client, channel_id=channel_id, message_id=message_id
             )
@@ -465,9 +486,10 @@ async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
     try:
         channel = await _channel_info(bot_client, channel_id=channel_id)
         await check_channel_access(bot_client, channel=channel, user_id=user_id)
+        read_policy.require(channel_id)
         return await _fetch_single_message(bot_client, channel_id=channel_id, message_id=message_id)
     except ToolError as terr:
-        if rc.runs_as_user:
+        if rc.runs_as_user or isinstance(terr, SealedChannelError):
             raise
         raise _with_connect_hint(runtime, terr, team_id=team_id, slack_user_id=user_id) from terr
     except SlackApiError as err:

@@ -14,6 +14,7 @@ import discord
 import discord.http
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY, ChannelReadPolicy
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -105,6 +106,7 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
     | None = None,
     limit: int = 25,
     offset: int = 0,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> SearchResult:
     # 1. Auth gates
     user_id = _require_discord_identity(auth)
@@ -141,8 +143,10 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                 guild_ch = _require_guild_channel(raw_ch, guild_id)
                 if isinstance(guild_ch, discord.Thread):
                     await _check_thread_view(c, guild_ch, member, user_id)
+                    read_policy.require(ch_id, str(guild_ch.parent_id))
                 else:
                     _check_view_permission(guild_ch, member)
+                    read_policy.require(ch_id)
 
         # 5. Build per-channel visibility data from fetch_channels.
         #    Absence does NOT mean invisible — it means "resolve it".
@@ -200,6 +204,10 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         # 9. Visibility filter per hit (cache decisions per channel_id)
         visible_hits: list[_SearchHit] = []
         view_cache: dict[str, bool] = {}
+        # Thread -> parent, for the sealed-channel rule below.
+        parent_by_channel_id: dict[str, str] = {
+            t_id: t.parent_id for t_id, t in thread_by_id.items() if t.parent_id
+        }
 
         for group in parsed.messages:
             # Hit selection: pick hit=true, fallback to group[0]
@@ -261,6 +269,7 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                 try:
                     raw_ch = await _resolve_channel(c, ch_id)
                     if isinstance(raw_ch, discord.Thread):
+                        parent_by_channel_id[ch_id] = str(raw_ch.parent_id)
                         try:
                             await _check_thread_view(c, raw_ch, member, user_id)
                             can_view = True
@@ -274,6 +283,8 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                 except ToolError:
                     can_view = False
 
+            # A sealed channel's hits are withheld outside it, like an invisible one's.
+            can_view = can_view and read_policy.allows(ch_id, parent_by_channel_id.get(ch_id))
             view_cache[ch_id] = can_view
             if can_view:
                 visible_hits.append(hit)
