@@ -102,6 +102,11 @@ class AgentInfo(BaseModel):
     mcp_servers: list[AgentMcpServerInfo]
     skills: list[AgentSkillInfo]
     sync_warnings: list[SyncRepoFailure] | None = None
+    system: str | None = None
+    """Set only by ``get_agent``, and only for an admin caller on an agent chat
+    tools may edit: the full system prompt (``""`` when it has none). ``None``
+    means withheld, not empty — a non-admin caller, or a defaults-managed or
+    system agent."""
     applies: str | None = None
     """Set only by ``update_agent`` when it changed ``model`` and/or ``system``:
     person-facing confirmation that the change reaches this conversation on
@@ -276,17 +281,24 @@ def _reject_system_agent(agent: BetaManagedAgentsAgent) -> None:
     - a missing `daimon_account` still rejects, preserving cover for older
       unstamped seeded agents that predate the account stamp.
     """
+    rejection = _system_agent_rejection(agent)
+    if rejection is not None:
+        raise ToolError(rejection)
+
+
+def _system_agent_rejection(agent: BetaManagedAgentsAgent) -> str | None:
+    """Return why chat tools cannot modify ``agent``, or ``None`` if they can."""
     if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
-        raise ToolError(
+        return (
             f"agent '{agent.name}' is managed by defaults; chat tools cannot modify it. "
             "Use fork_agent to make an editable copy, then edit the named copy."
         )
-    owner = agent.metadata.get(MA_METADATA_KEY_ACCOUNT)
-    if owner is None:
-        raise ToolError(
+    if agent.metadata.get(MA_METADATA_KEY_ACCOUNT) is None:
+        return (
             f"agent '{agent.name}' is a system agent; chat tools cannot modify it. "
             "Use fork_agent to make an editable copy, then edit the named copy."
         )
+    return None
 
 
 async def _reject_guild_name_collision(
@@ -327,7 +339,14 @@ async def _get_agent_impl(
     agent = await resolve_setup_agent(
         runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id, require_identity=False
     )
-    return await _build_agent_info(runtime.client, agent, tenant_id=auth.tenant_id)
+    info = await _build_agent_info(runtime.client, agent, tenant_id=auth.tenant_id)
+    # The prompt is readable only by callers who could replace it on any agent:
+    # admins, on agents chat tools may edit at all. A defaults-managed or system
+    # agent's prompt stays withheld even from admins — the edit path is a fork,
+    # and the fork's own prompt is then readable.
+    if auth.is_admin and _system_agent_rejection(agent) is None:
+        info = info.model_copy(update={"system": agent.system or ""})
+    return info
 
 
 def _reject_unknown_model(model: str) -> None:
@@ -802,7 +821,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Use ``list_agent_keys`` for stored key names. Configuration does not prove
         the answering session's access. Returns server names/URLs and skills; custom
-        skills have a display name (null if deleted), Anthropic skills have a readable id."""
+        skills have a display name (null if deleted), Anthropic skills have a readable id.
+        For an admin on an editable agent, ``system`` is the full system prompt;
+        null means withheld (non-admin caller, or Daimon/defaults-managed agent)."""
         return await _get_agent_impl(
             runtime,
             await _auth(ctx),

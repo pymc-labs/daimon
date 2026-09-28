@@ -363,6 +363,15 @@ class DiscordDriver:
         thread = MagicMock(spec=discord.Thread)
         thread.id = int(channel_id)
         thread.parent_id = int(channel_id) - 1
+        # A continuation re-fetches its requester's membership. The author
+        # above is not a guild Member, so its mention runs as USER; the
+        # lookup mirrors that by finding no member, which is also USER.
+        thread.guild = message.guild
+        message.guild.fetch_member = AsyncMock(
+            side_effect=discord.NotFound(
+                MagicMock(status=404, reason="Not Found"), "Unknown Member"
+            )
+        )
 
         # message_ref must carry a real .id so lifecycle._message_ref is
         # non-None; edit must be an AsyncMock since _edit_message awaits it.

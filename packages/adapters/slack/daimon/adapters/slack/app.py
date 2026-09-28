@@ -2183,6 +2183,13 @@ class SlackApp:
             else None
         )
 
+        # The follow-up runs as the requester, so it carries their role as it
+        # stands NOW, read from Slack the way a mention reads it. A failed
+        # lookup runs the turn as USER -- never more than the requester holds.
+        admin_status = await resolve_admin_status(
+            web_client, user_id=row.requester_external_user_id
+        )
+        role = Role.ADMIN if admin_status is True else Role.USER
         follow_admission = await admit(
             self.runtime.turn_deps,
             tenant_id=tenant_id,
@@ -2190,7 +2197,7 @@ class SlackApp:
             external_user_id=row.requester_external_user_id,
             channel_id=channel,
             thread_id=thread_id,
-            role=Role.USER,
+            role=role,
             now=datetime.now(UTC),
         )
         follow_deadline = turn_deadline(now=datetime.now(UTC))
@@ -2340,7 +2347,7 @@ class SlackApp:
                     follow_admission.config.configuration_target_ma_agent_id
                 ),
                 configuration_target_name=(follow_admission.config.configuration_target_name),
-                role=Role.USER,
+                role=role,
                 is_setup=follow_admission.config.thread_binding_kind == "setup",
             ) as follow_origin:
                 await run_prepared_turn(
