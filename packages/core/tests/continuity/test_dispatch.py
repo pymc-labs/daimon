@@ -1,4 +1,4 @@
-"""The platform-neutral continuation loop: every claimed row settles, on every path."""
+"""The platform-neutral continuation loop: every claimed row settles or is released."""
 
 from __future__ import annotations
 
@@ -8,13 +8,20 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from anthropic import AsyncAnthropic
-from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
+from daimon.core.continuity.continuation import (
+    ContinuationRequest,
+    ResponderChanged,
+    record_continuation,
+)
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
-from daimon.core.stores.domain import TaskContinuationRow
-from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
-from daimon.core.turn.errors import SessionBusyError, SessionPreparationFailed
+from daimon.core.continuity.wakes import WAKE_RETRY_DELAY, enqueue_wake
+from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
+from daimon.core.stores.task_continuations import get_continuation
+from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.thread_sessions import mark_turn_active
+from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn_origin import build_handoff_notice
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_tenant, make_thread_session
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -47,25 +54,32 @@ def _anthropic(tenant_id: uuid.UUID) -> AsyncAnthropic:
 
 
 async def _queue(
-    factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID], work: str | None
+    factory: async_sessionmaker[AsyncSession],
+    caller: tuple[uuid.UUID, uuid.UUID],
+    work: str | None,
+    *,
+    reason: ContinuationReason = "task_handoff",
+    available_at: datetime | None = None,
 ) -> uuid.UUID:
+    """A handoff, or with `available_at` a due wake."""
     key = uuid.uuid4()
-    await record_continuation(
-        factory,
-        ContinuationRequest(
-            tenant_id=caller[0],
-            platform="teams",
-            parent_channel_id="19:abc@thread.tacv2",
-            thread_id=_THREAD,
-            requester_account_id=caller[1],
-            requester_external_user_id="entra-oid",
-            target_ma_agent_id=_TARGET,
-            target_name="stats-bot",
-            requested_work=work,
-            reason="task_handoff",
-            idempotency_key=key,
-        ),
+    request = ContinuationRequest(
+        tenant_id=caller[0],
+        platform="teams",
+        parent_channel_id="19:abc@thread.tacv2",
+        thread_id=_THREAD,
+        requester_account_id=caller[1],
+        requester_external_user_id="entra-oid",
+        target_ma_agent_id=_TARGET,
+        target_name="stats-bot",
+        requested_work=work,
+        reason=reason,
+        idempotency_key=key,
     )
+    if available_at is None:
+        await record_continuation(factory, request)
+    else:
+        await enqueue_wake(factory, request, available_at=available_at)
     return key
 
 
@@ -104,12 +118,17 @@ async def _dispatch(
     return seeds, notices
 
 
+async def _row(factory: async_sessionmaker[AsyncSession], key: uuid.UUID) -> TaskContinuationRow:
+    async with factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None, "the continuation row should exist"
+    return row
+
+
 async def _status(
     factory: async_sessionmaker[AsyncSession], key: uuid.UUID
 ) -> tuple[str, str | None]:
-    async with factory() as session:
-        row = await get_continuation(session, idempotency_key=key)
-    assert row is not None
+    row = await _row(factory, key)
     return row.status, row.skip_reason
 
 
@@ -149,6 +168,7 @@ async def test_skips_settle_without_running(
             "blocked_preparation_failed",
         ),
         (RuntimeError("card post failed"), "dispatch_failed"),
+        (AdmissionDenied(reason="balance_depleted"), "admission_denied:balance_depleted"),
     ],
 )
 async def test_run_failures_settle(
@@ -162,19 +182,68 @@ async def test_run_failures_settle(
     assert await _status(db_session_factory, key) == ("skipped", reason)
 
 
-async def test_busy_session_requeues_the_same_work(
+async def test_a_busy_handoff_is_released_for_the_next_turn_tail(
     db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
 ) -> None:
     key = await _queue(db_session_factory, caller, "w")
-    await _dispatch(
-        db_session_factory, caller, run=SessionBusyError(pending_reasons=("x",), retry_after=_SOON)
+    busy = SessionBusyError(pending_reasons=("x",), retry_after=_SOON)
+    await _dispatch(db_session_factory, caller, run=busy)
+    row = await _row(db_session_factory, key)
+    assert (row.status, row.attempts, row.available_at) == ("pending", 0, None), (
+        "the same row waits again, claim refunded, still a handoff"
     )
-    assert await _status(db_session_factory, key) == ("skipped", "turn_running")
-    async with db_session_factory() as session:
-        (again,) = await list_pending_continuations(
-            session, tenant_id=caller[0], platform="teams", thread_id=_THREAD
+    assert await _dispatch(db_session_factory, caller) == (["w"], []), "the next tail runs it"
+    assert await _status(db_session_factory, key) == ("delivered", None)
+
+
+async def test_a_busy_wake_is_released_until_the_session_frees(
+    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    key = await _queue(
+        db_session_factory, caller, "w", reason="timer", available_at=datetime.now(UTC)
+    )
+    later = datetime.now(UTC) + timedelta(minutes=10)
+    await _dispatch(
+        db_session_factory, caller, run=SessionBusyError(pending_reasons=("x",), retry_after=later)
+    )
+    row = await _row(db_session_factory, key)
+    assert (row.status, row.attempts, row.available_at) == ("pending", 0, later), (
+        "a wake is retried no earlier than the busy session's retry_after"
+    )
+
+
+async def test_a_wake_behind_a_running_turn_is_released_without_a_notice(
+    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await get_tenant(session, caller[0])
+        assert tenant is not None
+        account = await make_account(session, tenant=tenant)
+        live = await make_thread_session(
+            session, tenant=tenant, account=account, platform="teams", thread_id=_THREAD
         )
-    assert (again.requested_work, again.idempotency_key != key) == ("w", True)
+        await mark_turn_active(session, id=live.id, active_turn_message_id="m-1", now=_SOON)
+    caller = (caller[0], account.id)
+    key = await _queue(
+        db_session_factory, caller, "w", reason="timer", available_at=datetime.now(UTC)
+    )
+    before = datetime.now(UTC)
+    assert await _dispatch(db_session_factory, caller) == ([], []), "nobody is told"
+    row = await _row(db_session_factory, key)
+    assert row.status == "pending" and row.available_at is not None
+    assert row.available_at >= before + WAKE_RETRY_DELAY, "retried after the turn in progress"
+
+
+async def test_a_changed_timer_responder_posts_the_notice_and_settles(
+    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    key = await _queue(
+        db_session_factory, caller, "w", reason="timer", available_at=datetime.now(UTC)
+    )
+    changed = ResponderChanged(target_name="stats-bot", current_name="daimon")
+    _, notices = await _dispatch(db_session_factory, caller, run=changed)
+    assert notices == [changed.message], "the thread is told the timer did not run"
+    assert await _status(db_session_factory, key) == ("skipped", "skip_target_changed")
 
 
 @pytest.mark.parametrize(
