@@ -30,6 +30,7 @@ from daimon.core.session_snapshot import (
 )
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.tenants import set_provision_status
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing import (
     DEFAULT_MODEL_ID,
@@ -37,6 +38,7 @@ from daimon.testing import (
     ma_environment,
     ma_session,
 )
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import make_tenant
@@ -1125,6 +1127,117 @@ class TestProtectedChannelSilence:
         thread.guild.fetch_channel.assert_awaited_once_with(789)  # pyright: ignore[reportAttributeAccessIssue]
         mock_resolve.assert_not_called()
         thread.send.assert_not_called()  # pyright: ignore[reportAttributeAccessIssue]
+
+
+class TestProtectedChannelBeforeAnyNotice:
+    """SYS-048 round 4: silence holds before readiness notices and when the
+    policy can't be read; the category fetch happens only when needed."""
+
+    @pytest.mark.parametrize(
+        ("status", "archive"),
+        [("pending", False), ("failed", False), ("ready", True)],
+        ids=["pending", "failed", "archived"],
+    )
+    async def test_no_setup_notice_in_a_protected_channel_of_an_unready_tenant(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        status: str,
+        archive: bool,
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(protected_channel_ids=("789",)),
+        )
+        await db_session.commit()
+        await set_provision_status(
+            db_session_factory, tenant_id=tenant.id, status=status, archive=archive
+        )
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message(channel_id=789)
+
+        with patch.object(bot, "_ensure_provisioning", new=AsyncMock()) as ensure:
+            await bot.on_message(message)
+
+        ensure.assert_not_awaited()
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_failed_policy_read_stays_silent(
+        self,
+        mock_resolve: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A DB or pool failure while reading protection posts nothing -- not
+        even an error -- into a channel whose safety is unknown."""
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        await db_session.commit()
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message(channel_id=789)
+
+        with patch(
+            "daimon.core.turn.protection.load_access_policy",
+            new=AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("pool gone"))),
+        ):
+            await bot.on_message(message)
+
+        mock_resolve.assert_not_called()
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+    @pytest.mark.parametrize(
+        ("policy", "fetches"),
+        [
+            (None, 0),
+            (TenantAccessPolicy(protected_channel_ids=("elsewhere",)), 0),
+            (TenantAccessPolicy(protected_category_ids=("other-cat",)), 1),
+        ],
+        ids=["no-policy", "no-category-policy", "category-policy-fetches-once"],
+    )
+    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_an_uncached_parent_is_fetched_only_for_a_category_policy_and_once(
+        self,
+        mock_resolve: AsyncMock,
+        mock_is_over_cap: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        policy: TenantAccessPolicy | None,
+        fetches: int,
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        if policy is not None:
+            await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+        await db_session.commit()
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_is_over_cap.return_value = True  # stop right after admission's gates
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_thread_message(parent_id=789)
+        thread = message.channel
+        parent = MagicMock(spec=discord.TextChannel)
+        parent.category_id = 4242
+        cached: dict[str, object] = {}
+        thread.guild = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+        thread.parent = None  # pyright: ignore[reportAttributeAccessIssue]
+        thread.guild.fetch_channel = AsyncMock(return_value=parent)  # pyright: ignore[reportAttributeAccessIssue]
+
+        def _cache(channel: object) -> None:
+            cached["parent"] = channel
+            thread.parent = channel  # pyright: ignore[reportAttributeAccessIssue]  # what guild._add_channel makes visible
+
+        thread.guild._add_channel = MagicMock(side_effect=_cache)  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        assert thread.guild.fetch_channel.await_count == fetches, (  # pyright: ignore[reportAttributeAccessIssue]
+            "fetch only when a category is protected, and never twice for one turn"
+        )
+        mock_resolve.assert_awaited_once()  # admitted past the protection gate
 
 
 class TestBillingAdmissionGate:

@@ -8,6 +8,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.turn.protection import turn_target_protected
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -71,3 +72,41 @@ async def test_an_unreadable_policy_counts_as_protected(
     await db_session.commit()
 
     assert await turn_target_protected(db_session_factory, tenant_id=tenant.id, channel_id="c1")
+
+
+async def test_a_failed_policy_read_counts_as_protected(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB or pool failure leaves the channel's safety unknown: post nothing."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+
+    async def _fail(*_args: object, **_kwargs: object) -> object:
+        raise OperationalError("SELECT", {}, Exception("pool exhausted"))
+
+    monkeypatch.setattr("daimon.core.turn.protection.load_access_policy", _fail)
+
+    assert await turn_target_protected(db_session_factory, tenant_id=tenant.id, channel_id="c1")
+
+
+async def test_the_category_lookup_runs_only_for_a_category_policy(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(protected_channel_ids=("x",))
+    )
+    await db_session.commit()
+    calls: list[str] = []
+
+    async def _lookup() -> tuple[str | None, bool]:
+        calls.append("lookup")
+        return None, True
+
+    protected = await turn_target_protected(
+        db_session_factory, tenant_id=tenant.id, channel_id="c1", resolve_category=_lookup
+    )
+
+    assert protected is False and calls == [], "no category policy: no lookup, no refusal"

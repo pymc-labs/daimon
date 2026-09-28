@@ -392,14 +392,15 @@ async def run_wizard_submit_turn_observed(
 
         # --- A protected channel hears nothing: not the capacity notice below,
         # not a refusal, not the reply. Checked first; the log is the trace. ---
-        category_id, category_unresolved = await _resolve_category(channel)
+        async def _category() -> tuple[str | None, bool]:
+            return await _resolve_category(channel)
+
         if await turn_target_protected(
             bot.runtime.sessionmaker,
             tenant_id=row.tenant_id,
             channel_id=parent_channel_id,
             thread_id=thread_id,
-            category_id=category_id,
-            category_unresolved=category_unresolved,
+            resolve_category=_category,
         ):
             _log.info("wizard_submit.skipped.channel_protected", short_id=row.id)
             return
@@ -437,6 +438,8 @@ async def run_wizard_submit_turn_observed(
         is_admin = isinstance(author, discord.Member) and is_member_guild_admin(
             author, guild_owner_id=interaction.guild.owner_id if interaction.guild else None
         )
+        # The protection check above cached any parent it had to fetch.
+        category_id, category_unresolved = await _resolve_category(channel, fetch=False)
         try:
             admission = await admit(
                 bot.runtime.turn_deps,

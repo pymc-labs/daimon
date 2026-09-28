@@ -103,9 +103,9 @@ config). The order is load-bearing and documented as such in the module:
 2. Channel protection — a turn whose reply would land in a protected channel,
    a thread under one or (Discord) a channel in a protected category raises
    `AdmissionDenied("channel_protected")`, admins included. It runs before the
-   invoker gate, whose refusal would otherwise be posted there. A Discord
-   thread's uncached parent is fetched to find its category; if that fails
-   while any category is protected, the turn is refused.
+   invoker gate, whose refusal would otherwise be posted there. If a Discord
+   thread's category can't be resolved while any category is protected, the
+   turn is refused.
 3. Invoker policy — the tenant's access policy (below) may restrict who can
    start a turn. A refused user raises `AdmissionDenied("invoker_not_allowed")`
    before the cascade, so they learn nothing about the tenant's configuration
@@ -129,13 +129,18 @@ The policy, protection, balance and cap gates each raise `AdmissionDenied` with 
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
 
 A protected channel hears nothing from the agent, not even a refusal. The
-adapters post some notices before admission (Discord's capacity notice,
-Slack's role-lookup failure), so each turn entry first asks
+adapters post some notices before admission (Discord's setup and capacity
+notices, Slack's role-lookup failure), so each turn entry first asks
 `turn_target_protected` (`packages/core/daimon/core/turn/protection.py`) and
-drops the turn with only a log line when it says yes: Discord `on_message`,
-wizard submit, and Slack `_orchestrate` right after it claims the thread. A
-policy that can't be read counts as protected there. Slack's ephemeral shed
-notice checks it too.
+drops the turn with only a log line when it says yes: Discord `on_message`
+(for any tenant with a row, before the setup notice of a pending, failed or
+archived tenant), wizard submit, Discord continuations, and Slack
+`_orchestrate` right after it claims the thread; Slack's ephemeral shed notice
+checks it too. When protection can't be established -- the policy doesn't
+parse, or the database or pool fails reading it -- the answer is yes, so
+nothing is posted, not even an error. A Discord thread's uncached parent is
+fetched only when the policy protects a category, and cached so admission
+doesn't fetch it again.
 
 **Tenant access policy — `packages/core/daimon/core/access_policy.py`.** One
 `TenantAccessPolicy` per tenant, stored as JSON in `tenant_access_policies`
