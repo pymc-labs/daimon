@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 import structlog
@@ -13,7 +15,7 @@ from daimon.core.config import load_crypto_settings
 from daimon.core.errors import StoreError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores.domain import AgentFileRow
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,8 +39,30 @@ def _row(cipher: MultiFernet | None, orm: AgentFile) -> AgentFileRow:
             key=orm.key,
         )
     return AgentFileRow.model_validate(orm).model_copy(
-        update={"content": decode_value(cipher, orm.content, encoding=orm.encoding)}
+        update={
+            "content": decode_value(
+                cipher,
+                orm.content,
+                encoding=orm.encoding,
+                tenant_id=orm.tenant_id,
+                agent_id=orm.agent_id,
+                key=orm.key,
+            )
+        }
     )
+
+
+@asynccontextmanager
+async def _encoding_writer(session: AsyncSession) -> AsyncIterator[None]:
+    """Mark this statement as encoding-aware, without trusting later legacy SQL.
+
+    If the write fails, its transaction/savepoint must be rolled back as usual;
+    that also rolls back SET LOCAL. Do not mask the write error with cleanup SQL
+    against an aborted transaction.
+    """
+    await session.execute(text("SET LOCAL daimon.agent_env_writer = 'v1'"))
+    yield
+    await session.execute(text("SET LOCAL daimon.agent_env_writer = ''"))
 
 
 async def put_agent_file(
@@ -92,7 +116,8 @@ async def put_agent_file(
         .returning(AgentFile)
         .execution_options(populate_existing=True)
     )
-    result = await session.execute(stmt)
+    async with _encoding_writer(session):
+        result = await session.execute(stmt)
     orm = result.scalar_one()
     await session.flush()
     return _row(cipher, orm)
@@ -152,7 +177,8 @@ async def put_agent_file_if_unchanged(
             .returning(AgentFile)
             .execution_options(populate_existing=True)
         )
-        result = await session.execute(insert_stmt)
+        async with _encoding_writer(session):
+            result = await session.execute(insert_stmt)
     else:
         update_stmt = (
             update(AgentFile)
@@ -171,7 +197,8 @@ async def put_agent_file_if_unchanged(
             .returning(AgentFile)
             .execution_options(populate_existing=True)
         )
-        result = await session.execute(update_stmt)
+        async with _encoding_writer(session):
+            result = await session.execute(update_stmt)
     orm = result.scalar_one_or_none()
     await session.flush()
     if orm is None:

@@ -202,7 +202,10 @@ async def test_migration_prefix_plaintext_idempotence_and_downgrade(
             {"t": tenant_id, "a": agent, "k": name, "v": value},
         )
     monkeypatch.setenv("DAIMON_CRYPTO__KEYS", "[]")
-    await _migrate(db_session)
+    with capture_logs() as logs:
+        await _migrate(db_session)
+    assert [log["event"] for log in logs] == ["agent_env.migration_keyless_noop"]
+    assert all(value not in str(logs) for value in originals.values())
     assert await _stored(db_session) == {k: (v, "plain") for k, v in originals.items()}
     await _migrate(db_session, downgrade=True)
     assert (
@@ -245,21 +248,143 @@ async def test_encrypted_rows_never_fall_back_to_plaintext(
     args = dict(tenant_id=tenant.id, agent_id=uuid.uuid4(), key="TOKEN")
     key = Fernet.generate_key()
     db_session.info["crypto_keys"] = (key.decode(),)
+    monkeypatch.setenv("DAIMON_CRYPTO__KEYS", json.dumps([key.decode()]))
+    await _migrate(db_session)
     await put_agent_file(db_session, **args, content="secret", set_by_account_id=None)
     if mode == "wrong-key":
         key = Fernet.generate_key()
     elif mode == "corrupt":
+        # Simulate damaged *tagged* ciphertext, not a legacy plaintext write.
+        await db_session.execute(text("SET LOCAL daimon.agent_env_writer = 'v1'"))
         await db_session.execute(text("UPDATE agent_files SET content = 'enc:v1:broken'"))
+        await db_session.execute(text("SET LOCAL daimon.agent_env_writer = ''"))
         db_session.expire_all()
     keys = [] if mode == "missing-key" else [key.decode()]
     db_session.info["crypto_keys"] = tuple(keys)
     monkeypatch.setenv("DAIMON_CRYPTO__KEYS", json.dumps(keys))
-    error = ValueError if mode == "missing-key" else InvalidToken
-    with pytest.raises(error):
+    with pytest.raises(ValueError, match="DAIMON_CRYPTO__KEYS") as raised:
         await get_agent_file(db_session, **args)
-    with pytest.raises(error):
+    with pytest.raises(ValueError, match="DAIMON_CRYPTO__KEYS"):
         await list_agent_files(db_session, tenant_id=args["tenant_id"], agent_id=args["agent_id"])
     before = await _stored(db_session)
-    with pytest.raises(error):
+    with pytest.raises(ValueError, match="DAIMON_CRYPTO__KEYS") as migration_error:
         await _migrate(db_session, downgrade=True)
     assert await _stored(db_session) == before
+
+    for message in (str(raised.value), str(migration_error.value)):
+        if mode != "missing-key":
+            assert str(args["tenant_id"]) in message
+            assert str(args["agent_id"]) in message
+            assert args["key"] in message
+            assert "cannot be decrypted" in message
+        assert "secret" not in message
+        assert before["TOKEN"][0] not in message
+        assert key.decode() not in message
+
+
+# Frozen write SQL from origin/main 4ce6d457's stores/agent_files.py. Neither
+# statement knows about encoding or the new-writer marker. Keep these legacy
+# statements unchanged so this cannot accidentally test the new store twice.
+_LEGACY_UPSERT = text("""
+    INSERT INTO agent_files
+        (tenant_id, agent_id, key, content, created_by_account_id, last_set_by_account_id)
+    VALUES (:tenant, :agent, :key, :content, :actor, :actor)
+    ON CONFLICT ON CONSTRAINT pk_agent_files DO UPDATE
+    SET content = :content, updated_at = now(), last_set_by_account_id = :actor
+    RETURNING tenant_id, agent_id, key, content, created_by_account_id,
+              last_set_by_account_id, created_at, updated_at
+""")
+_LEGACY_CAS = text("""
+    UPDATE agent_files
+    SET content = :content, updated_at = now(), last_set_by_account_id = :actor
+    WHERE tenant_id = :tenant AND agent_id = :agent AND key = :key
+      AND updated_at = :expected
+    RETURNING tenant_id, agent_id, key, content, created_by_account_id,
+              last_set_by_account_id, created_at, updated_at
+""")
+
+
+@pytest.mark.parametrize("legacy_statement", [_LEGACY_UPSERT, _LEGACY_CAS], ids=["upsert", "cas"])
+@pytest.mark.parametrize("literal", ["rotated-by-old-writer", "enc:v1:old-literal"])
+async def test_legacy_update_after_encryption_remains_readable_and_reversible(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_statement,
+    literal: str,
+) -> None:
+    key = Fernet.generate_key().decode()
+    monkeypatch.setenv("DAIMON_CRYPTO__KEYS", json.dumps([key]))
+    db_session.info["crypto_keys"] = (key,)
+    tenant = await make_tenant(db_session)
+    tenant_id, agent_id = tenant.id, uuid.uuid4()
+    await _migrate(db_session)  # Install the real trigger, not a store mock.
+    args = dict(tenant_id=tenant_id, agent_id=agent_id, key="TOKEN")
+
+    row = await put_agent_file_if_unchanged(
+        db_session,
+        **args,
+        content="first",
+        set_by_account_id=None,
+        expected_updated_at=None,
+    )
+    assert row is not None and row.content == "first"
+    assert (await _stored(db_session))["TOKEN"][1] == "fernet_v1"
+    row = await put_agent_file(db_session, **args, content="second", set_by_account_id=None)
+    assert row.content == "second"
+    assert (await _stored(db_session))["TOKEN"][1] == "fernet_v1"
+    row = await put_agent_file_if_unchanged(
+        db_session,
+        **args,
+        content="third",
+        set_by_account_id=None,
+        expected_updated_at=row.updated_at,
+    )
+    assert row is not None and row.content == "third"
+    assert (await _stored(db_session))["TOKEN"][1] == "fernet_v1"
+    await put_agent_file(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        key="KEEPER",
+        content="still-encrypted",
+        set_by_account_id=None,
+    )
+    # Same transaction as the new writes: the marker must not leak to later SQL.
+    updated = await db_session.execute(
+        legacy_statement,
+        {
+            "tenant": tenant_id,
+            "agent": agent_id,
+            "key": "TOKEN",
+            "content": literal,
+            "actor": None,
+            "expected": row.updated_at,
+        },
+    )
+    assert updated.one().content == literal
+    assert (await _stored(db_session))["TOKEN"] == (literal, "plain")
+    db_session.expire_all()
+    rows = await list_agent_files(db_session, tenant_id=tenant_id, agent_id=agent_id)
+    assert {r.key: r.content for r in rows} == {"TOKEN": literal, "KEEPER": "still-encrypted"}
+    await _migrate(db_session, downgrade=True)
+    assert dict((await db_session.execute(text("SELECT key, content FROM agent_files"))).all()) == {
+        "TOKEN": literal,
+        "KEEPER": "still-encrypted",
+    }
+    assert not (
+        await db_session.execute(
+            text("""
+        SELECT EXISTS (SELECT FROM pg_trigger WHERE tgrelid = 'agent_files'::regclass
+                       AND tgname = 'daimon_agent_env_encoding_guard')
+    """)
+        )
+    ).scalar_one()
+    assert not (
+        await db_session.execute(
+            text("""
+        SELECT EXISTS (SELECT FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                       WHERE n.nspname = current_schema()
+                         AND p.proname = 'daimon_agent_env_encoding_guard')
+    """)
+        )
+    ).scalar_one()

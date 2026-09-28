@@ -335,9 +335,21 @@ value and tag atomically. No text prefix is reserved: even literal values starti
 with `enc:v1:` or resembling valid Fernet tokens round-trip unchanged. Store APIs
 always accept plaintext user values. Migration retries encrypt only `plain` rows
 and preserve existing `fernet_v1` ciphertext without double encryption.
+
+A database trigger treats inserts and updates from old writers as `plain`, even
+when they replace an encrypted row. New writers and the migration set the local
+transaction marker `daimon.agent_env_writer = 'v1'` while writing explicit encoding
+metadata, then clear it. This keeps old upsert/CAS writes readable by new code and
+allows rollback during a mixed-writer window; it does not make old readers able
+to decrypt new ciphertext. Stop old readers before keyed migration as described
+above. Downgrade removes the trigger and its function after decrypting rows.
 New code reads legacy `plain` rows, logs a warning containing only row identifiers
 when encryption is enabled, and encrypts them on the next write. Wrong keys or
-corrupt rows tagged `fernet_v1` fail closed. Do not remove keys while
+corrupt rows tagged `fernet_v1` fail closed. Wrong-key and corrupt-ciphertext errors
+identify the tenant, agent and key name and point at `DAIMON_CRYPTO__KEYS`, never
+the value.
+The migration logs `agent_env.migration_keyless_noop` when keys are absent; keyed
+rewrites log their action and row count. Do not remove keys while
 encrypted values remain. When enabling keys after a keyless migration, rewrite
 existing values through the application or re-run this migration's data upgrade
 under maintenance; setting keys alone does not rewrite existing rows.
