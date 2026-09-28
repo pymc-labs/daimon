@@ -16,13 +16,13 @@ from __future__ import annotations
 import uuid as _uuid
 from collections.abc import Mapping
 from datetime import datetime, timedelta
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import structlog
-from daimon.core._models import Routine
+from daimon.core._models import Routine, Tenant
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.errors import StoreError
-from daimon.core.stores.domain import CatchUpPolicy, RoutineRow
+from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
 from sqlalchemy import and_, delete, false, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,9 +43,12 @@ async def create_routine(
     enabled: bool = True,
     catch_up_policy: CatchUpPolicy = "skip",
     next_fire_at: datetime | None = None,
+    destination_kind: RoutineDestinationKind | None = None,
+    destination_id: str | None = None,
 ) -> RoutineRow:
     if catch_up_policy not in ("skip", "run-once"):
         raise StoreError("catch_up_policy must be skip or run-once")
+    _check_destination(destination_kind, destination_id)
     orm = Routine(
         tenant_id=tenant_id,
         created_by_user_id=created_by_user_id,
@@ -57,6 +60,8 @@ async def create_routine(
         enabled=enabled,
         catch_up_policy=catch_up_policy,
         next_fire_at=next_fire_at,
+        destination_kind=destination_kind,
+        destination_id=destination_id,
     )
     session.add(orm)
     await session.flush()
@@ -117,8 +122,20 @@ async def update_routine(
     agent_id: str | None = None,
     agent_name: str | None = None,
     next_fire_at: datetime | None = None,
+    destination_kind: RoutineDestinationKind | None = None,
+    destination_id: str | None = None,
+    clear_destination: bool = False,
 ) -> RoutineRow | None:
-    values: dict[str, str | bool | datetime] = {}
+    """PATCH: `None` leaves a field alone. A destination is set as a pair;
+    `clear_destination=True` removes it (and any pending delivery)."""
+    values: dict[str, str | bool | datetime | None] = {}
+    if clear_destination:
+        if destination_kind is not None or destination_id is not None:
+            raise StoreError("clear_destination cannot be combined with a new destination")
+        values.update(destination_kind=None, destination_id=None, delivery_status=None)
+    elif destination_kind is not None or destination_id is not None:
+        _check_destination(destination_kind, destination_id)
+        values.update(destination_kind=destination_kind, destination_id=destination_id)
     if catch_up_policy is not None:
         if catch_up_policy not in ("skip", "run-once"):
             raise StoreError("catch_up_policy must be skip or run-once")
@@ -306,18 +323,127 @@ async def record_result(
     *,
     tail: str | None,
     error: str | None,
+    delivery: Literal["pending", "skipped"] | None = None,
+    delivery_note: str | None = None,
 ) -> None:
     """Set `last_result_tail` and `last_error` in a single UPDATE.
 
     `error=None` clears `last_error` (sets NULL); `error="..."` sets it.
     `tail` is written as-is (None or str).
+
+    `delivery` is only passed for a routine with a destination (FEAT-085):
+    `pending` queues this fire's tail for the adapter to post, `skipped`
+    records why it will not be (`delivery_note`). Either replaces whatever an
+    earlier fire left in the outbox, so only the newest tail is ever posted.
+    Omitted, the outbox columns are untouched — a routine without a
+    destination writes exactly what it wrote before.
     """
+    values: dict[str, object] = {"last_result_tail": tail, "last_error": error}
+    if delivery is not None:
+        values.update(
+            delivery_status=delivery,
+            delivery_note=delivery_note,
+            delivery_lease_owner=None,
+            delivery_lease_expires_at=None,
+            delivered_at=None,
+        )
+    await session.execute(update(Routine).where(Routine.id == routine_id).values(**values))
+    await session.flush()
+
+
+def _check_destination(kind: str | None, destination_id: str | None) -> None:
+    if (kind is None) != (destination_id is None):
+        raise StoreError("destination_kind and destination_id are set together")
+    if kind is not None and kind not in ("channel", "thread"):
+        raise StoreError("destination_kind must be channel or thread")
+    if destination_id is not None and not destination_id.strip():
+        raise StoreError("destination_id must not be empty")
+
+
+async def claim_routine_deliveries(
+    session: AsyncSession,
+    *,
+    platform: str,
+    owner: str,
+    now: datetime,
+    lease: timedelta,
+    limit: int = 20,
+) -> list[RoutineRow]:
+    """Claim pending result posts for `platform`'s tenants, oldest first.
+
+    At most once: a claim whose lease ran out is never handed out again — the
+    owner may have posted before it died — it is settled `skipped` with note
+    `interrupted` first. Pending rows are then claimed with `FOR UPDATE SKIP
+    LOCKED`, so two adapter processes never take the same row.
+    """
+    tenant_ids = select(Tenant.id).where(Tenant.platform == platform)
     await session.execute(
         update(Routine)
-        .where(Routine.id == routine_id)
-        .values(last_result_tail=tail, last_error=error)
+        .where(
+            Routine.delivery_status == "claimed",
+            Routine.delivery_lease_expires_at < now,
+            Routine.tenant_id.in_(tenant_ids),
+        )
+        .values(
+            delivery_status="skipped",
+            delivery_note="interrupted",
+            delivery_lease_owner=None,
+            delivery_lease_expires_at=None,
+        )
+    )
+    due = (
+        select(Routine.id)
+        .where(Routine.delivery_status == "pending", Routine.tenant_id.in_(tenant_ids))
+        .order_by(Routine.last_fired_at.asc().nulls_first())
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    result = await session.execute(
+        update(Routine)
+        .where(Routine.id.in_(due))
+        .values(
+            delivery_status="claimed",
+            delivery_lease_owner=owner,
+            delivery_lease_expires_at=now + lease,
+        )
+        .returning(Routine)
+        .execution_options(synchronize_session=False)
+    )
+    rows = [RoutineRow.model_validate(orm) for orm in result.scalars().all()]
+    await session.flush()
+    return rows
+
+
+async def settle_routine_delivery(
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    owner: str,
+    status: Literal["delivered", "skipped"],
+    now: datetime,
+    note: str | None = None,
+) -> bool:
+    """Finish a claim `owner` still holds. False = the claim was lost."""
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(Routine)
+            .where(
+                Routine.id == routine_id,
+                Routine.delivery_status == "claimed",
+                Routine.delivery_lease_owner == owner,
+            )
+            .values(
+                delivery_status=status,
+                delivery_note=note,
+                delivered_at=now if status == "delivered" else None,
+                delivery_lease_owner=None,
+                delivery_lease_expires_at=None,
+            )
+        ),
     )
     await session.flush()
+    return result.rowcount == 1
 
 
 async def set_last_fired_at(

@@ -5,15 +5,17 @@ agent and one prompt. The scheduler fires it, the agent runs with no human in
 the thread, and the tail of its final message is written back onto the
 routine row.
 
-The most important thing to know up front is what a routine does **not** do.
-There is no destination column on the row and nothing is delivered anywhere
-when the turn finishes. If the result should land in a channel, the prompt has
-to tell the agent to put it there — the agent calls a tool such as
-`send_message` itself during the turn (see
+A routine may name a **destination**: a channel or a thread. With one, the run
+is told where its result goes, and if the agent does not post there itself,
+daimon posts the tail of its final reply there after the run (see
+[Delivery](#delivery)). Without one — every routine created before this
+existed, and any created without it — nothing is delivered anywhere: the
+result is only recorded on the row, and if it should land in a channel the
+prompt has to tell the agent to call `send_message` itself (see
 [mcp-tools.md](mcp-tools.md#channels)). Session output files, which an
-interactive Slack turn uploads to the thread, are **not** swept for a routine;
-[slack.md](slack.md) says so, and the code agrees: the headless path installs a
-no-op lifecycle with nothing to render to.
+interactive Slack turn uploads to the thread, are **not** swept for a routine
+either way; [slack.md](slack.md) says so, and the code agrees: the headless
+path installs a no-op lifecycle with nothing to render to.
 
 A one-off "remind me in two hours" or "check back tomorrow at nine" is not a
 routine. Use a timer (`create_timer`, see [mcp-tools.md](mcp-tools.md#timers))
@@ -37,6 +39,9 @@ through `packages/core/daimon/core/stores/routines.py`:
 | `last_skipped_from` / `last_skipped_until` / `last_skip_reason` | most recent skipped range of scheduled slots and why (`stale` or `in_flight`) |
 | `next_fire_at` | the claim key — `NULL` means claimed or paused |
 | `last_fired_at`, `last_error`, `last_result_tail` | what the last run did |
+| `destination_kind` / `destination_id` | optional: `channel` or `thread` and its id, set together or not at all. On Slack a thread is `<channel id>:<thread ts>` |
+| `delivery_status`, `delivery_note`, `delivered_at` | the outbox for the last result: `pending` → `claimed` → `delivered` or `skipped` (with why); `NULL` for a routine without a destination |
+| `delivery_lease_owner` / `delivery_lease_expires_at` | the poster holding a `claimed` row |
 
 Slot arithmetic lives in `packages/core/daimon/core/cron.py`, whose
 `next_slot_at_or_after` converts into the routine's zone, steps one second
@@ -53,6 +58,12 @@ pausing is `update_routine(enabled=False)`. Set missed-run behavior with
 `update_routine(routine_id=..., catch_up_policy="skip")`; the same creator-or-admin
 permission applies to updates. The last run is read off the
 `last_*` fields that `get_routine` returns.
+
+A destination is set with `destination_kind` + `destination_id` on
+`create_routine` or `update_routine`, and removed with
+`update_routine(clear_destination=true)`. Both are refused if only one of the
+pair is given, or if the channel is write-protected by the tenant's access
+policy; the adapter checks again, fully, at post time.
 
 `create_routine` refuses four ways before it writes anything: a caller with no
 platform user identity (a CLI-only token) cannot create a schedulable routine
@@ -156,8 +167,55 @@ refused (the agent is told why) unless its server or `server/tool` is listed
 in `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`. Daimon's own tools are not
 affected. See [architecture.md](architecture.md).
 
+A routine with a destination sends its trigger message after a
+`<turn_controls>` block (`render_routine_controls` in
+`packages/core/daimon/core/routine_delivery.py`): the routine's id, agent,
+schedule, timezone and destination, and one line saying that nobody is
+watching and that daimon posts the end of the final reply to the destination
+unless the agent posts there itself. The controls grant nothing else. A
+routine without a destination sends its trigger message byte-for-byte as
+before.
+
 On success the runner returns the tail of the final message, truncated to
 1000 characters, and that is what lands in `last_result_tail`.
+
+## Delivery
+
+For a routine with a destination, a successful fire also fills the row's
+outbox. The scheduler looks through the finished turn for a completed
+`send_message` on daimon's own server whose `channel_id` is the destination
+(for a Slack thread, its channel). If the agent posted there, the outbox is
+`skipped` with note `agent_posted`. Otherwise it is `pending`. A failed fire
+leaves the outbox alone and records `last_error` as always.
+
+The scheduler has no chat client, so the post happens in the chat adapter for
+the tenant's platform: Discord and Slack each run `run_delivery_poller` next
+to their wake poller. Each poll claims `pending` rows for its platform
+(`FOR UPDATE SKIP LOCKED`, with a two-minute lease), posts, and settles:
+
+- **At most once.** A claim whose lease runs out is settled
+  `skipped/interrupted`, never posted again: the poster may have posted before
+  it died. A poster that raises is settled `skipped/post_failed`, not retried.
+- **The newest result only.** A new fire replaces whatever is still in the
+  outbox, so a backlog never posts a run of stale results.
+- **Policy, at post time.** The adapter resolves where the destination
+  actually is and applies the tenant access policy
+  (`packages/core/daimon/core/access_policy.py`): a protected channel, a
+  thread under one, or a Discord channel in a protected category is
+  `skipped/protected_channel`; a creator no longer on the invoker allowlist is
+  `skipped/invoker_not_allowed` (admins always pass); an unreadable policy is
+  `skipped/access_policy_unreadable`.
+- **Only the routine's own workspace.** Discord refuses a channel outside the
+  tenant's guild; Slack builds its client from the tenant's own team, so
+  another workspace's channel cannot be reached. Either way that is
+  `skipped/destination_unavailable`, as is a channel that no longer exists.
+- **No broadcasts.** Discord posts with every mention disabled; Slack escapes
+  the text the way agent replies are escaped, so `<!channel>` and `<!here>`
+  stay literal.
+
+The post reads `Routine result from <agent> (<cron>, <timezone>):` followed by
+the tail. An empty tail is `skipped/no_result`. A platform with no poller
+leaves rows `pending`; nothing is lost or posted wrongly.
 
 ## Timeouts, and the ceiling above them
 

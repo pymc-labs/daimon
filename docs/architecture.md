@@ -350,7 +350,11 @@ against.
   `packages/core/daimon/core/headless_runner.py`, which creates a session with
   the same `create_session` the chat path uses and delegates the drain to the
   same driver under the same ceiling — but it calls neither `admit()` nor
-  `bind_session()`. See [routines.md](routines.md).
+  `bind_session()`. A routine with a destination is told where its result
+  goes; if the agent does not post there, the row's outbox goes `pending` and
+  the chat adapter for the tenant's platform posts the result tail through
+  its delivery poller (`daimon.core.routine_delivery`), after the access
+  policy's protected-channel and invoker checks. See [routines.md](routines.md).
 - **MCP agent-chat tools**, in
   `packages/adapters/mcp/daimon/adapters/mcp/tools/agent_chat.py`, let a caller
   drive a session directly. They do not use the chokepoint either; they re-run

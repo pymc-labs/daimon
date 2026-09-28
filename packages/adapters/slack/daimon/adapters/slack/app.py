@@ -84,6 +84,7 @@ from daimon.adapters.slack.privacy_panel.submit import (
     evaluate_delete_submission,
     run_purge_and_update,
 )
+from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
 from daimon.adapters.slack.routines_panel.actions import (
     handle_routine_action,
     handle_routines_command,
@@ -124,6 +125,7 @@ from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role, TaskContinuationRow
@@ -335,6 +337,17 @@ class SlackApp:
                 self.runtime.sessionmaker,
                 platform="slack",
                 open_thread=self._open_wake_thread,
+                should_stop=lambda: self.draining,
+            )
+        )
+
+    def start_delivery_poller(self) -> asyncio.Task[None]:
+        """Post routine results to their destinations (FEAT-085) until draining."""
+        return self._spawn(
+            run_delivery_poller(
+                self.runtime.sessionmaker,
+                platform="slack",
+                post=make_slack_routine_poster(self.runtime),
                 should_stop=lambda: self.draining,
             )
         )

@@ -933,3 +933,155 @@ async def test_fire_skips_routine_the_invoker_policy_refuses(
     assert fetched is not None, "routine row must still exist after the skip"
     assert fetched.last_error == expected_error, f"got {fetched.last_error!r}"
     await fake_client.close()
+
+
+# --- FEAT-085: routine destination and fallback post -----------------------
+
+
+async def _fire_with_fake_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    destination: tuple[str, str] | None,
+    agent_posts_to: str | None,
+) -> tuple[RoutineRow, dict[str, object]]:
+    from daimon.core.turn.state import ToolUseBlock, TurnState
+
+    now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10.00"),
+        reason="trial_credit",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="U_DEST",
+        agent_id="agent_dest",
+        agent_name="daimon",
+        cron_expr="0 9 * * 1",
+        timezone_="Europe/Lisbon",
+        trigger_message="summarize the week",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        destination_kind=destination[0] if destination else None,
+        destination_id=destination[1] if destination else None,
+    )
+    await db_session.commit()
+    seen: dict[str, object] = {}
+
+    async def fake_run_turn(**kwargs: object) -> object:
+        seen.update(kwargs)
+        blocks: list[ToolUseBlock] = []
+        if agent_posts_to is not None:
+            blocks.append(
+                ToolUseBlock(
+                    kind="tool_use",
+                    id="tu_post",
+                    type="agent.mcp_tool_use",
+                    name="send_message",
+                    input={"channel_id": agent_posts_to, "content": "done"},
+                    mcp_server_name="daimon-mcp",
+                    status="complete",
+                )
+            )
+        on_state = kwargs["on_state"]
+        assert callable(on_state)
+        on_state(TurnState(content=list(blocks)))
+        return "Weekly summary: all green."
+
+    fire = await _build_fire(
+        client=AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999"),
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_dest"
+
+    with (
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", side_effect=fake_run_turn),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_agent", side_effect=fake_resolve
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.resolve_environment", side_effect=fake_resolve
+        ),
+    ):
+        await fire(row)
+    async with db_session_factory() as s:
+        after = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert after is not None
+    return after, seen
+
+
+async def test_fire_without_destination_is_unchanged(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    after, seen = await _fire_with_fake_turn(
+        db_session, db_session_factory, monkeypatch, destination=None, agent_posts_to=None
+    )
+
+    assert seen["trigger_message"] == "summarize the week", "no controls without a destination"
+    assert after.last_result_tail == "Weekly summary: all green."
+    assert after.delivery_status is None, "nothing queued without a destination"
+
+
+async def test_fire_with_destination_queues_the_tail_when_the_agent_did_not_post(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to=None,
+    )
+
+    trigger = str(seen["trigger_message"])
+    assert trigger.startswith("<turn_controls>\n")
+    assert '"channel_id": "111222333"' in trigger
+    assert '"schedule": "0 9 * * 1"' in trigger
+    assert trigger.endswith("</turn_controls>\nsummarize the week")
+    assert after.delivery_status == "pending"
+
+
+async def test_fire_with_destination_skips_the_fallback_when_the_agent_posted(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    after, _seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to="111222333",
+    )
+
+    assert (after.delivery_status, after.delivery_note) == ("skipped", "agent_posted")
+
+
+async def test_fire_posting_elsewhere_still_queues_the_fallback(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    after, _seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to="999",
+    )
+
+    assert after.delivery_status == "pending"

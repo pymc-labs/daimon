@@ -830,3 +830,109 @@ async def test_catch_up_policy_create_update_and_owner_gate(
     assert updated.catch_up_policy == "skip"
     assert updated.next_fire_at == row.next_fire_at
     await client.close()
+
+
+# --- FEAT-085: destination -----------------------------------------------------
+
+
+async def test_create_routine_saves_a_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    row = await _create_routine_impl(
+        _runtime(committing_sessionmaker, client=client),
+        _auth_identity(tenant_id=tenant.id),
+        agent_name="daimon",
+        cron_expr="0 9 * * 1",
+        timezone="UTC",
+        trigger_message="weekly summary",
+        destination_kind="channel",
+        destination_id="1234",
+    )
+    assert (row.destination_kind, row.destination_id, row.delivery_status) == (
+        "channel",
+        "1234",
+        None,
+    )
+
+
+async def test_create_routine_refuses_a_protected_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(protected_channel_ids=("C_ANN",)),
+    )
+    await db_session.commit()
+
+    with pytest.raises(ToolError, match="protected channel"):
+        await _create_routine_impl(
+            _runtime(committing_sessionmaker),
+            _auth_identity(tenant_id=tenant.id),
+            agent_name="daimon",
+            cron_expr="0 9 * * 1",
+            timezone="UTC",
+            trigger_message="weekly summary",
+            destination_kind="thread",
+            destination_id="C_ANN:1717.5",
+        )
+
+
+async def test_create_routine_needs_both_destination_fields(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    with pytest.raises(ToolError, match="together"):
+        await _create_routine_impl(
+            _runtime(committing_sessionmaker),
+            _auth_identity(tenant_id=tenant.id),
+            agent_name="daimon",
+            cron_expr="0 9 * * 1",
+            timezone="UTC",
+            trigger_message="x",
+            destination_kind="channel",
+        )
+
+
+async def test_update_routine_sets_and_clears_a_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    created = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u_test",
+        agent_id="agent_a",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="orig",
+    )
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity(tenant_id=tenant.id)
+
+    set_ = await _update_routine_impl(
+        runtime, auth, routine_id=created.id, destination_kind="channel", destination_id="55"
+    )
+    cleared = await _update_routine_impl(
+        runtime, auth, routine_id=created.id, clear_destination=True
+    )
+
+    assert (set_.destination_kind, set_.destination_id) == ("channel", "55")
+    assert set_.trigger_message == "orig"
+    assert (cleared.destination_kind, cleared.destination_id) == (None, None)

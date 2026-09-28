@@ -60,6 +60,7 @@ from daimon.core.ma_resolver import (
 from daimon.core.observability import init_sentry
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.pricing import MODEL_PRICING
+from daimon.core.routine_delivery import agent_posted_to, render_routine_controls
 from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
@@ -73,6 +74,7 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.state import TurnState
 from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
@@ -184,6 +186,7 @@ async def _build_fire(
             if tenant is None:
                 await record_result(s, row.id, tail=None, error="routine tenant not found")
                 return
+            platform = tenant.platform
             principal = await get_or_create_platform_principal(
                 s,
                 tenant_id=row.tenant_id,
@@ -300,11 +303,21 @@ async def _build_fire(
             else None
         )
 
+        # FEAT-085: a routine with a destination opens with host-supplied
+        # controls naming it; one without sends its trigger message as before.
+        trigger_message = row.trigger_message
+        if row.destination_kind is not None:
+            trigger_message = (
+                render_routine_controls(row, platform=platform) + "\n" + row.trigger_message
+            )
+        final_state: list[TurnState] = []
+
         tail = await run_turn(
             anthropic=client,
             agent_id=resolved_agent_id,
             environment_id=resolved_env_id,
-            trigger_message=row.trigger_message,
+            trigger_message=trigger_message,
+            on_state=final_state.append,
             mcp_settings=settings.mcp,
             account_id=account_id,
             usage_record_factory=usage_record_factory,
@@ -318,8 +331,23 @@ async def _build_fire(
             tool_safety=settings.tool_safety,
         )
 
+        if row.destination_kind is None:
+            async with sm() as s, s.begin():
+                await record_result(s, row.id, tail=tail, error=None)
+            return
+
+        # Fallback post: only when the agent did not deliver to the
+        # destination itself. The chat adapter for `platform` posts it.
+        posted = bool(final_state) and agent_posted_to(final_state[0], row, platform=platform)
         async with sm() as s, s.begin():
-            await record_result(s, row.id, tail=tail, error=None)
+            await record_result(
+                s,
+                row.id,
+                tail=tail,
+                error=None,
+                delivery="skipped" if posted else "pending",
+                delivery_note="agent_posted" if posted else None,
+            )
 
     return _fire
 

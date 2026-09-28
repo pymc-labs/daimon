@@ -27,6 +27,7 @@ from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.gating import is_participation_candidate, should_process_message
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.permissions import check_missing_permissions
+from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
 from daimon.adapters.discord.thread_participation import ThreadParticipant
@@ -61,6 +62,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.tenants import (
     get_tenant_liveness,
@@ -415,6 +417,18 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     platform="discord",
                     open_thread=self._open_wake_thread,
+                    should_stop=lambda: self.draining or self.is_closed(),
+                )
+            )
+            # FEAT-085: post routine results to their destinations. Same
+            # switch as the wake poller: one process per platform posts.
+            self._spawn(
+                run_delivery_poller(
+                    self.runtime.sessionmaker,
+                    platform="discord",
+                    post=make_discord_routine_poster(
+                        self.runtime.sessionmaker, fetch_channel=self._channel_by_id
+                    ),
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
@@ -1589,6 +1603,10 @@ class DaimonBot(commands.Bot):
             await self._drain_pending_mentions(thread.id, guild_id, tenant_id)
         finally:
             self._release_thread(thread.id)
+
+    async def _channel_by_id(self, channel_id: int) -> object:
+        """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
+        return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
 
     async def _open_wake_thread(self, wake: WakeThread) -> bool:
         """The wake poller's hook: dispatch a thread's due wakes, spawned.

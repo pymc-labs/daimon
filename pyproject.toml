@@ -155,6 +155,7 @@ source_modules = [
     "daimon.core.repo_resource",
     "daimon.core.reports",
     "daimon.core.roster",
+    "daimon.core.routine_delivery",
     "daimon.core.routing_facts",
     "daimon.core.scheduler",
     "daimon.core.scope",

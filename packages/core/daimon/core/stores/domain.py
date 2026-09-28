@@ -163,6 +163,10 @@ class TenantDependentCounts:
 CatchUpPolicy = Literal["skip", "run-once"]
 
 
+RoutineDestinationKind = Literal["channel", "thread"]
+RoutineDeliveryStatus = Literal["pending", "claimed", "delivered", "skipped"]
+
+
 class RoutineRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -183,6 +187,11 @@ class RoutineRow(BaseModel):
     last_fired_at: datetime | None
     last_error: str | None
     last_result_tail: str | None
+    destination_kind: RoutineDestinationKind | None = None
+    destination_id: str | None = None
+    delivery_status: RoutineDeliveryStatus | None = None
+    delivery_note: str | None = None
+    delivered_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

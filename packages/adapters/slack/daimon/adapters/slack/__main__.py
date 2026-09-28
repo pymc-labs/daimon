@@ -87,6 +87,7 @@ async def main() -> None:
             # Due wakes (timers, background completions) run in their thread
             # through the same dispatch a form submission uses.
             app.start_wake_poller()
+            app.start_delivery_poller()
             # Boot-time reconcile sweep, in the background so a slow provider
             # cannot delay mention handling. A crash is logged, never raised —
             # the listener must outlive its sweep.

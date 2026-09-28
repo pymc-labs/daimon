@@ -18,10 +18,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.core.access_policy import is_write_protected
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.stores import routines as routines_store
-from daimon.core.stores.domain import CatchUpPolicy, RoutineRow
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
@@ -84,6 +86,40 @@ def _compute_next_fire_at(cron_expr: str, tz: str) -> datetime:
         raise ToolError(f"invalid cron expression: {cron_expr!r}") from e
 
 
+async def _check_destination(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    kind: RoutineDestinationKind | None,
+    destination_id: str | None,
+) -> None:
+    """Refuse a malformed or write-protected destination before it is saved.
+
+    Only the channel id is known here; the adapter re-checks at post time with
+    the parent channel and category it resolves, so a thread or category
+    protected later is still honoured.
+    """
+    if (kind is None) != (destination_id is None):
+        raise ToolError("destination_kind and destination_id must be given together")
+    if kind is None or destination_id is None:
+        return
+    channel_id = destination_id.split(":", 1)[0].strip()
+    if not channel_id:
+        raise ToolError("destination_id must name a channel or thread")
+    async with runtime.session_factory() as session:
+        try:
+            policy = await load_access_policy(session, tenant_id=auth.tenant_id)
+        except AccessPolicyUnreadable as err:
+            raise ToolError(
+                "the workspace access policy could not be read; no destination was saved"
+            ) from err
+    if is_write_protected(policy, channel_id=channel_id):
+        raise ToolError(
+            f"{channel_id} is a protected channel: daimon does not post there, so a routine "
+            "cannot deliver to it. Pick another channel. Nothing was saved."
+        )
+
+
 async def _create_routine_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -94,10 +130,13 @@ async def _create_routine_impl(
     trigger_message: str,
     enabled: bool = True,
     catch_up_policy: CatchUpPolicy = "skip",
+    destination_kind: RoutineDestinationKind | None = None,
+    destination_id: str | None = None,
 ) -> RoutineRow:
     tenant_id = auth.tenant_id
     platform_user_id = _require_platform_user_id(auth)
     next_fire_at = _compute_next_fire_at(cron_expr, timezone)
+    await _check_destination(runtime, auth, kind=destination_kind, destination_id=destination_id)
 
     match = await find_agent_by_daimon_tag(
         runtime.client,
@@ -121,6 +160,8 @@ async def _create_routine_impl(
             enabled=enabled,
             catch_up_policy=catch_up_policy,
             next_fire_at=next_fire_at,
+            destination_kind=destination_kind,
+            destination_id=destination_id,
         )
 
 
@@ -158,8 +199,14 @@ async def _update_routine_impl(
     trigger_message: str | None = None,
     enabled: bool | None = None,
     catch_up_policy: CatchUpPolicy | None = None,
+    destination_kind: RoutineDestinationKind | None = None,
+    destination_id: str | None = None,
+    clear_destination: bool = False,
 ) -> RoutineRow:
     tenant_id = auth.tenant_id
+    if clear_destination and (destination_kind is not None or destination_id is not None):
+        raise ToolError("clear_destination cannot be combined with a new destination")
+    await _check_destination(runtime, auth, kind=destination_kind, destination_id=destination_id)
     async with runtime.session_factory() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
         if row is None:
@@ -199,6 +246,9 @@ async def _update_routine_impl(
             agent_id=new_agent_id,
             agent_name=agent_name if new_agent_id is not None else None,
             next_fire_at=next_fire_at,
+            destination_kind=destination_kind,
+            destination_id=destination_id,
+            clear_destination=clear_destination,
         )
         if updated is None:
             raise ToolError("routine not found")
@@ -233,10 +283,19 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         trigger_message: str,
         enabled: bool = True,
         catch_up_policy: CatchUpPolicy = "skip",
+        destination_kind: RoutineDestinationKind | None = None,
+        destination_id: str | None = None,
     ) -> RoutineRow:
         """Create a routine in the caller's tenant partition.
 
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
+
+        ``destination_kind`` (``channel`` or ``thread``) and ``destination_id``
+        optionally name where each run's result goes. The run is told where,
+        and if the agent does not post there itself, daimon posts the end of
+        its final reply there. On Slack a thread is ``<channel id>:<thread
+        ts>``. A protected channel is refused. Without a destination the
+        result is only recorded (``last_result_tail``), as before.
 
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
@@ -270,6 +329,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             trigger_message=trigger_message,
             enabled=enabled,
             catch_up_policy=catch_up_policy,
+            destination_kind=destination_kind,
+            destination_id=destination_id,
         )
 
     @mcp.tool
@@ -292,8 +353,14 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         trigger_message: str | None = None,
         enabled: bool | None = None,
         catch_up_policy: CatchUpPolicy | None = None,
+        destination_kind: RoutineDestinationKind | None = None,
+        destination_id: str | None = None,
+        clear_destination: bool = False,
     ) -> RoutineRow:
         """PATCH-update a routine. Only provided fields are changed.
+
+        ``destination_kind`` + ``destination_id`` set where results go (see
+        ``create_routine``); ``clear_destination=true`` removes it.
 
         ``catch_up_policy`` selects ``skip`` or one coalesced ``run-once`` after downtime.
 
@@ -310,6 +377,9 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             trigger_message=trigger_message,
             enabled=enabled,
             catch_up_policy=catch_up_policy,
+            destination_kind=destination_kind,
+            destination_id=destination_id,
+            clear_destination=clear_destination,
         )
 
     @mcp.tool
