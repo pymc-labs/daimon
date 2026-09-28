@@ -20,11 +20,8 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_app_auth import build_app_install_url
-from daimon.core.posted_controls import CardState, RefusalReason
-from daimon.core.posted_controls.teams_card import (
-    build_adaptive_card,
-    card_for_request,
-)
+from daimon.core.posted_controls import CardState, RefusalReason, card_for_request
+from daimon.core.posted_controls.teams_card import build_adaptive_card
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.teams_threads import conversation_of
 from fastmcp.exceptions import ToolError

@@ -3,16 +3,9 @@
 from __future__ import annotations
 
 import json
-import uuid
-from datetime import UTC, datetime
 
 import pytest
-from daimon.core.posted_controls.teams_card import (
-    CREDENTIAL_DIALOG,
-    build_adaptive_card,
-    card_for_request,
-)
-from daimon.core.stores.domain import CredentialRequestRow
+from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG, build_adaptive_card
 
 from .test_cards import AGENT, KINDS, STATES, TOKEN, build
 
@@ -45,26 +38,3 @@ def test_every_later_state_renders_without_a_form_button(kind: str, state: str) 
 def test_a_form_button_without_its_token_is_refused() -> None:
     with pytest.raises(ValueError, match="token"):
         build_adaptive_card(build("mcp", "requested"))
-
-
-def test_card_for_request_reads_the_row() -> None:
-    now = datetime(2026, 9, 14, 17, 0, tzinfo=UTC)
-    row = CredentialRequestRow(
-        token=TOKEN,
-        kind="mcp",
-        tenant_id=uuid.uuid4(),
-        agent_id=uuid.uuid4(),
-        account_id=uuid.uuid4(),
-        target="linear",
-        mcp_server_url="https://mcp.linear.app/sse",
-        requester_platform_user_id="u",
-        channel_id="a:chat",
-        idempotency_key=uuid.uuid4(),
-        target_name=AGENT,
-        created_at=now,
-        expires_at=now,
-        used_at=None,
-    )
-    card = card_for_request(row, state="requested")
-    assert card.headline == f"🔌 Connect {AGENT} to linear"
-    assert card.facts[0] == "https://mcp.linear.app/sse needs a token."

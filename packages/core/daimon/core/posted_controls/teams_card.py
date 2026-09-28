@@ -8,19 +8,9 @@ Plain JSON dicts, exactly as the Bot Framework takes them.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Final, cast
+from typing import Final
 
-from daimon.core.continuity.messages import ConfigurationChange
-from daimon.core.credential_requests import split_skill_repo_target
-from daimon.core.github_repo_auth import normalize_owner_repo
-from daimon.core.posted_controls.cards import (
-    CardKind,
-    CardState,
-    PostedCard,
-    RefusalReason,
-    build_posted_card,
-)
-from daimon.core.stores.domain import CredentialRequestRow
+from daimon.core.posted_controls.cards import PostedCard, card_for_request
 
 __all__ = [
     "ADAPTIVE_CARD_TYPE",
@@ -35,35 +25,6 @@ CREDENTIAL_DIALOG: Final[str] = "credential_request"
 # The poster knows the requester's Entra id, not their name, so the footer
 # names the role; only the requester can open the form either way.
 _REQUESTER: Final[str] = "the person who asked"
-
-
-def card_for_request(
-    row: CredentialRequestRow,
-    *,
-    state: CardState,
-    outcome: ConfigurationChange | None = None,
-    refusal: RefusalReason | None = None,
-) -> PostedCard:
-    """The card for one request row in `state`, with every fact the row holds."""
-    repo = branch = None
-    if row.kind in ("repo", "skill_repo"):
-        repo_url, branch, _path = split_skill_repo_target(row.target)
-        repo = normalize_owner_repo(repo_url)
-    return build_posted_card(
-        kind=cast("CardKind", row.kind),
-        state=state,
-        agent_name=row.target_name or "the agent",
-        responder_name=row.responder_name or "Daimon",
-        target=row.target,
-        requester_platform_user_id=row.requester_platform_user_id,
-        expires_at=row.expires_at,
-        token=row.token,
-        mcp_server_url=row.mcp_server_url,
-        repo=repo,
-        branch=branch,
-        outcome=outcome,
-        refusal=refusal,
-    )
 
 
 def _text(text: str, **style: object) -> dict[str, object]:
