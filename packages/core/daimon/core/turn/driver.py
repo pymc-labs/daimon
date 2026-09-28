@@ -530,6 +530,21 @@ async def _pump(
                     # suffix onto the monotonic in-memory state instead.
                     await _bill_replayed(billing, current_turn_events, billed_event_ids)
                     state_cell[0] = functools.reduce(apply, current_turn_events, state_cell[0])
+                    folded = state_cell[0]
+                    if (
+                        session.status == "terminated"
+                        and folded.stop_reason is None
+                        and folded.error is None
+                    ):
+                        # MA says terminated, but neither the stream nor the
+                        # replay showed this turn ending. Nothing proves it
+                        # finished, so it is the same end as a live
+                        # `session.status_terminated`, never a success.
+                        state_cell[0] = dataclasses.replace(
+                            folded,
+                            error=TurnError(kind="upstream", message="session terminated by MA"),
+                            termination=TerminationReason.SESSION_TERMINATED,
+                        )
                     if session.status == "idle":
                         match tool_confirmation:
                             case AutoApprove():

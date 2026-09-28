@@ -326,3 +326,72 @@ def test_only_completed_and_interrupted_are_not_failures() -> None:
         TerminationReason.COMPLETED,
         TerminationReason.INTERRUPTED,
     }
+
+
+async def test_a_terminated_session_with_no_terminal_event_is_not_completed() -> None:
+    """MA reports `terminated`, but neither the stream nor the replay shows the
+    turn ending: nothing proves it finished, so it must not read as success."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [[]]
+    fa.beta.sessions.events.replay_events = []
+    fa.beta.sessions.retrieve_statuses = ["terminated"]
+    lc = RecordingLifecycle()
+
+    final = await run_turn(
+        anthropic=cast(AsyncAnthropic, fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert final.termination is TerminationReason.SESSION_TERMINATED
+    assert final.error is not None and final.error.kind == "upstream"
+    assert lc.terminal_success == [] and len(lc.terminal_failures) == 1
+    assert _terminal_state(lc).termination is TerminationReason.SESSION_TERMINATED
+
+
+def test_an_unknown_turn_kind_maps_to_unknown_instead_of_raising() -> None:
+    err = TurnError(kind="bogus")  # type: ignore[arg-type]  # off the Literal on purpose
+    assert termination_reason(err) is TerminationReason.UNKNOWN
+
+
+def test_a_denial_without_a_reason_maps_to_the_generic_member() -> None:
+    class _Bare(AdmissionDenied):
+        def __init__(self) -> None:
+            Exception.__init__(self, "denied")
+
+    assert termination_reason(_Bare()) is TerminationReason.ADMISSION_DENIED
+
+
+def test_the_value_set_is_pinned() -> None:
+    """Values are storage strings. A rename or removal must fail here first."""
+    assert {m.value for m in TerminationReason} == {
+        "completed",
+        "interrupted",
+        "interrupt_timeout",
+        "connection_lost",
+        "upstream",
+        "rate_limited",
+        "session_terminated",
+        "mcp_degraded_empty",
+        "retrying_unsettled",
+        "requires_action",
+        "ceiling",
+        "recovery_cancelled",
+        "recovery_failed",
+        "reducer_bug",
+        "admission_balance_depleted",
+        "admission_cap_exceeded",
+        "admission_denied",
+        "admission_concurrency_shed",
+        "missing_config",
+        "resolver_miss",
+        "session_preparation_failed",
+        "session_busy",
+        "session_agent_mismatch",
+        "unknown",
+    }

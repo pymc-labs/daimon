@@ -15,7 +15,8 @@ Two sources fill it in:
   `TurnState`, so callers hand the exception they caught to
   `termination_reason` and get the member back.
 
-`termination_reason` is the one exception→reason mapper. A new admission gate
+`termination_reason` is the one exception→reason mapper, and it is total: it
+never raises, whatever it is handed. A new admission gate
 should raise `AdmissionDenied` with a new `AdmissionDenialReason` value: it
 maps to `ADMISSION_DENIED` until someone gives it a member of its own, so no
 call site grows a string literal. Anything unclassified maps to `UNKNOWN`.
@@ -66,6 +67,10 @@ class TerminationReason(StrEnum):
     """The per-turn wall-clock ceiling fired."""
     RECOVERY_CANCELLED = "recovery_cancelled"
     """The session was lost and the user stopped the turn before it was retried."""
+    RECOVERY_FAILED = "recovery_failed"
+    """The session was lost and replacing it raised. `run_prepared_turn` re-raises;
+    the caller records this member for the exception (the terminal hook it already
+    got carries the first attempt's reason, the only one known when it fired)."""
     REDUCER_BUG = "reducer_bug"
     """Reserved: mirrors `TurnKind`; no production path raises it."""
 
@@ -74,6 +79,10 @@ class TerminationReason(StrEnum):
     ADMISSION_CAP_EXCEEDED = "admission_cap_exceeded"
     ADMISSION_DENIED = "admission_denied"
     """Any other admission refusal (an access policy, a future gate)."""
+    ADMISSION_CONCURRENCY_SHED = "admission_concurrency_shed"
+    """`daimon.core.turn.gating.should_admit_turn` refused: too many turns in
+    flight. It returns a bool rather than raising, so callers that shed a turn
+    set this member themselves; `termination_reason` never produces it."""
     MISSING_CONFIG = "missing_config"
     RESOLVER_MISS = "resolver_miss"
     SESSION_PREPARATION_FAILED = "session_preparation_failed"
@@ -91,7 +100,9 @@ class TerminationReason(StrEnum):
 
 _NOT_FAILURES = frozenset({TerminationReason.COMPLETED, TerminationReason.INTERRUPTED})
 
-_BY_DENIAL = {
+_BY_VALUE: dict[str, TerminationReason] = {m.value: m for m in TerminationReason}
+
+_BY_DENIAL: dict[str, TerminationReason] = {
     "balance_depleted": TerminationReason.ADMISSION_BALANCE_DEPLETED,
     "cap_exceeded": TerminationReason.ADMISSION_CAP_EXCEEDED,
 }
@@ -109,9 +120,10 @@ def termination_reason(err: BaseException | None) -> TerminationReason:
         case None:
             return TerminationReason.COMPLETED
         case TurnError():
-            return TerminationReason(err.kind)
+            return _BY_VALUE.get(str(err.kind), TerminationReason.UNKNOWN)
         case AdmissionDenied():
-            return _BY_DENIAL.get(err.reason, TerminationReason.ADMISSION_DENIED)
+            denial = getattr(err, "reason", None)
+            return _BY_DENIAL.get(str(denial), TerminationReason.ADMISSION_DENIED)
         case MissingTurnConfigError():
             return TerminationReason.MISSING_CONFIG
         case MAResolverMissError():
