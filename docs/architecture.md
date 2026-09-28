@@ -140,9 +140,13 @@ protects a category and the channel isn't already protected, and cached so
 admission doesn't fetch it again. Anything but `unprotected` drops the turn
 with only a log line, and the entries' error boundaries post only when the
 state is `unprotected`. The entries are Discord `on_message`, organic thread
-participation, wizard submit and continuations, and Slack
+participation, wizard submit and continuation turns, and Slack
 `_handle_app_mention` (with a second check in `_orchestrate` after it claims
-the thread, and on its ephemeral shed notice).
+the thread, and on its ephemeral shed notice). The continuation dispatchers on
+both platforms, which can post skip or responder-changed copy outside any
+turn (from the wake poller or a credential submission), ask the same decision
+right before each post and settle the row skipped without posting when it
+isn't `unprotected`.
 
 **Tenant access policy — `packages/core/daimon/core/access_policy.py`.** One
 `TenantAccessPolicy` per tenant, stored as JSON in `tenant_access_policies`

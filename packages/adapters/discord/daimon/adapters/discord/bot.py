@@ -1658,7 +1658,15 @@ class DaimonBot(commands.Bot):
             run_follow_up=lambda row, decision: self._run_continuation_turn(
                 row, decision, thread=thread, tenant_id=tenant_id, guild_id=guild_id
             ),
+            may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
         )
+
+    async def _may_post_in(self, *, tenant_id: uuid.UUID, channel: object) -> bool:
+        """The access policy's may-post decision for a channel or thread."""
+        state = await _channel_protection_state(
+            self.runtime.sessionmaker, tenant_id=tenant_id, channel=channel
+        )
+        return state.may_post
 
     async def dispatch_continuations_in_thread(
         self, *, tenant_id: uuid.UUID, thread: discord.Thread, guild_id: str

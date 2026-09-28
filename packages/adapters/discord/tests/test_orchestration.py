@@ -1333,6 +1333,47 @@ class TestProtectedChannelWhateverFails:
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
 
 
+class TestContinuationMayPost:
+    """The bot hands its continuation dispatcher the access policy's may-post decision."""
+
+    @pytest.mark.parametrize(
+        ("policy", "fail_read", "expected"),
+        [
+            (None, False, True),
+            (TenantAccessPolicy(protected_channel_ids=("789",)), False, False),
+            (None, True, False),
+        ],
+        ids=["open", "protected-parent", "unknown"],
+    )
+    async def test_may_post_in_follows_the_policy(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        policy: TenantAccessPolicy | None,
+        fail_read: bool,
+        expected: bool,
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        if policy is not None:
+            await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+        await db_session.commit()
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        thread = _make_thread_message(parent_id=789).channel
+
+        breakage = (
+            patch(
+                "daimon.core.turn.protection.load_access_policy",
+                new=AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("gone"))),
+            )
+            if fail_read
+            else contextlib.nullcontext()
+        )
+        with breakage:
+            allowed = await bot._may_post_in(tenant_id=tenant.id, channel=thread)  # pyright: ignore[reportPrivateUsage]
+
+        assert allowed is expected
+
+
 class TestBillingAdmissionGate:
     """is_over_cap admission gate + billing posture wiring."""
 

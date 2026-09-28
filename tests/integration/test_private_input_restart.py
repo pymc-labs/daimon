@@ -175,6 +175,11 @@ async def _submit(runtime: DiscordRuntime, row: CredentialRequestRow, *, value: 
     return interaction
 
 
+async def _may_post_open() -> bool:
+    """No access policy: the agent may post in the thread."""
+    return True
+
+
 async def test_a_crash_between_the_commit_and_the_dispatch_leaves_the_turn_recoverable(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -234,6 +239,7 @@ async def test_a_crash_between_the_commit_and_the_dispatch_leaves_the_turn_recov
             tenant_id=row.tenant_id,
             thread=thread,
             run_follow_up=_run_follow_up,
+            may_post=_may_post_open,
         )
 
     assert len(calls) == 1, (
