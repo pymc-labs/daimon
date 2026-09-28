@@ -242,3 +242,32 @@ async def test_tenants_list_rejects_unknown_platform(
 
     with pytest.raises(typer.BadParameter, match="discord, cli, slack"):
         await tenants_list(rt=rt, console=console, platform="teams", as_json=True)
+
+
+async def test_tenants_funding_mode_changes_only_the_selected_tenant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    from daimon.adapters.cli.commands.tenants import tenants_funding_mode
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="funded")
+    other = await make_tenant(db_session, platform="slack", workspace_id="other")
+    await db_session.commit()
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await tenants_funding_mode(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="funded",
+        mode="operator_funded",
+    )
+    async with db_session_factory() as session:
+        row = await get_tenant(session, tenant.id)
+        untouched = await get_tenant(session, other.id)
+    assert row is not None and row.funding_mode == "operator_funded"
+    assert untouched is not None and untouched.funding_mode == "prepaid"
+    with pytest.raises(typer.BadParameter):
+        await tenants_funding_mode(
+            rt=rt, console=_make_console(), platform="discord", external_id="funded", mode="invalid"
+        )

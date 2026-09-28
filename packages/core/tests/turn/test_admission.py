@@ -16,8 +16,10 @@ from daimon.core.billing import BillingConfig
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores.domain import FundingMode
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing.ma import (
@@ -128,16 +130,21 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
     )
 
 
+@pytest.mark.parametrize("funding_mode", ["prepaid", "operator_funded"])
 async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    funding_mode: FundingMode,
 ) -> None:
     tenant = await make_tenant(db_session)
     await make_tenant_config(
         db_session, tenant=tenant, agent_name="daimon", environment_name="default"
     )
-    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    if funding_mode == "prepaid":
+        await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    else:
+        await set_funding_mode(db_session, tenant_id=tenant.id, funding_mode=funding_mode)
     await make_tenant_user_cap(db_session, tenant=tenant, amount=Decimal("0"))
     await db_session.commit()
 

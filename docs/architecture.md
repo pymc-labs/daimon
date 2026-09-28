@@ -252,6 +252,11 @@ credential; they reach daimon over HTTP with capability tokens, and the
 - [mcp-tools.md](mcp-tools.md) — every tool the agent can call.
 - [configuration.md](configuration.md) — every setting.
 
+The operator CLI also exposes `daimon tenants funding-mode PLATFORM EXTERNAL_ID
+MODE`. This stores a per-tenant `prepaid` or `operator_funded` policy. Shared
+balance admission emits a warning instead of a refusal for operator-funded
+tenants; usage recording and configured caps continue through the same path.
+
 ### Invocation context fragments
 
 Core adds a `turn_context` block before the user message, chosen by the trusted
