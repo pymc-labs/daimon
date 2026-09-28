@@ -9,8 +9,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0028_sys047_access_policies"
-down_revision: str | None = "0027_turn_card_intents"
+revision: str = "0029_sys047_access_policies"
+down_revision: str | None = "0028_tenant_funding_mode"
 branch_labels: str | None = None
 depends_on: str | None = None
 
