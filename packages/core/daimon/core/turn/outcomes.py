@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from importlib.metadata import version
@@ -91,6 +91,7 @@ class TurnObservation:
         finally:
             current_outcome.reset(token)
 
+    usage_available: bool = True
     model_by_session: dict[str, str] = field(default_factory=lambda: dict[str, str]())
     _samples: dict[tuple[str, str], UsageSample] = field(
         default_factory=lambda: dict[tuple[str, str], UsageSample]()
@@ -177,6 +178,20 @@ class TurnObservation:
             unpriced_calls=unpriced_calls,
             billing_posture=posture,
         )
+        if not self.usage_available:
+            # SDK polling/dispatch paths have outcomes but do not consume model spans.
+            row = replace(
+                row,
+                input_tokens=None,
+                output_tokens=None,
+                cache_read_input_tokens=None,
+                cache_creation_input_tokens=None,
+                model_calls=None,
+                model_ids=None,
+                cost_usd=None,
+                unpriced_calls=None,
+                billing_posture=None,
+            )
         if len(_PENDING) >= _MAX_PENDING:
             log.warning("turn.outcome_queue_full", turn_id=str(self.id))
             return

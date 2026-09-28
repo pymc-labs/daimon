@@ -20,6 +20,7 @@ def observed_agent_turn[**P, T](
         if current_outcome.get() is not None:
             return await call(runtime, auth, *args, **kwargs)
         with observe_turn(runtime.session_factory, tenant_id=auth.tenant_id, platform="mcp") as row:
+            row.usage_available = False
             row.account_id = auth.account_id
             row.agent_id = str(auth.agent_id) if auth.agent_id is not None else None
             return await call(runtime, auth, *args, **kwargs)

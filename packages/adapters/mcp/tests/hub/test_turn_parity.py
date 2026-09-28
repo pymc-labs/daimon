@@ -229,6 +229,7 @@ async def test_hub_turn_outcomes_and_account_attribution(
     assert outcome.account_id == principal.account_id
     assert "status?" not in str(outcome)
     if refused:
+        assert outcome.model_calls == 0 and outcome.cost_usd == 0
         assert outcome.reason == TerminationReason.ADMISSION_BALANCE_DEPLETED
         assert outcome.session_id is None
         create_session.assert_not_awaited()
@@ -238,6 +239,8 @@ async def test_hub_turn_outcomes_and_account_attribution(
         TerminationReason.COMPLETED if tool_name == "ask" else TerminationReason.UNKNOWN
     )
     assert outcome.session_id is not None and outcome.agent_id == AGENT_ID
+    assert outcome.model_calls is None and outcome.cost_usd is None
+    assert outcome.input_tokens is None and outcome.billing_posture is None
     if tool_name == "continue_turn":
         create_session.assert_not_awaited()
         assert outcome.session_id == "existing"

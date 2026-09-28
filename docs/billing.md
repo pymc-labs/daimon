@@ -377,9 +377,11 @@ unknown cost; `known_cost_usd` is the subtotal of fully priced turns, and
 `measured_turns` distinguishes measured rows from history. Token totals include
 only measured rows. Existing-session CLI runs without model metadata can report
 tokens with unknown cost. Separately metered tool models and auxiliary API calls
-are not included in these model-span totals. Separate MCP agent-chat
-start/continue/ask flows bypass the shared driver and are not covered. Library
-headless calls without an outcome session factory are likewise unobserved.
+are not included in these model-span totals. MCP agent-chat and hub
+start/continue/ask calls record outcomes, but their SDK polling paths do not
+consume model spans: usage fields remain null and summaries do not count them
+as measured turns. Their admission refusals still record measured zero usage.
+Library headless calls without an outcome session factory are unobserved.
 
 Telemetry inherits the outcome writer's bounded best-effort delivery: database
 outages, saturation or abrupt process termination can lose rows. It is operational
