@@ -22,6 +22,7 @@ from daimon.core.config import TeamsSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.testing import (
     build_fake_anthropic,
@@ -282,6 +283,7 @@ def build_teams_runtime(
     settings.defaults_root = MagicMock()
     settings.billing.markup = Decimal("1.0")
     settings.billing.signup_credit = Decimal("0")
+    settings.tool_safety = OPEN_TOOL_SAFETY
     client = anthropic or build_fake_anthropic(make_agent_env_echo_handler())
     deployment_default = DeploymentDefault(agent_name="daimon", environment_name="default")
     resolver_cache = new_resolver_cache()

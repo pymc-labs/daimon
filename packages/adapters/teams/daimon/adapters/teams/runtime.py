@@ -77,6 +77,7 @@ def build_turn_deps(
             else None
         ),
         public_url=public_url,
+        tool_safety=settings.tool_safety,
     )
 
 
