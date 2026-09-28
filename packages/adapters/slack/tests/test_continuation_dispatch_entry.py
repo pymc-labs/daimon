@@ -30,7 +30,8 @@ from daimon.core.continuity.continuation import ContinuationRequest, record_cont
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenant_ledger
-from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
+from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.domain import ContinuationReason, Role, TaskContinuationRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
@@ -283,8 +284,15 @@ async def _run_continuation_and_capture_controls(
     *,
     workspace_id: str,
     reason: ContinuationReason,
+    admin_status: bool | None = False,
+    prior_role: Role | None = None,
 ) -> str:
-    """Run one continuation turn and return the `user_message` it ran with."""
+    """Run one continuation turn and return the `user_message` it ran with.
+
+    `admin_status` is what Slack's `users.info` lookup reports for the
+    requester (`None` = the lookup failed); `prior_role` pre-stamps the
+    requester's account as an earlier turn would have.
+    """
     tenant = await make_tenant(db_session, platform="slack", workspace_id=workspace_id)
     await tenant_ledger.insert_entry(
         db_session,
@@ -296,6 +304,8 @@ async def _run_continuation_and_capture_controls(
     requester = await get_or_create_platform_principal(
         db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
     )
+    if prior_role is not None:
+        await set_role(db_session, requester.account_id, prior_role)
     await db_session.commit()
 
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
@@ -304,6 +314,11 @@ async def _run_continuation_and_capture_controls(
     )
 
     with (
+        patch(
+            "daimon.adapters.slack.app.resolve_admin_status",
+            new_callable=AsyncMock,
+            return_value=admin_status,
+        ),
         patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as resolve_agent,
         patch(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
@@ -371,6 +386,73 @@ async def test_continuation_turn_omits_handoff_notice_for_private_input(
     )
     assert '"handoff"' in handoff_controls, (
         f"a task handoff must still carry the one-time notice, got {handoff_controls}"
+    )
+
+
+async def _requester_role(db_session_factory: async_sessionmaker[AsyncSession]) -> list[Role]:
+    from sqlalchemy import text
+
+    async with db_session_factory() as session:
+        ids = (
+            await session.execute(
+                text("SELECT account_id FROM platform_principals WHERE external_id = 'U_REQUESTER'")
+            )
+        ).scalars()
+        roles: list[Role] = []
+        for account_id in ids:
+            account = await get_account(session, account_id)
+            assert account is not None
+            roles.append(account.role)
+    return roles
+
+
+async def test_continuation_turn_runs_as_admin_when_requester_is_a_workspace_admin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The continuation used to hardcode USER, so an admin's setup run lost its
+    admin tools on the turn that applied their private-form answer."""
+    controls = await _run_continuation_and_capture_controls(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_ROLE_ADMIN",
+        reason="private_input_applied",
+        admin_status=True,
+    )
+    assert '"current_role": "admin"' in controls, (
+        f"an admin requester's continuation must carry the admin role, got {controls}"
+    )
+    assert await _requester_role(db_session_factory) == [Role.ADMIN], (
+        "the live-role gate the resumed turn's MCP calls read must say admin"
+    )
+
+
+@pytest.mark.parametrize(
+    "admin_status",
+    [pytest.param(False, id="non-admin"), pytest.param(None, id="lookup-failed")],
+)
+async def test_continuation_turn_never_runs_as_admin_without_a_live_admin_requester(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    admin_status: bool | None,
+) -> None:
+    """A non-admin's form never produces an admin continuation -- even when
+    the requester's account was admin on an earlier turn."""
+    controls = await _run_continuation_and_capture_controls(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_CONT_ROLE_USER",
+        reason="private_input_applied",
+        admin_status=admin_status,
+        prior_role=Role.ADMIN,
+    )
+    assert '"current_role": "user"' in controls, f"continuation must run as user, got {controls}"
+    assert await _requester_role(db_session_factory) == [Role.USER], (
+        "a stale admin stamp must not survive into the continuation"
     )
 
 

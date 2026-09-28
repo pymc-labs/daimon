@@ -296,6 +296,24 @@ _PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = 10
 _PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = 6
 
 
+async def _requester_role(guild: discord.Guild, external_user_id: str) -> Role:
+    """The requester's live guild role, for a turn that has no message to read it from.
+
+    Same test a mention applies (`is_member_guild_admin`), against the member
+    fetched now. Anything short of a resolved member -- left the guild, a
+    Discord error, a malformed id -- is USER: a continuation never runs with
+    more than its requester provably holds.
+    """
+    try:
+        member = guild.get_member(int(external_user_id)) or await guild.fetch_member(
+            int(external_user_id)
+        )
+    except (discord.HTTPException, ValueError) as exc:
+        log.warning("continuation.requester_role_lookup_failed", exc_info=exc)
+        return Role.USER
+    return Role.ADMIN if is_member_guild_admin(member, guild_owner_id=guild.owner_id) else Role.USER
+
+
 class DaimonBot(commands.Bot):
     """Discord bot process. Slash commands + turn pipeline."""
 
@@ -1599,6 +1617,10 @@ class DaimonBot(commands.Bot):
             else None
         )
 
+        # The follow-up runs as the requester, so it carries their role as it
+        # stands NOW -- re-read from the guild, never from anything the form
+        # or the row recorded. A lookup that fails runs the turn as USER.
+        role = await _requester_role(thread.guild, row.requester_external_user_id)
         admission = await admit(
             self.runtime.turn_deps,
             tenant_id=tenant_id,
@@ -1606,7 +1628,7 @@ class DaimonBot(commands.Bot):
             external_user_id=row.requester_external_user_id,
             channel_id=row.parent_channel_id,
             thread_id=row.thread_id,
-            role=Role.USER,
+            role=role,
             now=datetime.now(UTC),
         )
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
@@ -1764,7 +1786,7 @@ class DaimonBot(commands.Bot):
                 responder_name=admission.config.agent_name or agent.name,
                 configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
                 configuration_target_name=admission.config.configuration_target_name,
-                role=Role.USER,
+                role=role,
                 is_setup=admission.config.thread_binding_kind == "setup",
             ) as origin:
                 outcome = await run_prepared_turn(
