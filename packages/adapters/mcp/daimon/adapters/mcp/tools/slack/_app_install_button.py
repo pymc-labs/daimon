@@ -14,6 +14,7 @@ from typing import Any
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
@@ -43,6 +44,7 @@ async def _post_slack_app_install_button_impl(  # pyright: ignore[reportUnusedFu
         # Slack responses and the shared visibility API expose an open channel mapping.
         channel: dict[str, Any] = dict(info.get("channel") or {})  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
         await check_channel_access(client, channel=channel, user_id=requester_id)
+        await require_channel_writable(runtime, auth, channel_id=channel_id)
         text = (
             f"<@{requester_id}> — {purpose}\n"
             "Install the GitHub App to choose repositories it may read. "

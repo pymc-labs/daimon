@@ -59,6 +59,7 @@ from daimon.adapters.mcp.tools.discord._send import (
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
+    _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.wizard.render import Screen, ScreenButton, to_screen
 from daimon.core.wizard.spec import WizardSpec
@@ -211,6 +212,7 @@ async def _post_wizard_impl(  # pyright: ignore[reportUnusedFunction]
             # the per-call REST client starts with an empty one.
             await _ensure_thread_parent_cached(channel)
         _check_send_permission(channel, member)
+        await _require_discord_channel_writable(runtime, auth, channel)
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support sending messages")
         # The head text carries the agent-authored prompt and question

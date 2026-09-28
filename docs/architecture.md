@@ -142,12 +142,15 @@ and skips the policy, as it skips billing. Ids are the platform's own (Discord s
 | Field | Empty means | Enforced by |
 | --- | --- | --- |
 | `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
-| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | not yet |
+| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | every Discord and Slack write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
 | `sealed_channel_ids` | nothing is sealed | `admit()` sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
 
-A sealed channel's content is readable only from a turn inside it (the channel
-or a thread under it). Operators edit it with the CLI:
+Protection covers threads under a protected channel and, on Discord, channels
+in a protected category; it applies to admins too, and runs after the caller's
+own permission check so it never reveals a channel the caller cannot see. A
+sealed channel's content is readable only from a turn inside it (the channel
+or a thread under it). Operators edit the policy with the CLI:
 
 ```bash
 daimon tenants access-policy get discord GUILD_ID [--json]

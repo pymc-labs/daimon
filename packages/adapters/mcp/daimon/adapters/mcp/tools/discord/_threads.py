@@ -33,6 +33,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _check_create_thread_permission,  # pyright: ignore[reportPrivateUsage]
     _check_rename_thread_permission,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
+    _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
 from fastmcp.exceptions import ToolError
 
@@ -79,6 +80,7 @@ async def _create_thread_impl(  # pyright: ignore[reportUnusedFunction]
             raise ToolError("channel does not support threads")
 
         _check_create_thread_permission(channel, member)
+        await _require_discord_channel_writable(runtime, auth, channel)
 
         if isinstance(channel, discord.ForumChannel):
             try:
@@ -135,6 +137,7 @@ async def _rename_thread_impl(  # pyright: ignore[reportUnusedFunction]
         await _check_thread_view(c, channel, member, user_id)
         bot_user_id = c.user.id if c.user is not None else None
         _check_rename_thread_permission(channel, member, bot_user_id=bot_user_id)
+        await _require_discord_channel_writable(runtime, auth, channel)
 
         try:
             if channel.archived:

@@ -202,7 +202,8 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``ts="1717171717.123456"`` for channel ``C0123456789``, reply with
         ``send_message(channel_id="C0123456789:1717171717.123456", ...)``).
 
-        Only create a thread when the user asked for one.
+        Only create a thread when the user asked for one. Refused in channels
+        the workspace marked protected.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
@@ -323,6 +324,10 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         sent as-is — nothing is escaped, so ``<@U…>`` mentions work — and is
         capped at 12,000 characters. daimon must already be in the channel
         (a member can run ``/invite @daimon``).
+
+        Channels the workspace marked protected, and threads under them,
+        refuse every post — tell the caller rather than retrying elsewhere
+        unasked.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":

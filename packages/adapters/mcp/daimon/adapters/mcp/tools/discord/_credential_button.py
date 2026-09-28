@@ -42,6 +42,7 @@ from daimon.adapters.mcp.tools.discord._posted_card import build_card_view
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
+    _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.credential_requests import (
@@ -127,6 +128,7 @@ async def _post_credential_button_impl(  # pyright: ignore[reportUnusedFunction]
             # the per-call REST client starts with an empty one.
             await _ensure_thread_parent_cached(channel)
         _check_send_permission(channel, member)
+        await _require_discord_channel_writable(runtime, auth, channel)
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support sending messages")
         sent = await channel.send(
