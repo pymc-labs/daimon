@@ -879,6 +879,20 @@ async def test_admit_refuses_when_the_stored_policy_is_unreadable(
         (TenantAccessPolicy(dm_memory_read_only=True), "dm-1", None, True, True),
         (TenantAccessPolicy(dm_memory_read_only=True), "chan-1", None, False, False),
         (None, "dm-1", None, True, False),
+        (
+            TenantAccessPolicy(sealed_channel_ids=("C1:1700000000.000100",)),
+            "C1",
+            "1700000000.000100",
+            False,
+            True,
+        ),
+        (
+            TenantAccessPolicy(sealed_channel_ids=("C1:1700000000.000100",)),
+            "C1",
+            "1700000000.000999",
+            False,
+            False,
+        ),
     ],
     ids=[
         "open",
@@ -888,6 +902,8 @@ async def test_admit_refuses_when_the_stored_policy_is_unreadable(
         "dm-read-only",
         "dm-flag-not-a-dm",
         "dm-default",
+        "slack-thread-sealed-on-its-own",
+        "slack-other-thread",
     ],
 )
 async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
@@ -918,3 +934,140 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
     )
 
     assert admission.memory_read_only is expected, "memory_read_only must follow the policy"
+
+
+@pytest.mark.parametrize(
+    ("policy", "channel_id", "thread_id", "category_id", "role"),
+    [
+        (TenantAccessPolicy(protected_channel_ids=("client",)), "client", None, None, Role.USER),
+        (TenantAccessPolicy(protected_channel_ids=("client",)), "client", "thr-1", None, Role.USER),
+        (TenantAccessPolicy(protected_category_ids=("cat-1",)), "chan-1", None, "cat-1", Role.USER),
+        (TenantAccessPolicy(protected_channel_ids=("client",)), "client", None, None, Role.ADMIN),
+    ],
+    ids=["protected-channel", "thread-under-protected", "protected-category", "admin"],
+)
+async def test_admit_refuses_a_turn_whose_reply_would_land_in_a_protected_channel(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    policy: TenantAccessPolicy,
+    channel_id: str,
+    thread_id: str | None,
+    category_id: str | None,
+    role: Role,
+) -> None:
+    """SYS-048: the reply is an agent write too. Refused before the cascade, so
+    the empty router proves no MA call, and before any thread or post exists."""
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=MARouter())
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="anyone",
+            channel_id=channel_id,
+            thread_id=thread_id,
+            now=_NOW,
+            role=role,
+            category_id=category_id,
+        )
+
+    assert exc_info.value.reason == "channel_protected"
+
+
+async def test_admit_still_admits_outside_the_protected_channels(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await _seed_admittable_tenant(
+        db_session,
+        policy=TenantAccessPolicy(
+            protected_channel_ids=("client",), protected_category_ids=("cat-1",)
+        ),
+    )
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="anyone",
+        channel_id="chan-1",
+        thread_id="thr-1",
+        now=_NOW,
+        role=Role.USER,
+        category_id="cat-2",
+    )
+
+    assert isinstance(admission, Admission), "an unprotected channel must still be answered"
+
+
+async def test_admit_protection_wins_over_the_invoker_refusal(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The invoker refusal comes with a notice; in a protected channel the turn
+    must be refused as protected so the adapters post nothing at all."""
+    tenant = await _seed_admittable_tenant(
+        db_session,
+        policy=TenantAccessPolicy(invoker_user_ids=("staff",), protected_channel_ids=("client",)),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=MARouter())
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="guest",
+            channel_id="client",
+            now=_NOW,
+            role=Role.USER,
+        )
+
+    assert exc_info.value.reason == "channel_protected"
+
+
+@pytest.mark.parametrize(
+    ("policy", "refused"),
+    [
+        (TenantAccessPolicy(protected_category_ids=("cat-1",)), True),
+        (TenantAccessPolicy(protected_channel_ids=("elsewhere",)), False),
+    ],
+    ids=["categories-configured-fails-closed", "no-category-policy-admits"],
+)
+async def test_admit_with_an_unresolved_category(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    policy: TenantAccessPolicy,
+    refused: bool,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    call = admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="anyone",
+        channel_id="chan-1",
+        thread_id="thr-1",
+        now=_NOW,
+        role=Role.USER,
+        category_unresolved=True,
+    )
+
+    if refused:
+        with pytest.raises(AdmissionDenied) as exc_info:
+            await call
+        assert exc_info.value.reason == "channel_protected"
+    else:
+        assert isinstance(await call, Admission), "no category policy: nothing to check"

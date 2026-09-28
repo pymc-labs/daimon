@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import discord
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
 from fastmcp.exceptions import ToolError
 
 
@@ -118,3 +121,31 @@ async def _check_thread_view(  # pyright: ignore[reportUnusedFunction]
             await thread.fetch_member(int(user_id))
         except discord.NotFound as e:
             raise ToolError("missing view_channel permission") from e
+
+
+async def _require_discord_channel_writable(  # pyright: ignore[reportUnusedFunction]
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    channel: discord.abc.GuildChannel | discord.Thread,
+) -> None:
+    """The tenant write guard for a Discord target: the channel, the parent of a
+    thread, and the category either sits in. A thread whose parent can't be
+    resolved is refused by ``_ensure_thread_parent_cached``. Call after the
+    caller-permission check; admins get no bypass here."""
+    if isinstance(channel, discord.Thread):
+        parent = await _ensure_thread_parent_cached(channel)
+        await require_channel_writable(
+            runtime,
+            auth,
+            channel_id=str(channel.id),
+            parent_channel_id=str(parent.id),
+            category_id=str(parent.category_id) if parent.category_id is not None else None,
+        )
+        return
+    category_id = channel.category_id
+    await require_channel_writable(
+        runtime,
+        auth,
+        channel_id=str(channel.id),
+        category_id=str(category_id) if category_id is not None else None,
+    )

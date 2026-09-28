@@ -304,6 +304,7 @@ def _happy_path_handler(
 
 async def test_post_wizard_sets_the_components_v2_flag_from_the_view(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     posted: dict[str, Any] = {}
     patch_discord_http(monkeypatch, _happy_path_handler(posted))
@@ -316,7 +317,7 @@ async def test_post_wizard_sets_the_components_v2_flag_from_the_view(
         ],
     )
     await _post_wizard_impl(
-        _runtime_with_discord_token(),
+        _runtime_with_discord_token(session_factory=db_session_factory),
         _auth(),
         channel_id="222",
         spec=spec,
@@ -328,7 +329,10 @@ async def test_post_wizard_sets_the_components_v2_flag_from_the_view(
     )
 
 
-async def test_post_wizard_sends_no_message_content(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_post_wizard_sends_no_message_content(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     posted: dict[str, Any] = {}
     patch_discord_http(monkeypatch, _happy_path_handler(posted))
     spec = WizardSpec(
@@ -340,7 +344,7 @@ async def test_post_wizard_sends_no_message_content(monkeypatch: pytest.MonkeyPa
         ],
     )
     await _post_wizard_impl(
-        _runtime_with_discord_token(),
+        _runtime_with_discord_token(session_factory=db_session_factory),
         _auth(),
         channel_id="222",
         spec=spec,
@@ -353,7 +357,10 @@ async def test_post_wizard_sends_no_message_content(monkeypatch: pytest.MonkeyPa
     )
 
 
-async def test_post_wizard_suppresses_every_mention(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_post_wizard_suppresses_every_mention(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """The head text carries the agent-authored prompt and question verbatim,
     so an injected mass mention would ping the whole channel."""
     posted: dict[str, Any] = {}
@@ -370,7 +377,7 @@ async def test_post_wizard_suppresses_every_mention(monkeypatch: pytest.MonkeyPa
         ],
     )
     await _post_wizard_impl(
-        _runtime_with_discord_token(),
+        _runtime_with_discord_token(session_factory=db_session_factory),
         _auth(),
         channel_id="222",
         spec=spec,
@@ -596,7 +603,10 @@ async def test_post_wizard_refuses_a_channel_the_requester_cannot_see(
         )
 
 
-async def test_post_wizard_posts_a_form_with_no_images(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_post_wizard_posts_a_form_with_no_images(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     posted: dict[str, Any] = {}
     patch_discord_http(monkeypatch, _happy_path_handler(posted))
     spec = WizardSpec(
@@ -608,7 +618,7 @@ async def test_post_wizard_posts_a_form_with_no_images(monkeypatch: pytest.Monke
         ],
     )
     posted_wizard = await _post_wizard_impl(
-        _runtime_with_discord_token(),
+        _runtime_with_discord_token(session_factory=db_session_factory),
         _auth(),
         channel_id="222",
         spec=spec,

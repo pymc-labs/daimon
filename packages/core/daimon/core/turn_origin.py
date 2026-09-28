@@ -215,7 +215,8 @@ def render_turn_origin(
         "recreated namesake for a missing identity. Ask one concise question when the "
         "target is missing or ambiguous. Pass expected_ma_agent_id with target-bearing "
         "tools. Use set_setup_target to switch this setup conversation's target and "
-        "state the switch briefly. Pass origin_context_id to credential-request tools. "
+        "state the switch briefly. Pass origin_context_id to credential-request tools and to "
+        "channel reads (read_channel, read_thread, get_message, list_threads, search_messages). "
         "These controls grant no additional mutation or routing permissions."
     )
     # The continuity paragraph is appended only when there is continuity to

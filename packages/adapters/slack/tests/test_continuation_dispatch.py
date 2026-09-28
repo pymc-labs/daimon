@@ -447,3 +447,71 @@ async def test_a_timer_refused_for_a_changed_responder_posts_why_and_settles_ski
         str((p.kwargs.get("json") or p.kwargs.get("data") or {}).get("text") or "") for p in posts
     ]
     assert any("other-agent answers in this thread now" in text for text in texts), texts
+
+
+@pytest.mark.parametrize("path", ["responder_changed", "turn_running"])
+@pytest.mark.parametrize("target", ["protected", "unknown", "open"])
+async def test_skip_copy_reaches_only_a_thread_the_agent_may_post_in(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    target: str,
+) -> None:
+    """SYS-048: the dispatcher's skip and responder-changed copy goes through the
+    may-post state. A protected thread, or one whose protection can't be read,
+    gets nothing; the row settles either way. `open` is the control."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.continuity.continuation import ResponderChanged
+    from daimon.core.stores.access_policy import set_access_policy
+    from sqlalchemy.exc import OperationalError
+
+    thread_id = "9200000009.000001"
+    request = await _seed_request(
+        db_session, db_session_factory, workspace_id=f"T_SKIP_{target}_{path}", thread_id=thread_id
+    )
+    if target == "protected":
+        async with db_session_factory() as s:
+            await set_access_policy(
+                s,
+                tenant_id=request.tenant_id,
+                policy=TenantAccessPolicy(protected_channel_ids=("C_CONT_DISPATCH",)),
+            )
+            await s.commit()
+    if target == "unknown":
+
+        async def _policy_read_fails(*_args: object, **_kwargs: object) -> object:
+            raise OperationalError("SELECT", {}, Exception("pool gone"))
+
+        monkeypatch.setattr("daimon.core.turn.protection.load_access_policy", _policy_read_fails)
+    anthropic = build_fake_anthropic(_fake_target_agent_handler(str(request.tenant_id)))
+
+    async def _no_newer_message(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(continuation_dispatch, "_latest_human_message_at", _no_newer_message)
+
+    async def _rerouted(row: TaskContinuationRow, seed: str) -> None:
+        raise ResponderChanged(target_name="receiving-agent", current_name="other-agent")
+
+    await dispatch_pending_continuations(
+        db_session_factory,
+        anthropic,
+        fake_slack_web_client.client,
+        tenant_id=request.tenant_id,
+        channel="C_CONT_DISPATCH",
+        thread_id=thread_id,
+        active_turn=path == "turn_running",
+        run_follow_up=_rerouted,
+    )
+
+    row = await _read(db_session_factory, request.idempotency_key)
+    assert row.status == "skipped", "the row settles whether or not anything is posted"
+    posts = fake_slack_web_client.mock.requests.get(
+        ("POST", yarl.URL("https://slack.com/api/chat.postMessage")), []
+    )
+    if target == "open":
+        assert posts, "an open thread still gets the skip copy"
+    else:
+        assert posts == [], f"{target} thread must receive nothing"

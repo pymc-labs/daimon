@@ -34,6 +34,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Load patch_discord_http directly from the sibling conftest.py by file path.
 _conftest_path = Path(__file__).parent / "conftest.py"
@@ -69,14 +70,16 @@ _STARTER_MESSAGE_ID = "1400000000000000000"
 # ---------------------------------------------------------------------------
 
 
-def _runtime_with_discord_token() -> McpRuntime:
+def _runtime_with_discord_token(
+    *, session_factory: async_sessionmaker[AsyncSession] | None = None
+) -> McpRuntime:
     settings = Settings(
         database=DatabaseSettings(url="postgresql+asyncpg://x/y"),  # pyright: ignore[reportArgumentType]
         anthropic=AnthropicSettings(api_key=SecretStr("k")),
         discord=DiscordSettings(bot_token=SecretStr("test-bot-token")),
     )
     return McpRuntime(
-        session_factory=MagicMock(),  # type: ignore[arg-type]
+        session_factory=session_factory or MagicMock(),  # type: ignore[arg-type]  # only writes read the tenant policy
         client=MagicMock(),  # type: ignore[arg-type]
         settings=settings,
         deployment_default=DeploymentDefault(),
@@ -290,6 +293,7 @@ def _message_payload(
 
 async def test_create_thread_text_channel_happy_path_returns_thread_row(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Text channel: creates the thread, posts the starter message, and returns
     a ThreadRow with message_count=1 and last_activity from the starter
@@ -325,7 +329,7 @@ async def test_create_thread_text_channel_happy_path_returns_thread_row(
 
     patch_discord_http(monkeypatch, handler)
     row = await _create_thread_impl(
-        _runtime_with_discord_token(),
+        _runtime_with_discord_token(session_factory=db_session_factory),
         _auth(),
         channel_id="222",
         name="my thread",
@@ -357,6 +361,7 @@ async def test_create_thread_text_channel_happy_path_returns_thread_row(
 
 async def test_create_thread_forum_channel_happy_path_returns_thread_row(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Forum channel: a single POST carries the starter content and returns a
     ThreadRow built from ThreadWithMessage.thread + .message."""
@@ -387,7 +392,7 @@ async def test_create_thread_forum_channel_happy_path_returns_thread_row(
 
     patch_discord_http(monkeypatch, handler)
     row = await _create_thread_impl(
-        _runtime_with_discord_token(),
+        _runtime_with_discord_token(session_factory=db_session_factory),
         _auth(),
         channel_id="333",
         name="forum post",
@@ -504,6 +509,7 @@ async def test_create_thread_rejects_name_over_100_chars(monkeypatch: pytest.Mon
 
 async def test_create_thread_forbidden_from_create_maps_to_named_tool_error(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """A discord.Forbidden raised by the create call is mapped to a ToolError
     naming daimon's own missing permission, chained from the original error."""
@@ -529,7 +535,11 @@ async def test_create_thread_forbidden_from_create_maps_to_named_tool_error(
     patch_discord_http(monkeypatch, handler)
     with pytest.raises(ToolError, match="daimon") as exc_info:
         await _create_thread_impl(
-            _runtime_with_discord_token(), _auth(), channel_id="222", name="x", content="hi"
+            _runtime_with_discord_token(session_factory=db_session_factory),
+            _auth(),
+            channel_id="222",
+            name="x",
+            content="hi",
         )
     assert isinstance(exc_info.value.__cause__, discord.Forbidden), (
         "the ToolError must chain the original discord.Forbidden via `from err`"
@@ -596,6 +606,7 @@ def _rename_handler(
 
 async def test_rename_thread_bot_owned_thread_renames_with_post_permission_only(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """A participant (view + send_messages_in_threads, no manage_threads) may
     rename a thread daimon opened; the PATCH carries the validated name and the
@@ -611,7 +622,10 @@ async def test_rename_thread_bot_owned_thread_renames_with_post_permission_only(
     )
 
     row = await _rename_thread_impl(
-        _runtime_with_discord_token(), _auth(), thread_id="444", name="  Renamed Title  "
+        _runtime_with_discord_token(session_factory=db_session_factory),
+        _auth(),
+        thread_id="444",
+        name="  Renamed Title  ",
     )
 
     assert captured["json"]["name"] == "Renamed Title", (
@@ -639,6 +653,7 @@ async def test_rename_thread_human_owned_thread_denied_without_manage_threads(
 
 async def test_rename_thread_human_owned_thread_allowed_with_manage_threads(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     captured: dict[str, Any] = {}
     patch_discord_http(
@@ -650,7 +665,10 @@ async def test_rename_thread_human_owned_thread_allowed_with_manage_threads(
         ),
     )
     row = await _rename_thread_impl(
-        _runtime_with_discord_token(), _auth(), thread_id="444", name="Renamed Title"
+        _runtime_with_discord_token(session_factory=db_session_factory),
+        _auth(),
+        thread_id="444",
+        name="Renamed Title",
     )
     assert captured["json"]["name"] == "Renamed Title", "manage_threads must unlock the rename"
     assert row.name == "Renamed Title", "row must carry the new name"
@@ -723,6 +741,7 @@ async def test_rename_thread_locked_bot_owned_thread_denied_without_manage_threa
 
 async def test_rename_thread_archived_thread_is_unarchived_first_by_manage_threads_holder(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Discord refuses every other edit on an archived thread (code 50083), so
     the rename unarchives first, then sets the name — two PATCHes in order."""
@@ -737,7 +756,10 @@ async def test_rename_thread_archived_thread_is_unarchived_first_by_manage_threa
         ),
     )
     row = await _rename_thread_impl(
-        _runtime_with_discord_token(), _auth(), thread_id="444", name="Renamed Title"
+        _runtime_with_discord_token(session_factory=db_session_factory),
+        _auth(),
+        thread_id="444",
+        name="Renamed Title",
     )
     assert patches == [{"archived": False}, {"name": "Renamed Title"}], (
         "an archived thread must be unarchived before the name edit, in that order"
@@ -747,6 +769,7 @@ async def test_rename_thread_archived_thread_is_unarchived_first_by_manage_threa
 
 async def test_rename_thread_maps_generic_discord_refusal_to_tool_error(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
@@ -769,5 +792,8 @@ async def test_rename_thread_maps_generic_discord_refusal_to_tool_error(
     patch_discord_http(monkeypatch, handler)
     with pytest.raises(ToolError, match="discord refused the rename"):
         await _rename_thread_impl(
-            _runtime_with_discord_token(), _auth(), thread_id="444", name="Renamed Title"
+            _runtime_with_discord_token(session_factory=db_session_factory),
+            _auth(),
+            thread_id="444",
+            name="Renamed Title",
         )

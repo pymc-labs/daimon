@@ -26,6 +26,7 @@ from typing import Any, cast
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
@@ -162,6 +163,7 @@ async def _slack_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
     client = await slack_web_client(runtime, team_id=team_id)
 
     await _validate_channel_access(client, channel_id=target_channel_id, requester_id=requester_id)
+    await require_channel_writable(runtime, auth, channel_id=target_channel_id)
     if thread_ts is not None:
         await _validate_thread_target(client, channel_id=target_channel_id, thread_ts=thread_ts)
 
@@ -207,6 +209,7 @@ async def _slack_create_thread_impl(  # pyright: ignore[reportUnusedFunction]  #
     client = await slack_web_client(runtime, team_id=team_id)
 
     await _validate_channel_access(client, channel_id=target_channel_id, requester_id=requester_id)
+    await require_channel_writable(runtime, auth, channel_id=target_channel_id)
 
     resp = await _post_message(
         client, channel_id=target_channel_id, content=content, thread_ts=None

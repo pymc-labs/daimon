@@ -522,6 +522,9 @@ async def test_access_policy_get_refuses_null_row(
         ("slack", "protected_channel", "#general"),
         ("slack", "protected_category", "category"),
         ("slack", "sealed_channel", "c123ABC"),
+        ("slack", "sealed_channel", "C123ABC:"),
+        ("slack", "sealed_channel", "C123ABC:yesterday"),
+        ("slack", "protected_channel", "C123ABC:1700000000.000100"),
         ("teams", "invoker", "U123ABC"),
         ("teams", "invoker", str(uuid.UUID(int=0xABCDEF)).upper()),
         ("teams", "protected_channel", "C123ABC"),
@@ -685,3 +688,38 @@ async def test_access_policy_accepts_platform_ids(
     assert policy.protected_channel_ids == tuple(channels)
     assert policy.protected_category_ids == tuple(channels)
     assert policy.sealed_channel_ids == tuple(channels)
+
+
+async def test_access_policy_seals_a_single_slack_thread(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    """The Slack channel_id:thread_ts form the read tools enforce can be set,
+    shown and cleared from the CLI."""
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="slack", workspace_id="thread-seal")
+    thread = "C123ABC:1700000000.000100"
+
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="slack",
+        external_id="thread-seal",
+        sealed_channel=[thread, "C456DEF"],
+    )
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant.id)
+    assert policy.sealed_channel_ids == (thread, "C456DEF")
+
+    console = _make_console()
+    await tenants_access_policy_get(
+        rt=rt, console=console, platform="slack", external_id="thread-seal", as_json=True
+    )
+    assert json.loads(_output(console))["sealed_channel_ids"] == [thread, "C456DEF"]
+
+    await tenants_access_policy_set(
+        rt=rt, console=_make_console(), platform="slack", external_id="thread-seal", clear=True
+    )
+    async with db_session_factory() as session:
+        assert await load_access_policy(session, tenant_id=tenant.id) == OPEN_ACCESS_POLICY

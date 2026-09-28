@@ -71,8 +71,10 @@ import structlog
 from daimon.adapters.discord.bot import (
     INVOKER_NOT_ALLOWED_NOTICE,
     DaimonBot,
+    _channel_protection_state,  # pyright: ignore[reportPrivateUsage]  # the same may-post decision the mention path makes
     _credit_depleted_message,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same balance-depleted copy the mention path shows
     _resolve_bot_display_name,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same bot-display-name resolution the mention path uses
+    _resolve_category,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
 )
 from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
@@ -105,6 +107,7 @@ from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
+from daimon.core.turn.protection import ProtectionState
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.apply import apply
@@ -291,6 +294,7 @@ async def _render_wizard_turn_error(
     tenant_id: uuid.UUID,
     rid: str,
     exc: Exception,
+    post_state: ProtectionState,
 ) -> None:
     """Sentry-tag + post a rendered error for a turn failure caught in
     `run_wizard_submit_turn`. Mirrors `bot.py`'s `_render_turn_error`.
@@ -309,6 +313,8 @@ async def _render_wizard_turn_error(
             "guild_id", str(interaction.guild_id) if interaction.guild_id is not None else ""
         )
         sentry_sdk.capture_exception(exc)
+    if not post_state.may_post:
+        return
     error_text = render_error(exc, request_id=rid)
     channel = interaction.channel
     if channel is None or not isinstance(channel, discord.abc.Messageable):
@@ -366,6 +372,9 @@ async def run_wizard_submit_turn_observed(
     rid = generate_request_id()
     structlog.contextvars.bind_contextvars(rid=rid)
     inflight_claimed = False
+    # Nothing is posted -- not even an error -- until the channel is known to
+    # be one the agent may post in.
+    post_state = ProtectionState.UNKNOWN
     try:
         # The form lives in the conversation the resumed turn should
         # continue -- no new thread is created here.
@@ -387,6 +396,19 @@ async def run_wizard_submit_turn_observed(
             "run_wizard_submit_turn called without discord settings -- entrypoint must "
             "validate at boot"
         )
+
+        # --- A protected channel hears nothing: not the capacity notice below,
+        # not a refusal, not the reply, not an error. The log is the trace. ---
+        post_state = await _channel_protection_state(
+            bot.runtime.sessionmaker, tenant_id=row.tenant_id, channel=channel
+        )
+        if not post_state.may_post:
+            _log.info(
+                "wizard_submit.skipped.channel_protected",
+                short_id=row.id,
+                state=post_state.value,
+            )
+            return
 
         # --- Per-tenant concurrency cap, claimed exactly as `on_message`
         # claims it: read-check-increment with no await in between, and one
@@ -421,6 +443,8 @@ async def run_wizard_submit_turn_observed(
         is_admin = isinstance(author, discord.Member) and is_member_guild_admin(
             author, guild_owner_id=interaction.guild.owner_id if interaction.guild else None
         )
+        # The protection check above cached any parent it had to fetch.
+        category_id, category_unresolved = await _resolve_category(channel, fetch=False)
         try:
             admission = await admit(
                 bot.runtime.turn_deps,
@@ -431,6 +455,8 @@ async def run_wizard_submit_turn_observed(
                 thread_id=thread_id,
                 now=datetime.now(UTC),
                 role=Role.ADMIN if is_admin else Role.USER,
+                category_id=category_id,
+                category_unresolved=category_unresolved,
             )
         except MissingTurnConfigError as err:
             _log.info(
@@ -470,7 +496,10 @@ async def run_wizard_submit_turn_observed(
             )
             return
         except AdmissionDenied as err:
-            if err.reason == "invoker_not_allowed":
+            if err.reason == "channel_protected":
+                # No post into a protected channel, not even a refusal.
+                _log.info("wizard_submit.skipped.channel_protected", short_id=row.id)
+            elif err.reason == "invoker_not_allowed":
                 _log.info(
                     "wizard_submit.skipped.invoker_not_allowed", user_id=str(interaction.user.id)
                 )
@@ -680,12 +709,16 @@ async def run_wizard_submit_turn_observed(
                     )
     except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
         _log.warning("wizard_submit.turn_failed", error=str(exc), short_id=row.id)
-        await _render_wizard_turn_error(interaction, tenant_id=row.tenant_id, rid=rid, exc=exc)
+        await _render_wizard_turn_error(
+            interaction, tenant_id=row.tenant_id, rid=rid, exc=exc, post_state=post_state
+        )
     except Exception as exc:
         # background-task adapter boundary (see module docstring); nothing above this task will
         # otherwise report the failure
         _log.exception("wizard_submit.turn_failed_unexpected", error=str(exc), short_id=row.id)
-        await _render_wizard_turn_error(interaction, tenant_id=row.tenant_id, rid=rid, exc=exc)
+        await _render_wizard_turn_error(
+            interaction, tenant_id=row.tenant_id, rid=rid, exc=exc, post_state=post_state
+        )
     finally:
         if inflight_claimed:
             bot._release_inflight(row.tenant_id)  # pyright: ignore[reportPrivateUsage]  # the matching release for the claim above

@@ -10,6 +10,7 @@ uniform ToolError.
 from __future__ import annotations
 
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import load_read_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.direct_messages import DirectMessageResult, send_direct_message_impl
 from daimon.adapters.mcp.tools.discord import (
@@ -105,6 +106,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         limit: int = 50,
         before: str | None = None,
         cursor: str | None = None,
+        origin_context_id: str | None = None,
     ) -> ReadChannelResult | SlackChannelResult:
         """Read channel messages, oldest-first, with pagination metadata.
 
@@ -112,8 +114,12 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         pagination parameter — the other is rejected. Discord: at most 200
         messages per call; use before to fetch older messages. Slack: use
         cursor to fetch the next page; at most 15 messages are returned.
+
+        A channel the workspace sealed is readable only from a conversation
+        inside it: pass this turn's origin_context_id when reading one.
         """
         auth = await _auth(ctx)
+        read_policy = await load_read_policy(runtime, auth, origin_context_id=origin_context_id)
         # MCP clients often send "" for an optional param they mean to omit —
         # treat it as absent, not as the wrong platform's cursor.
         before = before or None
@@ -122,12 +128,22 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             if before is not None:
                 raise ToolError("before is Discord-only — pass cursor to paginate on Slack")
             return await _slack_read_channel_impl(
-                runtime, auth, channel_id=channel_id, limit=limit, cursor=cursor
+                runtime,
+                auth,
+                channel_id=channel_id,
+                limit=limit,
+                cursor=cursor,
+                read_policy=read_policy,
             )
         if cursor is not None:
             raise ToolError("cursor is Slack-only — pass before to paginate on Discord")
         return await _read_channel_impl(
-            runtime, auth, channel_id=channel_id, limit=limit, before=before
+            runtime,
+            auth,
+            channel_id=channel_id,
+            limit=limit,
+            before=before,
+            read_policy=read_policy,
         )
 
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
@@ -136,6 +152,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         thread_id: str,
         limit: int = 50,
         before: str | None = None,
+        origin_context_id: str | None = None,
     ) -> ReadThreadResult | SlackThreadResult:
         """Read messages from a thread, oldest-first.
 
@@ -143,16 +160,25 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456);
         before is rejected — Slack threads read one page of at most 15 messages
         from the thread root, and has_more=true means the newest replies were
-        not returned.
+        not returned. Threads under a sealed channel need origin_context_id,
+        as read_channel does.
         """
         auth = await _auth(ctx)
+        read_policy = await load_read_policy(runtime, auth, origin_context_id=origin_context_id)
         before = before or None
         if auth.platform == "slack":
             if before is not None:
                 raise ToolError("before is Discord-only — slack read_thread has no pagination")
-            return await _slack_read_thread_impl(runtime, auth, thread_id=thread_id, limit=limit)
+            return await _slack_read_thread_impl(
+                runtime, auth, thread_id=thread_id, limit=limit, read_policy=read_policy
+            )
         return await _read_thread_impl(
-            runtime, auth, thread_id=thread_id, limit=limit, before=before
+            runtime,
+            auth,
+            thread_id=thread_id,
+            limit=limit,
+            before=before,
+            read_policy=read_policy,
         )
 
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
@@ -160,28 +186,48 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         channel_id: str,
         message_id: str,
+        origin_context_id: str | None = None,
     ) -> MessageRow | SlackMessageRow:
-        """Fetch a single message by channel and message id (Slack: the message ts)."""
+        """Fetch a single message by channel and message id (Slack: the message ts).
+
+        Sealed channels need origin_context_id, as read_channel does.
+        """
         auth = await _auth(ctx)
+        read_policy = await load_read_policy(runtime, auth, origin_context_id=origin_context_id)
         if auth.platform == "slack":
             return await _slack_get_message_impl(
-                runtime, auth, channel_id=channel_id, message_id=message_id
+                runtime,
+                auth,
+                channel_id=channel_id,
+                message_id=message_id,
+                read_policy=read_policy,
             )
-        return await _get_message_impl(runtime, auth, channel_id=channel_id, message_id=message_id)
+        return await _get_message_impl(
+            runtime,
+            auth,
+            channel_id=channel_id,
+            message_id=message_id,
+            read_policy=read_policy,
+        )
 
     @mcp.tool(tags={"discord"})  # pyright: ignore[reportArgumentType]
     async def list_threads(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
+        origin_context_id: str | None = None,
     ) -> list[ThreadRow]:
         """List active and archived public threads for a channel.
 
-        Archived private threads are not listed.
+        Archived private threads are not listed. Sealed channels need
+        origin_context_id, as read_channel does.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
             raise _slack_unsupported("list_threads")
-        return await _list_threads_impl(runtime, auth, channel_id=channel_id)
+        read_policy = await load_read_policy(runtime, auth, origin_context_id=origin_context_id)
+        return await _list_threads_impl(
+            runtime, auth, channel_id=channel_id, read_policy=read_policy
+        )
 
     @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def create_thread(  # pyright: ignore[reportUnusedFunction]
@@ -213,7 +259,8 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         its ``conversation_id``, which ``send_message`` takes to reply in it.
         Text only, and you must be a member of the channel.
 
-        Only create a thread when the user asked for one.
+        Only create a thread when the user asked for one. Refused in channels
+        the workspace marked protected.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
@@ -343,6 +390,9 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         turn_controls replies here; a 1:1 chat is ``a:…``, a channel thread
         ``19:…@thread.tacv2;messageid=…``. Text only (markdown), capped at
         6,000 characters, and you must be a member of that conversation.
+        Channels the workspace marked protected, and threads under them,
+        refuse every post — tell the caller rather than retrying elsewhere
+        unasked.
         """
         auth = await _auth(ctx)
         if auth.platform == "teams":
@@ -386,6 +436,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         has: list[str] | None = None,
         limit: int = 25,
         offset: int = 0,
+        origin_context_id: str | None = None,
     ) -> SearchResult | SlackSearchResult:
         """Search messages with server-side filters.
 
@@ -396,8 +447,11 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         server-wide count is withheld because it includes channels you cannot
         view. Slack: only content + limit are supported (other filters are
         Discord-only), and 1:1 DM hits are only returned in a DM with daimon.
+        Hits in sealed channels are withheld unless origin_context_id places
+        this turn inside that channel; scoping to one from outside is refused.
         """
         auth = await _auth(ctx)
+        read_policy = await load_read_policy(runtime, auth, origin_context_id=origin_context_id)
         if auth.platform == "slack":
             if content is None:
                 raise ToolError("slack search requires a content query")
@@ -405,7 +459,9 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 raise ToolError(
                     "slack search supports only content and limit — other filters are Discord-only"
                 )
-            return await _slack_search_messages_impl(runtime, auth, content=content, limit=limit)
+            return await _slack_search_messages_impl(
+                runtime, auth, content=content, limit=limit, read_policy=read_policy
+            )
         # Validate enum-typed params at the tool boundary (shell) so the impl
         # receives the precise Literal types without type-ignore suppressions.
         if author_types and any(a not in _VALID_AUTHOR_TYPES for a in author_types):
@@ -423,4 +479,5 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             has=has,  # type: ignore[arg-type]  # validated above
             limit=limit,
             offset=offset,
+            read_policy=read_policy,
         )

@@ -1591,7 +1591,8 @@
         its ``conversation_id``, which ``send_message`` takes to reply in it.
         Text only, and you must be a member of the channel.
         
-        Only create a thread when the user asked for one.
+        Only create a thread when the user asked for one. Refused in channels
+        the workspace marked protected.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2019,7 +2020,11 @@
       }),
     }),
     'get_message': dict({
-      'description': 'Fetch a single message by channel and message id (Slack: the message ts).',
+      'description': '''
+        Fetch a single message by channel and message id (Slack: the message ts).
+        
+        Sealed channels need origin_context_id, as read_channel does.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -2028,6 +2033,17 @@
           }),
           'message_id': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'required': list([
@@ -2578,13 +2594,25 @@
       'description': '''
         List active and archived public threads for a channel.
         
-        Archived private threads are not listed.
+        Archived private threads are not listed. Sealed channels need
+        origin_context_id, as read_channel does.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'channel_id': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'required': list([
@@ -2949,6 +2977,9 @@
         pagination parameter — the other is rejected. Discord: at most 200
         messages per call; use before to fetch older messages. Slack: use
         cursor to fetch the next page; at most 15 messages are returned.
+        
+        A channel the workspace sealed is readable only from a conversation
+        inside it: pass this turn's origin_context_id when reading one.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2982,6 +3013,17 @@
             'default': 50,
             'type': 'integer',
           }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
         }),
         'required': list([
           'channel_id',
@@ -2997,7 +3039,8 @@
         Slack: thread_id is channel_id:thread_ts (e.g. C0123456789:1717171717.123456);
         before is rejected — Slack threads read one page of at most 15 messages
         from the thread root, and has_more=true means the newest replies were
-        not returned.
+        not returned. Threads under a sealed channel need origin_context_id,
+        as read_channel does.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3016,6 +3059,17 @@
           'limit': dict({
             'default': 50,
             'type': 'integer',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'thread_id': dict({
             'type': 'string',
@@ -3484,6 +3538,8 @@
         server-wide count is withheld because it includes channels you cannot
         view. Slack: only content + limit are supported (other filters are
         Discord-only), and 1:1 DM hits are only returned in a DM with daimon.
+        Hits in sealed channels are withheld unless origin_context_id places
+        this turn inside that channel; scoping to one from outside is refused.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3576,6 +3632,17 @@
           'offset': dict({
             'default': 0,
             'type': 'integer',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'type': 'object',
@@ -3711,6 +3778,9 @@
         turn_controls replies here; a 1:1 chat is ``a:…``, a channel thread
         ``19:…@thread.tacv2;messageid=…``. Text only (markdown), capped at
         6,000 characters, and you must be a member of that conversation.
+        Channels the workspace marked protected, and threads under them,
+        refuse every post — tell the caller rather than retrying elsewhere
+        unasked.
       ''',
       'parameters': dict({
         'additionalProperties': False,

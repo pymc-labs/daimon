@@ -96,6 +96,11 @@ async def _seed_pending_row(
     return tenant.id, account.id, "42", idempotency_key
 
 
+async def _may_post_open() -> bool:
+    """The thread is one the agent may post in (no access policy)."""
+    return True
+
+
 async def test_dispatches_exactly_once_and_settles_delivered(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -112,6 +117,7 @@ async def test_dispatches_exactly_once_and_settles_delivered(
         tenant_id=tenant_id,
         thread=thread,
         run_follow_up=run_follow_up,
+        may_post=_may_post_open,
     )
 
     run_follow_up.assert_awaited_once()
@@ -135,6 +141,7 @@ async def test_dispatches_exactly_once_and_settles_delivered(
         tenant_id=tenant_id,
         thread=thread,
         run_follow_up=run_follow_up,
+        may_post=_may_post_open,
     )
     run_follow_up.assert_not_awaited()
 
@@ -154,6 +161,7 @@ async def test_skips_save_only_continuation_without_dispatch(
         tenant_id=tenant_id,
         thread=thread,
         run_follow_up=run_follow_up,
+        may_post=_may_post_open,
     )
 
     run_follow_up.assert_not_awaited()
@@ -187,6 +195,7 @@ async def test_preparation_failure_settles_skipped_not_delivered(
         tenant_id=tenant_id,
         thread=thread,
         run_follow_up=_failing_follow_up,
+        may_post=_may_post_open,
     )
 
     async with db_session_factory() as session:
@@ -232,6 +241,7 @@ async def test_a_handoff_survives_any_number_of_busy_binds_as_on_main(
             tenant_id=tenant_id,
             thread=thread,
             run_follow_up=_busy_five_times,
+            may_post=_may_post_open,
             now=lambda tail=tail: now + timedelta(minutes=tail),
         )
         async with db_session_factory() as session:
@@ -275,6 +285,7 @@ async def test_a_busy_wake_is_released_for_the_poller_to_retry(
         tenant_id=tenant_id,
         thread=thread,
         run_follow_up=_busy,
+        may_post=_may_post_open,
         now=lambda: now,
     )
     async with db_session_factory() as session:
@@ -326,6 +337,7 @@ async def test_each_row_is_stamped_with_the_time_it_actually_ran(
         tenant_id=tenant_id,
         thread=thread,
         run_follow_up=_slow_first_turn,
+        may_post=_may_post_open,
         now=lambda: clock[0],
     )
 
@@ -357,6 +369,7 @@ async def test_process_death_before_the_fence_is_retried_after_lease_expiry(
             tenant_id=tenant_id,
             thread=dying_thread,
             run_follow_up=run_follow_up,
+            may_post=_may_post_open,
             now=lambda: now,
         )
     async with db_session_factory() as session:
@@ -371,6 +384,7 @@ async def test_process_death_before_the_fence_is_retried_after_lease_expiry(
         tenant_id=tenant_id,
         thread=thread,
         run_follow_up=run_follow_up,
+        may_post=_may_post_open,
         now=lambda: now + timedelta(seconds=1),
     )
     run_follow_up.assert_not_awaited()  # the dead process's lease is still live
@@ -381,6 +395,7 @@ async def test_process_death_before_the_fence_is_retried_after_lease_expiry(
         tenant_id=tenant_id,
         thread=thread,
         run_follow_up=run_follow_up,
+        may_post=_may_post_open,
         now=lambda: now + WAKE_CLAIM_LEASE + timedelta(seconds=1),
     )
     run_follow_up.assert_awaited_once()
@@ -424,6 +439,7 @@ async def test_process_death_after_the_fence_settles_interrupted_and_never_rerun
             tenant_id=tenant_id,
             thread=thread,
             run_follow_up=_die_during_follow_up,
+            may_post=_may_post_open,
             now=lambda: now,
         )
 
@@ -435,6 +451,7 @@ async def test_process_death_after_the_fence_settles_interrupted_and_never_rerun
         tenant_id=tenant_id,
         thread=thread,
         run_follow_up=run_follow_up,
+        may_post=_may_post_open,
         now=lambda: after_lease,
     )
     assert run_follow_up.await_count == 0, "a started claim must never be retried"
@@ -466,3 +483,55 @@ def _reachable_agent_handler(
         return httpx.Response(200, json=agent.model_dump(mode="json"))
 
     return _handler
+
+
+@pytest.mark.parametrize("path", ["responder_changed", "turn_running"])
+@pytest.mark.parametrize("may_post", [False, True], ids=["protected-or-unknown", "open"])
+async def test_skip_copy_is_posted_only_where_the_agent_may_post(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    may_post: bool,
+) -> None:
+    """SYS-048: the dispatcher asks the bot's may-post decision before each
+    post. A protected or unknown thread gets nothing; the row settles skipped
+    either way. `open` is the control."""
+    from types import SimpleNamespace
+
+    from daimon.adapters.discord import continuation_dispatch
+    from daimon.core.continuity.continuation import ResponderChanged
+
+    tenant_id, _account_id, _thread_id, key = await _seed_pending_row(
+        db_session_factory, requested_work="continue"
+    )
+    thread = _make_thread()
+    anthropic = build_stub_anthropic(_reachable_agent_handler(tenant_id, ma_agent_id="ag_target"))
+    if path == "turn_running":
+
+        async def _live_turn(*_args: object, **_kwargs: object) -> object:
+            return SimpleNamespace(active_turn_message_id="m-1")
+
+        monkeypatch.setattr(continuation_dispatch, "get_live_thread_session", _live_turn)
+
+    async def _rerouted(row: object, decision: object) -> None:
+        raise ResponderChanged(target_name="target-agent", current_name="other-agent")
+
+    async def _may_post() -> bool:
+        return may_post
+
+    await dispatch_pending_continuations(
+        db_session_factory,
+        anthropic,
+        tenant_id=tenant_id,
+        thread=thread,
+        run_follow_up=_rerouted,
+        may_post=_may_post,
+    )
+
+    async with db_session_factory() as session:
+        settled = await get_continuation(session, idempotency_key=key)
+    assert settled is not None and settled.status == "skipped"
+    if may_post:
+        thread.send.assert_awaited_once()
+    else:
+        thread.send.assert_not_called()

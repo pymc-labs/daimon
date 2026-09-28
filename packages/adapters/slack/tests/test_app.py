@@ -5890,3 +5890,226 @@ async def test_dm_slash_command_dispatches_after_ack(monkeypatch):
     await app.on_request(socket, request)
     await asyncio.gather(*list(app._bg_tasks))
     assert socket.call_log == ["send_socket_mode_response", "dm-command"]
+
+
+@pytest.mark.parametrize(
+    ("in_thread", "guest"),
+    [(False, False), (True, False), (False, True)],
+    ids=["channel", "thread-under-protected", "guest-outside-the-allowlist"],
+)
+async def test_mention_in_a_protected_channel_is_dropped_without_posting(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    in_thread: bool,
+    guest: bool,
+) -> None:
+    """SYS-048: the reply is an agent write, so a protected channel gets no reply,
+    no refusal notice and no upload -- the turn never starts."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    team_id = "T_PROTECTED"
+    channel = "C_CLIENT"
+    event_ts = "9000000040.000002"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    async with db_session_factory() as s:
+        await set_access_policy(
+            s,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(
+                protected_channel_ids=(channel,),
+                # A guest would otherwise get the invoker refusal notice.
+                invoker_user_ids=("U_STAFF",) if guest else (),
+            ),
+        )
+        await s.commit()
+
+    app, _ = make_orchestrate_app(db_session_factory)
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": event_ts,
+        "event_ts": event_ts,
+        "channel": channel,
+        "user": "U_ANY",
+        "text": "<@U_BOT> hello",
+    }
+    if in_thread:
+        event["thread_ts"] = "9000000040.000001"
+
+    with (
+        patch(
+            "daimon.core.turn.admission.resolve_config", new_callable=AsyncMock
+        ) as mock_resolve_config,
+        patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
+        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+    ):
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event,
+            team_id=team_id,
+            channel=channel,
+            event_ts=event_ts,
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+        mock_resolve_config.assert_not_called()
+        mock_create.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+        mock_run_turn.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+
+    writes = {
+        URL("https://slack.com/api/chat.postMessage"),
+        URL("https://slack.com/api/chat.postEphemeral"),
+        URL("https://slack.com/api/files.uploadV2"),
+        URL("https://slack.com/api/files.getUploadURLExternal"),
+        URL("https://slack.com/api/files.completeUploadExternal"),
+    }
+    posted = [url for (_, url) in fake_slack_web_client.mock.requests if url in writes]
+    assert posted == [], f"a protected channel must receive nothing; got {posted}"
+
+
+async def test_the_shed_notice_is_not_posted_into_a_protected_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Even the ephemeral capacity notice stays out of a protected channel."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    team_id = "T_PROTECTED_SHED"
+    channel = "C_CLIENT"
+    event_ts = "9000000050.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    async with db_session_factory() as s:
+        await set_access_policy(
+            s, tenant_id=tenant_id, policy=TenantAccessPolicy(protected_channel_ids=(channel,))
+        )
+        await s.commit()
+    app, _ = make_orchestrate_app(db_session_factory, max_concurrent_turns_per_tenant=1)
+    app._inflight[tenant_id] = 1  # pyright: ignore[reportPrivateUsage]  # saturate the cap
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": event_ts,
+        "event_ts": event_ts,
+        "channel": channel,
+        "user": "U_ANY",
+        "text": "<@U_BOT> hello",
+    }
+
+    await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+        event,
+        team_id=team_id,
+        channel=channel,
+        event_ts=event_ts,
+        web_client=fake_slack_web_client.client,
+        tenant_id=tenant_id,
+    )
+
+    ephemeral = URL("https://slack.com/api/chat.postEphemeral")
+    assert not any(url == ephemeral for (_, url) in fake_slack_web_client.mock.requests), (
+        "no shed notice in a protected channel"
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["dedup_insert", "token_read", "policy_read", "external_sender", "turn_body"],
+)
+async def test_nothing_is_posted_into_a_protected_channel_whatever_fails(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    failure: str,
+) -> None:
+    """SYS-048: the may-post state is decided before anything else in the event
+    handler. Whatever fails afterwards -- or while deciding it -- a protected
+    channel gets no rejection, reply or error post."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from sqlalchemy.exc import OperationalError
+
+    team_id = "T_PROTECTED_FAILS"
+    channel = "C_CLIENT"
+    event_ts = "9000000060.000001"
+    key = Fernet.generate_key().decode()
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    async with db_session_factory() as s:
+        await set_access_policy(
+            s, tenant_id=tenant_id, policy=TenantAccessPolicy(protected_channel_ids=(channel,))
+        )
+        await upsert_slack_bot_token(
+            s, team_id=team_id, encrypted_token=encrypt_token(build_multifernet((key,)), "xoxb-x")
+        )
+        await s.commit()
+    app, _ = make_orchestrate_app(db_session_factory, crypto_key=key)
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": event_ts,
+        "event_ts": event_ts,
+        "channel": channel,
+        "user": "U_ANY",
+        "text": "<@U_BOT> hello",
+    }
+    if failure == "external_sender":
+        event["user_team"] = "T_SOMEONE_ELSE"
+    db_error = OperationalError("SELECT", {}, Exception("pool gone"))
+    targets = {
+        "dedup_insert": "daimon.adapters.slack.app.insert_if_new",
+        "token_read": "daimon.adapters.slack.app.get_slack_bot_token",
+        "policy_read": "daimon.core.turn.protection.load_access_policy",
+        "turn_body": "daimon.adapters.slack.app.SlackApp._orchestrate",
+    }
+    breakage = (
+        contextlib.nullcontext()
+        if failure == "external_sender"
+        else patch(targets[failure], new=AsyncMock(side_effect=db_error))
+    )
+
+    with breakage:
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+
+    posts = {
+        URL("https://slack.com/api/chat.postMessage"),
+        URL("https://slack.com/api/chat.postEphemeral"),
+    }
+    posted = [url for (_, url) in fake_slack_web_client.mock.requests if url in posts]
+    assert posted == [], f"{failure}: a protected channel must receive nothing; got {posted}"
+
+
+async def test_an_unprotected_channel_still_gets_the_error_post(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Control for the test above: the same failure outside a protected channel
+    still reaches the user."""
+    from sqlalchemy.exc import OperationalError
+
+    team_id = "T_OPEN_FAILS"
+    key = Fernet.generate_key().decode()
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    async with db_session_factory() as s:
+        await upsert_slack_bot_token(
+            s, team_id=team_id, encrypted_token=encrypt_token(build_multifernet((key,)), "xoxb-x")
+        )
+        await s.commit()
+    app, _ = make_orchestrate_app(db_session_factory, crypto_key=key)
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": "9000000070.000001",
+        "event_ts": "9000000070.000001",
+        "channel": "C_OPEN",
+        "user": "U_ANY",
+        "text": "<@U_BOT> hello",
+    }
+
+    with patch(
+        "daimon.adapters.slack.app.SlackApp._orchestrate",
+        new=AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("pool gone"))),
+    ):
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+
+    post = URL("https://slack.com/api/chat.postMessage")
+    assert any(url == post for (_, url) in fake_slack_web_client.mock.requests), (
+        "an unprotected channel still hears about the failure"
+    )

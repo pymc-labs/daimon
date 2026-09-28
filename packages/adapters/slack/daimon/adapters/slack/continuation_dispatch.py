@@ -48,6 +48,7 @@ from daimon.core.turn.errors import (
     SessionBusyError,
     SessionPreparationFailed,
 )
+from daimon.core.turn.protection import protection_state
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -124,6 +125,26 @@ async def dispatch_pending_continuations(
     that dies holding a claim leaves it to the lease: retried if it never
     started, settled `interrupted` if it had.
     """
+
+    async def _post(text: str, *, reason: str) -> None:
+        # The access policy's may-post decision, asked right before each post:
+        # a protected thread, or one whose protection can't be read, gets
+        # nothing; the caller still settles the row.
+        state = await protection_state(
+            sessionmaker, tenant_id=tenant_id, channel_id=channel, thread_id=thread_id
+        )
+        if not state.may_post:
+            log.info(
+                "slack.continuation.notice_withheld",
+                thread_id=thread_id,
+                reason=reason,
+                state=state.value,
+            )
+            return
+        await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+            channel=channel, thread_ts=thread_id, text=text
+        )
+
     rows = await list_dispatchable_wakes(
         sessionmaker, tenant_id=tenant_id, platform="slack", thread_id=thread_id, now=now()
     )
@@ -191,9 +212,7 @@ async def dispatch_pending_continuations(
             except ResponderChanged as exc:
                 # A timer whose thread is answered by another agent now: say
                 # so and stop; the turn never started.
-                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel, thread_ts=thread_id, text=exc.message
-                )
+                await _post(exc.message, reason="skip_target_changed")
                 await settle_wake(
                     sessionmaker,
                     claim,
@@ -241,9 +260,7 @@ async def dispatch_pending_continuations(
             continue
 
         if decision.message is not None:
-            await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                channel=channel, thread_ts=thread_id, text=decision.message
-            )
+            await _post(decision.message, reason=decision.action)
         await settle_wake(
             sessionmaker, claim, status="skipped", now=now(), skip_reason=decision.action
         )
