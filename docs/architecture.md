@@ -240,7 +240,9 @@ naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
 reserved name is gated like any other server. A pending card is owned by the
 turn: stopping the turn, a replayed pause, or the turn ceiling cancels the
 decision, refuses the call and retires the card, so an Approve that arrives
-after Stop never runs anything.
+after Stop never runs anything. That cleanup is best effort within a few
+seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
+answering cannot hold a turn past its ceiling or a Stop.
 
 ### How a turn ended
 

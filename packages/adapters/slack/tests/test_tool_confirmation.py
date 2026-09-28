@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from daimon.adapters.slack.tool_confirmation import SlackConfirmationCards
 from daimon.core.confirmation import ConfirmationPrompt, prompt_for_tool_call
 from daimon.core.posted_controls.confirmation import NOT_YOURS_MESSAGE
@@ -102,3 +103,112 @@ async def test_a_cancelled_wait_retires_the_card_and_ignores_late_clicks() -> No
     assert client.chat_update.await_args.kwargs["text"].startswith("🛡️ Denied")
     await cards.handle_click(_click(approve_id, "U1"))
     assert client.chat_update.await_count == 1, "a late click changes nothing"
+
+
+async def _run_turn_with_stalled_card_retire(
+    hook: object, monkeypatch: pytest.MonkeyPatch
+) -> tuple[float, object]:
+    """Drive a real turn whose write card is up when a 100ms deadline hits,
+    with the platform stalled on the card edit that retires it."""
+    import daimon.core.turn.driver as driver_mod
+    from anthropic.types.beta.sessions import (
+        BetaManagedAgentsAgentMCPToolUseEvent,
+        BetaManagedAgentsSessionEndTurn,
+        BetaManagedAgentsSessionRequiresAction,
+        BetaManagedAgentsSessionStatusIdleEvent,
+    )
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.core.turn import run_turn
+    from daimon.core.turn.approvals import interactive_decider
+    from daimon.core.turn.posture import BillingExempt, PolicyApproval
+    from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
+
+    monkeypatch.setattr(driver_mod, "CLEANUP_BUDGET_S", 0.2)
+    at = datetime.now(UTC)
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(
+                BetaManagedAgentsAgentMCPToolUseEvent(
+                    id="tu_w",
+                    type="agent.mcp_tool_use",
+                    name="create_issue",
+                    input={"title": "x"},
+                    mcp_server_name="linear",
+                    processed_at=at,
+                )
+            ),
+            YieldEvent(
+                BetaManagedAgentsSessionStatusIdleEvent(
+                    id="pause",
+                    type="session.status_idle",
+                    stop_reason=BetaManagedAgentsSessionRequiresAction(
+                        type="requires_action", event_ids=["tu_w"]
+                    ),
+                    processed_at=at,
+                )
+            ),
+            YieldEvent(
+                BetaManagedAgentsSessionStatusIdleEvent(
+                    id="end",
+                    type="session.status_idle",
+                    stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
+                    processed_at=at,
+                )
+            ),
+        ]
+    ]
+    started = asyncio.get_running_loop().time()
+    final = await asyncio.wait_for(
+        run_turn(
+            anthropic=fa,  # type: ignore[arg-type]
+            session_id="sess_1",
+            user_message="file a bug",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=BillingExempt(reason="cli-operator-run"),
+            tool_confirmation=PolicyApproval(
+                decide=interactive_decider(
+                    ToolSafetyPolicy(enabled=True),
+                    requester_platform_user_id="U1",
+                    confirm=hook,  # type: ignore[arg-type]
+                )
+            ),
+            deadline=datetime.now(UTC) + timedelta(milliseconds=100),
+        ),
+        timeout=5,
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+    sent = [
+        e
+        for _sid, batch in fa.beta.sessions.events.sent_events
+        for e in batch
+        if e["type"] == "user.tool_confirmation"
+    ]
+    assert all(e["result"] != "allow" for e in sent), "a stalled cleanup never lets the write run"
+    return elapsed, final
+
+
+async def test_a_stalled_slack_retire_cannot_hold_the_turn_past_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import daimon.adapters.slack.tool_confirmation as hook_mod
+
+    monkeypatch.setattr(hook_mod, "EDIT_TIMEOUT_S", 60.0)  # the driver's budget must bound it
+
+    async def stalled_update(**_kwargs: object) -> None:
+        await asyncio.Event().wait()  # Slack never answers
+
+    client = _client()
+    client.chat_update = stalled_update
+    cards = SlackConfirmationCards()
+
+    elapsed, final = await _run_turn_with_stalled_card_retire(
+        cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9"), monkeypatch
+    )
+
+    assert final.error is not None and final.error.kind == "ceiling"  # type: ignore[attr-defined]
+    assert elapsed < 1.5, f"took {elapsed:.2f}s"
+    await asyncio.sleep(0)
+    assert not [t for t in asyncio.all_tasks() if t.get_name() == "turn.decide_blocked"]

@@ -124,6 +124,37 @@ async def _decide_blocked(
             return build_decision_events(zip(fresh, results, strict=True))
 
 
+#: Most time one cleanup step (joining a cancelled card hook, sending the
+#: best-effort deny) may take before it is abandoned. Module-level so a test
+#: can shorten it.
+CLEANUP_BUDGET_S: float = 3.0
+
+
+async def _bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> None:
+    """Wait for `task` at most `CLEANUP_BUDGET_S`; cancel it after that.
+
+    Never raises and never waits longer than the budget: `asyncio.wait` with a
+    timeout returns instead of raising, and a task still running then is
+    cancelled and left to unwind on its own — its next await raises
+    `CancelledError`, so it does not linger.
+    """
+    done, _pending = await asyncio.wait({task}, timeout=CLEANUP_BUDGET_S)
+    if task in done:
+        if not task.cancelled() and task.exception() is not None:
+            log.warning(
+                "turn.cleanup_failed",
+                session_id=session_id,
+                step=what,
+                error=str(task.exception()),
+            )
+        return
+    task.cancel()
+    # Retrieve whatever it ends with, so an abandoned task never logs
+    # "exception was never retrieved".
+    task.add_done_callback(lambda t: t.cancelled() or t.exception())
+    log.warning("turn.cleanup_timed_out", session_id=session_id, step=what)
+
+
 async def _refuse_blocked(
     anthropic: AsyncAnthropic, session_id: str, fresh: list[str], *, message: str
 ) -> None:
@@ -179,23 +210,40 @@ async def _decide_or_refuse_on_cancel(
         if decide_task.done() and not cancel.is_set():
             return decide_task.result()
     finally:
+        # Cleanup is bounded: a card hook retiring its card, or the deny
+        # below, talks to a chat API or MA, and an outage there must not hold
+        # the turn past its ceiling or a Stop. Each step gets
+        # `CLEANUP_BUDGET_S`, then is cancelled and abandoned.
         for task in (decide_task, cancel_task):
             if not task.done():
                 task.cancel()
-            with _suppress_task_exc():
-                await task
+            await _bounded(task, what="decide_task_join", session_id=session_id)
         if not settled:
-            with _suppress_task_exc():
-                await asyncio.shield(
+            await _bounded(
+                asyncio.create_task(
                     _refuse_blocked(
                         anthropic,
                         session_id,
                         fresh,
                         message="This turn ran out of time; the call did not run.",
-                    )
-                )
-    await _refuse_blocked(
-        anthropic, session_id, fresh, message="The user stopped this turn; the call did not run."
+                    ),
+                    name="turn.refuse_blocked",
+                ),
+                what="deadline_refusal",
+                session_id=session_id,
+            )
+    await _bounded(
+        asyncio.create_task(
+            _refuse_blocked(
+                anthropic,
+                session_id,
+                fresh,
+                message="The user stopped this turn; the call did not run.",
+            ),
+            name="turn.refuse_blocked",
+        ),
+        what="stop_refusal",
+        session_id=session_id,
     )
     raise _InterruptInConsume()
 

@@ -12,6 +12,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
+import pytest
 from anthropic import AsyncAnthropic
 from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
@@ -530,3 +531,52 @@ async def test_a_blocked_call_nobody_saw_is_refused_without_a_card() -> None:
     (sent,) = _confirmations(fa)
     assert (sent["tool_use_id"], sent["result"]) == ("tu_unseen", "deny")
     assert "could not see" in str(sent["deny_message"])
+
+
+async def test_a_stalled_denial_send_cannot_hold_the_turn_past_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review regression (round 2): cleanup after a ceiling breach awaited the
+    best-effort deny with no bound, so an MA outage defeated the ceiling."""
+    import daimon.core.turn.driver as driver_mod
+
+    monkeypatch.setattr(driver_mod, "CLEANUP_BUDGET_S", 0.2)
+    fa = FakeAnthropic()
+    _script(fa, ("tu_write", "linear", "create_issue"))
+    real_send = fa.beta.sessions.events.send
+
+    async def stalled_send(session_id: str, *, events: list[dict[str, object]]) -> None:
+        if any(e["type"] == "user.tool_confirmation" for e in events):
+            await asyncio.Event().wait()  # MA never answers
+        await real_send(session_id, events=events)
+
+    fa.beta.sessions.events.send = stalled_send  # type: ignore[method-assign]
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        await asyncio.Event().wait()  # nobody clicks
+        return "approved"
+
+    started = asyncio.get_running_loop().time()
+    final = await asyncio.wait_for(
+        run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="file a bug",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=_EXEMPT,
+            tool_confirmation=PolicyApproval(
+                decide=interactive_decider(_ON, requester_platform_user_id="U1", confirm=card)
+            ),
+            deadline=datetime.now(UTC) + timedelta(milliseconds=100),
+        ),
+        timeout=5,
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+    await asyncio.sleep(0)
+
+    assert final.error is not None and final.error.kind == "ceiling"
+    assert elapsed < 1.5, f"cleanup must stay within its budget, took {elapsed:.2f}s"
+    assert not [t for t in asyncio.all_tasks() if t.get_name() == "turn.decide_blocked"]
+    assert all(e["result"] != "allow" for e in _confirmations(fa))

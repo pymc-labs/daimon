@@ -11,6 +11,7 @@ card runs in this process, and a restart ends both together.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -39,6 +40,9 @@ from slack_sdk.webhook.async_client import AsyncWebhookClient
 __all__ = ["CONFIRMATION_CUSTOM_ID_PREFIX", "SlackConfirmationCards"]
 
 log = structlog.get_logger(__name__)
+
+#: Most time a card edit may take.
+EDIT_TIMEOUT_S = 2.0
 
 
 @dataclass(frozen=True)
@@ -119,14 +123,19 @@ async def _edit(posted: _PostedCard, state: ConfirmationAnswer, *, answered_by: 
         posted.prompt, state=state, answered_by_platform_user_id=answered_by
     )
     try:
-        await posted.client.chat_update(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=posted.channel,
-            ts=posted.ts,
-            text=confirmation_card_text(card),
-            blocks=build_confirmation_blocks(card, prompt=posted.prompt),
+        # Bounded: this also runs while a turn is being stopped or timed out,
+        # and a slow Slack must not hold that up.
+        await asyncio.wait_for(
+            posted.client.chat_update(  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # slack_sdk **kwargs: Unknown
+                channel=posted.channel,
+                ts=posted.ts,
+                text=confirmation_card_text(card),
+                blocks=build_confirmation_blocks(card, prompt=posted.prompt),
+            ),
+            timeout=EDIT_TIMEOUT_S,
         )
-    except SlackApiError as err:
-        log.warning("slack.tool_confirmation.edit_failed", error=str(err))
+    except (SlackApiError, TimeoutError) as err:
+        log.warning("slack.tool_confirmation.edit_failed", error=str(err) or type(err).__name__)
 
 
 async def _ephemeral(posted: _PostedCard, user: str, text: str) -> None:

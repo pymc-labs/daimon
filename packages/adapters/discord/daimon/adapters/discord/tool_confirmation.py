@@ -34,6 +34,9 @@ log = structlog.get_logger(__name__)
 
 _DETAIL_MAX = 1800
 
+#: Most time a card edit may take while retiring it.
+RETIRE_TIMEOUT_S = 2.0
+
 
 def _body(card: ConfirmationCard) -> list[str]:
     lines = [f"**{card.headline}**"]
@@ -156,6 +159,11 @@ async def _retire(
 ) -> None:
     card = build_confirmation_card(prompt, state=state)
     try:
-        await message.edit(view=_ConfirmationView(card, prompt, answer=None))
-    except discord.HTTPException as err:
-        log.warning("tool_confirmation.retire_failed", error=str(err))
+        # Bounded: retiring is cosmetic, and runs while a turn is being
+        # stopped or timed out — a slow Discord must not hold that up.
+        await asyncio.wait_for(
+            message.edit(view=_ConfirmationView(card, prompt, answer=None)),
+            timeout=RETIRE_TIMEOUT_S,
+        )
+    except (discord.HTTPException, TimeoutError) as err:
+        log.warning("tool_confirmation.retire_failed", error=str(err) or type(err).__name__)
