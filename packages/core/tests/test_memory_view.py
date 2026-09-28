@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.memory_view import (
     get_channel_memory_store,
@@ -91,3 +93,21 @@ async def test_channel_store_is_none_before_the_agent_has_a_store(
     )
 
     assert resolved is None, "an agent that never ran has no memory to show"
+
+
+async def test_channel_store_raises_when_the_configured_agent_is_missing(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="teams", workspace_id="org-3")
+    await db_session.commit()
+
+    with pytest.raises(DaimonError, match="'daimon' not found"):
+        await get_channel_memory_store(
+            db_session_factory,
+            build_fake_anthropic(make_fake_ma_handler()),
+            tenant_id=tenant.id,
+            platform="teams",
+            user_id="user-1",
+            channel_id="chat-1",
+            default=_DEFAULT,
+        )
