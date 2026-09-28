@@ -1424,7 +1424,23 @@ class SlackApp:
             )
             return
         except AdmissionDenied as err:
-            if err.reason == "balance_depleted":
+            if err.reason == "invoker_not_allowed":
+                log.info(
+                    "turn.skipped.invoker_not_allowed",
+                    tenant_id=str(tenant_id),
+                    user_id=str(event.get("user") or ""),
+                    team_id=team_id,
+                    channel_id=channel,
+                )
+                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel,
+                    thread_ts=thread_id,
+                    text=(
+                        "You aren't on this workspace's list of people who can start a turn. "
+                        "A workspace admin can add you."
+                    ),
+                )
+            elif err.reason == "balance_depleted":
                 log.info(
                     "turn.skipped.over_balance",
                     tenant_id=str(tenant_id),

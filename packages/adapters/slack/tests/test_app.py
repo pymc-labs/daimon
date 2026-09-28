@@ -5750,3 +5750,68 @@ class TestPerTurnRoleUpsert:
             account = await get_account(s, principal.account_id)
         assert account is not None, "account must exist (identity resolution runs before the gate)"
         assert account.role == Role.USER, "verified role must persist before the balance gate"
+
+
+async def test_mention_from_a_user_outside_the_allowlist_is_refused_with_a_notice(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """SYS-047: the tenant's invoker allowlist refuses at admission, before any MA call."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    team_id = "T_INVOKER_REFUSED"
+    channel = "C_TEST"
+    thread_ts = "9000000030.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    async with db_session_factory() as s:
+        await set_access_policy(
+            s, tenant_id=tenant_id, policy=TenantAccessPolicy(invoker_user_ids=("U_STAFF",))
+        )
+        await s.commit()
+
+    app, _ = make_orchestrate_app(db_session_factory)
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": thread_ts,
+        "event_ts": thread_ts,
+        "channel": channel,
+        "user": "U_GUEST",
+        "text": "<@U_BOT> hello",
+    }
+
+    with (
+        patch(
+            "daimon.core.turn.admission.resolve_config", new_callable=AsyncMock
+        ) as mock_resolve_config,
+        patch(
+            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
+        ) as mock_resolve_agent,
+        patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
+        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+    ):
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event,
+            team_id=team_id,
+            channel=channel,
+            event_ts=thread_ts,
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+        mock_resolve_config.assert_not_called()
+        mock_resolve_agent.assert_not_called()
+        mock_create.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+        mock_run_turn.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+
+    post_url = URL("https://slack.com/api/chat.postMessage")
+    post_bodies = [
+        req.kwargs.get("json") or json.loads(req.kwargs.get("data") or "{}")
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == post_url
+        for req in reqs
+    ]
+    refusals = [b for b in post_bodies if "can start a turn" in str(b.get("text", ""))]
+    assert refusals, f"expected the invoker refusal notice in-thread, got: {post_bodies}"
+    assert refusals[0].get("thread_ts") == thread_ts

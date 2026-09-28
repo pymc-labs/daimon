@@ -128,7 +128,9 @@ it for later ticks and close it at shutdown.
 ## The turn itself
 
 A fire resolves the tenant, mints or finds the creator's principal on the
-tenant's own platform, checks the balance, binds a usage recorder, resolves
+tenant's own platform, checks the tenant's invoker allowlist against the
+creator (see [architecture.md](architecture.md#how-a-message-becomes-a-turn)),
+checks the balance, binds a usage recorder, resolves
 the agent and environment tags to live MA ids (writing back a healed id if it
 drifted), and calls `run_turn` in
 `packages/core/daimon/core/headless_runner.py`.
@@ -207,7 +209,9 @@ staying enabled.
 
 Nothing is sent anywhere on failure. The scheduler imports no chat adapter;
 discovery is pull-only, through the `/routines` panel. The strings that land
-in `last_error` come from a small, closed set: `balance_depleted`,
+in `last_error` come from a small, closed set: `invoker_not_allowed` (the
+creator is no longer on the allowlist and not a stored admin),
+`access_policy_unreadable`, `balance_depleted`,
 `cap_exceeded`, `routine has no created_by_user_id`, `routine tenant not
 found`, `scheduler_shutdown`, `timeout: exceeded <n>s` from the outer guard, and otherwise
 `<ExceptionType>: <message>` truncated to 500 characters — a ceiling breach
@@ -223,8 +227,12 @@ the per-account MCP vault credential with them. Everything else is tuning:
 the six `DAIMON_SCHEDULER__*` settings in
 [configuration.md](configuration.md#scheduler).
 
-Per run, two gates still apply — the tenant's credit balance and the
-per-person monthly cap. See [billing.md](billing.md).
+Per run, three gates still apply — the tenant's invoker allowlist, checked
+against the creator, the tenant's credit balance and the per-person monthly
+cap. See [billing.md](billing.md). Taking someone off the allowlist stops
+their routines at the next fire; the routine stays enabled and records
+`invoker_not_allowed`. A fire has no live platform role, so only the stored
+admin role exempts the creator.
 
 Routine turns receive core unattended-run framing: avoid clarification questions,
 verify evidence, and use delivery tools for requested output. Agents can customize

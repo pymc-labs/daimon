@@ -144,6 +144,11 @@ def _setting_up_message(bot_display_name: str) -> str:
     return f"{bot_display_name.capitalize()} is setting up this server — try again in a moment."
 
 
+INVOKER_NOT_ALLOWED_NOTICE = (
+    "you aren't on this server's list of people who can start a turn. A server admin can add you."
+)
+
+
 def _credit_depleted_message(bot_display_name: str) -> str:
     return (
         f"This server's {bot_display_name} credit is depleted. An admin can top up with `/billing`."
@@ -1995,7 +2000,14 @@ class DaimonBot(commands.Bot):
                 )
                 return
             target = thread or message.channel
-            if err.reason == "balance_depleted":
+            if err.reason == "invoker_not_allowed":
+                log.info(
+                    "turn.skipped.invoker_not_allowed",
+                    guild_id=guild_id,
+                    user_id=str(message.author.id),
+                )
+                await target.send("Sorry, " + INVOKER_NOT_ALLOWED_NOTICE)
+            elif err.reason == "balance_depleted":
                 log.info("turn.skipped.over_balance", guild_id=guild_id, tenant_id=str(tenant_id))
                 await target.send(
                     _credit_depleted_message(_resolve_bot_display_name(self.runtime.settings))

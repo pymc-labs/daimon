@@ -62,10 +62,12 @@ from daimon.adapters.mcp.tools.agent_chat import (
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut
 from daimon.core import bundle_handle
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_BILLING_EXEMPT
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.tenant_balance import debit_amount
 from daimon.testing import ma_agent, ma_model_usage, ma_session
@@ -3072,3 +3074,64 @@ async def test_archive_my_session_rejects_another_accounts_session_with_no_archi
         await _archive_my_session_impl(runtime, _auth(), "ses_other")
 
     assert archive_calls == []
+
+
+@pytest.mark.parametrize("tool_name", ["start_turn", "ask"])
+async def test_turn_tools_refuse_an_invoker_outside_the_allowlist_before_creating_session(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tool_name: str,
+) -> None:
+    """SYS-047: a platform member the tenant's invoker allowlist leaves out can't
+    drive the agent headlessly either -- refused before balance or MA."""
+    tenant_id = uuid.uuid4()
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(
+            session, platform="discord", workspace_id=str(tenant_id), id=tenant_id
+        )
+        account = await make_account(session, tenant=tenant)
+        await set_access_policy(
+            session, tenant_id=tenant_id, policy=TenantAccessPolicy(invoker_user_ids=("staff",))
+        )
+
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_MA_AGENT_ID)
+    token = "guest-agent-token"
+    claims: dict[str, str] = {
+        "sub": str(account.id),
+        "tenant_id": str(tenant_id),
+        "role": "user",
+        "agent_id": str(agent_uuid),
+        "platform_user_id": "guest",
+        "client_id": "test",
+    }
+    mcp = FastMCP(name="admission-invoker", auth=StaticTokenVerifier(tokens={token: claims}))
+    mcp.add_middleware(
+        IdentityMiddleware(
+            subject_resolver=production_subject_resolver,
+            tenant_resolver=production_tenant_resolver,
+            role_resolver=production_role_resolver,
+            agent_id_resolver=production_agent_id_resolver,
+            is_admin_resolver=production_is_admin_resolver,
+            internal_resolver=production_internal_resolver,
+            sessionmaker=db_session_factory,
+        )
+    )
+    mcp.add_transform(Visibility(False, tags={"agent-chat"}))
+    runtime = _runtime(
+        build_fake_anthropic(MARouter().dispatch), session_factory=db_session_factory
+    )
+    register_agent_chat_tools(mcp, runtime, billing_config=None)
+
+    with patch(
+        "daimon.adapters.mcp.tools.agent_chat.create_session", new=AsyncMock()
+    ) as mock_create_session:
+        result = await call_mcp_tool(
+            mcp.http_app(), token=token, name=tool_name, arguments={"message": "hello"}
+        )
+
+    payload = result.get("result", result)
+    assert isinstance(payload, dict) and payload.get("isError"), (
+        f"{tool_name} must refuse a caller outside the allowlist; got {result!r}"
+    )
+    content = str(payload.get("content"))
+    assert "TERMINAL ERROR" in content and "list of people" in content, content
+    mock_create_session.assert_not_awaited()

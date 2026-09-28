@@ -69,6 +69,7 @@ import anthropic as _anthropic
 import sentry_sdk
 import structlog
 from daimon.adapters.discord.bot import (
+    INVOKER_NOT_ALLOWED_NOTICE,
     DaimonBot,
     _credit_depleted_message,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same balance-depleted copy the mention path shows
     _resolve_bot_display_name,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same bot-display-name resolution the mention path uses
@@ -90,7 +91,6 @@ from daimon.adapters.discord.wizard import (
 from daimon.adapters.discord.wizard_render import build_wizard_view
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role, WizardSessionRow
 from daimon.core.stores.thread_sessions import (
     clear_active_turn_if_message_id,
@@ -382,9 +382,17 @@ async def run_wizard_submit_turn(
         bot._inflight[row.tenant_id] = count + 1  # pyright: ignore[reportPrivateUsage]  # see the read above
         inflight_claimed = True
 
-        # --- Stage one: admission -- D-01 admit(). Same three branches
+        # --- Stage one: admission -- D-01 admit(). Same four branches
         # _orchestrate has, prefixed with a sentence saying the answers were
         # already recorded (the claim committed before this runs). ---
+        # The live role, read from the interaction before admission: the
+        # invoker policy's admin exemption must not rest on a stored role the
+        # user may have lost since. admit() persists it for the resumed turn's
+        # MCP calls. A non-Member author is treated as non-admin. ---
+        author = interaction.user
+        is_admin = isinstance(author, discord.Member) and is_member_guild_admin(
+            author, guild_owner_id=interaction.guild.owner_id if interaction.guild else None
+        )
         try:
             admission = await admit(
                 bot.runtime.turn_deps,
@@ -393,6 +401,7 @@ async def run_wizard_submit_turn(
                 external_user_id=str(interaction.user.id),
                 channel_id=parent_channel_id,
                 now=datetime.now(UTC),
+                role=Role.ADMIN if is_admin else Role.USER,
             )
         except MissingTurnConfigError as err:
             _log.info(
@@ -432,7 +441,12 @@ async def run_wizard_submit_turn(
             )
             return
         except AdmissionDenied as err:
-            if err.reason == "balance_depleted":
+            if err.reason == "invoker_not_allowed":
+                _log.info(
+                    "wizard_submit.skipped.invoker_not_allowed", user_id=str(interaction.user.id)
+                )
+                await channel.send("Your answers were recorded, but " + INVOKER_NOT_ALLOWED_NOTICE)
+            elif err.reason == "balance_depleted":
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
                 await channel.send(
                     "Your answers were recorded, but "
@@ -456,19 +470,6 @@ async def run_wizard_submit_turn(
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
 
         agent = admission.agent
-
-        # --- Per-turn role upsert -- unconditional, same rationale as
-        # _orchestrate: the live-role gate the resumed turn's MCP calls hit
-        # must read a fresh value. ---
-        author = interaction.user
-        is_admin = isinstance(author, discord.Member) and is_member_guild_admin(
-            author, guild_owner_id=interaction.guild.owner_id if interaction.guild else None
-        )
-        async with bot.runtime.sessionmaker() as role_session:
-            await set_role(
-                role_session, admission.account_id, Role.ADMIN if is_admin else Role.USER
-            )
-            await role_session.commit()
 
         if discord_settings.per_caller_thread_sessions:
             session_account_id = admission.account_id
