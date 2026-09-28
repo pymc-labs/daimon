@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -9,8 +10,10 @@ from dataclasses import dataclass
 import structlog
 from daimon.adapters.teams import card, routines_card
 from daimon.adapters.teams.app import TeamsApp
-from daimon.adapters.teams.commands import fresh_start
+from daimon.adapters.teams.commands import CommandHandler, fresh_start
 from daimon.adapters.teams.feedback import record_feedback
+from daimon.adapters.teams.help import send_help
+from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import TeamsSettings
@@ -183,12 +186,13 @@ def create_teams_http_service(
         return str(token) if token is not None else None
 
     routines = RoutinesPanel(runtime)
-    turns = TeamsApp(
-        runtime=runtime,
-        sender=teams_app,
-        commands={"new": fresh_start, "routines": routines.command},
-        bot_token=bot_token,
-    )
+    commands: dict[str, CommandHandler] = {
+        "new": fresh_start,
+        "routines": routines.command,
+        "memory": show_memory,
+    }
+    commands["help"] = functools.partial(send_help, names=(*commands, "help"))
+    turns = TeamsApp(runtime=runtime, sender=teams_app, commands=commands, bot_token=bot_token)
 
     async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]) -> None:
         try:
