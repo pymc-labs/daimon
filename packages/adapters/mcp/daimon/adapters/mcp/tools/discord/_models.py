@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 import discord
+from daimon.adapters.mcp.tools._untrusted import UntrustedMarker, UntrustedResult
 from pydantic import BaseModel
 
 
@@ -24,6 +25,8 @@ class MessageRow(BaseModel):
     attachments: list[AttachmentRow] = []
     author_username: str = ""
     role: Literal["user", "assistant"] = "user"
+    trust: UntrustedMarker | None = None
+    """"untrusted" when this row was read back rather than just sent by daimon."""
 
 
 class ChannelRow(BaseModel):
@@ -50,19 +53,19 @@ class ParsedLink(BaseModel):
     hint: str
 
 
-class ReadThreadResult(BaseModel):
+class ReadThreadResult(UntrustedResult):
     rows: list[MessageRow]
     next_before: str | None = None
     hint: str | None = None
 
 
-class ReadChannelResult(BaseModel):
+class ReadChannelResult(UntrustedResult):
     rows: list[MessageRow]
     next_before: str | None = None
     hint: str | None = None
 
 
-class SearchResult(BaseModel):
+class SearchResult(UntrustedResult):
     total_results: int
     showing: int
     offset: int

@@ -434,7 +434,7 @@ async def _fetch_single_message(
     if match is None:
         raise ToolError("message not found")
     usernames = await _resolve_usernames(client, _author_ids([match]))
-    return _to_message_rows([match], usernames)[0]
+    return _to_message_rows([match], usernames)[0].model_copy(update={"trust": "untrusted"})
 
 
 async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py

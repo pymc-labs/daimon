@@ -229,6 +229,25 @@ already receives -- so the CLI, headless routines and any new adapter keep
 their existing failure path, and `TerminationNotice.plain_text()` is the
 fallback wording for a surface without markup.
 
+### Outside text is data
+
+Anything daimon quotes into a turn from someone other than the person asking
+goes through one envelope, `packages/core/daimon/core/untrusted.py`: an
+element marked `trust="untrusted"`, opened by a fixed line saying the content
+is data, not instructions, with every value escaped so the content cannot
+close the element early. The Discord and Slack context builders wrap replayed
+thread history, deltas and channel backfill in it; `fetch_youtube_transcript`
+returns its transcript in it; the quoted transcript on a workspace
+replacement (`render_previous_session`) uses it too. The channel read and
+search tools return JSON rows, so their results carry the same marker as
+`trust` and `trust_note` fields instead. The paragraph in the agent guidance
+block (`packages/core/daimon/core/agent_guidance.py`) tells every agent what
+the marker means. Only the `<user_query>` is the request.
+
+Third-party MCP tool results travel from Managed Agents straight to the model
+without passing through daimon, so they carry no marker; the guidance
+paragraph covers them by name ("whatever a tool returns").
+
 ## Tenancy and isolation
 
 One Discord guild or one Slack workspace is one tenant. The tenant UUID is
