@@ -11,9 +11,11 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 from typing import Any, cast
+from urllib.parse import parse_qs, urlparse
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY, ChannelReadPolicy
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
@@ -29,8 +31,22 @@ from slack_sdk.errors import SlackApiError
 _SEARCH_LIMIT_CAP = 25
 
 
+def _permalink_thread_ts(permalink: object) -> str | None:
+    """The thread a search hit sits in: Slack's permalink for a reply carries it
+    as a ``thread_ts`` query parameter; a root message has none."""
+    if not isinstance(permalink, str):
+        return None
+    values = parse_qs(urlparse(permalink).query).get("thread_ts")
+    return values[0] if values else None
+
+
 async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
-    runtime: McpRuntime, auth: AuthIdentity, *, content: str, limit: int
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    content: str,
+    limit: int,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
 ) -> SlackSearchResult:
     user_id = _require_slack_identity(auth)
     team_id = _require_team_id(auth)
@@ -57,6 +73,12 @@ async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
         channel = cast(dict[str, Any], m.get("channel") or {})
         if not dm_ok and channel.get("is_im"):
             continue
+        # A sealed channel's hits -- or a sealed thread's, keyed channel_id:thread_ts
+        # -- are withheld outside it.
+        channel_id = str(channel.get("id", ""))
+        thread_ts = _permalink_thread_ts(m.get("permalink")) or str(m.get("ts", ""))
+        if not read_policy.allows(f"{channel_id}:{thread_ts}", channel_id):
+            continue
         matches.append(
             SlackSearchMatch(
                 channel_id=str(channel.get("id", "")),
@@ -67,4 +89,9 @@ async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
                 permalink=str(m["permalink"]) if m.get("permalink") else None,
             )
         )
+    if read_policy.policy.sealed_channel_ids:
+        # Slack's total counts every page, sealed hits included, so it would
+        # answer "does the sealed channel mention X?". Report only what is
+        # shown, as Discord does for unscoped searches.
+        total = len(matches)
     return SlackSearchResult(matches=matches, total=total)

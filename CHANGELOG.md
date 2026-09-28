@@ -72,6 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   categories, sealed channels, DM memory); `--clear` puts the tenant back on
   the open default. IDs are validated per platform before writing, and concurrent
   edits preserve fields changed by other CLI commands.
+- Sealed channels: the channel read tools refuse a channel the tenant access
+  policy seals, and threads under it, unless the call passes the
+  `origin_context_id` of a turn inside that channel and the token executes
+  as that turn's agent. A single Discord thread, or a Slack thread keyed
+  `channel_id:thread_ts`, can be sealed on its own. Search withholds sealed
+  hits and, once anything is sealed, counts only what it shows. The read
+  tools gain an optional `origin_context_id` parameter.
 - Protected channels: the agent, including its own replies, never writes into
   channels, threads and Discord categories the tenant access policy marks
   protected, for admins as well. A mention there is dropped silently (no

@@ -879,6 +879,20 @@ async def test_admit_refuses_when_the_stored_policy_is_unreadable(
         (TenantAccessPolicy(dm_memory_read_only=True), "dm-1", None, True, True),
         (TenantAccessPolicy(dm_memory_read_only=True), "chan-1", None, False, False),
         (None, "dm-1", None, True, False),
+        (
+            TenantAccessPolicy(sealed_channel_ids=("C1:1700000000.000100",)),
+            "C1",
+            "1700000000.000100",
+            False,
+            True,
+        ),
+        (
+            TenantAccessPolicy(sealed_channel_ids=("C1:1700000000.000100",)),
+            "C1",
+            "1700000000.000999",
+            False,
+            False,
+        ),
     ],
     ids=[
         "open",
@@ -888,6 +902,8 @@ async def test_admit_refuses_when_the_stored_policy_is_unreadable(
         "dm-read-only",
         "dm-flag-not-a-dm",
         "dm-default",
+        "slack-thread-sealed-on-its-own",
+        "slack-other-thread",
     ],
 )
 async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(

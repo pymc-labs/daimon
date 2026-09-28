@@ -169,14 +169,31 @@ and skips the policy, as it skips billing. Ids are the platform's own (Discord s
 | --- | --- | --- |
 | `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
 | `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord and Slack write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
-| `sealed_channel_ids` | nothing is sealed | `admit()` sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
+| `sealed_channel_ids` | nothing is sealed | the channel read tools (`read_channel`, `read_thread`, `get_message`, `list_threads`, `search_messages`) via `ChannelReadPolicy`, which the dispatcher in `tools/channels.py` loads per call; `admit()` also sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
 
 Protection covers threads under a protected channel and, on Discord, channels
 in a protected category; it applies to admins too, and runs after the caller's
 own permission check so it never reveals a channel the caller cannot see. A
 sealed channel's content is readable only from a turn inside it (the channel
-or a thread under it). Operators edit the policy with the CLI:
+or a thread under it): the read must pass the `origin_context_id` from that
+turn's controls, and a missing, expired or foreign origin counts as outside.
+The origin must also belong to the agent the token executes as (`agent_id`,
+or `chat_agent_id` for ordinary chat); a token bound to neither can't claim
+one. A single thread can be sealed on its own: a Discord thread by its id, a
+Slack thread as `channel_id:thread_ts`. Such a thread, its messages and (on
+Discord) its name are withheld from outside turns: in `read_thread` and
+`get_message`, in channel history (a Slack thread's root and broadcast replies;
+Discord's thread-created notice, whose text is the name), in `list_threads`
+and in search. The CLI's `--sealed-channel` accepts the Slack form. Once
+anything is sealed, search reports only the hits it shows as its total, scoped
+or not, on both platforms, so the count can't reveal sealed matches. A Slack
+turn inside a thread sealed on its own also gets read-only memory. An origin is any active
+one of the same account and responder, not only the current turn's: a member
+who copies an origin id out of a sealed-channel turn can read that channel
+from elsewhere until it expires -- someone who could read it anyway.
+Outside reads are refused after the platform's own caller check, and search
+drops sealed hits. Operators edit the policy with the CLI:
 
 ```bash
 daimon tenants access-policy get discord GUILD_ID [--json]
@@ -191,7 +208,8 @@ fields not given keep their stored value, including concurrent CLI edits.
 Edits and clears lock the tenant row for their transaction, even when no policy
 row exists yet. Every supplied id is validated before writing: Discord ids are
 15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with
-`C`, `G` or `D`, followed by uppercase letters or digits. CLI ids must be
+`C`, `G` or `D`, followed by uppercase letters or digits (a sealed Slack
+thread is `channel_id:thread_ts`). CLI ids must be
 non-blank. Invalid input names the field and value and writes nothing.
 To empty a single field, `--clear`
 and set the rest again. `set` refuses to overwrite an unreadable row, so

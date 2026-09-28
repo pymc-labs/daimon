@@ -261,9 +261,12 @@ async def admit_impl(
     ):
         raise AdmissionDenied(reason="cap_exceeded")
 
-    memory_read_only = is_sealed(
-        policy, channel_id=thread_id or channel_id, parent_channel_id=channel_id
-    ) or (is_dm and policy.dm_memory_read_only)
+    memory_read_only = (
+        is_sealed(policy, channel_id=thread_id or channel_id, parent_channel_id=channel_id)
+        # A Slack thread is sealed on its own as channel_id:thread_ts.
+        or (thread_id is not None and f"{channel_id}:{thread_id}" in policy.sealed_channel_ids)
+        or (is_dm and policy.dm_memory_read_only)
+    )
 
     return Admission(
         memory_read_only=memory_read_only,
