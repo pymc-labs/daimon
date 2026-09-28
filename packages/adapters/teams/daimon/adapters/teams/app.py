@@ -25,7 +25,6 @@ from daimon.adapters.teams.commands import (
     CHANNEL_POINTER,
     CommandContext,
     CommandHandler,
-    fresh_start,
     parse_command,
 )
 from daimon.adapters.teams.identity import (
@@ -133,7 +132,7 @@ class TeamsApp:
         *,
         runtime: TeamsRuntime,
         sender: TeamsSender,
-        commands: Mapping[str, CommandHandler] | None = None,
+        commands: Mapping[str, CommandHandler],
     ) -> None:
         teams = runtime.settings.teams
         if teams is None:
@@ -141,7 +140,7 @@ class TeamsApp:
         self.runtime = runtime
         self._teams = teams
         self._sender = TimedSender(sender)
-        self._commands: Mapping[str, CommandHandler] = commands or {"new": fresh_start}
+        self._commands = commands
         self._processing: set[str] = set()
         self._pending: dict[str, list[TeamsInbound]] = {}
         self._inflight: dict[uuid.UUID, int] = {}

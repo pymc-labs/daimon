@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import structlog
 from daimon.adapters.teams import card
 from daimon.adapters.teams.app import TeamsApp
+from daimon.adapters.teams.commands import fresh_start
 from daimon.adapters.teams.feedback import record_feedback
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import TeamsSettings
@@ -176,7 +177,7 @@ def create_teams_http_service(
         # in local development and tests.
     )
 
-    turns = TeamsApp(runtime=runtime, sender=teams_app)
+    turns = TeamsApp(runtime=runtime, sender=teams_app, commands={"new": fresh_start})
 
     async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]) -> None:
         try:

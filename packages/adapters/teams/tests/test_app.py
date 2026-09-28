@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.app import TeamsApp
+from daimon.adapters.teams.commands import fresh_start
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -56,7 +57,7 @@ def _app(
     runtime.settings.teams = runtime.settings.teams.model_copy(
         update={"max_concurrent_turns_per_tenant": cap}
     )
-    return TeamsApp(runtime=runtime, sender=sender)
+    return TeamsApp(runtime=runtime, sender=sender, commands={"new": fresh_start})
 
 
 @pytest.mark.asyncio
