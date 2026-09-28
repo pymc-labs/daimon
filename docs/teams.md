@@ -30,7 +30,7 @@ principal is created on first contact.
   DM routing in `daimon.core.dm_routing`; with one organisation per deployment
   there is always exactly one tenant, so no picker is shown.
 - **Channels.** Only messages that @mention the bot. Each root post is its own
-  thread and session; replies in that thread continue it.
+  thread and session; replies that @mention it continue that thread.
 - **Group chats** get a short refusal.
 
 A turn shows one status card, edited in place, with a Cancel button only the
@@ -42,16 +42,17 @@ runs are queued and run as one follow-up per author. Work an agent hands off
 ### Commands and admins
 
 Commands answer in the 1:1 chat only, since their replies can carry account
-details; in a channel the bot points to the 1:1 chat. None of them runs an
-agent turn.
+details; in a channel the bot points to the 1:1 chat. A message is a command
+only when it is the bare word (or `memory /<path>`); anything longer goes to
+the agent. None of them runs an agent turn.
 
 | Command | Does |
 | --- | --- |
-| `new` | Start a fresh conversation, or end a setup conversation. |
+| `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
 | `help` | List the commands. |
 | `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins), or open a setup conversation. |
 | `routines` | List routines; admins create them, admins and creators pause, resume, read the last output or delete. |
-| `memory` | Show what the agent remembers; add a path to read one file. |
+| `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
 | `privacy` | See, export or delete what daimon stores about you. |
 | `billing` | Your usage this month; admins also see totals, top spenders and top-ups. |
 
@@ -62,7 +63,10 @@ usual session resumes when `new` or **End** closes it. Opening one runs no turn.
 Teams has no workspace-admin flag a bot can read, so admins are listed by
 Entra object ID in `DAIMON_TEAMS__ADMIN_USER_IDS`. Their turns run with the
 admin role, and the panels unlock the admin actions for them. Every card click
-and dialog re-checks the organisation, the clicker and their role.
+and dialog re-checks the organisation, the clicker and their role. Someone
+removed from the list keeps the admin role in agent tools until their next
+message. There are no ephemeral messages: refusals come as toasts, dialog
+messages or card edits only the clicker sees.
 
 ### Files
 
@@ -72,9 +76,10 @@ and dialog re-checks the organisation, the clicker and their role.
 - **Out.** Files the agent writes to its outputs are offered in the 1:1 chat
   with Teams' file consent card; accepting uploads the file to the user's
   OneDrive. Offers live in memory, so a restart drops them and the next turn
-  offers the file again.
+  that uses a tool offers the file again.
 - **Channels.** Reading a file shared in a channel, or posting one, needs
-  Microsoft Graph. The bot says so instead.
+  Microsoft Graph. The bot names a file it made there in a note and discards
+  it.
 
 The bot token is only sent to Bot Framework hosts, downloads and uploads only
 go to SharePoint hosts, and every redirect hop is re-checked.
@@ -112,7 +117,9 @@ found and is left as is.
 
 ### Not supported yet
 
-Reactions, reading channel history, files in channels (both need Microsoft
-Graph), file posting through `send_message`, and private inputs a password
-field cannot take: `.env` uploads, multi-line secrets, and repository or
-skill-repository tokens.
+Reactions, reading channel history (`read_channel`, `read_thread`,
+`search_messages`, `get_message`, `list_channels` and `parse_link` are hidden
+from Teams turns), files in channels (both need Microsoft Graph), file posting
+through `send_message`, and private inputs a password field cannot take: `.env`
+uploads, multi-line secrets, and repository or skill-repository tokens.
+Removing the app does not archive the organisation's tenant.

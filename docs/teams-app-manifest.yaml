@@ -33,8 +33,8 @@ version: "0.1.0"
 developer:
   name: daimon
   websiteUrl: https://DAIMON_HOST
-  privacyUrl: https://DAIMON_HOST/privacy
-  termsOfUseUrl: https://DAIMON_HOST/terms
+  privacyUrl: https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md  # or DAIMON_PRIVACY_POLICY_URL
+  termsOfUseUrl: https://DAIMON_HOST/terms  # your own terms page; daimon serves none
 name:
   short: daimon
   full: daimon

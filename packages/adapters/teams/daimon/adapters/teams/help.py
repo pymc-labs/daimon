@@ -30,7 +30,7 @@ def help_card(names: Collection[str], *, bot: str) -> AdaptiveCard:
     ]
     talk = [
         "In our 1:1 chat, just type: every message goes to your agent.",
-        f"In a channel, @mention {bot} in a post; replies in that thread continue it.",
+        f"In a channel, @mention {bot} in a post, and again in replies to continue it.",
         f"For example: @{bot} help me set up, or @{bot} make a routine that runs daily.",
     ]
     body: list[CardElement] = [
