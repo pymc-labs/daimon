@@ -86,8 +86,8 @@ def test_slack_bot_scopes_constant_contains_required_v3_day1_scopes() -> None:
     assert required <= set(SLACK_BOT_SCOPES), (
         "SLACK_BOT_SCOPES must include all v3.0 day-1 bot scopes"
     )
-    assert len(SLACK_BOT_SCOPES) == 11, (
-        "SLACK_BOT_SCOPES must have exactly 11 scopes after adding files:write"
+    assert len(SLACK_BOT_SCOPES) == 12, (
+        "SLACK_BOT_SCOPES must have exactly 12 scopes after adding im:write"
     )
 
 

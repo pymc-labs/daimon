@@ -382,3 +382,27 @@ The scheduler owns a persistent, bounded routine dispatcher across ticks.
 Routine turns run independently of the tick; the same routine cannot overlap
 itself. Per-routine missed-run policy and the latest skipped range are exposed
 by the routine MCP tools. See [routines.md](routines.md) for catch-up and shutdown.
+
+### Agent-initiated direct messages
+
+The shared channel tool `send_direct_message(recipient_id, content)` dispatches
+to Discord or Slack under the authenticated tenant. Both sender and recipient
+are checked for current platform membership before a DM is opened. Discord bot
+recipients and Slack inactive, external, or bot users are rejected. Other
+platforms return unsupported. Channel tools continue to reject DM channel IDs.
+
+Default recipient policy is tenant members. `DAIMON_DIRECT_MESSAGE_POLICIES` is
+a JSON map keyed by tenant UUID, for example:
+
+```json
+{"00000000-0000-0000-0000-000000000001": {"mode": "allowlist", "recipient_ids": ["U123"]}}
+```
+
+Tenant UUID keys are normalized at settings load, including uppercase and
+unhyphenated UUIDs. Invalid keys fail settings validation.
+
+`mode` accepts `members`, `allowlist`, or `disabled`. All modes that allow sending
+still require live tenant membership. The tool sends at most 19000 characters
+as plain text in bounded chunks and returns every platform message ID. Partial
+failures state the number already sent; callers should not retry the whole text
+blindly. Attachments and cross-tenant delivery are outside this tool's scope.

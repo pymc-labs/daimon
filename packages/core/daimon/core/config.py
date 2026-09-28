@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 from daimon.core.thread_participation import ParticipationMode
-from pydantic import BaseModel, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -817,6 +817,20 @@ class ArtifactsSettings(BaseModel):
     )
 
 
+class DirectMessagePolicy(BaseModel):
+    """Tenant recipient restrictions; platform membership is always required."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["members", "allowlist", "disabled"] = "members"
+    recipient_ids: list[str] = Field(default_factory=list[str])
+
+    def allows(self, recipient_id: str) -> bool:
+        return self.mode == "members" or (
+            self.mode == "allowlist" and recipient_id in self.recipient_ids
+        )
+
+
 class Settings(BaseSettings):
     completion_pings: dict[uuid.UUID, bool] = Field(
         default_factory=dict[uuid.UUID, bool],
@@ -826,6 +840,16 @@ class Settings(BaseSettings):
             "mentioning only the requester "
             "on Discord and Slack. Missing/false preserves in-place delivery. "
             "Configure DAIMON_COMPLETION_PINGS as a JSON object."
+        ),
+    )
+    direct_message_policies: dict[uuid.UUID, DirectMessagePolicy] = Field(
+        default_factory=dict[uuid.UUID, DirectMessagePolicy],
+        description=(
+            "Per-tenant DM recipient policies keyed by tenant UUID (normalized at load; "
+            "invalid keys rejected). Default is "
+            "members (live membership required). Set mode=disabled to disable DMs, "
+            "or mode=allowlist with recipient_ids to restrict delivery to listed "
+            "members. Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object."
         ),
     )
     database: DatabaseSettings

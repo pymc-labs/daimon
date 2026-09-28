@@ -3543,6 +3543,34 @@
         'type': 'object',
       }),
     }),
+    'send_direct_message': dict({
+      'description': '''
+        Privately message one human member of the current server/workspace.
+        
+        Pass a platform user ID, not a channel or mention. Both sender and
+        recipient must still belong to this tenant. Tenant policy may disable
+        delivery or restrict recipients to an allowlist. Plain text only, up to
+        19000 characters, split into bounded messages. Returns all delivery IDs;
+        a partial failure states how many messages were already sent, so do not
+        blindly resend the whole message. No attachments or cross-tenant DMs.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'content': dict({
+            'type': 'string',
+          }),
+          'recipient_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'recipient_id',
+          'content',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'send_message': dict({
       'description': '''
         Post a message to a channel.

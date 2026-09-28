@@ -56,6 +56,15 @@ accepted/done reactions and posts the final answer as a fresh reply mentioning o
 requester on Discord and Slack. Missing/false preserves in-place delivery. Configure
 DAIMON_COMPLETION_PINGS as a JSON object.
 
+### `DAIMON_DIRECT_MESSAGE_POLICIES`
+
+`dict[UUID, DirectMessagePolicy]` · optional · default `{}`
+
+Per-tenant DM recipient policies keyed by tenant UUID (normalized at load; invalid keys
+rejected). Default is members (live membership required). Set mode=disabled to disable
+DMs, or mode=allowlist with recipient_ids to restrict delivery to listed members.
+Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object.
+
 ### `DAIMON_PRIVACY_POLICY_URL`
 
 `HttpUrl` · optional · default `https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md`

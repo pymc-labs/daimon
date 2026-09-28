@@ -27,6 +27,7 @@ _TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 SLACK_BOT_SCOPES: tuple[str, ...] = (
     "app_mentions:read",
     "chat:write",
+    "im:write",  # agent-initiated direct messages to verified workspace members
     "commands",
     "users:read",
     "channels:history",
