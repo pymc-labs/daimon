@@ -226,6 +226,17 @@ class TurnCardIntentRow(BaseModel):
     updated_at: datetime
 
 
+class DmTenantSelectionRow(BaseModel):
+    """The tenant one person picked for their direct messages."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    platform: str
+    external_user_id: str
+    tenant_id: uuid.UUID
+    selected_at: datetime
+
+
 class SessionPreparationRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

@@ -96,6 +96,7 @@ from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import credential_requests as credential_requests_store
+from daimon.core.stores import dm_tenant_selections as dm_tenant_selections_store
 from daimon.core.stores import github_credentials as github_credentials_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
@@ -139,6 +140,7 @@ class PurgeReport(BaseModel):
     wizard_sessions: int = 0
     message_feedback: int = 0
     support_escalations: int = 0
+    dm_tenant_selections: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -159,6 +161,7 @@ class PurgeReport(BaseModel):
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
             message_feedback=self.message_feedback + other.message_feedback,
             support_escalations=self.support_escalations + other.support_escalations,
+            dm_tenant_selections=self.dm_tenant_selections + other.dm_tenant_selections,
         )
 
 
@@ -246,6 +249,15 @@ async def _purge_principal_in_session(
                 platform_user_id=principal.external_id,
             )
         )
+        # A DM tenant pick names this tenant under the same platform identity.
+        dm_tenant_selections_count = (
+            await dm_tenant_selections_store.delete_dm_tenant_selection_for_principal(
+                session,
+                tenant_id=principal.tenant_id,
+                platform=principal.platform,
+                external_user_id=principal.external_id,
+            )
+        )
     else:
         routines_count = 0
         kind = "cli"
@@ -293,6 +305,8 @@ async def _purge_principal_in_session(
         # principal owns no support_escalations rows — same reasoning, and the
         # same refusal to match on os_user, as message_feedback above.
         support_escalations_count = 0
+        # CLI has no direct messages, so it owns no DM tenant pick.
+        dm_tenant_selections_count = 0
 
     # user_skills and github_credentials are keyed by principal_id alone — both
     # principal kinds own rows in these tables.
@@ -339,6 +353,7 @@ async def _purge_principal_in_session(
         wizard_sessions=wizard_sessions_count,
         message_feedback=message_feedback_count,
         support_escalations=support_escalations_count,
+        dm_tenant_selections=dm_tenant_selections_count,
     )
 
 

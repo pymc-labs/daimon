@@ -108,6 +108,7 @@ source_modules = [
     "daimon.core.credential_requests",
     "daimon.core.cron",
     "daimon.core.db",
+    "daimon.core.dm_routing",
     "daimon.core.env_file",
     "daimon.core.errors",
     "daimon.core.github_app_auth",

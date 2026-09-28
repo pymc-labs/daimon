@@ -28,6 +28,7 @@ import uuid
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import credential_requests as credential_requests_store
+from daimon.core.stores import dm_tenant_selections as dm_tenant_selections_store
 from daimon.core.stores import github_credentials as github_credentials_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
@@ -82,6 +83,7 @@ class PurgePreview(BaseModel):
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
+    dm_tenant_selections: PurgePreviewRow
 
 
 def _format_platform_principal(p: PlatformPrincipalRow) -> str:
@@ -350,6 +352,16 @@ async def collect_purge_preview(
         )
         support_escalations = PurgePreviewRow(count=support_escalations_count, example=None)
 
+        # 16. dm_tenant_selections — the purge path deletes a pick only when it
+        # names the principal's own tenant, so count with the same keys.
+        dm_tenant_selections_count = (
+            await dm_tenant_selections_store.count_dm_tenant_selections_for_principals(
+                session,
+                principal_keys=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list],
+            )
+        )
+        dm_tenant_selections = PurgePreviewRow(count=dm_tenant_selections_count, example=None)
+
     return PurgePreview(
         linked_principals=linked_principals,
         principal_links=principal_links,
@@ -367,4 +379,5 @@ async def collect_purge_preview(
         wizard_sessions=wizard_sessions,
         message_feedback=message_feedback,
         support_escalations=support_escalations,
+        dm_tenant_selections=dm_tenant_selections,
     )
