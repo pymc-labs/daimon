@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `send_direct_message` delivers private agent messages to verified Discord/Slack
   tenant members, with per-tenant disabled/allowlist policies and delivery receipts.
+- A durable wake queue runs a turn in an existing thread later, at most once,
+  through the same admission, bind and run path as a mention. The Discord and
+  Slack adapters poll for due wakes. A wake whose process dies before its turn
+  starts is retried when the lease expires. One that dies after the turn
+  starts is settled `interrupted` and never re-run. Migration
+  `0028_feat003_wake_queue` adds the lease columns to `task_continuations`.
 
 - Added durable initial-card intent rows and bounded Discord and Slack history
   lookup. Both adapters now commit an intent before posting, record the
@@ -66,6 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the loss window after a token is burned but before its body is read.
 
 ### Changed
+
+- A handoff or private-input continuation whose process dies mid-dispatch is
+  no longer stuck in `claimed`: it is retried if its turn had not started, and
+  settled `skipped/interrupted` if it had. When the session is busy, the same
+  row is retried about 30 seconds later instead of being queued again under a
+  new key.
 
 - `get_agent` now returns the agent's `system` prompt to an admin caller on
   an agent chat tools may edit, so a setup flow can save the prompt before

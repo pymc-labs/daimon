@@ -14,15 +14,18 @@ controls the follow-up runs with, not the session-preparation pipeline.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
+from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
 from daimon.core.config import McpSettings, ThreadNamingSettings
-from daimon.core.continuity.continuation import ContinuationDecision
+from daimon.core.continuity.continuation import ContinuationDecision, ContinuationRequest
+from daimon.core.continuity.wakes import enqueue_wake, poll_wakes_once
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
@@ -108,7 +111,9 @@ def _make_thread(*, thread_id: int = _THREAD_ID, guild: MagicMock | None = None)
     return thread
 
 
-def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntime:
+def _make_runtime(
+    sessionmaker: async_sessionmaker[AsyncSession], *, agent: object = None
+) -> DiscordRuntime:
     settings = MagicMock()
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")
@@ -120,6 +125,8 @@ def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRunt
     settings.thread_naming = ThreadNamingSettings(enabled=False)
     anthropic = AsyncMock()
     anthropic.beta.agents.retrieve = AsyncMock(return_value=ma_agent())
+    if agent is not None:
+        anthropic.beta.agents.retrieve.return_value = agent
     anthropic.beta.environments.retrieve = AsyncMock(return_value=ma_environment())
     anthropic.beta.agents.list = MagicMock(return_value=_AsyncIter([]))
     resolver_cache = new_resolver_cache()
@@ -548,3 +555,164 @@ async def test_dispatch_skipped_while_processing_runs_when_the_thread_is_release
         f"the skipped dispatch must run once the thread is released, got {row.status}"
     )
     assert thread.id not in bot._processing  # pyright: ignore[reportPrivateUsage]
+
+
+async def _seed_due_wake(
+    db_session_factory: async_sessionmaker[AsyncSession], *, workspace_id: str, funded: bool
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Seed one wake already due in `_THREAD_ID`; return (tenant_id, key)."""
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=workspace_id)
+        if funded:
+            await tenant_ledger.insert_entry(
+                session,
+                tenant_id=tenant.id,
+                delta_usd=Decimal("100.00"),
+                reason="trial",
+                idempotency_key=f"trial:{tenant.id}",
+            )
+        account = await make_account(session, tenant=tenant)
+    request = ContinuationRequest(
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id=str(_THREAD_ID - 1),
+        thread_id=str(_THREAD_ID),
+        requester_account_id=account.id,
+        requester_external_user_id="555",
+        target_ma_agent_id="ag_target",
+        target_name="target-agent",
+        requested_work="check the build again",
+        reason="task_handoff",
+        idempotency_key=uuid.uuid4(),
+    )
+    await enqueue_wake(
+        db_session_factory, request, available_at=datetime.now(UTC) - timedelta(seconds=1)
+    )
+    return tenant.id, request.idempotency_key
+
+
+def _wake_bot(
+    db_session_factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> tuple[DaimonBot, MagicMock]:
+    """A bot whose MA stub knows the wake's target agent, and a live thread for it."""
+    target = ma_agent(id="ag_target", name="target-agent", tenant_id=tenant_id)
+    bot = make_bot(_make_runtime(db_session_factory, agent=target))
+    thread = _make_thread(guild=_make_guild(member=_make_member(admin=False)))
+    return bot, thread
+
+
+def _admission_patches() -> tuple[Any, ...]:
+    return (
+        patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock),
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock),
+        patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock),
+        patch("daimon.adapters.discord.bot.bind_session", new_callable=AsyncMock),
+        patch("daimon.adapters.discord.bot.run_prepared_turn", new_callable=AsyncMock),
+    )
+
+
+async def test_a_wake_denied_by_admission_settles_skipped_and_never_runs(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A wake goes through the same balance gate a mention does, and stops there."""
+    tenant_id, key = await _seed_due_wake(
+        db_session_factory, workspace_id="710000007", funded=False
+    )
+    bot, thread = _wake_bot(db_session_factory, tenant_id)
+
+    p_config, p_agent, p_env, p_bind, p_run = _admission_patches()
+    with (
+        p_config as resolve_config,
+        p_agent as resolve_agent,
+        p_env as resolve_env,
+        p_bind as bind,
+        p_run as run_turn,
+    ):
+        resolve_config.return_value = ResolvedConfig(
+            agent_name="test-agent",
+            agent_name_tier="tenant",
+            environment_name="test-env",
+            environment_name_tier="tenant",
+        )
+        resolve_agent.return_value = "ag_target"
+        resolve_env.return_value = "env_test"
+        await bot.dispatch_continuations_in_thread(
+            tenant_id=tenant_id, thread=thread, guild_id="710000007"
+        )
+
+    bind.assert_not_awaited()
+    run_turn.assert_not_awaited()
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None
+    assert row.status == "skipped"
+    assert row.skip_reason == "admission_denied:balance_depleted"
+
+
+async def test_the_wake_poller_opens_the_thread_and_runs_the_wake_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Poll → open thread → admit/bind/run → delivered; a second poll finds nothing."""
+    tenant_id, key = await _seed_due_wake(db_session_factory, workspace_id="710000008", funded=True)
+    bot, thread = _wake_bot(db_session_factory, tenant_id)
+    bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+
+    p_config, p_agent, p_env, p_bind, p_run = _admission_patches()
+    with (
+        p_config as resolve_config,
+        p_agent as resolve_agent,
+        p_env as resolve_env,
+        p_bind as bind,
+        p_run as run_turn,
+    ):
+        resolve_config.return_value = ResolvedConfig(
+            agent_name="test-agent",
+            agent_name_tier="tenant",
+            environment_name="test-env",
+            environment_name_tier="tenant",
+        )
+        resolve_agent.return_value = "ag_target"
+        resolve_env.return_value = "env_test"
+        bind.return_value = _make_prepared_turn(account_id=uuid.uuid4())
+        run_turn.return_value = RunOutcome(
+            state=TurnState(), ma_session_id="sess_test", mapping_id=None, recovered=False
+        )
+        for _ in range(2):
+            await poll_wakes_once(
+                db_session_factory,
+                platform="discord",
+                open_thread=bot._open_wake_thread,  # pyright: ignore[reportPrivateUsage]
+                now=datetime.now(UTC),
+            )
+            for task in list(bot._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+                await task
+
+    run_turn.assert_awaited_once()
+    assert run_turn.await_args is not None
+    assert run_turn.await_args.kwargs["user_message"].endswith("check the build again")
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None and row.status == "delivered" and row.attempts == 1
+
+
+async def test_the_wake_poller_settles_wakes_for_a_thread_that_is_gone(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, key = await _seed_due_wake(db_session_factory, workspace_id="710000009", funded=True)
+    bot, _thread = _wake_bot(db_session_factory, tenant_id)
+    bot.get_channel = MagicMock(return_value=None)  # pyright: ignore[reportAttributeAccessIssue]
+    bot.fetch_channel = AsyncMock(  # pyright: ignore[reportAttributeAccessIssue]
+        side_effect=discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Channel")
+    )
+
+    await poll_wakes_once(
+        db_session_factory,
+        platform="discord",
+        open_thread=bot._open_wake_thread,  # pyright: ignore[reportPrivateUsage]
+        now=datetime.now(UTC),
+    )
+
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None
+    assert row.status == "skipped" and row.skip_reason == "thread_unavailable"

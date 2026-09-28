@@ -106,6 +106,7 @@ from daimon.core.continuity.messages import (
     render_responder_changed_without_handoff,
     render_unexpected_loss,
 )
+from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError
@@ -124,6 +125,7 @@ from daimon.core.stores.slack_turn_contexts import (
     delete_slack_turn_context,
 )
 from daimon.core.stores.slack_user_tokens import get_slack_user_token
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_agent_bindings import get_binding as get_setup_binding
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
@@ -311,6 +313,45 @@ class SlackApp:
         if self._orphan_recovery_task is None:
             self._orphan_recovery_task = self._spawn(self._recover_orphaned_turns())
         return self._orphan_recovery_task
+
+    def start_wake_poller(self) -> asyncio.Task[None]:
+        """Poll the wake queue for Slack threads with due work until draining."""
+        return self._spawn(
+            run_wake_poller(
+                self.runtime.sessionmaker,
+                platform="slack",
+                open_thread=self._open_wake_thread,
+                should_stop=lambda: self.draining,
+            )
+        )
+
+    async def _open_wake_thread(self, wake: WakeThread) -> None:
+        """The wake poller's hook: dispatch a thread's due wakes, spawned.
+
+        Goes through `dispatch_continuations_in_thread`, so a wake takes the
+        same per-thread guard and the same admit -> bind -> run path as any
+        continuation. A workspace with no stored bot token is skipped this
+        poll; the rows wait for it to be reinstalled.
+        """
+        if self.draining:
+            return
+        async with self.runtime.sessionmaker() as session:
+            tenant = await get_tenant(session, wake.tenant_id)
+        if tenant is None or tenant.archived_at is not None:
+            return
+        web_client = await resolve_web_client(self.runtime, team_id=tenant.external_id)
+        if web_client is None:
+            return
+        self._spawn(
+            self.dispatch_continuations_in_thread(
+                web_client=web_client,
+                tenant_id=wake.tenant_id,
+                channel=wake.parent_channel_id,
+                thread_id=wake.thread_id,
+                account_id=wake.requester_account_id,
+                team_id=tenant.external_id,
+            )
+        )
 
     async def _recover_orphaned_turns(self) -> None:
         delay_s = _ORPHAN_RECOVERY_RETRY_DELAY_S

@@ -13,7 +13,16 @@ java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/crash-progress" -config forma
 java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/crash-free-progress" -config formal/continuation/ContinuationProgress.cfg formal/continuation/ContinuationDispatch.tla
 # This expected invariant violation shows why blindly retrying old claims can duplicate a turn (TLC exit 12).
 java -jar "$TLA2TOOLS_JAR" -metadir "$TLC_META_DIR/recovery" -config formal/continuation/ContinuationRecovery.cfg formal/continuation/ContinuationDispatch.tla || test "$?" -eq 12
+# The leased wake queue that production now runs (see "Wake lease" below).
+java -jar "$TLA2TOOLS_JAR" -workers 1 -metadir "$TLC_META_DIR/wake" -config formal/continuation/WakeLease.cfg formal/continuation/WakeLease.tla
+java -jar "$TLA2TOOLS_JAR" -workers 1 -metadir "$TLC_META_DIR/wake-progress" -config formal/continuation/WakeLeaseProgress.cfg formal/continuation/WakeLease.tla
+# Expected violation: a takeover that ignores the start fence (TLC exit 12).
+java -jar "$TLA2TOOLS_JAR" -workers 1 -metadir "$TLC_META_DIR/wake-nofence" -config formal/continuation/WakeLeaseNoFence.cfg formal/continuation/WakeLease.tla || test "$?" -eq 12
 ```
+
+`ContinuationDispatch.tla` below is the protocol as it stood before the wake
+queue, kept because its two expected failures are exactly what `WakeLease.tla`
+has to rule out.
 
 `ContinuationDispatch.tla` models one durable request and one adapter process.
 It bounds execution to two claims, enough for one hypothetical stale-claim
@@ -34,14 +43,18 @@ transition used only to test a blanket stale-claim retry policy.
 
 ## Runtime regression coverage
 
-The real-Postgres dispatcher tests inject process death at the follow-up
-callback boundary, before or after recording an observable effect:
+The real-Postgres dispatcher tests inject process death on both sides of the
+start fence:
 [`Discord`](../../packages/adapters/discord/tests/test_continuation_dispatch.py)
 and [`Slack`](../../packages/adapters/slack/tests/test_continuation_dispatch.py).
-They assert that the committed claim remains `claimed` and a later dispatch
-does not retry it. The effect is deliberately injected; these tests verify
-the dispatcher/status boundary and do not establish atomic exactly-once
-behavior across MA, billing, or platform APIs.
+Death before the fence is retried exactly once after the claim lease expires;
+death after it — with or without the injected observable effect — is never
+retried and settles `skipped/interrupted` once the run lease expires.
+[`test_wakes.py`](../../packages/core/tests/continuity/test_wakes.py) covers
+the store transitions and a restart across separate engines with two racing
+pollers. The effect is deliberately injected; these tests verify the
+dispatcher/status boundary and do not establish atomic exactly-once behavior
+across MA, billing, or platform APIs.
 
 ## Bounds and assumptions
 
@@ -86,7 +99,8 @@ can lose a promised follow-up after a crash. Retrying old claims improves
 delivery before the effect but can duplicate a turn after an ambiguous send.
 Resolving both requires a durable idempotency key honored by the downstream
 turn/post boundary, or an explicit product choice about which failure to favor.
-No production transition was changed pending that choice.
+The wake queue (below) makes that choice explicit: retry before the fence,
+settle after it.
 
 ## TLC evidence
 
@@ -96,3 +110,30 @@ expected `PendingEventuallySettles` counterexample above (9 distinct states).
 Hypothetical recovery: expected `AtMostOneExternalEffect` violation after two
 claims/effects (17 distinct states). These results establish only the stated
 finite transition behavior.
+
+## Wake lease
+
+`WakeLease.tla` models the leased protocol in
+[`wakes.py`](../../packages/core/daimon/core/continuity/wakes.py): one row, two
+dispatchers, a lease that can expire at any moment (including under a live,
+slow owner), at most two crashes and three attempts.
+
+| Model item | Implementation |
+| --- | --- |
+| `Claim` (pending, or expired and unstarted) | `claim_wake_row` in [`task_continuations.py`](../../packages/core/daimon/core/stores/task_continuations.py) |
+| `Start` / `StartLost` | `start_wake_row`: owner-guarded, commits `started_at` |
+| `Effect`, `Settle` | `run_follow_up`, then owner-guarded `settle_wake_row` in the Discord/Slack dispatchers |
+| `SkipDecided` | a `decide_continuation` skip, settled before any fence |
+| `Expire` | `lease_expires_at` passing; `WAKE_CLAIM_LEASE`, then `WAKE_RUN_LEASE` after the fence |
+| `Abandon` | `abandon_interrupted_wake_rows`, run by every poll |
+
+`WakeLease` is clean for `AtMostOneExternalEffect` and
+`DeliveredHasExternalEffect` (367 distinct states). `WakeLeaseProgress` shows
+`PendingEventuallySettles` under weak fairness of the dispatcher steps, the
+lease clock and the abandon sweep — the property `ContinuationCrashProgress`
+violates. `WakeLeaseNoFence` lets a takeover ignore the fence, which is
+`ContinuationRecovery`'s blind retry, and TLC finds the duplicate effect
+again (164 distinct states). A release (the owner handing a row back when it
+knows the turn did not run) is not modelled; it is an owner-only write.
+
+Checked 2026-09-28 with tla2tools 1.7.4, one worker.

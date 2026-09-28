@@ -84,6 +84,9 @@ async def main() -> None:
             # register a new active card. Event handlers wait on this task.
             app.start_orphan_recovery()
             await client.connect()
+            # Due wakes (timers, background completions) run in their thread
+            # through the same dispatch a form submission uses.
+            app.start_wake_poller()
             # Boot-time reconcile sweep, in the background so a slow provider
             # cannot delay mention handling. A crash is logged, never raised —
             # the listener must outlive its sweep.

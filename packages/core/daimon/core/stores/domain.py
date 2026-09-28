@@ -31,7 +31,7 @@ PreparationStage = Literal["decided", "checkpointed", "uploaded", "created", "co
 # into the successor's working files, or leave them in the old checkout.
 UnsavedWorkChoice = Literal["copy", "leave"]
 ContinuationReason = Literal["task_handoff", "private_input_applied"]
-ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped"]
+ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
 
 
 class Role(enum.StrEnum):
@@ -273,6 +273,11 @@ class TaskContinuationRow(BaseModel):
     created_at: datetime
     claimed_at: datetime | None
     delivered_at: datetime | None
+    available_at: datetime | None = None
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    started_at: datetime | None = None
+    attempts: int = 0
 
 
 class GitHubOauthStateRow(BaseModel):
