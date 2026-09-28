@@ -449,8 +449,11 @@ async def test_two_concurrent_submits_bill_exactly_one_turn(
 # --- per-tenant concurrency cap ---------------------------------------------------
 
 
+@pytest.mark.parametrize("table_rendering", [False, True])
 async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    table_rendering: bool,
 ) -> None:
     """A wizard turn costs the same upstream capacity as a mention turn, so it
     counts against the same cap -- and must give the slot back."""
@@ -462,6 +465,7 @@ async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
     stream_hits: list[str] = []
     router = _build_router(str(tenant.id), sent_events=sent_events, stream_hits=stream_hits)
     runtime = _make_runtime(db_session_factory, router)
+    runtime.settings.table_rendering = {tenant.id: table_rendering}
     bot = _make_bot(runtime)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
 
@@ -474,6 +478,10 @@ async def test_a_submit_turn_claims_and_releases_a_per_tenant_in_flight_slot(
             marker.thread_id == str(channel.id) and marker.active_turn_message_id == "42"
             for marker in active
         ), "wizard turn marker must be durable before run_prepared_turn starts"
+        assert kwargs["lifecycle"]._render_tables is table_rendering
+        recovery = kwargs["recovery_lifecycle"](asyncio.Event())
+        assert recovery._render_tables is table_rendering
+        kwargs["lifecycle"] = recovery
         return await real_run_prepared_turn(*args, **kwargs)
 
     with (

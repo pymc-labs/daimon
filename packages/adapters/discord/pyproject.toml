@@ -7,6 +7,7 @@ license = "MIT"
 authors = [{ name = "PyMC Labs" }]
 dependencies = [
     "daimon-core",
+    "pillow>=11",
     "discord.py>=2.7,<3",
     "structlog>=24",
     "anthropic>=0.96",
@@ -16,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2.4",
     "python-ulid>=3,<4",
     "sentry-sdk>=2.61",
+    "fonttools>=4.60",
 ]
 
 [project.urls]

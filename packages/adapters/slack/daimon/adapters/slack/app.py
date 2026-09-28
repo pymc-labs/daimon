@@ -1544,6 +1544,7 @@ class SlackApp:
         # final_ts off THAT lifecycle, not the pre-recovery one.
         cancel_event = asyncio.Event()
         lifecycle = SlackTurnLifecycle(
+            render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
             channel=channel,
             thread_ts=thread_id,
@@ -1965,6 +1966,8 @@ class SlackApp:
 
             def _recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
                 new_lifecycle = SlackTurnLifecycle(
+                    render_tables=self.runtime.settings.table_rendering.get(tenant_id, False)
+                    is True,
                     client=web_client,
                     channel=channel,
                     thread_ts=thread_id,
@@ -2291,6 +2294,7 @@ class SlackApp:
             await intent_session.commit()
         follow_cancel = asyncio.Event()
         follow_lifecycle = SlackTurnLifecycle(
+            render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
             channel=channel,
             thread_ts=thread_id,
@@ -2382,6 +2386,7 @@ class SlackApp:
 
         def _follow_up_recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = SlackTurnLifecycle(
+                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 client=web_client,
                 channel=channel,
                 thread_ts=thread_id,

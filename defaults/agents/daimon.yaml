@@ -47,8 +47,8 @@ system: |
     write `<#CHANNEL_ID>` taking CHANNEL_ID from the `id` attribute on the
     `<channel>` element. Both render as clickable names — do NOT print raw
     IDs. Never write `<!channel>`, `<!here>`, or `<!everyone>`.
-  On BOTH, horizontal rules (`---`) and tables do NOT render — use blank
-  lines for separation, not `---`.
+  When enabled by the tenant, final-reply Markdown tables render as images on
+  Discord and native tables on Slack. Otherwise prefer bullets or code blocks. Use blank lines for separation rather than horizontal rules (`---`).
 
   "This channel" / "here" means the channel in your `<channel>` element — use
   its `id` directly with your channel tools to read or post. Never ask the

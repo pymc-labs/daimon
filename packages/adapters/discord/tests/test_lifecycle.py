@@ -44,6 +44,7 @@ def _make_lifecycle(
     cancel_view: discord.ui.View | None = None,
     model_id: str = "claude-sonnet-4-6",
     notify_on_completion: bool = False,
+    render_tables: bool = False,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
     """Create lifecycle with recorder callables.
 
@@ -65,6 +66,7 @@ def _make_lifecycle(
         send=fake_send,
         notify_on_completion=notify_on_completion,
         requester_id=123,
+        render_tables=render_tables,
         edit=fake_edit,
         agent_name=agent_name,
         model_id=model_id,
@@ -1366,3 +1368,74 @@ async def test_completion_preserves_original_card_id():
     await lifecycle.on_terminal_success(_make_success_state())
     assert lifecycle.card_message_id == "1000"
     assert lifecycle.final_message_id == "1001"
+
+
+@pytest.mark.parametrize("notify", [False, True])
+async def test_final_table_is_attached_to_answer(notify):
+    lifecycle, sends, edits = _make_lifecycle(render_tables=True, notify_on_completion=notify)
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(
+        _make_success_state("| Name | Value |\n| --- | ---: |\n| Example | 42 |")
+    )
+    answer = sends[-1] if notify else edits[-1][1]
+    attachment_key = "files" if notify else "attachments"
+    assert "table-1.png" in answer["content"]
+    assert "| ---" not in answer["content"]
+    assert len(answer[attachment_key]) == 1
+    assert answer[attachment_key][0].fp.read(8) == b"\x89PNG\r\n\x1a\n"
+    assert len(sends) == (2 if notify else 1)
+
+
+@pytest.mark.parametrize("status", [403, 413, 500])
+@pytest.mark.parametrize("notify", [False, True])
+async def test_rejected_table_upload_retries_original_answer_as_text(status, notify):
+    from daimon.adapters.discord.split import split_for_discord_safe
+    from structlog.testing import capture_logs
+
+    delivered = []
+    attempts = []
+    ref = types.SimpleNamespace(id=1000)
+
+    def reject_upload(kwargs):
+        attempts.append(kwargs)
+        if kwargs.get("attachments") or kwargs.get("files"):
+            response = types.SimpleNamespace(status=status, reason="Rejected upload")
+            error = discord.Forbidden if status == 403 else discord.HTTPException
+            raise error(response, "upload rejected")
+
+    async def send(**kwargs):
+        reject_upload(kwargs)
+        if "content" in kwargs:
+            delivered.append(kwargs)
+        return ref
+
+    async def edit(message, **kwargs):
+        reject_upload(kwargs)
+        if "content" in kwargs:
+            delivered.append(kwargs)
+
+    lifecycle = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        render_tables=True,
+        agent_name="test",
+        model_id="claude-sonnet-4-6",
+        notify_on_completion=notify,
+        requester_id=123,
+    )
+    lifecycle.answer_prefix = "Recovered files."
+    text = "| Name | Value |\n| --- | ---: |\n| Example | 42 |\n\n" + "Tail. " * 500
+    await lifecycle.post_initial()
+    with capture_logs() as logs:
+        await lifecycle.on_terminal_success(_make_success_state(text))
+    assert [part["content"] for part in delivered] == split_for_discord_safe(
+        ("<@123>\n" if notify else "") + "Recovered files.\n\n" + text
+    )
+    assert all("attachments" not in part and "files" not in part for part in delivered)
+    assert all(part["allowed_mentions"].to_dict()["parse"] == [] for part in delivered)
+    assert (
+        sum(bool(attempt.get("attachments") or attempt.get("files")) for attempt in attempts) == 1
+    )
+    assert delivered[0]["allowed_mentions"].to_dict().get("users", []) == ([123] if notify else [])
+    assert any(entry["event"] == "turn.table_delivery_failed" for entry in logs)
+    assert lifecycle.was_answered

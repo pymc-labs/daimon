@@ -61,8 +61,9 @@ from daimon.adapters.slack.blockkit import (
 )
 from daimon.adapters.slack.errors import bound_request_id
 from daimon.adapters.slack.feedback import build_feedback_actions_block
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn, escape_mrkdwn_preserving_mentions
+from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.split import split_for_slack_safe
+from daimon.adapters.slack.tables import render_slack_tables
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.degraded import render_degraded_notice
@@ -156,6 +157,7 @@ class SlackTurnLifecycle:
         deregister_pending: Callable[[str], None] | None = None,
         trigger_ts: str | None = None,
         notify_on_completion: bool = False,
+        render_tables: bool = False,
         clock: Callable[[], float] = time.monotonic,
         adopt_status_ts: str | None = None,
         intent_id: UUID | None = None,
@@ -164,6 +166,7 @@ class SlackTurnLifecycle:
         self._trigger_ts = trigger_ts
         self._notify_on_completion = notify_on_completion
         self._answer_ts: str | None = None
+        self._render_tables = render_tables
         self._client = client
         self._request_id = request_id
         self._channel = channel
@@ -481,55 +484,78 @@ class SlackTurnLifecycle:
             degraded_notice = render_degraded_notice(state.mcp_failures)
             if degraded_notice is not None:
                 final_text = f"{final_text}\n\n{degraded_notice}"
-            if self._notify_on_completion and self._author_id:
-                escaped = f"<@{self._author_id}>\n{escape_mrkdwn(final_text)}"
-            else:
-                escaped = escape_mrkdwn_preserving_mentions(final_text)
-            chunks = split_for_slack_safe(escaped)
-            first_chunk = chunks[0]
-            # First chunk + the cost/usage footer replace the status message
-            # in place; the terminal footer carries elapsed/tokens/cost and drops
-            # the cancel button. The feedback vote buttons ride the LAST chunk
-            # only, so a vote's message_id keys the same message final_ts (and
-            # the watermark) point at.
+            deliveries = await render_slack_tables(
+                final_text,
+                enabled=self._render_tables,
+                preserve_mentions=not self._notify_on_completion,
+            )
+            # Rejected tables become Markdown in the same delivery slot, leaving
+            # earlier answer chunks intact. The first successful delivery owns
+            # continuity notices, and only the last carries feedback controls.
             self._terminal = True
-            first_blocks: list[dict[str, Any]] = [
-                {"type": "markdown", "text": first_chunk},
-                *to_blocks(self._state, now=self._clock()),
-            ]
-            if len(chunks) == 1:
-                first_blocks.append(build_feedback_actions_block())
             if self._notify_on_completion:
                 await self._flush_terminal()
-                response = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=self._channel,
-                    thread_ts=self._thread_ts,
-                    blocks=first_blocks,
-                    text=_notification_text(first_chunk),
-                    link_names=False,
+            index = 0
+            first_markdown_prefixed = False
+            current_ts: str | None = self._status_ts
+            while index < len(deliveries):
+                chunk, block = deliveries[index]
+                mention = (
+                    f"<@{self._author_id}>"
+                    if self._notify_on_completion and self._author_id
+                    else None
                 )
-                self._answer_ts = cast(str, response["ts"])
-            else:
-                await self._post_or_update(first_blocks, _notification_text(first_chunk))
-                self._answer_ts = self._status_ts
-            self._revealed_first_chunk = first_chunk
-            self._revealed_first_blocks = first_blocks
-            surface_replaced = True
-            assert self._status_ts is not None  # narrowing — _post_or_update always sets it
-            current_ts = self._answer_ts
-
-            # Overflow chunks posted as new thread replies.
-            for i, chunk in enumerate(chunks[1:], start=2):
-                chunk_blocks: list[dict[str, Any]] = [{"type": "markdown", "text": chunk}]
-                if i == len(chunks):
-                    chunk_blocks.append(build_feedback_actions_block())
-                resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=self._channel,
-                    thread_ts=self._thread_ts,
-                    blocks=chunk_blocks,
-                    text=_notification_text(chunk),
-                )
-                current_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
+                if (
+                    index == 0
+                    and mention
+                    and block.get("type") == "markdown"
+                    and not first_markdown_prefixed
+                ):
+                    deliveries[0:1] = [
+                        (plain, {"type": "markdown", "text": plain})
+                        for plain in split_for_slack_safe(f"{mention}\n{chunk}")
+                    ]
+                    first_markdown_prefixed = True
+                    continue
+                blocks: list[dict[str, Any]] = [block]
+                notification_chunk = chunk
+                if index == 0:
+                    if mention and block.get("type") == "table":
+                        blocks.insert(0, {"type": "markdown", "text": mention})
+                        notification_chunk = f"{mention}\n{chunk}"
+                    blocks.extend(to_blocks(self._state, now=self._clock()))
+                if index == len(deliveries) - 1:
+                    blocks.append(build_feedback_actions_block())
+                try:
+                    if index == 0 and not self._notify_on_completion:
+                        await self._post_or_update(blocks, _notification_text(notification_chunk))
+                        current_ts = self._status_ts
+                    else:
+                        resp = await self._client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                            channel=self._channel,
+                            thread_ts=self._thread_ts,
+                            blocks=blocks,
+                            text=_notification_text(notification_chunk),
+                            link_names=False if self._notify_on_completion else None,
+                        )
+                        current_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
+                    if index == 0:
+                        self._answer_ts = current_ts
+                        self._revealed_first_chunk = notification_chunk
+                        self._revealed_first_blocks = blocks
+                        surface_replaced = True
+                except SlackApiError as exc:
+                    if block.get("type") != "table":
+                        raise
+                    log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
+                    # The renderer retains escaped original Markdown alongside
+                    # the native table. Avoid double-escaping it on retry.
+                    deliveries[index : index + 1] = [
+                        (plain, {"type": "markdown", "text": plain})
+                        for plain in split_for_slack_safe(chunk)
+                    ]
+                    continue
+                index += 1
 
             self.final_ts = current_ts
         except _SLACK_SEND_ERRORS as exc:
@@ -567,7 +593,12 @@ class SlackTurnLifecycle:
         if len(split_for_slack_safe(updated)) > 1:
             return False
         blocks = list(self._revealed_first_blocks)
-        blocks[0] = {"type": "markdown", "text": updated}
+        if any(block.get("type") == "table" for block in blocks):
+            blocks.insert(
+                0, {"type": "markdown", "text": escape_mrkdwn_preserving_mentions(notice)}
+            )
+        else:
+            blocks[0] = {"type": "markdown", "text": updated}
         try:
             if self._notify_on_completion and self._answer_ts is not None:
                 await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]

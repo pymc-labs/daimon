@@ -67,3 +67,6 @@ asks a workspace admin to reinstall or reauthorize daimon from the install link.
 Revoked, expired, or invalid bot authorizations give the same recovery direction.
 Errors include the number of chunks already delivered; a failure to open the DM
 sends no messages.
+With the tenant enabled in `DAIMON_TABLE_RENDERING`, final-answer Markdown tables use native table blocks with wrapped cells, up to
+20 columns and 100 rows including the header. Larger tables retain their Markdown
+text. Surrounding prose and multiple tables are delivered in order.

@@ -37,6 +37,7 @@ from daimon.adapters.discord.embed import (
 )
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.split import split_for_discord_safe
+from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
@@ -131,6 +132,7 @@ class DiscordTurnLifecycle:
         requester_id: int | None = None,
         trigger_message: discord.Message | None = None,
         notify_on_completion: bool = False,
+        render_tables: bool = False,
         clock: Callable[[], float] = time.monotonic,
         adopt_message_ref: discord.Message | None = None,
         delete: DeleteFn | None = None,
@@ -141,6 +143,7 @@ class DiscordTurnLifecycle:
         self._requester_id = requester_id
         self._trigger_message = trigger_message
         self._notify_on_completion = notify_on_completion
+        self._render_tables = render_tables
         self._send = send
         self._request_id = request_id
         self._edit = edit
@@ -389,28 +392,47 @@ class DiscordTurnLifecycle:
         notify = (
             self._notify_on_completion and self._requester_id is not None and not self._unprompted
         )
-        if notify:
-            response_text = f"<@{self._requester_id}>\n{response_text}"
-        chunks = split_for_discord_safe(response_text)
+        mentions = discord.AllowedMentions.none()
         if notify:
             assert self._requester_id is not None
-            self._message_ref = await self._send_message(
-                content=chunks[0],
-                allowed_mentions=discord.AllowedMentions(
-                    users=[discord.Object(id=self._requester_id)],
-                    roles=False,
-                    everyone=False,
-                    replied_user=False,
-                ),
+            mentions = discord.AllowedMentions(
+                users=[discord.Object(id=self._requester_id)],
+                roles=False,
+                everyone=False,
+                replied_user=False,
             )
-        else:
-            await self._edit(
-                self._message_ref,
-                content=chunks[0],
-                embed=None,
-                view=None,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            response_text = f"<@{self._requester_id}>\n{response_text}"
+        original_response_text = response_text
+        response_text, table_files = await render_discord_tables(
+            response_text, enabled=self._render_tables
+        )
+        chunks = split_for_discord_safe(response_text)
+
+        async def deliver_first(content: str, files: list[discord.File]) -> None:
+            if notify:
+                self._message_ref = await self._send_message(
+                    content=content,
+                    allowed_mentions=mentions,
+                    **({"files": files} if files else {}),
+                )
+            else:
+                await self._edit(
+                    self._message_ref,
+                    content=content,
+                    embed=None,
+                    view=None,
+                    allowed_mentions=mentions,
+                    **({"attachments": files} if files else {}),
+                )
+
+        try:
+            await deliver_first(chunks[0], table_files)
+        except discord.HTTPException as exc:
+            if not table_files:
+                raise
+            log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
+            chunks = split_for_discord_safe(original_response_text)
+            await deliver_first(chunks[0], [])
         self._revealed_first_chunk = chunks[0]
         # Overflow: subsequent chunks posted as new messages
         for chunk in chunks[1:]:

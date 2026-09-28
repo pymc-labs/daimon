@@ -518,6 +518,8 @@ async def run_wizard_submit_turn(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
+                render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
+                is True,
                 send=_send_embed,
                 edit=_edit_message,
                 agent_name=agent.name,
@@ -548,6 +550,8 @@ async def run_wizard_submit_turn(
 
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
+                render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
+                is True,
                 send=_send_embed,
                 edit=_edit_message,
                 agent_name=agent.name,

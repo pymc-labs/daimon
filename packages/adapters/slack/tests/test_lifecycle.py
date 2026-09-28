@@ -158,6 +158,7 @@ def _make_lifecycle(
     adopt_status_ts: str | None = None,
     notify_on_completion: bool = False,
     trigger_ts: str | None = None,
+    render_tables: bool = False,
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
 
@@ -179,6 +180,7 @@ def _make_lifecycle(
     lc = SlackTurnLifecycle(
         notify_on_completion=notify_on_completion,
         trigger_ts=trigger_ts,
+        render_tables=render_tables,
         client=fake.client,
         channel="C_TEST",
         thread_ts="1700000000.000000",
@@ -1421,3 +1423,89 @@ async def test_reactions_target_trigger_not_thread_root(fake_slack_web_client, e
     assert any("name=eyes" in url and "reactions.add" in url for url in urls)
     assert any("name=white_check_mark" in url for url in urls) is enabled
     assert any("reactions.remove" in url for url in urls) is enabled
+
+
+@pytest.mark.parametrize("notify", [False, True])
+async def test_native_table_survives_late_continuity_notice(fake_slack_web_client, notify):
+    fake = fake_slack_web_client
+    lifecycle, _, _, _ = _make_lifecycle(fake, render_tables=True, notify_on_completion=notify)
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(
+        TurnState(
+            content=[
+                TextBlock(kind="text", text="| Name | Value |\n| --- | ---: |\n| Example | 42 |")
+            ]
+        )
+    )
+    original_blocks = (
+        fake.mock.requests[("POST", _POST_URL)][-1].kwargs["json"]["blocks"]
+        if notify
+        else _last_update_blocks(fake)
+    )
+    assert sum(block["type"] == "table" for block in original_blocks) == 1
+    assert lifecycle.final_ts is not None
+    assert await lifecycle.prepend_revealed_answer("Recovered files.")
+    blocks = _last_update_blocks(fake)
+    assert blocks[0]["type"] == "markdown"
+    table_blocks = [block for block in blocks if block["type"] == "table"]
+    assert len(table_blocks) == 1 and table_blocks[0]["rows"][1][1]["text"] == "42"
+
+
+@pytest.mark.parametrize("prefix", ["", "Before\n\n"])
+@pytest.mark.parametrize("notify", [False, True])
+async def test_rejected_native_table_retries_plain_chunks_without_duplicate_prose(
+    fake_slack_web_client, prefix, notify
+):
+    from aioresponses import CallbackResult
+    from structlog.testing import capture_logs
+
+    fake = fake_slack_web_client
+    lifecycle, _, _, deregistered = _make_lifecycle(
+        fake, render_tables=True, notify_on_completion=notify
+    )
+    await lifecycle.post_initial()
+    _reset_slack_responses(fake)
+    delivered = []
+    rejected = []
+
+    def respond(url, **kwargs):
+        body = kwargs["json"]
+        if any(block.get("type") == "table" for block in body["blocks"]):
+            rejected.append(body)
+            return CallbackResult(payload={"ok": False, "error": "invalid_blocks"})
+        delivered.append(body)
+        return CallbackResult(
+            payload={"ok": True, "channel": "C_TEST", "ts": f"1700000000.00099{len(delivered)}"}
+        )
+
+    fake.mock.post(str(_UPDATE_URL), callback=respond, repeat=True)
+    fake.mock.post(str(_POST_URL), callback=respond, repeat=True)
+    table = "| " + " | ".join(f"C{i}" for i in range(20)) + " |\n"
+    table += "| " + " | ".join(["---"] * 20) + " |\n"
+    table += "\n".join("| " + " | ".join([f"{i:04}"] * 20) + " |" for i in range(99))
+    assert len(table) > 11800  # Cell data fits the budget; Markdown syntax needs splitting.
+    with capture_logs() as logs:
+        await lifecycle.on_terminal_success(
+            TurnState(content=[TextBlock(kind="text", text=prefix + table + "\n\nAfter <@U999>")])
+        )
+    markdown = [
+        block["text"]
+        for body in delivered
+        for block in body["blocks"]
+        if block.get("type") == "markdown"
+    ]
+    answer = "\n".join(markdown)
+    assert len(rejected) == 1
+    assert "| C0 | C1 |" in answer
+    assert all(answer.count(f"{i:04}") == 20 for i in range(99))
+    assert answer.count("Before") == (1 if prefix else 0)
+    assert answer.count("After") == 1
+    assert answer.count("<@U_AUTHOR>") == (1 if notify else 0)
+    assert ("<@U999>" not in answer) is notify
+    assert all(len(chunk) <= 11800 for chunk in markdown)
+    assert lifecycle.final_ts == f"1700000000.00099{len(delivered)}"
+    assert deregistered
+    assert (
+        sum(block.get("type") == "actions" for body in delivered for block in body["blocks"]) == 1
+    )
+    assert any(entry["event"] == "turn.table_delivery_failed" for entry in logs)
