@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Memory mounts are read-only for sealed-channel turns, routines, and DMs when
   the tenant policy requests it. Session reuse enforces policy changes before
   another turn runs, including wizard submissions in sealed threads.
+- Security audit writes run in bounded background tasks. Privacy deletion erases user identifiers, tenant deletion removes audit rows, and `daimon audit prune` applies configurable retention (90 days by default). Tool errors are distinguished from authorization denials.
+- Database deletion triggers erase audit identifiers even when older privacy workers delete accounts or tenants during a rolling upgrade.
+- The security audit covers the main JWT MCP application. Separate hub OAuth applications (`/discord/mcp`, `/slack/mcp`) and adapter setup panels are excluded in this version.
+- Authenticated main-JWT MCP calls and listings now append tenant-scoped security audit metadata, including shared operation-policy decisions. Operators can query and export it with `daimon audit list`; database guards prevent ordinary updates, deletes and truncation.
 
 - Core selects chat, routine, relay and handoff prompt fragments per invocation.
   Agent specs can replace or extend each fragment; default chat is unchanged.

@@ -7,6 +7,7 @@ import importlib.metadata
 import rich.traceback
 import typer
 from daimon.adapters.cli.commands.agents import agents_app
+from daimon.adapters.cli.commands.audit import audit_app
 from daimon.adapters.cli.commands.backup import backup_app
 from daimon.adapters.cli.commands.config import config_app
 from daimon.adapters.cli.commands.defaults import defaults_app
@@ -30,6 +31,7 @@ app.add_typer(backup_app, name="backup")
 app.add_typer(environments_app, name="environments")
 app.add_typer(tenants_app, name="tenants")
 app.add_typer(usage_app, name="usage")
+app.add_typer(audit_app, name="audit")
 app.add_typer(sessions_app, name="sessions")
 app.add_typer(config_app, name="config")
 app.add_typer(defaults_app, name="defaults")

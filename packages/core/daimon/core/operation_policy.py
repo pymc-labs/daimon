@@ -42,6 +42,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from daimon.core.security_audit import record_policy_decision
 from pydantic import BaseModel
 
 OperationKind = Literal[
@@ -82,7 +83,7 @@ class TargetFacts(BaseModel):
     is_reachable_in_tenant: bool
 
 
-def decide_operation(
+def _decide_operation(
     operation: OperationKind, *, is_admin: bool, target: TargetFacts
 ) -> PolicyOutcome:
     """Return the policy outcome for `operation` against `target`.
@@ -111,6 +112,15 @@ def decide_operation(
     if target.is_reachable_in_tenant:
         return "needs_admin"
     return "allow"
+
+
+def decide_operation(
+    operation: OperationKind, *, is_admin: bool, target: TargetFacts
+) -> PolicyOutcome:
+    """Evaluate the policy and annotate the active security-audit request, if any."""
+    outcome = _decide_operation(operation, is_admin=is_admin, target=target)
+    record_policy_decision(operation, outcome)
+    return outcome
 
 
 def needs_reachability_read(

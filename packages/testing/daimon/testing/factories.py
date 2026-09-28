@@ -25,6 +25,7 @@ from daimon.core._models import (
     CliPrincipal,
     PlatformPrincipal,
     PrincipalLink,
+    SecurityAuditEvent,
     Tenant,
     TenantLedger,
     UsageEvent,
@@ -67,6 +68,7 @@ from daimon.core.stores.domain import (
     UsageEventRow,
     WizardSessionRow,
 )
+from daimon.core.stores.security_audit import SecurityAuditRow
 from daimon.core.stores.tenant_ledger import insert_entry
 from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec
 from daimon.core.wizard.state import new_short_id
@@ -536,3 +538,26 @@ async def make_wizard_session(
         expires_at=expires_at,
         now=now,
     )
+
+
+async def make_security_audit_event(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID | None = None,
+    occurred_at: datetime | None = None,
+) -> SecurityAuditRow:
+    """Seed metadata at a chosen time for audit retention and privacy tests."""
+    event = SecurityAuditEvent(
+        tenant_id=tenant_id,
+        account_id=account_id,
+        platform="slack",
+        platform_user_id="U123",
+        tool_name="read",
+        outcome="allowed",
+        reason="completed",
+        occurred_at=occurred_at or datetime.now(UTC),
+    )
+    session.add(event)
+    await session.flush()
+    return SecurityAuditRow.model_validate(event)

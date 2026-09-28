@@ -102,6 +102,7 @@ from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import routines as routines_store
+from daimon.core.stores import security_audit as security_audit_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
 from daimon.core.stores import support_escalation as support_escalation_store
@@ -421,6 +422,7 @@ async def purge_account(
     to — `principal_links` permits an account to span tenants.
     """
     async with sm() as session, session.begin():
+        await security_audit_store.erase_account_for_privacy(session, account_id=account_id)
         cli_list = await identity_store.list_cli_principals_for_account(
             session, account_id=account_id
         )
