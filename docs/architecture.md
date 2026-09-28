@@ -316,7 +316,8 @@ against.
   subprocess entry point that calls `run_turn` directly with `BillingExempt`.
 - **Wakes** run a turn in an existing thread later, with nobody mentioning the
   bot: a handoff's first turn for the new agent, work unblocked by a private
-  form, and anything queued through `daimon.core.continuity.wakes`. A wake is
+  form, a one-shot timer (`daimon.core.continuity.timers`, the `create_timer`
+  tool), and anything else queued through `daimon.core.continuity.wakes`. A wake is
   a `task_continuations` row. The Discord and Slack adapters each run a wake
   poller (`run_wake_poller`) that opens threads with due rows and hands them
   to the adapter's continuation dispatch. That dispatch takes the thread's

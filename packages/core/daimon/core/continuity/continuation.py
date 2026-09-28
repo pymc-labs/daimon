@@ -32,7 +32,7 @@ from datetime import datetime
 from typing import Final, Literal
 
 from anthropic import AsyncAnthropic
-from daimon.core.continuity.messages import render_current_work_must_finish
+from daimon.core.continuity.messages import render_current_work_must_finish, render_timer_seed
 from daimon.core.errors import DaimonError
 from daimon.core.setup_conversations import get_setup_agent
 from daimon.core.stores.domain import ContinuationReason, CredentialRequestRow
@@ -261,6 +261,7 @@ async def decide_continuation(
        substitute a namesake; say the target changed and stop.
     3. The person has spoken again since. Their newer message supersedes the
        queued work; running it would answer a stale request out of order.
+       Not for a timer, which is meant to fire whatever was said since.
     4. A turn is already running in this thread. The continuation waits for it
        rather than racing it, and the person is told so.
 
@@ -294,7 +295,13 @@ async def decide_continuation(
             action="skip_target_changed", message=_render_target_changed(request.target_name)
         )
 
-    if latest_user_message_at is not None and latest_user_message_at > row.created_at:
+    # A timer is the agent's own appointment: the person talking in the
+    # meantime is expected, not a newer request that replaces it.
+    if (
+        request.reason != "timer"
+        and latest_user_message_at is not None
+        and latest_user_message_at > row.created_at
+    ):
         return ContinuationDecision(action="skip_superseded")
 
     if active_turn:
@@ -305,4 +312,9 @@ async def decide_continuation(
             ),
         )
 
+    if request.reason == "timer":
+        return ContinuationDecision(
+            action="dispatch",
+            seed_user_message=render_timer_seed(request.requested_work, set_at=row.created_at),
+        )
     return ContinuationDecision(action="dispatch", seed_user_message=request.requested_work)

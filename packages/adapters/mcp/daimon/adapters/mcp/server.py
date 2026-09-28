@@ -62,6 +62,7 @@ from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_t
 from daimon.adapters.mcp.tools.thread_participation import (
     register_thread_participation_tools,
 )
+from daimon.adapters.mcp.tools.timers import register_timer_tools
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
@@ -296,6 +297,7 @@ def create_mcp_app(
     agent_chat.register_agent_chat_tools(mcp, runtime, billing_config=effective_billing_config)
     time.register_time_tools(mcp, runtime)
     routines.register_routines_tools(mcp, runtime)
+    register_timer_tools(mcp, runtime)  # one-shot timers on the wake queue
     register_cli_token_tool(mcp, runtime)
     if effective_settings.discord is not None or effective_settings.slack is not None:
         register_channel_tools(mcp, runtime)

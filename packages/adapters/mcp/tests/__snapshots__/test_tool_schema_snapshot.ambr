@@ -424,6 +424,21 @@
         'type': 'object',
       }),
     }),
+    'cancel_timer': dict({
+      'description': 'Cancel a pending timer by id (from `create_timer` or `list_timers`). A cancelled timer never fires.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'timer_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'timer_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'cancel_turn': dict({
       'description': '''
         Stop a running turn immediately.
@@ -1560,6 +1575,42 @@
         'type': 'object',
       }),
     }),
+    'create_timer': dict({
+      'description': '''
+        Come back to this conversation once, later: "remind me in two hours", "check back tomorrow at 9".
+        
+        At `fire_at` you get one new turn in this same thread, with its context
+        and your `note` as the message, as the person who asked. It fires once;
+        for anything that repeats ("every Monday"), use `create_routine`.
+        
+        `fire_at` needs an explicit offset; use the time tools to work it out
+        from the person's timezone. One minute to 90 days ahead. `note` is all
+        you get besides the thread, so name what to check and what to report.
+        Tell the person when it will fire and how to cancel it.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'fire_at': dict({
+            'description': 'ISO 8601 with a UTC offset, e.g. 2026-09-29T09:00:00+02:00.',
+            'type': 'string',
+          }),
+          'note': dict({
+            'description': 'What to do when it fires, written for yourself, with the details.',
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'fire_at',
+          'note',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'delete_notebook': dict({
       'description': '''
         Un-publish a notebook or blog you published (frees its host port).
@@ -2499,6 +2550,15 @@
         'required': list([
           'channel_id',
         ]),
+        'type': 'object',
+      }),
+    }),
+    'list_timers': dict({
+      'description': "List the caller's pending timers in this workspace, soonest first.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
         'type': 'object',
       }),
     }),

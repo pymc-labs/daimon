@@ -17,6 +17,7 @@ Lines are joined with ``"\\n"`` and never end in a trailing newline.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Final, Literal
 
 from daimon.core.env_file import EnvProblem, EnvRejection
@@ -38,6 +39,7 @@ __all__ = [
     "render_preparation_failed",
     "render_replacement_summary",
     "render_responder_changed_without_handoff",
+    "render_timer_seed",
     "render_unexpected_loss",
     "render_unsaved_work_question",
 ]
@@ -529,3 +531,12 @@ def render_replacement_summary(transfer_kind: TransferKind, lost: Sequence[str])
     if lost:
         lines.append("Not carried: " + ", ".join(lost) + ".")
     return "\n".join(lines)
+
+
+def render_timer_seed(note: str, *, set_at: datetime) -> str:
+    """The user message a fired timer's turn runs with. Model-facing, not person-facing."""
+    return (
+        f"[timer] You set this timer in this conversation at "
+        f"{set_at.astimezone(UTC):%Y-%m-%d %H:%M} UTC and it has fired. Nobody posted "
+        f"a new message; act on your note and reply here.\n\n{note}"
+    )

@@ -558,7 +558,11 @@ async def test_dispatch_skipped_while_processing_runs_when_the_thread_is_release
 
 
 async def _seed_due_wake(
-    db_session_factory: async_sessionmaker[AsyncSession], *, workspace_id: str, funded: bool
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_id: str,
+    funded: bool,
+    reason: ContinuationReason = "task_handoff",
 ) -> tuple[uuid.UUID, uuid.UUID]:
     """Seed one wake already due in `_THREAD_ID`; return (tenant_id, key)."""
     async with db_session_factory() as session, session.begin():
@@ -582,7 +586,7 @@ async def _seed_due_wake(
         target_ma_agent_id="ag_target",
         target_name="target-agent",
         requested_work="check the build again",
-        reason="task_handoff",
+        reason=reason,
         idempotency_key=uuid.uuid4(),
     )
     await enqueue_wake(
@@ -690,6 +694,57 @@ async def test_the_wake_poller_opens_the_thread_and_runs_the_wake_once(
     run_turn.assert_awaited_once()
     assert run_turn.await_args is not None
     assert run_turn.await_args.kwargs["user_message"].endswith("check the build again")
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None and row.status == "delivered" and row.attempts == 1
+
+
+async def test_a_fired_timer_resumes_the_thread_with_its_note(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A timer's turn runs in its thread with the note, framed as a timer, once."""
+    tenant_id, key = await _seed_due_wake(
+        db_session_factory, workspace_id="710000010", funded=True, reason="timer"
+    )
+    bot, thread = _wake_bot(db_session_factory, tenant_id)
+    bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+
+    p_config, p_agent, p_env, p_bind, p_run = _admission_patches()
+    with (
+        p_config as resolve_config,
+        p_agent as resolve_agent,
+        p_env as resolve_env,
+        p_bind as bind,
+        p_run as run_turn,
+    ):
+        resolve_config.return_value = ResolvedConfig(
+            agent_name="test-agent",
+            agent_name_tier="tenant",
+            environment_name="test-env",
+            environment_name_tier="tenant",
+        )
+        resolve_agent.return_value = "ag_target"
+        resolve_env.return_value = "env_test"
+        bind.return_value = _make_prepared_turn(account_id=uuid.uuid4())
+        run_turn.return_value = RunOutcome(
+            state=TurnState(), ma_session_id="sess_test", mapping_id=None, recovered=False
+        )
+        for _ in range(2):
+            await poll_wakes_once(
+                db_session_factory,
+                platform="discord",
+                open_thread=bot._open_wake_thread,  # pyright: ignore[reportPrivateUsage]
+                now=datetime.now(UTC),
+            )
+            for task in list(bot._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+                await task
+
+    run_turn.assert_awaited_once()
+    assert run_turn.await_args is not None
+    user_message = run_turn.await_args.kwargs["user_message"]
+    assert "[timer] You set this timer" in user_message
+    assert user_message.endswith("check the build again")
+    assert '"handoff"' not in user_message, "a timer is the same agent, not a handoff"
     async with db_session_factory() as session:
         row = await get_continuation(session, idempotency_key=key)
     assert row is not None and row.status == "delivered" and row.attempts == 1

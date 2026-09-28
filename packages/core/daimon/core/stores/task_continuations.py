@@ -520,3 +520,25 @@ async def abandon_interrupted_wake_rows(
         settled.extend(TaskContinuationRow.model_validate(row) for row in rows)
     await session.flush()
     return settled
+
+
+async def list_pending_timer_rows(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    requester_account_id: _uuid.UUID,
+) -> list[TaskContinuationRow]:
+    """One person's timers that have not been claimed, settled or cancelled, soonest first."""
+    rows = (
+        await session.execute(
+            select(TaskContinuation)
+            .where(
+                TaskContinuation.tenant_id == tenant_id,
+                TaskContinuation.requester_account_id == requester_account_id,
+                TaskContinuation.reason == "timer",
+                TaskContinuation.status == "pending",
+            )
+            .order_by(TaskContinuation.available_at, TaskContinuation.id)
+        )
+    ).scalars()
+    return [TaskContinuationRow.model_validate(row) for row in rows]
