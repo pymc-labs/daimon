@@ -87,6 +87,7 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
@@ -410,6 +411,13 @@ class TeamsApp:
         cap = self._teams.max_concurrent_turns_per_tenant
         count = self._inflight.get(tenant_id, 0)
         if not should_admit_turn(current_in_flight=count, cap=cap):
+            record_refusal(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="teams",
+                channel_id=inbound.channel_id,
+                thread_id=inbound.thread_id,
+            )
             log.info(
                 "turn.skipped.concurrency_shed", tenant_id=str(tenant_id), in_flight=count, cap=cap
             )
@@ -462,6 +470,28 @@ class TeamsApp:
         handoff: HandoffFactory | None = None,
         reraise: bool = False,
         continuation: TaskContinuationRow | None = None,
+    ) -> None:
+        """The turn inside one outcome observation, so a failure before bind still records."""
+        with observe_turn(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="teams",
+            channel_id=inbound.channel_id,
+            thread_id=inbound.thread_id,
+            origin="chat" if continuation is None else "handoff",
+        ):
+            await self._run_turn_observed(
+                inbound, tenant_id, handoff=handoff, reraise=reraise, continuation=continuation
+            )
+
+    async def _run_turn_observed(
+        self,
+        inbound: TeamsInbound,
+        tenant_id: uuid.UUID,
+        *,
+        handoff: HandoffFactory | None,
+        reraise: bool,
+        continuation: TaskContinuationRow | None,
     ) -> None:
         """Turn body: admit → card → bind → marker → run → watermark. Mirrors Slack's.
 

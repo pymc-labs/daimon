@@ -18,9 +18,12 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+from daimon.core.stores.turn_outcomes import OutcomeRecord, list_for_tenant
 from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
+from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.state import TextBlock, TurnState
+from daimon.core.turn.termination import TerminationReason
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -127,6 +130,13 @@ async def test_a_failing_command_is_answered(
     assert [a.text for a in sender.activities] == [app_module._FAILED]
 
 
+async def _outcomes(db_factory: async_sessionmaker[AsyncSession]) -> list[OutcomeRecord]:
+    await drain_outcomes()
+    async with db_factory() as session:
+        return await list_for_tenant(session, TENANT)
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
 async def test_the_tenant_cap_sheds_a_new_thread(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -145,6 +155,25 @@ async def test_the_tenant_cap_sheds_a_new_thread(
         await first
 
     assert [(c, a.text) for c, a, _ in sender.sent] == [("a:conversation-2", app_module._SHED)]
+    [shed] = await _outcomes(db_session_factory)
+    assert (shed.reason, shed.thread_id) == (
+        TerminationReason.ADMISSION_CONCURRENCY_SHED,
+        "a:conversation-2",
+    ), "a shed turn leaves an outcome row"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_card_post_failure_after_admission_still_finishes_the_outcome(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender(fail_on={0})
+    teams = _app(db_session_factory, sender)
+    with patched_admission():
+        await teams._run_turn_guarded(make_inbound(), TENANT)
+    [outcome] = await _outcomes(db_session_factory)
+    assert (outcome.platform, outcome.error_class) == ("teams", "ConnectError"), (
+        "the failure before bind is recorded, not left unfinished"
+    )
 
 
 def _click(key: str, clicker: str) -> Any:

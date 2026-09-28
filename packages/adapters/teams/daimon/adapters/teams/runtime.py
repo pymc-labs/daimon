@@ -18,6 +18,7 @@ from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -119,4 +120,5 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
                 mcp_token_probe=probe_bearer_token,
             )
         finally:
+            await drain_outcomes()
             await engine.dispose()
