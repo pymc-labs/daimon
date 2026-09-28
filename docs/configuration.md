@@ -52,7 +52,7 @@ section below is a nested block on this model, reached with the `__` delimiter.
 
 `HttpUrl` · optional · default `https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md`
 
-URL rendered on the Discord and Slack privacy panels' Policy button. Override via
+URL rendered on the privacy panels' Policy button. Override via
 DAIMON_PRIVACY_POLICY_URL if you host your own policy page.
 
 ### `DAIMON_DEFAULTS_ROOT`
