@@ -38,6 +38,7 @@ def _make_lifecycle(
     agent_name: str = "test-agent",
     cancel_view: discord.ui.View | None = None,
     model_id: str = "claude-sonnet-4-6",
+    notify_on_completion: bool = False,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
     """Create lifecycle with recorder callables.
 
@@ -57,6 +58,8 @@ def _make_lifecycle(
 
     lc = DiscordTurnLifecycle(
         send=fake_send,
+        notify_on_completion=notify_on_completion,
+        requester_id=123,
         edit=fake_edit,
         agent_name=agent_name,
         model_id=model_id,
@@ -1173,3 +1176,49 @@ class TestDegradedTurnNotice:
 
         notices = [s for s in sends if "`notion`" in str(s.get("content", ""))]
         assert len(notices) == 1, "the dropped server is named once, on its own line"
+
+
+async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
+    lifecycle, sends, edits = _make_lifecycle(notify_on_completion=True)
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(_make_success_state("Done <@456> @everyone"))
+    assert len(sends) == 2
+    assert sends[-1]["content"] == "<@123>\nDone <@456> @everyone"
+    mentions = sends[-1]["allowed_mentions"].to_dict()
+    assert mentions["users"] == [123]
+    assert "everyone" not in mentions["parse"]
+    assert "roles" not in mentions["parse"]
+    assert not any(e.get("content") == sends[-1]["content"] for _, e in edits)
+    assert await lifecycle.prepend_revealed_answer("Recovered files.")
+    assert edits[-1][1]["content"].startswith("Recovered files.")
+
+
+async def test_reactions_replace_accepted_after_success():
+    calls = []
+
+    class Trigger:
+        guild = types.SimpleNamespace(me=object())
+
+        async def add_reaction(self, emoji):
+            calls.append(("add", emoji))
+
+        async def remove_reaction(self, emoji, user):
+            calls.append(("remove", emoji))
+
+    async def send(**kwargs):
+        return _SENTINEL_REF
+
+    async def edit(ref, **kwargs):
+        pass
+
+    lifecycle = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        agent_name="test",
+        model_id="claude-sonnet-4-6",
+        trigger_message=Trigger(),
+    )
+    await lifecycle.on_acknowledgment("accepted")
+    await lifecycle.on_terminal_success(_make_success_state())
+    await lifecycle.on_acknowledgment("done")
+    assert calls == [("add", "👀"), ("add", "✅"), ("remove", "👀")]

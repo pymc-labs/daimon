@@ -1490,6 +1490,8 @@ class SlackApp:
             thread_ts=thread_id,
             cancel=cancel_event,
             author_id=str(event.get("user") or ""),
+            notify_on_completion=self.runtime.settings.completion_pings.get(str(tenant_id), False),
+            trigger_ts=str(event.get("ts") or "") or None,
             agent_name=_lc_agent_name,
             model_id=_lc_model_id,
             register=self._register_cancel,
@@ -1908,6 +1910,10 @@ class SlackApp:
                     thread_ts=thread_id,
                     cancel=cancel,
                     author_id=str(event.get("user") or ""),
+                    notify_on_completion=self.runtime.settings.completion_pings.get(
+                        str(tenant_id), False
+                    ),
+                    trigger_ts=str(event.get("ts") or "") or None,
                     agent_name=_lc_agent_name,
                     model_id=_lc_model_id,
                     register=self._register_cancel,
@@ -2229,6 +2235,7 @@ class SlackApp:
             thread_ts=thread_id,
             cancel=follow_cancel,
             author_id=row.requester_external_user_id,
+            notify_on_completion=self.runtime.settings.completion_pings.get(str(tenant_id), False),
             agent_name=follow_admission.agent.name,
             model_id=follow_admission.agent.model.id,
             register=self._register_cancel,
@@ -2318,6 +2325,9 @@ class SlackApp:
                 thread_ts=thread_id,
                 cancel=cancel,
                 author_id=row.requester_external_user_id,
+                notify_on_completion=self.runtime.settings.completion_pings.get(
+                    str(tenant_id), False
+                ),
                 agent_name=follow_admission.agent.name,
                 model_id=follow_admission.agent.model.id,
                 register=self._register_cancel,

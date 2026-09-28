@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   isolated restore drill; workspace-wide Managed Agents object export and a
   state-by-state disaster recovery contract in the self-hosting guide.
 
+- Discord and Slack show accepted/done reactions for requested turns. Tenants can
+  opt into a fresh final reply that pings only the requester with `completion_pings`.
+
 - Added durable initial-card intent rows and bounded Discord and Slack history
   lookup. Both adapters now commit an intent before posting, record the
   returned message ID, and reconcile unresolved cards after a restart. A

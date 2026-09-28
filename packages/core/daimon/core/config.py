@@ -817,6 +817,15 @@ class ArtifactsSettings(BaseModel):
 
 
 class Settings(BaseSettings):
+    completion_pings: dict[str, bool] = Field(
+        default_factory=dict[str, bool],
+        description=(
+            "Per-tenant completion notification policy, keyed by tenant UUID. "
+            "True posts the final answer as a fresh reply mentioning only the requester "
+            "on Discord and Slack. Missing/false preserves in-place delivery. "
+            "Configure DAIMON_COMPLETION_PINGS as a JSON object."
+        ),
+    )
     database: DatabaseSettings
     anthropic: AnthropicSettings
     privacy_policy_url: HttpUrl = Field(

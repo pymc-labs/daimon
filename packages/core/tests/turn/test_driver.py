@@ -1021,3 +1021,32 @@ async def test_retrying_error_behind_a_partial_answer_fails_when_ma_says_retries
 
     assert final.error is not None and "overloaded" in final.error.message
     assert len(lc.terminal_failures) == 1, "retries ran out behind the partial text"
+
+
+async def test_driver_acknowledges_only_after_final_delivery():
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(make_agent_message(event_id="sevt_1", text="answer")),
+            YieldEvent(make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())),
+        ]
+    ]
+    phases = []
+
+    class SignalingLifecycle(RecordingLifecycle):
+        async def on_acknowledgment(self, phase):
+            if phase == "done":
+                assert len(self.terminal_success) == 1
+            else:
+                assert not self.terminal_success
+            phases.append(phase)
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=SignalingLifecycle(),
+        cancel=asyncio.Event(),
+        billing=_EXEMPT,
+    )
+    assert phases == ["accepted", "done"]

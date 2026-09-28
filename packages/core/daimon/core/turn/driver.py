@@ -67,7 +67,7 @@ from daimon.core.ma import replay_events, send_interrupt_and_wait, terminal_stop
 from daimon.core.turn.approvals import build_confirmation_events, pending_confirmation_ids
 from daimon.core.turn.ceiling import ceiling_error, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
-from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle
+from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge
 from daimon.core.turn.posture import (
     AutoApprove,
     Billed,
@@ -299,6 +299,7 @@ async def run_turn(
         log.info("turn.billing_exempt", session_id=session_id, reason=billing.reason)
 
     async def _send_initial() -> None:
+        await acknowledge(lifecycle, "accepted")
         content: list[BetaManagedAgentsImageBlockParam | BetaManagedAgentsTextBlockParam] = [
             *(image_blocks or []),
             BetaManagedAgentsTextBlockParam(type="text", text=user_message),
@@ -1135,6 +1136,12 @@ async def _finalize_success_or_error(
             renders_failed=renders_failed,
         )
         await lifecycle.on_terminal_success(final_state)
+        if (
+            final_state.content
+            and final_state.stop_reason is not None
+            and final_state.stop_reason.type == "end_turn"
+        ):
+            await acknowledge(lifecycle, "done")
     return final_state
 
 

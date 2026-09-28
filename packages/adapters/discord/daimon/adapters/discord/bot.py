@@ -1650,6 +1650,10 @@ class DaimonBot(commands.Bot):
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
+                requester_id=int(row.requester_external_user_id),
+                notify_on_completion=self.runtime.settings.completion_pings.get(
+                    str(tenant_id), False
+                ),
                 send=_send_embed,
                 edit=_edit_message,
                 delete=_delete_message,
@@ -1757,6 +1761,10 @@ class DaimonBot(commands.Bot):
 
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
+                requester_id=int(row.requester_external_user_id),
+                notify_on_completion=self.runtime.settings.completion_pings.get(
+                    str(tenant_id), False
+                ),
                 send=_send_embed,
                 edit=_edit_message,
                 delete=_delete_message,
@@ -2080,6 +2088,11 @@ class DaimonBot(commands.Bot):
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
+                requester_id=message.author.id,
+                notify_on_completion=self.runtime.settings.completion_pings.get(
+                    str(tenant_id), False
+                ),
+                trigger_message=message,
                 send=_send_embed,
                 edit=_edit_message,
                 delete=_delete_message,
@@ -2440,6 +2453,11 @@ class DaimonBot(commands.Bot):
 
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
+                requester_id=message.author.id,
+                notify_on_completion=self.runtime.settings.completion_pings.get(
+                    str(tenant_id), False
+                ),
+                trigger_message=message,
                 send=_send_embed,
                 edit=_edit_message,
                 delete=_delete_message,
