@@ -20,7 +20,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0028_feat003_wake_queue"
-down_revision: str | None = "0028_sys074_routine_catch_up"
+down_revision: str | None = "0029_sys047_access_policies"
 branch_labels: str | None = None
 depends_on: str | None = None
 
