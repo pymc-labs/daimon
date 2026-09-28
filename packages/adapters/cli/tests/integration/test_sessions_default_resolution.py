@@ -27,6 +27,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import ScopeContext
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.tenants import list_all_tenant_ids
+from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing import ma_environment
 from daimon.testing.ma import (
     EMPTY_SESSION_STATS,
@@ -82,6 +83,7 @@ def _build_settings(defaults_root: Path) -> Settings:
         public_url = None
 
     class _Settings:
+        tool_safety = ToolSafetyPolicy()
         cli = _Cli()
         mcp = _Mcp()
         github = GithubSettings()

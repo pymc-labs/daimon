@@ -21,6 +21,7 @@ from daimon.core.billing import BillingConfig
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -49,3 +50,4 @@ class TurnDeps:
     github_app_id: str | None
     github_app_private_key: str | None
     public_url: str | None
+    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY

@@ -27,6 +27,7 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing import ma_environment
 from daimon.testing.ma import (
     EMPTY_SESSION_STATS,
@@ -51,6 +52,7 @@ class _FakeMcp:
 
 
 class _FakeSettings:
+    tool_safety = ToolSafetyPolicy()
     cli = _FakeCli()
     mcp = _FakeMcp()
     github = GithubSettings()
@@ -329,6 +331,7 @@ class _ConfiguredMcp:
 
 
 class _ConfiguredSettings:
+    tool_safety = ToolSafetyPolicy()
     cli = _FakeCli()
     mcp = _ConfiguredMcp()
     github = GithubSettings()

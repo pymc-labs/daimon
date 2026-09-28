@@ -315,6 +315,7 @@ async def _build_fire(
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
+            tool_safety=settings.tool_safety,
         )
 
         async with sm() as s, s.begin():

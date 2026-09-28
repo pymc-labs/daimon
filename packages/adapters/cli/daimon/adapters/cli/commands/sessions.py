@@ -103,6 +103,7 @@ async def sessions_create(
             if rt.settings.github.app_private_key is not None
             else None
         ),
+        tool_safety=rt.settings.tool_safety,
     )
 
     if as_json:

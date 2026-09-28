@@ -41,6 +41,7 @@ from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
 )
 from daimon.core.defaults.mcp_merge import (
+    DAIMON_MCP_SERVER_NAME,
     get_reserved_mcp_rejection,
     merge_default_mcp_server,
     merge_default_mcp_toolset,
@@ -502,6 +503,35 @@ async def _create_agent_impl(
     return await _with_answering_note(runtime, auth, info)
 
 
+def _reject_reserved_servers(
+    runtime: McpRuntime, mcp_servers: list[BetaManagedAgentsURLMCPServerParams]
+) -> None:
+    """The same reserved-name guard `attach_mcp_server` applies, for `update_agent`.
+
+    Its merge replaces servers by name, so without this a caller could re-point
+    `daimon-mcp` at any URL. Re-sending the canonical entry unchanged (a
+    get_agent round trip) is allowed; anything else under the reserved name,
+    or the deployment's own URL under another name, is refused.
+    """
+    public_url = (
+        str(runtime.settings.mcp.public_url)
+        if runtime.settings.mcp.public_url is not None
+        else None
+    )
+    for server in mcp_servers:
+        name = str(server.get("name") or "")
+        url = str(server.get("url") or "")
+        if (
+            name == DAIMON_MCP_SERVER_NAME
+            and public_url is not None
+            and url.rstrip("/") == public_url.rstrip("/")
+        ):
+            continue
+        rejection = get_reserved_mcp_rejection(server_name=name, url=url, public_url=public_url)
+        if rejection is not None:
+            raise ToolError(f"update_agent: {rejection} Nothing was saved.")
+
+
 async def _update_agent_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -521,6 +551,8 @@ async def _update_agent_impl(
     list_fields = (tools, mcp_servers, skills)
     if all(v is None for v in scalars.values()) and all(v is None for v in list_fields):
         raise ToolError("update_agent: at least one field is required")
+    if mcp_servers is not None:
+        _reject_reserved_servers(runtime, mcp_servers)
     agent = await resolve_setup_agent(
         runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id
     )
