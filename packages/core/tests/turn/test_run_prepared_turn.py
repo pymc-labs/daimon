@@ -1735,6 +1735,9 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
     assert outcome.recovered is True
     assert outcome.state.error is not None
     assert outcome.state.error.kind == "interrupted", "the mirror must have forwarded the cancel"
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
     assert _leaked_turn_task_names() == [], (
         "no turn.cancel_mirror task may linger after the call returns"
     )
@@ -1794,6 +1797,9 @@ async def test_recovery_happy_path_unaffected_by_the_cancel_mirror_and_leaks_no_
     assert outcome.ma_session_id != "sess_old"
     assert outcome.state.error is None
     assert len(session_bodies) == 1
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
     assert _leaked_turn_task_names() == [], (
         "no turn.cancel_mirror task may linger after a clean recovery"
     )

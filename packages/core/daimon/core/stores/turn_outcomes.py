@@ -57,4 +57,11 @@ async def list_for_tenant(
             .limit(limit)
         )
     ).mappings()
-    return [OutcomeRecord(**dict(row)) for row in rows]
+    from daimon.core.turn.termination import TerminationReason
+
+    result: list[OutcomeRecord] = []
+    for row in rows:
+        values = dict(row)
+        values["reason"] = TerminationReason(row["reason"])
+        result.append(OutcomeRecord(**values))
+    return result

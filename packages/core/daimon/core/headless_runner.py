@@ -308,6 +308,9 @@ async def run_turn_impl(
         )
         raise ceiling_error() from err
 
+    if (observation := current_outcome.get()) is not None:
+        observation.session_id = session.id
+
     usage_record: Callable[..., Awaitable[None]] | None = None
     if usage_record_factory is not None:
         usage_record = usage_record_factory(session.id, session.agent.model.id)
