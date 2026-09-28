@@ -13,6 +13,7 @@ from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import fresh_start
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.continuity.continuation import (
     ContinuationRequest,
     ResponderChanged,
@@ -21,6 +22,7 @@ from daimon.core.continuity.continuation import (
 from daimon.core.continuity.wakes import WakeThread, enqueue_wake, poll_wakes_once
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_agent_bindings import create_binding
@@ -34,9 +36,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CHANNEL_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
     SERVICE_URL,
+    THREAD_ID,
     FakeSender,
     bot_token,
     build_teams_runtime,
@@ -75,7 +79,10 @@ async def _app(
 
 
 async def _hand_off(
-    db: async_sessionmaker[AsyncSession], account_id: uuid.UUID, thread_id: str = CONVERSATION_ID
+    db: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    thread_id: str = CONVERSATION_ID,
+    parent: str = CONVERSATION_ID,
 ) -> uuid.UUID:
     """What hand_off_task records mid-turn."""
     key = uuid.uuid4()
@@ -84,7 +91,7 @@ async def _hand_off(
         ContinuationRequest(
             tenant_id=TENANT,
             platform="teams",
-            parent_channel_id=CONVERSATION_ID,
+            parent_channel_id=parent,
             thread_id=thread_id,
             requester_account_id=account_id,
             requester_external_user_id=AAD_OBJECT_ID,
@@ -315,6 +322,28 @@ async def test_a_timer_whose_chat_changed_responder_says_so_and_never_runs(
     notice = ResponderChanged(target_name="stats-bot", current_name="daimon").message
     assert [a.text for a in sender.activities] == [notice], "the notice, and no status card"
     assert await _status(db_session_factory, key) == ("skipped", "skip_target_changed")
+
+
+async def test_a_continuation_in_a_protected_channel_settles_without_a_word(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """SYS-048: admission refuses it as channel_protected; nothing is posted and
+    the row still settles."""
+    sender = FakeSender()
+    teams, account_id = await _app(db_session_factory, sender)
+    policy = TenantAccessPolicy(protected_channel_ids=(CHANNEL_ID,))
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+    key = await _hand_off(db_session_factory, account_id, THREAD_ID, parent=CHANNEL_ID)
+
+    with patched_admission():
+        await teams.dispatch_after_input(TENANT, THREAD_ID, SERVICE_URL)
+
+    assert sender.sent == [], "a protected channel hears nothing, not even the refusal"
+    assert await _status(db_session_factory, key) == (
+        "skipped",
+        "admission_denied:channel_protected",
+    )
 
 
 async def test_start_runs_the_teams_wake_poller_until_drain(

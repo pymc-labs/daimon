@@ -16,12 +16,18 @@ from daimon.adapters.teams.commands import fresh_start, parse_command
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.identity import DENIED
 from daimon.core._models import ThreadSession
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.access_policy import set_access_policy
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CHANNEL_ID,
     CONVERSATION_ID,
+    ENTRA_TENANT_ID,
     THREAD_ID,
     TeamsApiFake,
     build_teams_runtime,
@@ -34,6 +40,8 @@ from .conftest import (
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token")
+
+TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 
 
 @asynccontextmanager
@@ -167,3 +175,53 @@ async def test_prose_that_starts_with_a_command_word_runs_a_turn(
         await post_activity(service, make_message_activity(text="new idea: fit a GLM"))
         await service.turns.drain(timeout=30)
     assert len(turns) == 1 and "new idea: fit a GLM" in turns[0]["user_message"]
+
+
+async def _protect(db_factory: async_sessionmaker[AsyncSession], channel_id: str) -> None:
+    policy = TenantAccessPolicy(protected_channel_ids=(channel_id,))
+    async with db_factory.begin() as session:
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+@pytest.mark.parametrize("state", ["protected", "unknown"])
+@pytest.mark.parametrize(
+    "payload",
+    [make_channel_activity(), make_channel_activity(text="new"), make_channel_activity(text="")],
+    ids=["mention", "channel-command", "empty-mention"],
+)
+async def test_a_protected_channel_hears_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    payload: dict[str, object],
+) -> None:
+    """SYS-048: a reply, the 1:1-chat pointer and a refusal are all agent posts.
+    A thread under a protected channel, or one whose protection can't be read,
+    gets none of them, and no turn runs."""
+    if state == "protected":
+        await _protect(db_session_factory, CHANNEL_ID)
+    else:
+
+        async def _policy_read_fails(*_args: object, **_kwargs: object) -> object:
+            raise OperationalError("SELECT", {}, Exception("pool gone"))
+
+        monkeypatch.setattr("daimon.core.turn.protection.load_access_policy", _policy_read_fails)
+    async with _running(db_session_factory, teams_api_fake) as (service, turns):
+        await post_activity(service, payload)
+        await service.turns.drain(timeout=30)
+    assert turns == [], "no turn runs"
+    assert teams_api_fake.activity_requests == [], f"{state} channel must receive nothing"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_channel_outside_the_policy_still_gets_its_turn(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    await _protect(db_session_factory, "19:other@thread.tacv2")
+    async with _running(db_session_factory, teams_api_fake) as (service, turns):
+        await post_activity(service, make_channel_activity())
+        await service.turns.drain(timeout=30)
+    assert len(turns) == 1, "an unprotected channel runs its turn"
+    assert teams_api_fake.activity_requests, "and gets its card and answer"

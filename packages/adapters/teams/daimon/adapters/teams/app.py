@@ -62,6 +62,7 @@ from daimon.core.continuity.messages import (
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.stores.domain import Role, TaskContinuationRow
@@ -90,6 +91,7 @@ from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
+from daimon.core.turn.protection import protection_state
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_origin import (
@@ -133,10 +135,12 @@ _CANCELLING = "Cancelling…"
 # Everything a turn can raise that is not a bug in this adapter.
 _TURN_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
 _BIND_REFUSALS = (SessionPreparationFailed, SessionBusyError, SessionAgentMismatch)
-_DENIALS: dict[AdmissionDenialReason, tuple[str, str]] = {
+_DENIALS: dict[AdmissionDenialReason, tuple[str, str | None]] = {
     "balance_depleted": ("turn.skipped.over_balance", _BALANCE_DEPLETED),
     "cap_exceeded": ("turn.skipped.over_cap", _CAP_REACHED),
     "invoker_not_allowed": ("turn.skipped.invoker_not_allowed", _NOT_INVITED),
+    # A protected channel hears nothing, a refusal included.
+    "channel_protected": ("turn.skipped.channel_protected", None),
 }
 
 LifecycleFactory = Callable[[asyncio.Event, str | None], TeamsTurnLifecycle]
@@ -171,8 +175,8 @@ def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
 
 def _admission_refusal(
     err: MissingTurnConfigError | MAResolverMissError | AdmissionDenied, tenant_id: uuid.UUID
-) -> str:
-    """Log a refused admission; what to tell the person."""
+) -> str | None:
+    """Log a refused admission; what to tell the person, if anything."""
     if isinstance(err, MissingTurnConfigError):
         log.info("teams.missing_config", missing=list(err.missing))
         return f"No {' or '.join(err.missing)} configured here. Ask the operator to set one."
@@ -200,6 +204,11 @@ class TeamsApp:
             raise ValueError("TeamsApp requires Teams settings")
         self.runtime = runtime
         self._teams = teams
+        # The tenant `resolve_tenant` derives, known before any read: the
+        # access policy is read with it first thing (see `_may_post`).
+        self._tenant_id = derive_tenant_uuid(
+            platform="teams", workspace_id=canonical_uuid(teams.tenant_id) or teams.tenant_id
+        )
         self._sender = TimedSender(sender)
         self._commands = commands
         self._bot_token = bot_token
@@ -353,7 +362,10 @@ class TeamsApp:
             service_url=ctx.conversation_ref.service_url,
         )
         if isinstance(parsed, Refusal):
-            if parsed.text is not None:
+            conversation_id = activity.conversation.id
+            if parsed.text is not None and await self._may_post(
+                conversation_id.split(";", 1)[0], conversation_id
+            ):
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
                     await asyncio.wait_for(ctx.reply(parsed.text), SEND_TIMEOUT_S)
             return
@@ -366,8 +378,35 @@ class TeamsApp:
             service_url=inbound.service_url,
         )
 
+    async def _may_post(self, channel_id: str, thread_id: str) -> bool:
+        """The access policy's may-post decision; never raises.
+
+        Only an unprotected target may be posted to. A protected one, or one
+        whose protection can't be read, gets nothing, not even an error.
+        """
+        state = await protection_state(
+            self.runtime.sessionmaker,
+            tenant_id=self._tenant_id,
+            channel_id=channel_id,
+            thread_id=thread_id,
+        )
+        if not state.may_post:
+            log.info(
+                "turn.skipped.channel_protected",
+                channel_id=channel_id,
+                thread_id=thread_id,
+                state=state.value,
+            )
+        return state.may_post
+
     async def _handle(self, inbound: TeamsInbound) -> None:
-        """Error boundary around tenant lookup, routing, commands and the turn loop."""
+        """Error boundary around tenant lookup, routing, commands and the turn loop.
+
+        May-post is decided first, before any read that can fail: every post
+        below (denial, pointer, shed notice, errors) only happens after it.
+        """
+        if not await self._may_post(inbound.channel_id, inbound.thread_id):
+            return
         try:
             await self._route(inbound)
         except _TURN_ERRORS as exc:
@@ -499,7 +538,8 @@ class TeamsApp:
         """Turn body: admit → card → bind → marker → run → watermark. Mirrors Slack's.
 
         `reraise` (continuations) re-raises a refusal or failure after telling
-        the person, so the dispatcher can settle or re-queue the work.
+        the person (nothing, in a protected channel), so the dispatcher can
+        settle or re-queue the work.
         """
         deps = self.runtime.turn_deps
         try:
@@ -515,7 +555,8 @@ class TeamsApp:
                 is_dm=inbound.kind == "dm",
             )
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
-            await self._say(inbound, _admission_refusal(err, tenant_id))
+            if (refusal := _admission_refusal(err, tenant_id)) is not None:
+                await self._say(inbound, refusal)
             if reraise:
                 raise
             return
