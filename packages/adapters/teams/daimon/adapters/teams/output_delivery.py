@@ -64,7 +64,7 @@ _CHANNEL_SKIP = (
 
 
 class Spawn(Protocol):
-    """`TeamsApp._spawn`: runs a tracked background task the drain waits for."""
+    """`TeamsApp.spawn`: runs a tracked background task the drain waits for."""
 
     def __call__(self, coro: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]: ...
 

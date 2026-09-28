@@ -5,7 +5,6 @@ Only the outbound Bot Framework transport and MA are faked.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from contextlib import AbstractAsyncContextManager
@@ -134,9 +133,7 @@ async def test_a_confirmed_delete_purges_and_edits_the_card_in_place(
         response = await post_activity(
             service, _click("confirm_delete", account=account_id, confirm_name=NAME)
         )
-        async with asyncio.timeout(10):
-            while not [r for r in teams_api_fake.activity_requests if r.method == "PUT"]:
-                await asyncio.sleep(0.01)
+        await service.turns.drain(timeout=10)  # The purge is a tracked task.
 
     assert DELETING in json.dumps(response, ensure_ascii=False), "the click answers at once"
     [edit] = [r for r in teams_api_fake.activity_requests if r.method == "PUT"]

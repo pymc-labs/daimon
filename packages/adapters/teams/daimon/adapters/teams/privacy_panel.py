@@ -9,8 +9,6 @@ and edits the card when done, since deleting sessions can outlast an invoke.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import uuid
 
 import structlog
@@ -18,6 +16,7 @@ from daimon.adapters.teams.card_actions import (
     FAILED,
     PANEL_ERRORS,
     card_actor,
+    edit_origin_card,
     guarded,
     replace_card,
     text_card,
@@ -25,7 +24,7 @@ from daimon.adapters.teams.card_actions import (
 )
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED
-from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
+from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.privacy_card import (
     CONFIRM_INPUT,
     confirm_card,
@@ -39,11 +38,7 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.privacy import collect_purge_preview
 from daimon.core.purge import purge_account
 from daimon.core.stores.identity import find_platform_principal
-from microsoft_teams.api import (
-    AdaptiveCardInvokeActivity,
-    AdaptiveCardInvokeResponse,
-    MessageActivityInput,
-)
+from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import AdaptiveCard
 
@@ -57,9 +52,10 @@ DELETING = "⏳ Deleting… this may take a moment."
 class PrivacyPanel:
     """Handlers for the command and the panel buttons."""
 
-    def __init__(self, runtime: TeamsRuntime) -> None:
+    def __init__(self, runtime: TeamsRuntime, *, spawn: Spawn) -> None:
         self._runtime = runtime
-        self._purges: set[asyncio.Task[None]] = set()
+        # Tracked, so a shutdown waits for the purge to finish.
+        self._spawn = spawn
 
     async def command(self, context: CommandContext) -> None:
         bot = context.inbound.bot_name or "daimon"
@@ -114,9 +110,7 @@ class PrivacyPanel:
         if str(data.get("account")) != str(account_id):
             log.warning("teams.privacy.account_mismatch", account_id=str(account_id))
             return replace_card(text_card("🔒 Privacy", STALE))
-        purge = asyncio.create_task(self._purge(ctx, account_id, bot), name="teams.privacy.purge")
-        self._purges.add(purge)
-        purge.add_done_callback(self._purges.discard)
+        self._spawn(self._purge(ctx, account_id, bot), name="teams.privacy.purge")
         return replace_card(text_card("🔒 Privacy", DELETING))
 
     async def _purge(
@@ -140,6 +134,4 @@ class PrivacyPanel:
             log.error("teams.privacy.purge_failed", account_id=str(account_id), exc_info=exc)
             capture_exception_with_scope(exc)
             card = text_card("🔒 Privacy", FAILED)
-        edit = MessageActivityInput(id=ctx.activity.reply_to_id).add_card(card)
-        with contextlib.suppress(*TEAMS_SEND_ERRORS):
-            await ctx.send(edit)
+        await edit_origin_card(ctx, card)

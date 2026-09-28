@@ -188,11 +188,11 @@ class TeamsApp:
         self._sender = TimedSender(sender)
         self._commands = commands
         self._bot_token = bot_token
-        self.outputs = TeamsOutputDelivery(runtime=runtime, sender=self._sender, spawn=self._spawn)
+        self.outputs = TeamsOutputDelivery(runtime=runtime, sender=self._sender, spawn=self.spawn)
         self.credentials = TeamsCredentialRequests(
             runtime=runtime,
             sender=self._sender,
-            spawn=self._spawn,
+            spawn=self.spawn,
             dispatch=self.dispatch_after_input,
         )
         self._processing: set[str] = set()
@@ -216,7 +216,7 @@ class TeamsApp:
     def in_flight(self) -> int:
         return len(self._tasks)
 
-    def _spawn(self, coro: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+    def spawn(self, coro: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
         task = asyncio.create_task(coro, name=name)
         self._tasks.add(task)
         task.add_done_callback(self._task_done)
@@ -231,7 +231,7 @@ class TeamsApp:
         """Start the boot sweep (turns wait for it) and tenant provisioning."""
         if self._recovery is None:
             self._recovery = asyncio.create_task(self._recover(), name="teams.boot-sweep")
-            self._spawn(self._provision(), name="teams.provision")
+            self.spawn(self._provision(), name="teams.provision")
         return self._recovery
 
     async def _recover(self) -> None:
@@ -309,7 +309,7 @@ class TeamsApp:
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
                     await asyncio.wait_for(ctx.reply(parsed.text), SEND_TIMEOUT_S)
             return
-        self._spawn(self._handle(parsed), name="teams.turn")
+        self.spawn(self._handle(parsed), name="teams.turn")
 
     async def _say(self, inbound: TeamsInbound, text: str) -> None:
         await self._sender.send(
@@ -624,7 +624,7 @@ class TeamsApp:
             markers.add(outcome.mapping_id)
         if any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
             sweep = self.outputs.sweep(inbound, outcome.ma_session_id)
-            self._spawn(sweep, name="teams.output-sweep")
+            self.spawn(sweep, name="teams.output-sweep")
         final = holder[-1]
         if outcome.continuity.state == "replaced_after_loss":
             kind: Literal["transcript", "history"] = (
@@ -651,7 +651,7 @@ class TeamsApp:
             tenant_id, service_url = self._deferred_dispatch.pop(thread_id)
             if not self.draining:
                 resume = self.dispatch_after_input(tenant_id, thread_id, service_url)
-                self._spawn(resume, name="teams.resume")
+                self.spawn(resume, name="teams.resume")
 
     async def dispatch_after_input(
         self, tenant_id: uuid.UUID, thread_id: str, service_url: str | None

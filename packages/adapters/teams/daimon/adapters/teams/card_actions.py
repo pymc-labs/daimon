@@ -25,6 +25,7 @@ from microsoft_teams.api import (
     AdaptiveCardActionCardResponse,
     AdaptiveCardActionMessageResponse,
     AdaptiveCardAttachment,
+    AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
     CardTaskModuleTaskInfo,
     InvokeActivity,
@@ -108,7 +109,8 @@ async def guarded[T](
 
 
 async def edit_origin_card(
-    ctx: ActivityContext[TaskSubmitInvokeActivity], card: AdaptiveCard
+    ctx: ActivityContext[TaskSubmitInvokeActivity] | ActivityContext[AdaptiveCardInvokeActivity],
+    card: AdaptiveCard,
 ) -> None:
     """Best effort: show `card` in place of the one the dialog was opened from."""
     edit = MessageActivityInput(id=ctx.activity.reply_to_id).add_card(card)

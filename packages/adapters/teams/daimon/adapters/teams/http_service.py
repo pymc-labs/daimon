@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import jwt
 import structlog
@@ -181,7 +182,11 @@ def create_teams_http_service(
         return str(token) if token is not None else None
 
     routines = RoutinesPanel(runtime)
-    privacy = PrivacyPanel(runtime)
+
+    def spawn(coro: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+        return turns.spawn(coro, name=name)  # Built below; its drain waits for the task.
+
+    privacy = PrivacyPanel(runtime, spawn=spawn)
     billing = BillingPanel(runtime)
     setup = SetupPanel(runtime)
     commands: dict[str, CommandHandler] = {
