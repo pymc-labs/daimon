@@ -225,13 +225,18 @@ async def test_upload_url_off_sharepoint_is_refused_and_the_file_stays_listed(
 async def test_a_pending_offer_is_not_sent_twice(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A later turn's sweep sees the file still listed but does not offer it again."""
+    """A later sweep sees the file still listed, pending or uploading, and does not re-offer it."""
     harness = _harness(db_session_factory)
 
     await harness.delivery.sweep(make_inbound(), "sesn_1")
     await harness.delivery.sweep(make_inbound(), "sesn_1")
-
     assert len(harness.sender.activities) == 1 and harness.deletes == []
+
+    await harness.delivery.handle_consent(_consent("accept", _offer_token(harness.sender)))
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+    await harness.settle()
+    assert [_card(harness.sender, -1).content_type] == [FILE_INFO_CONTENT_TYPE]
+    assert len(harness.sender.activities) == 2, "no second consent card"
 
 
 async def test_channel_outputs_get_a_note_and_are_deleted(

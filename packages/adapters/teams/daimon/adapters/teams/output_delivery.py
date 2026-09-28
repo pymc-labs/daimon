@@ -120,6 +120,8 @@ class TeamsOutputDelivery:
         self._clock = clock
         self._sleep = sleep
         self._offers: dict[str, _Offer] = {}
+        # Files whose click is being handled: still listed, never offered again.
+        self._claimed: set[str] = set()
         self._sweeps: dict[str, asyncio.Task[Any]] = {}
 
     async def _say(self, conversation_id: str, service_url: str | None, text: str) -> None:
@@ -161,7 +163,8 @@ class TeamsOutputDelivery:
         """Send a consent card, then defer: the click decides the file's fate."""
         now = self._clock()
         self._offers = {k: v for k, v in self._offers.items() if v.expires_at > now}
-        if any(offer.file_id == file.file_id for offer in self._offers.values()):
+        pending = {offer.file_id for offer in self._offers.values()} | self._claimed
+        if file.file_id in pending:
             raise OutputDeliveryDeferred(file.file_id)  # Still waiting on the last card.
         token = secrets.token_urlsafe(24)
         name = display_filename_for(file.filename, file.mime_type)
@@ -203,11 +206,19 @@ class TeamsOutputDelivery:
             self._spawn(say, name="teams.file-consent")
             return
         del self._offers[token]
+        self._claimed.add(offer.file_id)
         upload = activity.value.upload_info
         if activity.value.action == "accept" and upload is not None:
-            self._spawn(self._upload(offer, upload), name="teams.file-consent")
+            work = self._upload(offer, upload)
         else:
-            self._spawn(self._decline(offer), name="teams.file-consent")
+            work = self._decline(offer)
+        self._spawn(self._unclaim_after(offer.file_id, work), name="teams.file-consent")
+
+    async def _unclaim_after(self, file_id: str, work: Awaitable[None]) -> None:
+        try:
+            await work
+        finally:
+            self._claimed.discard(file_id)
 
     async def _upload(self, offer: _Offer, info: FileUploadInfo) -> None:
         """PUT the bytes to the upload session, delete the output, show the file."""
