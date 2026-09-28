@@ -27,3 +27,19 @@ def next_slot_at_or_after(cron_expr: str, tz: str, after: datetime) -> datetime:
     if nxt_local.tzinfo is None:
         nxt_local = nxt_local.replace(tzinfo=ZoneInfo(tz))
     return nxt_local.astimezone(UTC)
+
+
+class InvalidScheduleError(ValueError):
+    """A timezone or cron expression a routine cannot be scheduled on."""
+
+
+def validated_next_slot(cron_expr: str, tz: str, after: datetime) -> datetime:
+    """`next_slot_at_or_after` for user input: a bad zone or cron raises `InvalidScheduleError`."""
+    try:
+        ZoneInfo(tz)
+    except (KeyError, ValueError) as error:  # ZoneInfoNotFoundError is a KeyError
+        raise InvalidScheduleError(f"unknown timezone: {tz!r}") from error
+    try:
+        return next_slot_at_or_after(cron_expr, tz, after)
+    except (KeyError, ValueError) as error:  # croniter raises both
+        raise InvalidScheduleError(f"invalid cron expression: {cron_expr!r}") from error
