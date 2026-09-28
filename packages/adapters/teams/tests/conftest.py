@@ -163,7 +163,7 @@ class TeamsApiFake:
                 body = {}
         self.requests.append(SentRequest(method=context.method, url=context.url, body=body))
         request = httpx.Request(context.method, context.url)
-        update = re.match(
+        update = re.search(
             r"/v3/conversations/[^/]+/activities/([^/]+)$", httpx.URL(context.url).path
         )
         if context.method == "PUT" and update:
