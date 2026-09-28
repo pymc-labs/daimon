@@ -51,10 +51,12 @@ import asyncio
 import dataclasses
 import time
 import types
-from typing import Any
+from typing import Any, NoReturn
 
 import aiohttp
+import daimon.adapters.slack.lifecycle as lifecycle_module
 import pytest
+import structlog
 import yarl
 from daimon.adapters.slack import lifecycle as lifecycle_mod
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
@@ -841,6 +843,33 @@ async def test_terminal_failure_notice_fits_slack_limits_with_many_long_names(
     assert "`rid: " in section
     assert body["text"].startswith("Tool connection failed: "), "fallback text is the notice"
     assert len(body["text"]) <= 3000
+
+
+async def test_a_notice_that_fails_to_build_still_draws_the_error_card(
+    fake_slack_web_client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _broken(*_args: object, **_kwargs: object) -> NoReturn:
+        raise RuntimeError("renderer broke")
+
+    monkeypatch.setattr(lifecycle_module, "render_termination_notice", _broken)
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+
+    await lc.on_terminal_failure(TurnState(), RuntimeError("upstream timeout"))
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    assert [b["type"] for b in blocks] == ["context"], "no notice section, no repair notice"
+    assert blocks[0]["elements"][0]["text"].startswith("❌ upstream timeout · ")
+
+
+async def test_the_card_reuses_the_rid_bound_for_the_turn(fake_slack_web_client: Any) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+
+    with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
+        await lc.on_terminal_failure(TurnState(), RuntimeError("x"))
+
+    assert "`rid: 01BOUNDRID`" in _block_text(_last_update_blocks(fake_slack_web_client))
 
 
 async def test_terminal_failure_does_not_raise(fake_slack_web_client: Any) -> None:

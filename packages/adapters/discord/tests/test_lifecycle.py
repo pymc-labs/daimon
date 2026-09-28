@@ -11,10 +11,12 @@ import dataclasses
 import time
 import types
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
 
+import daimon.adapters.discord.lifecycle as lifecycle_module
 import discord
 import pytest
+import structlog
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
@@ -363,6 +365,34 @@ async def test_terminal_failure_notice_fits_discord_limits_with_many_long_names(
     assert len(embed.footer.text) <= 2048
     assert "and 42 more" in embed.description and "and 40 more" in embed.description
     assert "`rid: " in embed.description
+
+
+async def test_a_notice_that_fails_to_build_still_turns_the_card_red(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _broken(*_args: object, **_kwargs: object) -> NoReturn:
+        raise RuntimeError("renderer broke")
+
+    monkeypatch.setattr(lifecycle_module, "render_termination_notice", _broken)
+    lc, _, edits = _make_lifecycle()
+    await lc.on_render(TurnState())
+
+    await lc.on_terminal_failure(TurnState(), Exception("upstream timeout"))
+
+    embed = edits[-1][1]["embeds"][0]
+    assert embed.colour.value == COLOR_RED
+    assert embed.footer.text.startswith("❌ upstream timeout · "), "falls back to the raw label"
+    assert not embed.description
+
+
+async def test_the_card_reuses_the_rid_bound_for_the_turn() -> None:
+    lc, _, edits = _make_lifecycle()
+    await lc.on_render(TurnState())
+
+    with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
+        await lc.on_terminal_failure(TurnState(), Exception("x"))
+
+    assert "`rid: 01BOUNDRID`" in edits[-1][1]["embeds"][0].description
 
 
 async def test_terminal_failure_without_a_reason_on_the_state_maps_the_error() -> None:

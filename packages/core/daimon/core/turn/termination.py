@@ -68,9 +68,9 @@ class TerminationReason(StrEnum):
     RECOVERY_CANCELLED = "recovery_cancelled"
     """The session was lost and the user stopped the turn before it was retried."""
     RECOVERY_FAILED = "recovery_failed"
-    """The session was lost and replacing it raised. `run_prepared_turn` re-raises;
-    the caller records this member for the exception (the terminal hook it already
-    got carries the first attempt's reason, the only one known when it fired)."""
+    """The session was lost and replacing it raised. `run_prepared_turn` hands
+    the caller's terminal hook this member, then re-raises the exception, which
+    `termination_reason` maps to `UNKNOWN`; record this member for it instead."""
     REDUCER_BUG = "reducer_bug"
     """Reserved: mirrors `TurnKind`; no production path raises it."""
 

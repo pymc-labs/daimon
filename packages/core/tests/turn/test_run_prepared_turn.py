@@ -18,6 +18,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import NoReturn
 
 import anthropic
 import httpx
@@ -1108,6 +1109,67 @@ async def test_recovered_turn_never_shows_the_user_a_failure(
     assert caller_lifecycle.terminal_failures == [], (
         "a recovered turn must never deliver on_terminal_failure -- that hook is "
         "what paints the error embed the user sees retracted"
+    )
+
+
+async def test_a_failed_recovery_tells_the_caller_recovery_failed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When replacing the dead session raises, the held failure is replayed as
+    `recovery_failed`, not the first attempt's upstream error: that one would
+    tell the person their workspace was kept."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-recovery-fails",
+        ma_session_id="sess_old",
+    )
+    await db_session.commit()
+
+    async def _replacement_fails(*_args: object, **_kwargs: object) -> NoReturn:
+        raise RuntimeError("replacement failed")
+
+    monkeypatch.setattr(run_module, "_replace_dead_session", _replacement_fails)
+    router = _router(session_bodies=[], dead_session_ids={"sess_old"})
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(account_id=account.id, agent=agent, env=env),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_old",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    caller_lifecycle = RecordingLifecycle()
+
+    with pytest.raises(RuntimeError, match="replacement failed"):
+        await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-recovery-fails",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=caller_lifecycle,
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+        )
+
+    assert len(caller_lifecycle.terminal_failures) == 1
+    assert caller_lifecycle.terminal_failures[0][0].termination is (
+        TerminationReason.RECOVERY_FAILED
     )
 
 

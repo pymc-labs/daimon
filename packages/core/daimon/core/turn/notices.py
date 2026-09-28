@@ -100,6 +100,8 @@ _COPY: dict[TerminationReason, _Copy] = {
         _KEPT,
         "Ask for the result another way, or ask an admin to change that tool's permission.",
     ),
+    # "Retired" holds because both ceiling handlers mark the thread's mapping
+    # dead; a headless routine has no mapping, but it also has no one to read this.
     TerminationReason.CEILING: _Copy(
         "Turn timed out",
         f"This turn ran past the {int(TURN_CEILING_S // 60)}-minute limit and was abandoned.",
@@ -249,8 +251,13 @@ def render_termination_notice(
         in_flight = tuple(b.name for b in tools if b.status == "pending")
         finished = sum(1 for b in tools if b.status != "pending")
         if reason is TerminationReason.MCP_DEGRADED_EMPTY and state.mcp_failures:
-            names = _listed([f.server_name for f in state.mcp_failures], shown=_SERVERS_SHOWN)
-            cause = f"The tool server {names} failed and the agent had no reply without it."
+            failed = [f.server_name for f in state.mcp_failures]
+            names = _listed(failed, shown=_SERVERS_SHOWN)
+            cause = (
+                f"The tool server {names} failed and the agent had no reply without it."
+                if len(failed) == 1
+                else f"The tool servers {names} failed and the agent had no reply without them."
+            )
         if reason is TerminationReason.RATE_LIMITED and state.rate_limit_until is not None:
             next_step = f"Send your message again after {_clock(state.rate_limit_until)}."
     return TerminationNotice(

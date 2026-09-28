@@ -168,3 +168,11 @@ def test_fit_notice_clips_the_body_and_keeps_the_request_id() -> None:
 def test_fit_notice_leaves_short_notices_alone() -> None:
     assert fit_notice(["a", "b"], tail="rid", limit=100) == "a\nb\nrid"
     assert fit_notice(["a" * 10], tail=None, limit=5) == "aaaa…"
+
+
+def test_several_failed_servers_read_as_plural() -> None:
+    state = TurnState(mcp_failures=_many_failures(2, 6))
+    notice = render_termination_notice(TerminationReason.MCP_DEGRADED_EMPTY, state=state)
+    assert notice is not None
+    assert notice.cause.startswith("The tool servers 00ssss, 01ssss failed")
+    assert notice.cause.endswith("without them.")

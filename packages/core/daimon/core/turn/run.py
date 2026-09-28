@@ -690,7 +690,10 @@ async def run_prepared_turn(
                     with contextlib.suppress(BaseException):
                         await mirror_task
         except Exception:
-            await first_attempt.flush_held_failure()
+            # The first attempt's reason (a dead-session upstream error) would
+            # tell the person their workspace was kept; it is gone, and so is
+            # the replacement that was meant to take over.
+            await first_attempt.flush_held_failure(TerminationReason.RECOVERY_FAILED)
             raise
 
         return RunOutcome(

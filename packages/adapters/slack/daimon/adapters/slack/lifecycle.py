@@ -59,7 +59,7 @@ from daimon.adapters.slack.blockkit import (
     to_blocks,
     update,
 )
-from daimon.adapters.slack.errors import generate_request_id
+from daimon.adapters.slack.errors import bound_request_id
 from daimon.adapters.slack.feedback import build_feedback_actions_block
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn, escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.split import split_for_slack_safe
@@ -159,7 +159,7 @@ class SlackTurnLifecycle:
         clock: Callable[[], float] = time.monotonic,
         adopt_status_ts: str | None = None,
         intent_id: UUID | None = None,
-        request_id: Callable[[], str] = generate_request_id,
+        request_id: Callable[[], str] = bound_request_id,
     ) -> None:
         self._trigger_ts = trigger_ts
         self._notify_on_completion = notify_on_completion
@@ -592,27 +592,36 @@ class SlackTurnLifecycle:
         Does not re-raise — the lifecycle boundary absorbs all failures.
         """
         try:
-            reason = state.termination or termination_reason(err)
-            request_id = self._request_id()
+            label = str(err)[:100]
+            body = ""
+            fallback_text: str | None = None
+            reason = request_id = None
+            # The notice is words on top of the ❌ card, never a reason not to
+            # draw it: if building it fails, the card falls back to the raw label.
+            try:
+                reason = state.termination or termination_reason(err)
+                request_id = self._request_id()
+                notice = render_termination_notice(reason, state=state, request_id=request_id)
+                if notice is not None:
+                    label, body = notice.headline, format_termination_notice(notice)
+                    fallback_text = fit_notice(
+                        [notice.plain_text()], tail=None, limit=NOTICE_MAX_CHARS
+                    )
+            except Exception:
+                log.warning("turn.terminal_notice_failed", exc_info=True)
             log.warning(
-                "turn.terminal_failure", error=str(err), reason=str(reason), request_id=request_id
+                "turn.terminal_failure",
+                error=str(err),
+                reason=str(reason) if reason is not None else None,
+                request_id=request_id,
             )
-            notice = render_termination_notice(reason, state=state, request_id=request_id)
-            label = notice.headline if notice is not None else str(err)[:100]
             # Transition to the ERROR phase so to_blocks renders the ❌ error
             # footer (reason + usage) under the notice and removes the cancel
             # button — Discord parity.
             self._state = update(self._state, EmbedEvent(kind="error", label=label))
-            if notice is not None:
-                self._state = dataclasses.replace(
-                    self._state, notice=format_termination_notice(notice)
-                )
+            self._state = dataclasses.replace(self._state, notice=body)
             self._apply_usage(state)
-            await self._flush_terminal(
-                fit_notice([notice.plain_text()], tail=None, limit=NOTICE_MAX_CHARS)
-                if notice is not None
-                else None
-            )
+            await self._flush_terminal(fallback_text)
             self.final_ts = self._status_ts
         except Exception:
             log.warning("turn.terminal_failure.flush_failed", exc_info=True)
