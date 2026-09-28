@@ -23,7 +23,7 @@ from daimon.core.stores.dm_tenant_selections import (
     get_dm_tenant_selection,
     set_dm_tenant_selection,
 )
-from daimon.core.stores.domain import Platform, TenantRow
+from daimon.core.stores.domain import Platform
 from daimon.core.stores.tenants import get_tenants
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -53,25 +53,6 @@ class DmTenantSelectionRequired(DaimonError):
         self.candidates = candidates
 
 
-def _is_live(row: TenantRow, *, platform: Platform) -> bool:
-    return row.platform == platform and row.provision_status == "ready" and row.archived_at is None
-
-
-def live_candidates(
-    rows: Sequence[TenantRow], *, platform: Platform, workspace_ids: Sequence[str]
-) -> tuple[DmTenantCandidate, ...]:
-    """Keep the workspaces whose tenant is live, in the adapter's order, deduplicated."""
-    live = {row.id for row in rows if _is_live(row, platform=platform)}
-    candidates: dict[uuid.UUID, DmTenantCandidate] = {}
-    for workspace_id in workspace_ids:
-        tenant_id = derive_tenant_uuid(platform=platform, workspace_id=workspace_id)
-        if tenant_id in live and tenant_id not in candidates:
-            candidates[tenant_id] = DmTenantCandidate(
-                tenant_id=tenant_id, workspace_id=workspace_id
-            )
-    return tuple(candidates.values())
-
-
 def pick_dm_tenant(
     candidates: tuple[DmTenantCandidate, ...], *, selected: uuid.UUID | None
 ) -> DmTenantCandidate:
@@ -90,12 +71,24 @@ def pick_dm_tenant(
     raise DmTenantSelectionRequired(candidates)
 
 
-async def _candidates(
+async def _live_candidates(
     session: AsyncSession, *, platform: Platform, workspace_ids: Sequence[str]
 ) -> tuple[DmTenantCandidate, ...]:
-    ids = [derive_tenant_uuid(platform=platform, workspace_id=w) for w in workspace_ids]
-    rows = await get_tenants(session, ids)
-    return live_candidates(rows, platform=platform, workspace_ids=workspace_ids)
+    """The workspaces whose tenant is live, in the adapter's order, deduplicated."""
+    workspaces: dict[uuid.UUID, str] = {}
+    for workspace_id in workspace_ids:
+        tenant_id = derive_tenant_uuid(platform=platform, workspace_id=workspace_id)
+        workspaces.setdefault(tenant_id, workspace_id)
+    live = {
+        row.id
+        for row in await get_tenants(session, list(workspaces))
+        if row.platform == platform and row.provision_status == "ready" and row.archived_at is None
+    }
+    return tuple(
+        DmTenantCandidate(tenant_id=tenant_id, workspace_id=workspace_id)
+        for tenant_id, workspace_id in workspaces.items()
+        if tenant_id in live
+    )
 
 
 async def resolve_dm_tenant(
@@ -111,7 +104,7 @@ async def resolve_dm_tenant(
     object id): the stored pick follows the person, not a workspace.
     """
     async with sessionmaker() as session:
-        candidates = await _candidates(session, platform=platform, workspace_ids=workspace_ids)
+        candidates = await _live_candidates(session, platform=platform, workspace_ids=workspace_ids)
         selected = None
         if len(candidates) > 1:
             row = await get_dm_tenant_selection(
@@ -136,7 +129,7 @@ async def choose_dm_tenant(
     show the picker again.
     """
     async with sessionmaker() as session:
-        candidates = await _candidates(session, platform=platform, workspace_ids=workspace_ids)
+        candidates = await _live_candidates(session, platform=platform, workspace_ids=workspace_ids)
         chosen = pick_dm_tenant(candidates, selected=tenant_id)
         if chosen.tenant_id != tenant_id:
             raise DmTenantSelectionRequired(candidates)

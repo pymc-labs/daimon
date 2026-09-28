@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+from daimon.core.billing import month_start as month_start
 from daimon.core.config import McpSettings
 from daimon.core.errors import DaimonError
 from daimon.core.mcp_auth import mint_jwt
@@ -149,11 +150,6 @@ def estimate_turns(amount_usd: float, *, guild_spend: float, guild_turns: int) -
     has_history = guild_spend > 0 and guild_turns > 0
     cost_per_turn = guild_spend / guild_turns if has_history else _FALLBACK_TURN_COST_USD
     return int(amount_usd / cost_per_turn)
-
-
-def month_start(now: datetime) -> datetime:
-    """The panels report the current calendar month in UTC."""
-    return datetime(now.year, now.month, 1, tzinfo=UTC)
 
 
 async def create_checkout(

@@ -82,8 +82,8 @@ def load_billing_config() -> BillingConfig | None:
     )
 
 
-def _calendar_month_start_utc(now: datetime) -> datetime:
-    """First day of the calendar month at 00:00 UTC."""
+def month_start(now: datetime) -> datetime:
+    """First day of the calendar month at 00:00 UTC: the cap period the panels report."""
     return datetime(now.year, now.month, 1, tzinfo=UTC)
 
 
@@ -115,7 +115,7 @@ async def is_over_cap(
         )
         if cap is None:
             return False  # no row = uncapped
-        period_start = _calendar_month_start_utc(now)
+        period_start = month_start(now)
         spent = await usage_events.cost_for_user_in_tenant_since(
             s,
             tenant_id=tenant_id,
