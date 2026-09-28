@@ -21,7 +21,7 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.stores import routines as routines_store
-from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.domain import CatchUpPolicy, RoutineRow
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
@@ -93,6 +93,7 @@ async def _create_routine_impl(
     timezone: str,
     trigger_message: str,
     enabled: bool = True,
+    catch_up_policy: CatchUpPolicy = "skip",
 ) -> RoutineRow:
     tenant_id = auth.tenant_id
     platform_user_id = _require_platform_user_id(auth)
@@ -118,6 +119,7 @@ async def _create_routine_impl(
             timezone_=timezone,
             trigger_message=trigger_message,
             enabled=enabled,
+            catch_up_policy=catch_up_policy,
             next_fire_at=next_fire_at,
         )
 
@@ -155,6 +157,7 @@ async def _update_routine_impl(
     timezone: str | None = None,
     trigger_message: str | None = None,
     enabled: bool | None = None,
+    catch_up_policy: CatchUpPolicy | None = None,
 ) -> RoutineRow:
     tenant_id = auth.tenant_id
     async with runtime.session_factory() as session, session.begin():
@@ -192,6 +195,7 @@ async def _update_routine_impl(
             timezone_=timezone,
             trigger_message=trigger_message,
             enabled=enabled,
+            catch_up_policy=catch_up_policy,
             agent_id=new_agent_id,
             agent_name=agent_name if new_agent_id is not None else None,
             next_fire_at=next_fire_at,
@@ -228,8 +232,11 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         timezone: str,
         trigger_message: str,
         enabled: bool = True,
+        catch_up_policy: CatchUpPolicy = "skip",
     ) -> RoutineRow:
         """Create a routine in the caller's tenant partition.
+
+        ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
 
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
@@ -262,6 +269,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             timezone=timezone,
             trigger_message=trigger_message,
             enabled=enabled,
+            catch_up_policy=catch_up_policy,
         )
 
     @mcp.tool
@@ -283,8 +291,11 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         timezone: str | None = None,
         trigger_message: str | None = None,
         enabled: bool | None = None,
+        catch_up_policy: CatchUpPolicy | None = None,
     ) -> RoutineRow:
         """PATCH-update a routine. Only provided fields are changed.
+
+        ``catch_up_policy`` selects ``skip`` or one coalesced ``run-once`` after downtime.
 
         ``agent_name`` reassigns the routine to a different daimon-tagged agent;
         the tool resolves it to a live MA agent id at the call boundary.
@@ -298,6 +309,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             timezone=timezone,
             trigger_message=trigger_message,
             enabled=enabled,
+            catch_up_policy=catch_up_policy,
         )
 
     @mcp.tool

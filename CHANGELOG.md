@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional Postgres backup service, checksum-verified empty-database restore and
   isolated restore drill; workspace-wide Managed Agents object export and a
   state-by-state disaster recovery contract in the self-hosting guide.
+- Routine dispatch runs independently of scheduler ticks, with bounded in-flight tasks, per-routine `skip`/`run-once` catch-up policies, and visible skipped-slot ranges.
 
 - Tenants can opt into accepted/done reactions and a fresh final reply that pings
   only the requester on Discord and Slack with `completion_pings`; defaults stay unchanged.

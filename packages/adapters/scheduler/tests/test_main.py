@@ -43,7 +43,20 @@ from daimon.testing import ma_model_usage
 from daimon.testing.factories import make_tenant
 from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+
+@pytest.fixture
+def db_session_factory(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+) -> async_sessionmaker[AsyncSession]:
+    """Concurrent fire finalizers need independent connections, as in production.
+
+    db_session triggers schema cleanup; these tests commit setup before dispatch.
+    """
+    return async_sessionmaker(bind=db_engine, expire_on_commit=False)
+
 
 _TEST_BILLING = BillingConfig(
     secret_key=SecretStr("sk_test"),
@@ -138,6 +151,7 @@ async def test_fire_skips_on_over_cap(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
 
     assert fired == [], "over-cap routine must not fire"
@@ -198,6 +212,7 @@ async def test_run_one_tick_resolves_tenant_per_row(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
 
     assert set(captured_tenant_ids) == {

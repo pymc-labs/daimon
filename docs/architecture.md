@@ -305,6 +305,7 @@ Operator recovery tools: `daimon backup platform-export` exports the dedicated
 MA workspace through core; `scripts/backup/postgres.sh` backs up/restores Postgres.
 See [self-hosting](self-hosting.md#backup-and-disaster-recovery) for the recovery
 contract and limits.
+
 ### Google tokens in ordinary chat
 
 Chat sessions attach a per-account, per-agent vault whose signed JWT carries
@@ -342,3 +343,10 @@ Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
 answer as a fresh thread reply mentioning only the requester. Missing or false
 entries keep the existing in-place answer and reactions (none on Discord; Slack keeps its admission eyes). Slack admission adds eyes once; the lifecycle only replaces it on opted-in completion. Recovery lifecycles retain this policy;
 continuity notices and feedback target the new answer. Other adapters need no changes.
+
+### Routine dispatch
+
+The scheduler owns a persistent, bounded routine dispatcher across ticks.
+Routine turns run independently of the tick; the same routine cannot overlap
+itself. Per-routine missed-run policy and the latest skipped range are exposed
+by the routine MCP tools. See [routines.md](routines.md) for catch-up and shutdown.

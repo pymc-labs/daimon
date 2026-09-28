@@ -795,14 +795,14 @@ Seconds between scheduler ticks (loop sleep).
 
 `float` · optional · default `900.0`
 
-Freshness window — rows whose next_fire_at slipped past now - max_age_s are advanced via
-advance_stale and not fired.
+Freshness window for routines with catch_up_policy=skip. Older slots are recorded as
+skipped and advanced; run-once routines ignore this window.
 
 ### `DAIMON_SCHEDULER__MAX_CONCURRENT_FIRES`
 
 `int` · optional · default `10`
 
-Global cap on simultaneously-dispatched routine fires within one tick. Conservative
+Global cap on simultaneously-dispatched routine fires across all ticks. Conservative
 against the shared Anthropic key's rate limit; per-tenant caps are enforced separately
 by the adapters.
 
@@ -815,10 +815,9 @@ ceiling (daimon.core.turn.ceiling) is enforced inside headless_runner.run_turn a
 first, producing a TurnError(kind='ceiling'). This bound only catches a fire that hangs
 OUTSIDE the ceiling's two legs (routine row bookkeeping, agent/environment resolution,
 the usage-recorder factory, record_result), and must stay strictly above TURN_CEILING_S
-or the core ceiling becomes unreachable for routines. run_one_tick awaits the full
-gather, so a fire running to this bound blocks the tick loop for that long, and cron
-slots that slip more than max_age_s (default 900s) behind during that window are
-advanced by advance_stale rather than fired.
+or the core ceiling becomes unreachable for routines. Each routine has its own timeout;
+continuous scheduler ticks do not await in-flight routines. Missed slots follow the
+routine's catch_up_policy.
 
 ### `DAIMON_SCHEDULER__ADVISORY_LOCK_KEY`
 

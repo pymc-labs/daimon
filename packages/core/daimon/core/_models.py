@@ -258,6 +258,9 @@ class Routine(Base):
             postgresql_where=text("enabled AND next_fire_at IS NOT NULL"),
         ),
         Index("routines_tenant_idx", "tenant_id"),
+        CheckConstraint(
+            "catch_up_policy IN ('skip', 'run-once')", name="ck_routines_catch_up_policy"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -277,6 +280,14 @@ class Routine(Base):
     timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="UTC")
     trigger_message: Mapped[str] = mapped_column(Text, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    catch_up_policy: Mapped[str] = mapped_column(Text, nullable=False, server_default="skip")
+    last_skipped_from: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_skipped_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     next_fire_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

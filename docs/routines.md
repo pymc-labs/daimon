@@ -28,6 +28,8 @@ through `packages/core/daimon/core/stores/routines.py`:
 | `cron_expr` / `timezone` | a five-field croniter expression and an IANA zone |
 | `trigger_message` | the prompt sent as the turn's user message |
 | `enabled` | the pause flag |
+| `catch_up_policy` | `skip` (default) or `run-once` after downtime |
+| `last_skipped_from` / `last_skipped_until` / `last_skip_reason` | most recent skipped range of scheduled slots and why (`stale` or `in_flight`) |
 | `next_fire_at` | the claim key — `NULL` means claimed or paused |
 | `last_fired_at`, `last_error`, `last_result_tail` | what the last run did |
 
@@ -41,7 +43,10 @@ Five MCP tools — `create_routine`, `list_routines`, `get_routine`,
 `update_routine`, `delete_routine` — are registered by
 `packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py` and catalogued
 in [mcp-tools.md](mcp-tools.md#routines). There is no separate pause tool:
-pausing is `update_routine(enabled=False)`, and the last run is read off the
+pausing is `update_routine(enabled=False)`. Set missed-run behavior with
+`create_routine(..., catch_up_policy="run-once")` or
+`update_routine(routine_id=..., catch_up_policy="skip")`; the same creator-or-admin
+permission applies to updates. The last run is read off the
 `last_*` fields that `get_routine` returns.
 
 `create_routine` refuses four ways before it writes anything: a caller with no
@@ -75,23 +80,46 @@ standby never looks healthy.
 
 Each tick, 30 seconds apart by default:
 
-1. `advance_stale` rolls forward rows that were orphaned (claimed but never
-   fired, e.g. a crash mid-claim) or that slipped more than `max_age_s`
-   behind.
-2. `claim_due_fireable` selects at most 20 due rows with
-   `FOR UPDATE SKIP LOCKED`, then in the same statement nulls `next_fire_at`
-   and stamps `last_fired_at`. A second phase immediately recomputes each
-   row's next slot, per row, so one unparseable cron cannot block the batch.
-3. Claimed rows are checked against the monthly cap, then fired concurrently
-   under a semaphore sized by `max_concurrent_fires`.
-4. Five housekeeping sweeps run, then the loop sleeps — interruptibly, so
-   SIGTERM is prompt.
+1. `advance_stale` rolls forward orphaned `NULL` claim keys, stale slots with
+   policy `skip`, and slots that became due while their routine was still running.
+2. `claim_due_fireable` selects at most 20 due rows, bounded by available
+   dispatch capacity, with `FOR UPDATE SKIP LOCKED`. It excludes in-flight
+   routine ids, nulls each claimed `next_fire_at`, stamps `last_fired_at`, then
+   computes the next future slot in the same transaction.
+3. Claimed rows pass the monthly cap check and start independent tasks owned by
+   a persistent `RoutineDispatcher`. The tick returns without awaiting those
+   turns. Its semaphore and in-flight registry span ticks, so a slow routine
+   cannot hold up a later tick or overlap another run of itself.
+4. Housekeeping runs, then the loop sleeps interruptibly. Pending work remains
+   in PostgreSQL when dispatch capacity is full; there is no unbounded task queue.
 
-**There is no catch-up.** A slot only fires if it falls inside
-`[now - max_age_s, now]`. A scheduler that was down over a slot does not
-replay it: `advance_stale` rolls the row forward to the next slot instead.
-Missed runs are skipped, never queued, and two due slots are never coalesced
-because the claim computes the next slot immediately.
+The per-routine catch-up policy controls downtime recovery:
+
+- **`skip` (default):** preserve the existing freshness window. A slot fires
+  only inside `[now - max_age_s, now]`; older slots roll forward without firing.
+- **`run-once`:** claim an overdue slot regardless of age, fire once, then move
+  `next_fire_at` beyond now. Missed slots coalesce into that single run; they
+  are never replayed one by one.
+
+For both policies, slots passing while the same routine is in flight are
+skipped. `last_skipped_from` and `last_skipped_until` delimit the latest skipped
+range, and `last_skip_reason` distinguishes stale work from an already-running
+routine. These fields are returned by `get_routine` and `list_routines` and
+also logged as `scheduler.slots_skipped`. They do not replace a running turn's
+result. This is a latest-range record, not a permanent history of every slot.
+
+Schedule changes made during a run survive completion: the fire records only
+its result, while claims and skip advancement lock the current schedule row.
+The process-wide advisory lock remains necessary; the in-flight registry is
+local to the winning scheduler process. A crash after a claim can lose that
+claimed run; catch-up applies to slots still pending in `next_fire_at`.
+
+On shutdown the scheduler cancels and joins its fire tasks before releasing
+the advisory lock, client or database resources. Started cancelled fires record
+`scheduler_shutdown`. `--once` deliberately drains its one batch before exiting;
+standalone callers can request that behavior with `wait_for_completion=True`.
+By default `run_one_tick` returns its dispatcher immediately; callers retain
+it for later ticks and close it at shutdown.
 
 ## The turn itself
 
@@ -133,10 +161,10 @@ deadline the runner computes for itself. `dispatch_timeout_s` is an outer
 process guard that only catches a fire hanging *outside* those two legs — row
 bookkeeping, agent resolution, recording the result. Its default is derived
 from `TURN_CEILING_S` plus a margin rather than hardcoded, precisely so it
-cannot be set below the ceiling it is meant to backstop. Note the knock-on:
-the tick awaits the whole batch, so a fire that runs to the outer bound holds
-the loop for that long, and slots that slip past `max_age_s` meanwhile are
-advanced rather than fired.
+cannot be set below the ceiling it is meant to backstop. Each fire has its own
+timeout; the continuous scheduler keeps ticking while a fire approaches that
+bound. If all dispatch slots are occupied, other routines wait in the database
+and follow their configured catch-up policy when capacity becomes available.
 
 ## Who may do what
 
@@ -174,7 +202,7 @@ Nothing is sent anywhere on failure. The scheduler imports no chat adapter;
 discovery is pull-only, through the `/routines` panel. The strings that land
 in `last_error` come from a small, closed set: `balance_depleted`,
 `cap_exceeded`, `routine has no created_by_user_id`, `routine tenant not
-found`, `timeout: exceeded <n>s` from the outer guard, and otherwise
+found`, `scheduler_shutdown`, `timeout: exceeded <n>s` from the outer guard, and otherwise
 `<ExceptionType>: <message>` truncated to 500 characters — a ceiling breach
 arrives as `TurnError: ceiling: …`.
 

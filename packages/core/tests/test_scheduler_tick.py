@@ -21,7 +21,19 @@ from daimon.core.scheduler import run_one_tick
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine, record_result
 from daimon.testing.factories import make_tenant
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+
+@pytest.fixture
+def db_session_factory(
+    db_engine: AsyncEngine,
+    db_session: AsyncSession,
+) -> async_sessionmaker[AsyncSession]:
+    """Concurrent fire finalizers need independent connections, as in production.
+
+    db_session triggers schema cleanup; these tests commit setup before dispatch.
+    """
+    return async_sessionmaker(bind=db_engine, expire_on_commit=False)
 
 
 class _FakeCaps:
@@ -83,6 +95,7 @@ async def test_run_one_tick_dispatches_due_routine(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
 
     assert fired == [row.id], "fire must be called exactly once for the due routine"
@@ -115,6 +128,7 @@ async def test_run_one_tick_records_cap_error(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
 
     assert fired == [], "over-cap routine must not be fired"
@@ -162,6 +176,7 @@ async def test_run_one_tick_swallows_cap_block_record_result_error(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
     assert fired == [], "over-cap routine must not be fired"
 
@@ -185,6 +200,7 @@ async def test_run_one_tick_records_fire_error_via_gather(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
 
     async with db_session_factory() as s:
@@ -215,6 +231,7 @@ async def test_run_one_tick_truncates_long_error_at_500_chars(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
 
     async with db_session_factory() as s:
@@ -259,6 +276,7 @@ async def test_run_one_tick_dispatches_all_concurrently_up_to_cap(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
     assert peak == 10, "all 10 due routines must dispatch concurrently when cap >= 10"
     assert len(fired) == 10, "all 10 routines must fire"
@@ -296,6 +314,7 @@ async def test_run_one_tick_bounds_concurrency_to_semaphore(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=5,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
     assert peak == 5, "semaphore must bound peak concurrency to max_concurrent_fires=5"
     assert len(fired) == 20, "all 20 routines must eventually fire despite the semaphore bound"
@@ -328,6 +347,7 @@ async def test_run_one_tick_isolates_timed_out_fire_from_sibling(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=0.05,
+        wait_for_completion=True,
     )
 
     async with db_session_factory() as s:
@@ -376,6 +396,7 @@ async def test_fire_exception_is_captured_to_sentry_and_still_swallowed(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
 
     assert len(captured) == 1, "the broad except site must capture exactly the fire's exception"
@@ -419,6 +440,7 @@ async def test_timed_out_fire_is_captured_to_sentry_and_still_swallowed(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=0.05,
+        wait_for_completion=True,
     )
 
     assert len(captured) == 1, "the timeout except site must capture exactly once"
@@ -459,6 +481,7 @@ async def test_fire_binds_rid_and_tenant_id_into_log_context(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
 
     assert len(seen) == 1, "fire must run exactly once for the due routine"
@@ -500,6 +523,7 @@ async def test_concurrent_fires_get_isolated_rids(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
+        wait_for_completion=True,
     )
 
     assert len(rids_by_routine) == 2, "both fires must run"
@@ -538,6 +562,7 @@ async def test_fire_timeout_records_exact_error_string(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=dispatch_timeout_s,
+        wait_for_completion=True,
     )
 
     async with db_session_factory() as s:
@@ -574,6 +599,7 @@ async def test_timed_out_fire_reschedules_to_next_cron_slot(
         max_age=timedelta(minutes=15),
         max_concurrent_fires=10,
         dispatch_timeout_s=0.05,
+        wait_for_completion=True,
     )
 
     from daimon.core.cron import next_slot_at_or_after
