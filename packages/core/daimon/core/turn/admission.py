@@ -93,6 +93,8 @@ async def admit(
                 thread_id=thread_id,
                 role=role,
                 is_dm=is_dm,
+                category_id=category_id,
+                category_unresolved=category_unresolved,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -113,6 +115,8 @@ async def admit_impl(
     thread_id: str | None = None,
     role: Role | None = None,
     is_dm: bool = False,
+    category_id: str | None = None,
+    category_unresolved: bool = False,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool."""
     # --- Identity resolution ---
