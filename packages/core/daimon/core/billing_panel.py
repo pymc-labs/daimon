@@ -15,7 +15,7 @@ from decimal import Decimal
 import httpx
 from daimon.core.config import McpSettings
 from daimon.core.errors import DaimonError
-from daimon.core.mcp_auth import mint_internal_mcp_token
+from daimon.core.mcp_auth import mint_jwt
 from daimon.core.stores import tenant_user_caps
 from daimon.core.stores.tenant_ledger import get_balance
 from daimon.core.stores.usage_events import (
@@ -163,6 +163,8 @@ async def create_checkout(
 
     The token's `sub` is the clicker's account in the current tenant; the MCP
     verifier derives the tenant from it, so the body carries only the amount.
+    The route never checks admin, so the token is a plain account token: an
+    internal admin one would be a non-revocable admin bearer for any account.
     Raises DaimonError when the MCP url or JWT secret is unset and
     httpx.HTTPStatusError on a non-2xx answer (no billing routes mounted is a 404).
     """
@@ -170,7 +172,7 @@ async def create_checkout(
     jwt_secret = settings.jwt_secret
     if app_root_url is None or jwt_secret is None:
         raise DaimonError("Top-ups need DAIMON_MCP__PUBLIC_URL and DAIMON_MCP__JWT_SECRET.")
-    token = mint_internal_mcp_token(
+    token = mint_jwt(
         account_id=account_id,
         secret=jwt_secret.get_secret_value().encode(),
         now=datetime.now(UTC),

@@ -9,6 +9,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock
 
 import httpx
+import jwt as pyjwt
 import pytest
 from daimon.core.billing_panel import (
     create_checkout,
@@ -151,6 +152,26 @@ async def test_create_checkout_posts_only_the_amount_with_a_bearer_token() -> No
     assert request.method == "POST" and request.url.path == "/billing/checkout"
     assert json.loads(request.content) == {"amount": 25}, "the tenant never rides in the body"
     assert request.headers["authorization"].startswith("Bearer "), "the hop is authenticated"
+
+
+async def test_create_checkout_sends_a_plain_account_token() -> None:
+    """The checkout route never checks admin, so the hop carries no admin or internal claim."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"url": _CHECKOUT_URL})
+
+    account_id = uuid.uuid4()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await create_checkout(client, settings=_mcp_settings(), account_id=account_id, amount=10)
+
+    token = captured[0].headers["authorization"].removeprefix("Bearer ")
+    claims = pyjwt.decode(token, options={"verify_signature": False})
+    assert claims["sub"] == str(account_id), "the verifier derives the tenant from the account"
+    assert "internal" not in claims and "is_admin" not in claims, (
+        "a checkout hop must not mint an internal admin bearer"
+    )
 
 
 async def test_create_checkout_raises_on_non_2xx() -> None:
