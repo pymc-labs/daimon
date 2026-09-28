@@ -19,6 +19,8 @@ from daimon.adapters.cli.run.events import (
 from daimon.adapters.cli.run.lifecycle import NdjsonLifecycle
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.config import load_settings
+from daimon.core.tool_safety import trusted_servers_for
+from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.outcomes import current_outcome, observe_turn
@@ -106,6 +108,18 @@ async def run_conversation_observed(
             lifecycle=lifecycle,
             cancel=cancel,
             billing=BillingExempt(reason="cli-operator-run"),
+            # No card surface here: with the tool-safety policy on, reads run
+            # and third-party writes are refused (`no_confirmation_surface`).
+            tool_confirmation=chat_tool_confirmation(
+                rt.settings.tool_safety,
+                requester_platform_user_id=rt.settings.cli.local_user or "cli",
+                confirm=None,
+                trusted_servers=trusted_servers_for(
+                    str(rt.settings.mcp.public_url)
+                    if rt.settings.mcp.public_url is not None
+                    else None
+                ),
+            ),
             deadline=effective_deadline,
         )
     except anthropic.APIError as err:

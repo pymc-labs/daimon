@@ -65,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DAIMON_TOOL_SAFETY__DENIED` blocks a server or tool everywhere. The
   confirmation card is a reusable `ConfirmationHook`; surfaces without one
   refuse the write.
+- `update_agent` now refuses to re-point the reserved `daimon-mcp` server or to
+  register the deployment's own MCP endpoint under another name, matching
+  `attach_mcp_server`.
 
 - `send_direct_message` delivers private agent messages to verified Discord/Slack
   tenant members, with per-tenant disabled/allowlist policies and delivery receipts.

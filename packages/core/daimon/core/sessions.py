@@ -51,7 +51,13 @@ from daimon.core.mcp_vault import (
 from daimon.core.memory_resource import ensure_memory_store_and_mount
 from daimon.core.repo_resource import build_repo_resource
 from daimon.core.stores.agent_repo_binding import get_binding
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, session_tools_for_policy
+from daimon.core.tool_safety import (
+    OPEN_TOOL_SAFETY,
+    ToolSafetyPolicy,
+    heal_reserved_server,
+    session_tools_for_policy,
+    trusted_servers_for,
+)
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -176,7 +182,11 @@ async def create_session(
     ``tool_safety`` is the deployment's attached-tool policy. When enabled,
     every gated third-party toolset is sent as ``always_ask`` through the same
     ``agent_with_overrides`` the personal-server filter uses, whatever the
-    agent itself stores; disabled (the default) sends the agent unchanged.
+    agent itself stores. Only the built-in ``daimon-mcp`` is exempt, and only
+    as the deployment's own endpoint: an entry carrying that name with any
+    other URL is re-pointed at ``mcp_settings.public_url`` for this session
+    (or gated like a third party when no public URL is configured).
+    Disabled (the default) sends the agent unchanged.
 
     ``billing_exempt`` is the creating caller's ``ExemptReason`` when it runs
     ``BillingExempt``; it is stamped as ``daimon_billing_exempt`` so the usage
@@ -383,8 +393,20 @@ async def create_session(
     session_tools: list[dict[str, Any]] = [
         tool.model_dump(mode="json", exclude_none=True) for tool in visible_tools(agent, hidden)
     ]
-    gated_tools = session_tools_for_policy(tool_safety, session_tools)
-    if hidden or gated_tools is not None:
+    session_servers: list[dict[str, Any]] = [
+        {"name": server.name, "type": "url", "url": server.url}
+        for server in visible_mcp_servers(agent, hidden)
+    ]
+    public_url = (
+        str(mcp_settings.public_url)
+        if mcp_settings is not None and mcp_settings.public_url is not None
+        else None
+    )
+    healed_servers = heal_reserved_server(tool_safety, session_servers, public_url=public_url)
+    gated_tools = session_tools_for_policy(
+        tool_safety, session_tools, trusted_servers=trusted_servers_for(public_url)
+    )
+    if hidden or gated_tools is not None or healed_servers is not None:
         overrides: BetaManagedAgentsAgentWithOverridesParams = {
             "type": "agent_with_overrides",
             "id": agent.id,
@@ -392,8 +414,10 @@ async def create_session(
             # other session gets, and both arrays below are full
             # replacements — there is nothing left for a version to pin.
             "mcp_servers": [
-                BetaManagedAgentsURLMCPServerParams(name=server.name, type="url", url=server.url)
-                for server in visible_mcp_servers(agent, hidden)
+                BetaManagedAgentsURLMCPServerParams(
+                    name=server["name"], type="url", url=server["url"]
+                )
+                for server in (healed_servers if healed_servers is not None else session_servers)
             ],
             "tools": [
                 cast(Tool, tool)
@@ -401,6 +425,10 @@ async def create_session(
             ],
         }
         agent_argument = overrides
+        if healed_servers is not None:
+            # The reserved name on a server daimon does not run: the tool-safety
+            # exemption is for the real endpoint only, so this session gets it.
+            _log.warning("session.reserved_mcp_server_healed", agent_id=agent.id)
         if gated_tools is not None:
             _log.info("session.tool_safety_applied", agent_id=agent.id)
 

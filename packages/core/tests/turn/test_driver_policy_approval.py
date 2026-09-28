@@ -9,7 +9,7 @@ confirmation card, sending `allow` only after the answer.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from anthropic import AsyncAnthropic
@@ -328,3 +328,163 @@ def test_unattended_chat_turn_gets_the_unattended_rules() -> None:
         _ON, requester_platform_user_id="U1", confirm=None, attended=False
     )
     assert isinstance(posture, PolicyApproval)
+
+
+def _replay_script(fa: FakeAnthropic) -> None:
+    """The pause is lost to a clean close and only found in the replay."""
+    pre = make_mcp_tool_use(
+        event_id="tu_write", name="delete_issue", mcp_server_name="linear", input={"id": "ENG-1"}
+    )
+    pause = make_status_idle(
+        event_id="sevt_pause", stop_reason=make_requires_action(event_ids=["tu_write"])
+    )
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pre)],  # exhausts -> clean close; the pause never arrives live
+        [YieldEvent(make_status_idle(event_id="sevt_end", stop_reason=make_end_turn()))],
+    ]
+    fa.beta.sessions.events.replay_events = [pre, pause]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+
+
+async def test_replayed_pause_is_decided_through_the_card() -> None:
+    fa = FakeAnthropic()
+    _replay_script(fa)
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        return "approved"
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="delete it",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=PolicyApproval(
+            decide=interactive_decider(_ON, requester_platform_user_id="U1", confirm=card)
+        ),
+    )
+
+    assert final.error is None
+    assert _confirmations(fa) == [
+        {"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "tu_write"}
+    ]
+
+
+async def _cancel_replayed_pause(
+    *, click_after_s: float | None
+) -> tuple[FakeAnthropic, list[bool]]:
+    fa = FakeAnthropic()
+    _replay_script(fa)
+    fa.beta.sessions.events.stream_scripts[1] = [
+        YieldEvent(make_status_idle(event_id="ack", stop_reason=make_end_turn()))
+    ]
+    cancel = asyncio.Event()
+    card_up = asyncio.Event()
+    clicked = asyncio.Event()
+    retired: list[bool] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        card_up.set()
+        try:
+            await clicked.wait()
+        except asyncio.CancelledError:
+            retired.append(True)
+            raise
+        return "approved"
+
+    turn = asyncio.create_task(
+        run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="delete it",
+            lifecycle=RecordingLifecycle(),
+            cancel=cancel,
+            render_interval_s=0.001,
+            interrupt_timeout_s=0.05,
+            billing=_EXEMPT,
+            tool_confirmation=PolicyApproval(
+                decide=interactive_decider(_ON, requester_platform_user_id="U1", confirm=card)
+            ),
+        )
+    )
+    await asyncio.wait_for(card_up.wait(), timeout=2)
+    cancel.set()
+    if click_after_s is None:
+        clicked.set()  # Approve lands in the same tick as Stop
+    else:
+        await asyncio.sleep(click_after_s)
+        clicked.set()
+    await asyncio.wait_for(turn, timeout=5)
+    return fa, retired
+
+
+async def test_cancel_on_a_replayed_pause_never_sends_allow_and_retires_the_card() -> None:
+    """Review regression: the eventless/replay path used to await the decision
+    without racing cancel, so an Approve clicked after Stop still sent allow."""
+    fa, retired = await _cancel_replayed_pause(click_after_s=0.05)
+
+    assert [(e["tool_use_id"], e["result"]) for e in _confirmations(fa)] == [("tu_write", "deny")]
+    assert retired == [True], "the card is cancelled so its hook can retire it"
+
+
+async def test_an_approve_in_the_same_tick_as_stop_is_still_refused() -> None:
+    fa, _retired = await _cancel_replayed_pause(click_after_s=None)
+
+    assert [(e["tool_use_id"], e["result"]) for e in _confirmations(fa)] == [("tu_write", "deny")]
+
+
+async def test_a_turn_deadline_while_a_card_is_up_leaves_no_decide_task_behind() -> None:
+    """Review regression: a ceiling breach cancelled the driver but left
+    `turn.decide_blocked` (and its card) waiting forever."""
+    fa = FakeAnthropic()
+    _script(fa, ("tu_write", "linear", "create_issue"))
+    retired: list[bool] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        try:
+            await asyncio.Event().wait()  # nobody clicks
+        except asyncio.CancelledError:
+            retired.append(True)
+            raise
+        return "approved"
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="file a bug",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=PolicyApproval(
+            decide=interactive_decider(_ON, requester_platform_user_id="U1", confirm=card)
+        ),
+        deadline=datetime.now(UTC) + timedelta(milliseconds=200),
+    )
+    await asyncio.sleep(0)
+
+    assert final.error is not None and final.error.kind == "ceiling"
+    assert retired == [True]
+    assert not [t for t in asyncio.all_tasks() if t.get_name() == "turn.decide_blocked"]
+    assert all(e["result"] != "allow" for e in _confirmations(fa))
+
+
+async def test_trusted_daimon_server_is_not_gated_and_an_untrusted_one_is() -> None:
+    fa = FakeAnthropic()
+    _script(fa, ("tu_daimon", "daimon-mcp", "routine_delete"))
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="tidy",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=PolicyApproval(decide=unattended_decider(_ON)),  # no trust set
+    )
+
+    (sent,) = _confirmations(fa)
+    assert sent["result"] == "deny", "without a verified endpoint the reserved name earns nothing"

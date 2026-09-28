@@ -41,6 +41,7 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
     mark_dead,
 )
+from daimon.core.tool_safety import trusted_servers_for
 from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
@@ -599,6 +600,7 @@ async def run_prepared_turn_impl(
         requester_platform_user_id=external_user_id,
         confirm=confirm_write,
         attended=attended if attended is not None else origin != "routine",
+        trusted_servers=trusted_servers_for(deps.public_url),
     )
 
     # Tracks the session/mapping id (and whether recovery has taken over) the

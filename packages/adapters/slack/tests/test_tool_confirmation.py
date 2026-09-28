@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -87,3 +88,17 @@ async def test_an_unanswered_card_expires_and_is_retired() -> None:
 
     assert answer == "expired"
     assert client.chat_update.await_args.kwargs["text"].startswith("⌛")
+
+
+async def test_a_cancelled_wait_retires_the_card_and_ignores_late_clicks() -> None:
+    cards = SlackConfirmationCards()
+    client = _client()
+    waiting, approve_id = await _post(cards, client)
+
+    waiting.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await waiting
+
+    assert client.chat_update.await_args.kwargs["text"].startswith("🛡️ Denied")
+    await cards.handle_click(_click(approve_id, "U1"))
+    assert client.chat_update.await_count == 1, "a late click changes nothing"

@@ -163,12 +163,14 @@ def _answer_message(call: ToolCall, answer: str) -> str:
     )
 
 
-def unattended_decider(policy: ToolSafetyPolicy) -> ToolCallDecider:
+def unattended_decider(
+    policy: ToolSafetyPolicy, *, trusted_servers: frozenset[str] = frozenset()
+) -> ToolCallDecider:
     """Decider for runs nobody is watching: reads run, writes are refused
     unless the operator allowed them there."""
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
-        verdict = decide_tool_call(policy, call, attended=False)
+        verdict = decide_tool_call(policy, call, attended=False, trusted_servers=trusted_servers)
         log.info(
             "tool_safety.decided",
             tool=call.key,
@@ -188,6 +190,7 @@ def interactive_decider(
     *,
     requester_platform_user_id: str,
     confirm: ConfirmationHook = no_confirmation_surface,
+    trusted_servers: frozenset[str] = frozenset(),
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> ToolCallDecider:
     """Decider for chat: reads run, writes wait for `confirm`.
@@ -198,7 +201,7 @@ def interactive_decider(
     """
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
-        verdict = decide_tool_call(policy, call, attended=True)
+        verdict = decide_tool_call(policy, call, attended=True, trusted_servers=trusted_servers)
         log.info(
             "tool_safety.decided",
             tool=call.key,
@@ -228,14 +231,16 @@ def interactive_decider(
     return _decide
 
 
-def headless_tool_confirmation(policy: ToolSafetyPolicy) -> ToolConfirmation:
+def headless_tool_confirmation(
+    policy: ToolSafetyPolicy, *, trusted_servers: frozenset[str] = frozenset()
+) -> ToolConfirmation:
     """Posture for a run nobody is watching (routines, smoke, transfers).
 
     Disabled keeps `AutoApprove`, byte-identical to before the policy existed.
     """
     if not policy.enabled:
         return AutoApprove()
-    return PolicyApproval(decide=unattended_decider(policy))
+    return PolicyApproval(decide=unattended_decider(policy, trusted_servers=trusted_servers))
 
 
 def chat_tool_confirmation(
@@ -244,6 +249,7 @@ def chat_tool_confirmation(
     requester_platform_user_id: str,
     confirm: ConfirmationHook | None,
     attended: bool = True,
+    trusted_servers: frozenset[str] = frozenset(),
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -254,11 +260,12 @@ def chat_tool_confirmation(
     if not policy.enabled:
         return RequireApproval()
     if not attended:
-        return PolicyApproval(decide=unattended_decider(policy))
+        return PolicyApproval(decide=unattended_decider(policy, trusted_servers=trusted_servers))
     return PolicyApproval(
         decide=interactive_decider(
             policy,
             requester_platform_user_id=requester_platform_user_id,
             confirm=confirm if confirm is not None else no_confirmation_surface,
+            trusted_servers=trusted_servers,
         )
     )

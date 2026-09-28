@@ -60,7 +60,7 @@ from cryptography.fernet import MultiFernet
 from daimon.core.config import McpSettings
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.sessions import create_session
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, trusted_servers_for
 from daimon.core.turn.approvals import headless_tool_confirmation
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.driver import run_turn as drive_turn
@@ -347,7 +347,14 @@ async def run_turn_impl(
         cancel=asyncio.Event(),  # never set — headless has no cancel source
         render_interval_s=2.0,  # nothing renders; do not spin the diff timer
         billing=billing,
-        tool_confirmation=headless_tool_confirmation(tool_safety),
+        tool_confirmation=headless_tool_confirmation(
+            tool_safety,
+            trusted_servers=trusted_servers_for(
+                str(mcp_settings.public_url)
+                if mcp_settings is not None and mcp_settings.public_url is not None
+                else None
+            ),
+        ),
         deadline=effective_deadline,
     )
 

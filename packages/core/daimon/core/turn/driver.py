@@ -129,27 +129,39 @@ async def _decide_or_refuse_on_cancel(
     state: TurnState,
     fresh: list[str],
     *,
-    cancel_task: asyncio.Task[Any],
+    cancel: asyncio.Event,
     anthropic: AsyncAnthropic,
     session_id: str,
 ) -> list[BetaManagedAgentsUserToolConfirmationEventParams]:
     """`_decide_blocked`, raced against the turn's cancel signal.
 
-    On cancel the pending cards are abandoned, every fresh id is refused (the
-    session is on a `requires_action` idle, so the send is accepted), and
-    `_InterruptInConsume` hands the turn to the normal interrupt path.
+    The one place blocked calls are decided, for the live stream and the
+    replay/eventless path alike. A cancel — before the decision, or landing
+    in the same tick as it — refuses every fresh id instead (the session is on
+    a `requires_action` idle, so the send is accepted) and raises
+    `_InterruptInConsume` for the normal interrupt path: a stop request never
+    lets an `allow` out.
+
+    This function owns the decide task and its cancel waiter. Whatever ends
+    the wait — a decision, a cancel, or this coroutine itself being cancelled
+    by the turn ceiling or a caller — the `finally` cancels and joins both, so
+    a card hook never outlives the turn; the hooks retire their cards on that
+    cancellation.
     """
     decide_task = asyncio.create_task(
         _decide_blocked(tool_confirmation, state, fresh), name="turn.decide_blocked"
     )
-    done, _pending = await asyncio.wait(
-        {decide_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
-    )
-    if decide_task in done:
-        return decide_task.result()
-    decide_task.cancel()
-    with _suppress_task_exc():
-        await decide_task
+    cancel_task = asyncio.create_task(cancel.wait(), name="turn.decide_cancel_waiter")
+    try:
+        await asyncio.wait({decide_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+        if decide_task.done() and not cancel.is_set():
+            return decide_task.result()
+    finally:
+        for task in (decide_task, cancel_task):
+            if not task.done():
+                task.cancel()
+            with _suppress_task_exc():
+                await task
     refusals = build_decision_events(
         (
             tool_use_id,
@@ -629,8 +641,13 @@ async def _pump(
                                 )
                                 if fresh:
                                     confirmed_tool_use_ids.update(fresh)
-                                    decisions = await _decide_blocked(
-                                        tool_confirmation, state_cell[0], fresh
+                                    decisions = await _decide_or_refuse_on_cancel(
+                                        tool_confirmation,
+                                        state_cell[0],
+                                        fresh,
+                                        cancel=cancel,
+                                        anthropic=anthropic,
+                                        session_id=session_id,
                                     )
                                     # Safe to send here (and only here on this
                                     # branch): `session.status` just came back
@@ -1058,7 +1075,7 @@ async def _consume_with_reconnect(
                                 tool_confirmation,
                                 state_cell[0],
                                 fresh,
-                                cancel_task=cancel_task,
+                                cancel=cancel,
                                 anthropic=anthropic,
                                 session_id=session_id,
                             )

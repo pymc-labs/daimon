@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -110,3 +111,21 @@ async def test_an_unanswered_card_expires() -> None:
     assert answer == "expired"
     view = message.edit.await_args.kwargs["view"]
     assert _texts(view)[0].startswith("**⌛")
+
+
+async def test_a_cancelled_wait_retires_the_card() -> None:
+    channel = MagicMock()
+    message = MagicMock(edit=AsyncMock())
+    channel.send = AsyncMock(return_value=message)
+    waiting = asyncio.create_task(discord_confirmation_hook(channel)(_prompt()))
+    while not channel.send.await_count:
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    waiting.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await waiting
+
+    view = message.edit.await_args.kwargs["view"]
+    assert _texts(view)[0] == "**🛡️ Denied — it did not run.**"
+    assert _buttons(view) == []

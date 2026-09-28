@@ -12,8 +12,10 @@ from daimon.core.tool_safety import (
     ToolSafetyPolicy,
     classify_tool,
     decide_tool_call,
+    heal_reserved_server,
     session_tools_for_policy,
     toolset_permission_policy,
+    trusted_servers_for,
 )
 
 _ON = ToolSafetyPolicy(enabled=True)
@@ -91,12 +93,37 @@ def test_disabled_allows_everything() -> None:
     assert (verdict.outcome, verdict.reason) == ("allow", "disabled")
 
 
-def test_sandbox_and_daimon_tools_are_never_gated() -> None:
+def test_sandbox_tools_and_trusted_servers_are_not_gated() -> None:
+    trusted = trusted_servers_for("https://mcp.example.com/mcp")
     assert decide_tool_call(_ON, _call(None, "bash"), attended=False).outcome == "allow"
     assert (
-        decide_tool_call(_ON, _call(DAIMON_SERVER_NAME, "routine_delete"), attended=False).outcome
+        decide_tool_call(
+            _ON,
+            _call(DAIMON_SERVER_NAME, "routine_delete"),
+            attended=False,
+            trusted_servers=trusted,
+        ).outcome
         == "allow"
     )
+
+
+def test_the_reserved_name_alone_earns_no_exemption() -> None:
+    assert trusted_servers_for(None) == frozenset()
+    verdict = decide_tool_call(_ON, _call(DAIMON_SERVER_NAME, "delete_records"), attended=False)
+    assert (verdict.outcome, verdict.reason) == ("deny", "unattended_write")
+
+
+def test_a_foreign_url_under_the_reserved_name_is_healed() -> None:
+    servers = [
+        {"name": DAIMON_SERVER_NAME, "type": "url", "url": "https://third-party.example/mcp"},
+        {"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"},
+    ]
+    healed = heal_reserved_server(_ON, servers, public_url="https://mcp.example.com/mcp")
+    assert healed is not None
+    assert healed[0]["url"] == "https://mcp.example.com/mcp"
+    assert healed[1] == servers[1]
+    assert heal_reserved_server(OPEN_TOOL_SAFETY, servers, public_url="https://x/mcp") is None
+    assert heal_reserved_server(_ON, healed, public_url="https://mcp.example.com/mcp/") is None
 
 
 def test_reads_run_attended_or_not() -> None:
@@ -140,9 +167,10 @@ def test_toolset_policy_asks_only_for_gated_servers_when_enabled() -> None:
         "type": "always_allow"
     }
     assert toolset_permission_policy(_ON, server_name="linear") == {"type": "always_ask"}
-    assert toolset_permission_policy(_ON, server_name=DAIMON_SERVER_NAME) == {
-        "type": "always_allow"
-    }
+    assert toolset_permission_policy(
+        _ON, server_name=DAIMON_SERVER_NAME, trusted_servers=frozenset({DAIMON_SERVER_NAME})
+    ) == {"type": "always_allow"}
+    assert toolset_permission_policy(_ON, server_name=DAIMON_SERVER_NAME) == {"type": "always_ask"}
     assert toolset_permission_policy(_ON, server_name=None) == {"type": "always_allow"}
 
 
@@ -171,7 +199,7 @@ def test_session_tools_are_untouched_when_disabled() -> None:
 
 
 def test_session_tools_gate_third_party_toolsets_only() -> None:
-    out = session_tools_for_policy(_ON, _tools())
+    out = session_tools_for_policy(_ON, _tools(), trusted_servers=frozenset({DAIMON_SERVER_NAME}))
     assert out is not None
     assert out[0] == _tools()[0]
     assert out[1] == _tools()[1]
@@ -182,6 +210,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
 
 
 def test_session_tools_report_no_change_once_gated() -> None:
-    once = session_tools_for_policy(_ON, _tools())
+    trusted = frozenset({DAIMON_SERVER_NAME})
+    once = session_tools_for_policy(_ON, _tools(), trusted_servers=trusted)
     assert once is not None
-    assert session_tools_for_policy(_ON, once) is None
+    assert session_tools_for_policy(_ON, once, trusted_servers=trusted) is None

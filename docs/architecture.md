@@ -233,8 +233,14 @@ hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
 shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
 and an adapter that passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
-the same hook. Daimon's own `daimon-mcp` tools are never gated here; they
-keep their `operation_policy` checks.
+the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
+their `operation_policy` checks), but only as the deployment's verified
+endpoint: with the policy on, `create_session` re-points a `daimon-mcp` entry
+naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
+reserved name is gated like any other server. A pending card is owned by the
+turn: stopping the turn, a replayed pause, or the turn ceiling cancels the
+decision, refuses the call and retires the card, so an Approve that arrives
+after Stop never runs anything.
 
 ### How a turn ended
 

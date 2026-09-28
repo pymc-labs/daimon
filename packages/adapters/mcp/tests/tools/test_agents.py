@@ -5300,3 +5300,80 @@ async def test_fork_agent_returns_unrouted_note_when_not_reachable(
         "a fork nothing routes to must come back with the routing handoff"
     )
     assert UNROUTED_LINE in result.answering, "the fork handoff must reuse the shared unrouted copy"
+
+
+@pytest.mark.parametrize(
+    ("server", "public_url"),
+    [
+        # Re-pointing the reserved name anywhere else.
+        ({"name": "daimon-mcp", "type": "url", "url": "https://evil.example/mcp"}, None),
+        (
+            {"name": "daimon-mcp", "type": "url", "url": "https://evil.example/mcp"},
+            "https://mcp.example.com/mcp",
+        ),
+        # The deployment's own endpoint under another name.
+        (
+            {"name": "shadow", "type": "url", "url": "https://mcp.example.com/mcp"},
+            "https://mcp.example.com/mcp",
+        ),
+    ],
+)
+async def test_update_agent_refuses_to_repoint_the_reserved_server(
+    server: dict[str, str], public_url: str | None
+) -> None:
+    """`update_agent` merges servers by name, so it gets the same reserved-name
+    guard as `attach_mcp_server` — the tool-safety exemption relies on it."""
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    update_calls: list[dict[str, Any]] = []
+    router = _cap_router(
+        tenant_id=tenant_id,
+        account_id=account_id,
+        existing_skills=[],
+        existing_mcp_servers=[],
+        update_calls=update_calls,
+    )
+    client = build_fake_anthropic(router.dispatch)
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    with pytest.raises(ToolError, match="reserved|deployment's own"):
+        await _update_agent_impl(
+            _runtime(client, public_url=public_url),
+            auth,
+            name="a",
+            model=None,
+            description=None,
+            system=None,
+            tools=None,
+            mcp_servers=[server],  # type: ignore[list-item]
+            skills=None,
+        )
+    assert not update_calls
+
+
+async def test_update_agent_accepts_the_canonical_reserved_entry_round_trip() -> None:
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    update_calls: list[dict[str, Any]] = []
+    router = _cap_router(
+        tenant_id=tenant_id,
+        account_id=account_id,
+        existing_skills=[],
+        existing_mcp_servers=[],
+        update_calls=update_calls,
+    )
+    client = build_fake_anthropic(router.dispatch)
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+
+    await _update_agent_impl(
+        _runtime(client, public_url="https://mcp.example.com/mcp"),
+        auth,
+        name="a",
+        model=None,
+        description=None,
+        system=None,
+        tools=None,
+        mcp_servers=[{"name": "daimon-mcp", "type": "url", "url": "https://mcp.example.com/mcp/"}],
+        skills=None,
+    )
+    assert len(update_calls) == 1

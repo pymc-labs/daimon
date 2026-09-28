@@ -20,6 +20,8 @@ Three questions, each a total function of its arguments:
 - `toolset_permission_policy` — which MA policy a toolset carries, so the
   pause above happens at all. Daimon's own server keeps `always_allow`: its
   tools are daimon code with their own authorization (`operation_policy`).
+  "Daimon's own" is verified, not a name match: see `trusted_servers_for`
+  and `heal_reserved_server`.
   `session_tools_for_policy` applies it to a session's tool list, which
   `create_session` sends as a per-session override.
 
@@ -51,8 +53,10 @@ __all__ = [
     "VerdictReason",
     "classify_tool",
     "decide_tool_call",
+    "heal_reserved_server",
     "session_tools_for_policy",
     "toolset_permission_policy",
+    "trusted_servers_for",
 ]
 
 ToolEffect = Literal["read", "write"]
@@ -270,8 +274,51 @@ def classify_tool(
     return "read" if _name_says_read(tool_name) else "write"
 
 
-def _gated(server_name: str | None) -> bool:
-    return server_name is not None and server_name != DAIMON_SERVER_NAME
+def _gated(server_name: str | None, trusted_servers: frozenset[str]) -> bool:
+    return server_name is not None and server_name not in trusted_servers
+
+
+def trusted_servers_for(public_url: str | None) -> frozenset[str]:
+    """The servers exempt from gating in a session: the built-in daimon server,
+    and only when this deployment runs one (`public_url` set).
+
+    The exemption is by verified identity, not by name alone: with the policy
+    on, `create_session` re-points a `daimon-mcp` entry that names any other
+    URL at `public_url` (`heal_reserved_server`) before the session exists, so
+    in every session this set is used for, `daimon-mcp` IS the deployment's
+    own endpoint. Without a `public_url` there is no built-in server, and an
+    entry carrying the reserved name is gated like any third party.
+    """
+    return frozenset({DAIMON_SERVER_NAME}) if public_url else frozenset()
+
+
+def heal_reserved_server(
+    policy: ToolSafetyPolicy, servers: Sequence[Mapping[str, Any]], *, public_url: str | None
+) -> list[dict[str, Any]] | None:
+    """`servers` with a foreign-URL `daimon-mcp` entry re-pointed, or `None`.
+
+    Only while the policy is on and a `public_url` exists (the exemption in
+    `trusted_servers_for` depends on it). A `daimon-mcp` entry naming another
+    URL is the reserved name worn by a server daimon does not run; the session
+    gets the real endpoint under that name instead, so the exemption can never
+    cover a third party.
+    """
+    if not policy.enabled or not public_url:
+        return None
+    canonical = public_url.rstrip("/")
+    changed = False
+    out: list[dict[str, Any]] = []
+    for server in servers:
+        entry = dict(server)
+        url = entry.get("url")
+        if (
+            entry.get("name") == DAIMON_SERVER_NAME
+            and (url.rstrip("/") if isinstance(url, str) else None) != canonical
+        ):
+            entry["url"] = public_url
+            changed = True
+        out.append(entry)
+    return out if changed else None
 
 
 def decide_tool_call(
@@ -279,16 +326,18 @@ def decide_tool_call(
     call: ToolCall,
     *,
     attended: bool,
+    trusted_servers: frozenset[str] = frozenset(),
     annotations: ToolAnnotations | None = None,
 ) -> ToolVerdict:
     """Decide one blocked call.
 
     `attended` is whether a person started this turn and can answer a card
-    (chat) or not (routines, wakes, smoke runs).
+    (chat) or not (routines, wakes, smoke runs). `trusted_servers` is
+    `trusted_servers_for(public_url)`; empty (the default) gates every server.
     """
     if not policy.enabled:
         return ToolVerdict(outcome="allow", effect="read", reason="disabled")
-    if call.server_name is None or not _gated(call.server_name):
+    if call.server_name is None or not _gated(call.server_name, trusted_servers):
         return ToolVerdict(outcome="allow", effect="read", reason="not_attached")
     effect = classify_tool(
         policy, server_name=call.server_name, tool_name=call.tool_name, annotations=annotations
@@ -307,7 +356,10 @@ def decide_tool_call(
 
 
 def toolset_permission_policy(
-    policy: ToolSafetyPolicy, *, server_name: str | None
+    policy: ToolSafetyPolicy,
+    *,
+    server_name: str | None,
+    trusted_servers: frozenset[str] = frozenset(),
 ) -> dict[str, PermissionPolicyType]:
     """The MA `permission_policy` for a toolset: `always_ask` iff gated.
 
@@ -315,13 +367,16 @@ def toolset_permission_policy(
     runs: bash and file edits inside the session's own sandbox are not
     third-party writes.
     """
-    if policy.enabled and _gated(server_name):
+    if policy.enabled and _gated(server_name, trusted_servers):
         return {"type": "always_ask"}
     return {"type": "always_allow"}
 
 
 def session_tools_for_policy(
-    policy: ToolSafetyPolicy, tools: Sequence[Mapping[str, Any]]
+    policy: ToolSafetyPolicy,
+    tools: Sequence[Mapping[str, Any]],
+    *,
+    trusted_servers: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]] | None:
     """`tools` (SDK params dicts) with every toolset's policy set, or `None`.
 
@@ -344,7 +399,9 @@ def session_tools_for_policy(
         if entry.get("type") == "mcp_toolset":
             server_name = entry.get("mcp_server_name")
             wanted = toolset_permission_policy(
-                policy, server_name=server_name if isinstance(server_name, str) else None
+                policy,
+                server_name=server_name if isinstance(server_name, str) else "",
+                trusted_servers=trusted_servers,
             )
             default_config = dict(entry.get("default_config") or {})
             if default_config.get("permission_policy") != wanted:

@@ -13,10 +13,13 @@ import json
 from typing import Any
 
 import httpx
+from daimon.core.config import McpSettings
 from daimon.core.headless_runner import run_turn
+from daimon.core.sessions import create_session
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing.ma import MARouter, build_fake_anthropic, sse_response
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+from pydantic import HttpUrl
 
 _NOW = dt.datetime(2026, 9, 28, 12, 0, tzinfo=dt.UTC)
 
@@ -141,3 +144,65 @@ async def test_routine_session_is_unchanged_when_the_policy_is_off() -> None:
     assert creates[0]["agent"] == "agent_x", "no override when enforcement is off"
     (sent,) = _confirmations(sends)
     assert sent["result"] == "allow", "AutoApprove, as before"
+
+
+_PUBLIC_URL = "https://mcp.example.com/mcp"
+
+
+def _toolset(server: str) -> dict[str, object]:
+    return {
+        "type": "mcp_toolset",
+        "mcp_server_name": server,
+        "configs": [],
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+    }
+
+
+async def _create_with_reserved_name(public_url: str | None) -> dict[str, Any]:
+    """Real `create_session` for an agent whose `daimon-mcp` points elsewhere."""
+    creates: list[dict[str, Any]] = []
+    client = build_fake_anthropic(_router(creates=creates, sends=[]).dispatch)
+    agent = ma_agent(
+        id="agent_x",
+        tools=[_toolset("daimon-mcp"), _toolset("linear")],
+        mcp_servers=[
+            {"name": "daimon-mcp", "type": "url", "url": "https://third-party.example/mcp"},
+            {"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"},
+        ],
+    )
+    await create_session(
+        client,
+        agent=agent,
+        environment=ma_environment(id="env_x", name="env", created_at=_NOW.isoformat()),
+        mcp_settings=McpSettings(public_url=HttpUrl(public_url) if public_url else None),
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+    (created,) = creates
+    return created["agent"]
+
+
+def _policies(agent: dict[str, Any]) -> dict[str, str]:
+    return {
+        t["mcp_server_name"]: t["default_config"]["permission_policy"]["type"]
+        for t in agent["tools"]
+        if t.get("type") == "mcp_toolset"
+    }
+
+
+async def test_a_foreign_url_under_the_reserved_name_is_healed_before_it_is_trusted() -> None:
+    agent = await _create_with_reserved_name(_PUBLIC_URL)
+
+    assert agent["type"] == "agent_with_overrides"
+    servers = {s["name"]: s["url"] for s in agent["mcp_servers"]}
+    assert servers["daimon-mcp"] == _PUBLIC_URL, (
+        "the reserved name must reach daimon, not a third party"
+    )
+    assert _policies(agent) == {"daimon-mcp": "always_allow", "linear": "always_ask"}
+
+
+async def test_without_a_daimon_endpoint_the_reserved_name_is_gated_like_any_server() -> None:
+    agent = await _create_with_reserved_name(None)
+
+    servers = {s["name"]: s["url"] for s in agent["mcp_servers"]}
+    assert servers["daimon-mcp"] == "https://third-party.example/mcp"
+    assert _policies(agent) == {"daimon-mcp": "always_ask", "linear": "always_ask"}
