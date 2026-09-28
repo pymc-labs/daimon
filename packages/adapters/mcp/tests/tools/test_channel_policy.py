@@ -781,3 +781,109 @@ async def test_discord_scoped_search_counts_only_what_it_shows_once_anything_is_
     shown = len(structured["rows"])
     assert structured["total_results"] == shown, "the total must not count withheld hits"
     assert not structured.get("hint"), "no hint that hidden matches exist"
+
+
+def _search_with(hits: list[dict[str, Any]], *, total: int) -> Any:
+    """The search handler, answering with these hits (all in open channel 333)."""
+    base = _discord_search_handler([])
+
+    async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}/messages/search":
+            return _search._search_response(  # pyright: ignore[reportPrivateUsage]
+                messages=[[h] for h in hits], total_results=total
+            )
+        return await base(route, kwargs)
+
+    return handler
+
+
+def _search_notice(*, message_id: str, thread_id: str | None) -> dict[str, Any]:
+    notice = {
+        **_search._search_hit_payload(  # pyright: ignore[reportPrivateUsage]
+            message_id=message_id, channel_id=_OTHER, content="sealed acquisition target"
+        ),
+        "type": 18,
+    }
+    if thread_id is not None:
+        notice["message_reference"] = {"channel_id": thread_id, "guild_id": _GUILD}
+    return notice
+
+
+async def _search_rows(
+    sessionmaker: async_sessionmaker[AsyncSession], token: str, arguments: dict[str, object]
+) -> dict[str, Any]:
+    result = await call_mcp_tool(
+        _app(sessionmaker), token=token, name="search_messages", arguments=arguments
+    )
+    payload = result.get("result", result)
+    structured = payload.get("structuredContent") or {}  # type: ignore[union-attr]
+    return structured.get("result", structured)  # type: ignore[no-any-return]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inside", [False, True], ids=["outside", "inside-the-thread"])
+async def test_discord_search_withholds_thread_created_notices_for_sealed_threads(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    inside: bool,
+) -> None:
+    """A visible hit in the open parent comes first (so the parent's view is
+    cached), then the notice naming sealed thread 902, then a notice naming no
+    thread. Only the ordinary hit, plus the 902 notice from inside, may show."""
+    token, origin_id = await _caller(
+        db_session,
+        platform="discord",
+        workspace_id=_GUILD,
+        user_id=_CALLER,
+        policy=TenantAccessPolicy(sealed_channel_ids=("902",)),
+        origin_channel_id=_OTHER if inside else None,
+        origin_thread_id="902",
+    )
+    ordinary = _search._search_hit_payload(  # pyright: ignore[reportPrivateUsage]
+        message_id="1", channel_id=_OTHER, content="open talk"
+    )
+    hits = [
+        ordinary,
+        _search_notice(message_id="2", thread_id="902"),
+        _search_notice(message_id="3", thread_id=None),
+    ]
+    patch_discord_http(monkeypatch, _search_with(hits, total=3))
+    arguments: dict[str, object] = {"content": "x"}
+    if origin_id is not None:
+        arguments["origin_context_id"] = origin_id
+
+    structured = await _search_rows(sessionmaker, token, arguments)
+
+    ids = [r["id"] for r in structured["rows"]]
+    assert ids == (["1", "2"] if inside else ["1"]), f"got {structured!r}"
+
+
+@pytest.mark.asyncio
+async def test_discord_search_hint_does_not_depend_on_the_raw_total_once_sealed(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The reviewer's probe: same visible hit, limit 1, raw totals 1 and 2 (the
+    second match possibly sealed). The two answers must be identical."""
+    token, _ = await _caller(
+        db_session,
+        platform="discord",
+        workspace_id=_GUILD,
+        user_id=_CALLER,
+        policy=TenantAccessPolicy(sealed_channel_ids=("902",)),
+    )
+    hit = _search._search_hit_payload(  # pyright: ignore[reportPrivateUsage]
+        message_id="1", channel_id=_OTHER, content="open talk"
+    )
+    answers = []
+    for total in (1, 2):
+        patch_discord_http(monkeypatch, _search_with([hit], total=total))
+        structured = await _search_rows(
+            sessionmaker, token, {"content": "x", "channel_ids": [_OTHER], "limit": 1}
+        )
+        answers.append((structured["total_results"], structured.get("hint")))
+
+    assert answers[0] == answers[1], f"the raw total leaks through: {answers}"
+    assert answers[0][0] == 1

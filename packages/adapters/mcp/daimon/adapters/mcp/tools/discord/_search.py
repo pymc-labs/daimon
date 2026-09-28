@@ -54,6 +54,12 @@ class _SearchAttachment(BaseModel):
     size: int
 
 
+class _SearchReference(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    channel_id: str | None = None
+
+
 class _SearchHit(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -64,6 +70,24 @@ class _SearchHit(BaseModel):
     timestamp: str = ""
     attachments: list[_SearchAttachment] = []
     hit: bool = False
+    # Kept so a THREAD_CREATED notice (type 18, content = the thread's name) can
+    # be withheld when the thread it references is sealed.
+    type: int = 0
+    message_reference: _SearchReference | None = None
+
+
+_THREAD_CREATED = 18
+
+
+def _names_a_withheld_thread(hit: _SearchHit, read_policy: ChannelReadPolicy) -> bool:
+    """Same rule as channel history: a thread-created notice naming a sealed
+    thread is withheld; one naming no thread is withheld whenever anything is sealed."""
+    if hit.type != _THREAD_CREATED:
+        return False
+    thread_id = hit.message_reference.channel_id if hit.message_reference else None
+    if thread_id is None:
+        return bool(read_policy.policy.sealed_channel_ids)
+    return not read_policy.allows(thread_id, hit.channel_id)
 
 
 class _SearchThread(BaseModel):
@@ -214,6 +238,10 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
             hit = next((m for m in group if m.hit), group[0] if group else None)
             if hit is None:
                 continue
+            # Before the per-channel cache: this is a per-message rule, and the
+            # notice sits in an open parent whose other hits stay visible.
+            if _names_a_withheld_thread(hit, read_policy):
+                continue
 
             ch_id = hit.channel_id
             if ch_id in view_cache:
@@ -324,7 +352,16 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         exact_count = bool(channel_ids) and not read_policy.policy.sealed_channel_ids
         effective_total = parsed.total_results if exact_count else showing
         hint: str | None = None
-        if clamped_offset + consumed < parsed.total_results:
+        if read_policy.policy.sealed_channel_ids:
+            # With anything sealed, the raw total (and a page's raw size) could
+            # count withheld hits, so the hint rests on what is shown: a full
+            # page of visible rows may have more behind it.
+            if showing == clamped_limit:
+                hint = (
+                    f"More results may be available. "
+                    f"Use offset={clamped_offset + consumed} to continue."
+                )
+        elif clamped_offset + consumed < parsed.total_results:
             if exact_count:
                 hint = (
                     f"More results available. Use offset={clamped_offset + consumed} to continue."

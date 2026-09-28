@@ -187,7 +187,9 @@ Discord) its name are withheld from outside turns: in `read_thread` and
 Discord's thread-created notice, whose text is the name), in `list_threads`
 and in search. The CLI's `--sealed-channel` accepts the Slack form. Once
 anything is sealed, search reports only the hits it shows as its total, scoped
-or not, on both platforms, so the count can't reveal sealed matches. A Slack
+or not, on both platforms, and Discord hints at more results only when a full
+page of visible hits came back, so neither the count nor the hint can reveal
+sealed matches. A Slack
 turn inside a thread sealed on its own also gets read-only memory. An origin is any active
 one of the same account and responder, not only the current turn's: a member
 who copies an origin id out of a sealed-channel turn can read that channel
