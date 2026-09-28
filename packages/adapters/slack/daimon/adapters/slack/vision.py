@@ -12,24 +12,20 @@ token in an ``Authorization: Bearer`` header, so the byte fetch is authed here.
 
 from __future__ import annotations
 
-import base64
 from typing import NotRequired, TypedDict
 
 import httpx
 import structlog
-from anthropic.types.beta.sessions import (
-    BetaManagedAgentsBase64ImageSourceParam,
-    BetaManagedAgentsImageBlockParam,
+from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.core.media.vision import (
+    MAX_VISION_IMAGE_BYTES,
+    MAX_VISION_IMAGE_DIMENSION,
+    MAX_VISION_IMAGES,
+    VISION_MEDIA_TYPES,
+    build_image_block,
 )
 
 log = structlog.get_logger()
-
-VISION_MEDIA_TYPES: frozenset[str] = frozenset(
-    {"image/png", "image/jpeg", "image/gif", "image/webp"}
-)
-MAX_VISION_IMAGE_BYTES: int = 5 * 1024 * 1024
-MAX_VISION_IMAGE_DIMENSION: int = 8000
-MAX_VISION_IMAGES: int = 20
 
 
 class SlackFile(TypedDict):
@@ -116,13 +112,9 @@ async def download_as_image_blocks(
             skipped.append((file, f"private-URL fetch failed: HTTP {resp.status_code}"))
             continue
         blocks.append(
-            BetaManagedAgentsImageBlockParam(
-                type="image",
-                source=BetaManagedAgentsBase64ImageSourceParam(
-                    type="base64",
-                    media_type=media_type,  # pyright: ignore[reportArgumentType]  # gated to VISION_MEDIA_TYPES above
-                    data=base64.standard_b64encode(resp.content).decode(),
-                ),
+            build_image_block(
+                resp.content,
+                media_type,  # pyright: ignore[reportArgumentType]  # gated to VISION_MEDIA_TYPES above
             )
         )
     return blocks, skipped
