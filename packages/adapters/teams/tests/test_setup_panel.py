@@ -124,7 +124,7 @@ async def test_details_and_routing_replace_the_card_and_a_gone_agent_says_so(
 
     assert details["type"] == "application/vnd.microsoft.card.adaptive"
     assert "Model:" in json.dumps(details) and "Use from your coding tools" in json.dumps(details)
-    assert "Workspace default" in json.dumps(routing)
+    assert "Organisation default" in json.dumps(routing)
     assert setup_panel.GONE in json.dumps(gone), "the roster returns with a notice"
 
 

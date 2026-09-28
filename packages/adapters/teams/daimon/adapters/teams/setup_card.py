@@ -131,7 +131,7 @@ def roster_card(
 def _place(place: AnsweringPlace, *, here: str) -> str:
     if place.tier == "channel" and place.channel_id is not None:
         return "this chat" if place.channel_id == here else f"channel `{place.channel_id}`"
-    return "the workspace default" if place.tier == "tenant" else "the deployment default"
+    return "the organisation default" if place.tier == "tenant" else "the deployment default"
 
 
 def _detail_lists(details: AgentDetails) -> list[CardElement]:
@@ -189,13 +189,14 @@ def routing_card(
         _text(f"Channel `{answer.channel_id}`: **{answer.agent_name}**") for answer in page.items
     ] or [_text("No channel has its own setting.", subtle=True)]
     tenant = answering_map.tenant_default
-    body.append(_text(f"**Workspace default:** {tenant.agent_name if tenant else 'Not assigned'}"))
+    default = tenant.agent_name if tenant else "Not assigned"
+    body.append(_text(f"**Organisation default:** {default}"))
     if answering_map.deployment_default is None:
         body.append(_text("No deployment default.", subtle=True))
     else:
         line = f"**Deployment default:** {answering_map.deployment_default}"
         if answering_map.tenant_consumes_fallthrough:
-            line += " (not in effect while a workspace default is set)"
+            line += " (not in effect while an organisation default is set)"
         body.append(_text(line))
     names = [setup_thread_name(ref.target_name) for ref in answering_map.setup_threads]
     if answering_map.setup_threads_truncated:

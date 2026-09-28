@@ -137,7 +137,7 @@ async def _post_teams_app_install_link_impl(  # pyright: ignore[reportUnusedFunc
     """Post the configured GitHub App install link. Returns the activity id."""
     text = (
         f"{purpose}\n\n[Install the GitHub App]({build_app_install_url(slug)}) to choose "
-        "repositories it may read. Installing alone does not verify this workspace's access "
+        "repositories it may read. Installing alone does not verify this organisation's access "
         "or bind a working repo. A working GitHub token remains an alternative; existing "
         "bound tokens stay in use."
     )

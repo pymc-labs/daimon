@@ -479,10 +479,10 @@ class TeamsSettings(BaseModel):
         default=(),
         description=(
             "Entra object IDs of the people who administer this deployment "
-            "from Teams. Teams exposes no workspace-admin role to bots, so "
-            "this list is the admin check: admins create and delete routines "
-            "and agents and see tenant-wide settings. Everyone else is a "
-            "regular user."
+            "from Teams. Teams exposes no admin role to bots, so this list is "
+            "the admin check: admins get the admin role in turns, create "
+            "routines, replace shared keys, top up and see everyone's usage. "
+            "Everyone else is a regular user."
         ),
     )
 

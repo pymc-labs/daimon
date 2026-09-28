@@ -259,7 +259,7 @@ async def _require_key_replacement_allowed(
     if outcome in ("managed_agent", "needs_admin"):
         raise ToolError(
             f"'{ma_agent.name}' is shared with everyone here, so replacing the key "
-            f"'{key}' it already has needs a server or workspace admin, and the caller "
+            f"'{key}' it already has needs an admin, and the caller "
             f"is not one. Nothing changed: the existing '{key}' is still in use and no "
             "card was posted. Tell them an admin can ask Daimon to replace the "
             f"'{key}' key on '{ma_agent.name}'. Do not ask anyone for the value here "

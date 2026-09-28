@@ -108,10 +108,14 @@ _RECOVERY_RETRY_DELAY_S = 1.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats are in flight right now. Try again in a moment."
-_BALANCE_DEPLETED = "This deployment's credit is depleted. Ask the operator to top it up."
-_CAP_REACHED = "Monthly usage cap reached. Ask the operator to adjust it."
+_BALANCE_DEPLETED = (
+    "This organisation's credit is depleted. An admin can top up with `billing` in a 1:1 "
+    "chat with me."
+)
+_CAP_REACHED = "Monthly usage cap reached for this organisation. Ask an admin to adjust it."
 _RESOLVER_MISS = (
-    "The configured agent or environment no longer exists. Ask the operator to restore it."
+    "The configured agent or environment no longer exists. Pick another with `setup` in a "
+    "1:1 chat with me, or ask an admin to restore it."
 )
 _CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
 _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
