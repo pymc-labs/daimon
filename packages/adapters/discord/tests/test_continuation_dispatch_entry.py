@@ -112,7 +112,10 @@ def _make_thread(*, thread_id: int = _THREAD_ID, guild: MagicMock | None = None)
 
 
 def _make_runtime(
-    sessionmaker: async_sessionmaker[AsyncSession], *, agent: object = None
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    agent: object = None,
+    agents: dict[str, object] | None = None,
 ) -> DiscordRuntime:
     settings = MagicMock()
     settings.mcp = McpSettings()
@@ -127,6 +130,8 @@ def _make_runtime(
     anthropic.beta.agents.retrieve = AsyncMock(return_value=ma_agent())
     if agent is not None:
         anthropic.beta.agents.retrieve.return_value = agent
+    if agents is not None:
+        anthropic.beta.agents.retrieve.side_effect = lambda agent_id, **_: agents[agent_id]
     anthropic.beta.environments.retrieve = AsyncMock(return_value=ma_environment())
     anthropic.beta.agents.list = MagicMock(return_value=_AsyncIter([]))
     resolver_cache = new_resolver_cache()
@@ -771,3 +776,62 @@ async def test_the_wake_poller_settles_wakes_for_a_thread_that_is_gone(
         row = await get_continuation(session, idempotency_key=key)
     assert row is not None
     assert row.status == "skipped" and row.skip_reason == "thread_unavailable"
+
+
+async def test_a_timer_never_runs_as_an_agent_it_was_not_set_with(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The thread was rerouted to another agent while the timer waited.
+
+    The route now resolves to ag_other; both agents exist. The timer must be
+    refused after admission, before any card, session bind or turn, with a
+    notice in the thread. bind_session and run_prepared_turn are spies around
+    the real functions, not replacements.
+    """
+    from daimon.adapters.discord import bot as bot_module
+
+    tenant_id, key = await _seed_due_wake(
+        db_session_factory, workspace_id="710000011", funded=True, reason="timer"
+    )
+    agents: dict[str, object] = {
+        "ag_target": ma_agent(id="ag_target", name="target-agent", tenant_id=tenant_id),
+        "ag_other": ma_agent(id="ag_other", name="other-agent", tenant_id=tenant_id),
+    }
+    bot = make_bot(_make_runtime(db_session_factory, agents=agents))
+    thread = _make_thread(guild=_make_guild(member=_make_member(admin=False)))
+    bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+
+    with (
+        patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock) as config,
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as resolve,
+        patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock) as env,
+        patch.object(bot_module, "bind_session", side_effect=bot_module.bind_session) as bind,
+        patch.object(
+            bot_module, "run_prepared_turn", side_effect=bot_module.run_prepared_turn
+        ) as run_turn,
+    ):
+        config.return_value = ResolvedConfig(
+            agent_name="other-agent",
+            agent_name_tier="tenant",
+            environment_name="test-env",
+            environment_name_tier="tenant",
+        )
+        resolve.return_value = "ag_other"
+        env.return_value = "env_test"
+        await poll_wakes_once(
+            db_session_factory,
+            platform="discord",
+            open_thread=bot._open_wake_thread,  # pyright: ignore[reportPrivateUsage]
+            now=datetime.now(UTC),
+        )
+        for task in list(bot._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+            await task
+
+    bind.assert_not_called()
+    run_turn.assert_not_called()
+    sent = [call.args[0] for call in thread.send.await_args_list if call.args]
+    assert any("set with target-agent" in text and "other-agent" in text for text in sent), sent
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None
+    assert row.status == "skipped" and row.skip_reason == "skip_target_changed"

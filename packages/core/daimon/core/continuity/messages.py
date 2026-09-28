@@ -40,6 +40,7 @@ __all__ = [
     "render_replacement_summary",
     "render_responder_changed_without_handoff",
     "render_timer_seed",
+    "render_timer_target_changed",
     "render_unexpected_loss",
     "render_unsaved_work_question",
 ]
@@ -537,6 +538,19 @@ def render_timer_seed(note: str, *, set_at: datetime) -> str:
     """The user message a fired timer's turn runs with. Model-facing, not person-facing."""
     return (
         f"[timer] You set this timer in this conversation at "
-        f"{set_at.astimezone(UTC):%Y-%m-%d %H:%M} UTC and it has fired. Nobody posted "
-        f"a new message; act on your note and reply here.\n\n{note}"
+        f"{set_at.astimezone(UTC):%Y-%m-%d %H:%M} UTC and it has fired. This turn was "
+        f"started by the timer, not by a new message; act on your note and reply "
+        f"here.\n\n{note}"
+    )
+
+
+def render_timer_target_changed(target_name: str, current_name: str) -> str:
+    """Tell the person a timer did not run because another agent answers here now."""
+    return "\n".join(
+        [
+            f"A reminder here was set with {target_name}, but {current_name} answers in this "
+            "thread now.",
+            "It did not run.",
+            "Ask again and I'll set it with the current agent.",
+        ]
     )

@@ -6,11 +6,15 @@ timer never fires.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import os
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from daimon.core.continuity import timers as timers_module
 from daimon.core.continuity.continuation import ContinuationRequest, decide_continuation
 from daimon.core.continuity.messages import render_timer_seed
 from daimon.core.continuity.timers import (
@@ -31,7 +35,7 @@ from daimon.core.stores.task_continuations import get_continuation
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_stub_anthropic
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 _NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
 
@@ -229,3 +233,57 @@ async def test_a_fired_timer_dispatches_its_note_even_after_newer_messages(
     assert decision.seed_user_message == render_timer_seed(
         "check whether the nightly build went green", set_at=row.created_at
     )
+
+
+async def test_two_concurrent_creators_cannot_pass_the_cap_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At 24 pending, two creators racing on separate connections leave exactly 25.
+
+    Separate engines stand in for two MCP processes; default schema with a
+    fresh tenant, so parallel workers cannot collide. Each creator is held
+    after its count until the other has counted too (or 1 s passes), which
+    is the interleaving that let both insert before the per-person lock: with
+    the lock the second cannot count until the first commits.
+    """
+    real_count = timers_module.count_pending_timer_rows
+    counted = 0
+    both_counted = asyncio.Event()
+
+    async def _count_then_wait(*args: object, **kwargs: object) -> int:
+        nonlocal counted
+        result = await real_count(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        counted += 1
+        if counted == 2:
+            both_counted.set()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(both_counted.wait(), timeout=1.0)
+        return result
+
+    dsn = os.environ.get("DAIMON_DATABASE__TEST_URL")
+    if not dsn:
+        pytest.skip("DAIMON_DATABASE__TEST_URL must be set for the multi-engine test")
+    engine_a, engine_b = create_async_engine(dsn), create_async_engine(dsn)
+    factory_a = async_sessionmaker(engine_a, expire_on_commit=False)
+    factory_b = async_sessionmaker(engine_b, expire_on_commit=False)
+    try:
+        tenant_id = await _tenant(factory_a)
+        owner = uuid.uuid4()
+        fire_at = datetime.now(UTC) + timedelta(hours=1)
+        for _ in range(MAX_PENDING_TIMERS - 1):
+            await _schedule(factory_a, tenant_id, account_id=owner, fire_at=fire_at)
+        monkeypatch.setattr(timers_module, "count_pending_timer_rows", _count_then_wait)
+
+        results = await asyncio.gather(
+            _schedule(factory_a, tenant_id, account_id=owner, fire_at=fire_at),
+            _schedule(factory_b, tenant_id, account_id=owner, fire_at=fire_at),
+            return_exceptions=True,
+        )
+
+        assert sum(isinstance(r, uuid.UUID) for r in results) == 1, results
+        assert sum(isinstance(r, TimerError) for r in results) == 1, results
+        pending = await list_timers(factory_a, tenant_id=tenant_id, account_id=owner)
+        assert len(pending) == MAX_PENDING_TIMERS
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()

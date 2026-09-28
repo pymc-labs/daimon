@@ -66,7 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   come back to a conversation once, at a set time, with a note it left itself
   ("remind me in two hours"). A timer runs in the thread it was set in, as the
   person who asked for it, and goes through the wake queue. A cancelled timer
-  never fires. Migration `0029_feat084_timers` adds the `timer` reason.
+  never fires, and a timer whose thread now answers to a different agent is
+  skipped with a notice instead of running under that agent. Migration
+  `0029_feat084_timers` adds the `timer` reason; deploy it and timer-aware
+  Discord, Slack and MCP builds before anyone can create timers (see
+  `docs/architecture.md`). Downgrading it deletes all timer rows.
 - Added durable initial-card intent rows and bounded Discord and Slack history
   lookup. Both adapters now commit an intent before posting, record the
   returned message ID, and reconcile unresolved cards after a restart. A

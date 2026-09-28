@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 import pytest
+import yarl
 from daimon.adapters.slack import continuation_dispatch
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
@@ -402,3 +403,47 @@ async def test_process_death_after_the_fence_settles_interrupted_and_never_rerun
     assert len(visible_effects) == int(effect_before_crash), (
         "a later dispatch must not repeat the observable effect"
     )
+
+
+async def test_a_timer_refused_for_a_changed_responder_posts_why_and_settles_skipped(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.continuity.continuation import ResponderChanged
+
+    thread_id = "9200000005.000001"
+    request = await _seed_request(
+        db_session, db_session_factory, workspace_id="T_TIMER_TARGET", thread_id=thread_id
+    )
+    anthropic = build_fake_anthropic(_fake_target_agent_handler(str(request.tenant_id)))
+
+    async def _no_newer_message(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(continuation_dispatch, "_latest_human_message_at", _no_newer_message)
+
+    async def _rerouted(row: TaskContinuationRow, seed: str) -> None:
+        raise ResponderChanged(target_name="receiving-agent", current_name="other-agent")
+
+    await dispatch_pending_continuations(
+        db_session_factory,
+        anthropic,
+        fake_slack_web_client.client,
+        tenant_id=request.tenant_id,
+        channel="C_CONT_DISPATCH",
+        thread_id=thread_id,
+        active_turn=False,
+        run_follow_up=_rerouted,
+    )
+
+    row = await _read(db_session_factory, request.idempotency_key)
+    assert row.status == "skipped" and row.skip_reason == "skip_target_changed"
+    posts = fake_slack_web_client.mock.requests.get(
+        ("POST", yarl.URL("https://slack.com/api/chat.postMessage")), []
+    )
+    texts = [
+        str((p.kwargs.get("json") or p.kwargs.get("data") or {}).get("text") or "") for p in posts
+    ]
+    assert any("other-agent answers in this thread now" in text for text in texts), texts

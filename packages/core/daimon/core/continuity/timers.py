@@ -7,8 +7,9 @@ that note as its message. A timer is nothing but a wake
 `available_at = fire_at`, so it inherits the queue's guarantees — it survives
 restarts, runs at most once, goes through the same admission as a mention —
 and resumes the thread's bound session, so the conversation's context carries
-over. Cancelling is `cancel_wake`: a status flip, so a cancelled timer can
-never be claimed.
+over. Creation counts and inserts under a per-person advisory lock, so the
+pending cap holds under concurrent calls. Cancelling is `cancel_wake`: a
+status flip, so a cancelled timer can never be claimed.
 
 Recurring asks are routines, not timers.
 """
@@ -19,11 +20,16 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
-from daimon.core.continuity.continuation import ContinuationRequest
-from daimon.core.continuity.wakes import cancel_wake, enqueue_wake
+from daimon.core.continuity.wakes import cancel_wake
 from daimon.core.errors import DaimonError
 from daimon.core.stores.domain import TaskContinuationRow
-from daimon.core.stores.task_continuations import get_continuation, list_pending_timer_rows
+from daimon.core.stores.task_continuations import (
+    count_pending_timer_rows,
+    get_continuation,
+    list_pending_timer_rows,
+    lock_timer_quota,
+    record_continuation,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -100,15 +106,20 @@ async def schedule_timer(
         raise TimerError("note is empty; say what to do when the timer fires.")
     if len(note) > MAX_TIMER_NOTE:
         raise TimerError(f"note is longer than {MAX_TIMER_NOTE} characters; shorten it.")
-    pending = await list_timers(sessionmaker, tenant_id=tenant_id, account_id=requester_account_id)
-    if len(pending) >= MAX_PENDING_TIMERS:
-        raise TimerError(
-            f"This person already has {MAX_PENDING_TIMERS} pending timers; cancel one first."
-        )
     timer_id = uuid.uuid4()
-    await enqueue_wake(
-        sessionmaker,
-        ContinuationRequest(
+    # Count and insert under one per-person lock, so two concurrent creators
+    # cannot both see room for the last timer.
+    async with sessionmaker.begin() as session:
+        await lock_timer_quota(session, tenant_id=tenant_id, account_id=requester_account_id)
+        pending = await count_pending_timer_rows(
+            session, tenant_id=tenant_id, requester_account_id=requester_account_id
+        )
+        if pending >= MAX_PENDING_TIMERS:
+            raise TimerError(
+                f"This person already has {MAX_PENDING_TIMERS} pending timers; cancel one first."
+            )
+        await record_continuation(
+            session,
             tenant_id=tenant_id,
             platform=platform,
             parent_channel_id=parent_channel_id,
@@ -117,12 +128,11 @@ async def schedule_timer(
             requester_external_user_id=requester_external_user_id,
             target_ma_agent_id=target_ma_agent_id,
             target_name=target_name,
-            requested_work=note,
             reason="timer",
             idempotency_key=timer_id,
-        ),
-        available_at=fire_at,
-    )
+            requested_work=note,
+            available_at=fire_at,
+        )
     return timer_id
 
 

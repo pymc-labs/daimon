@@ -44,7 +44,7 @@ from daimon.adapters.discord.vision import (
     is_vision_image_attachment,
 )
 from daimon.core.config import DiscordSettings, Settings
-from daimon.core.continuity.continuation import ContinuationDecision
+from daimon.core.continuity.continuation import ContinuationDecision, check_wake_responder
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
@@ -1720,6 +1720,15 @@ class DaimonBot(commands.Bot):
             thread_id=row.thread_id,
             role=role,
             now=datetime.now(UTC),
+        )
+        # A timer runs only as the agent it was set with; a thread rerouted in
+        # the meantime refuses it here, before any card, bind or billed turn.
+        check_wake_responder(
+            reason=row.reason,
+            target_ma_agent_id=row.target_ma_agent_id,
+            target_name=row.target_name,
+            admitted_ma_agent_id=admission.agent.id,
+            admitted_name=admission.agent.name,
         )
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
         agent = admission.agent

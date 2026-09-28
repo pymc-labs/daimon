@@ -31,6 +31,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
     ContinuationRequest,
+    ResponderChanged,
     decide_continuation,
 )
 from daimon.core.continuity.wakes import (
@@ -148,6 +149,14 @@ async def _dispatch_one(
             status="skipped",
             now=now(),
             skip_reason="blocked_preparation_failed",
+        )
+        return
+    except ResponderChanged as exc:
+        # A timer whose thread is answered by another agent now: say so and
+        # stop; the turn never started.
+        await thread.send(exc.message)
+        await settle_wake(
+            sessionmaker, claim, status="skipped", now=now(), skip_reason="skip_target_changed"
         )
         return
     except AdmissionDenied as exc:

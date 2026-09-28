@@ -29,6 +29,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.slack.context import THREAD_PAGE_LIMIT
 from daimon.core.continuity.continuation import (
     ContinuationRequest,
+    ResponderChanged,
     decide_continuation,
 )
 from daimon.core.continuity.wakes import (
@@ -185,6 +186,20 @@ async def dispatch_pending_continuations(
                     status="skipped",
                     now=now(),
                     skip_reason="blocked_preparation_failed",
+                )
+                continue
+            except ResponderChanged as exc:
+                # A timer whose thread is answered by another agent now: say
+                # so and stop; the turn never started.
+                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel, thread_ts=thread_id, text=exc.message
+                )
+                await settle_wake(
+                    sessionmaker,
+                    claim,
+                    status="skipped",
+                    now=now(),
+                    skip_reason="skip_target_changed",
                 )
                 continue
             except AdmissionDenied as exc:

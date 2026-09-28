@@ -343,6 +343,17 @@ against.
   every scheduled wake that has not run as `skipped/downgraded`, so none of
   them runs early.
 
+  Timers add a reason (`timer`) that older code rejects when it reads a row.
+  A FEAT-003-only adapter or MCP process fails to load a batch containing a
+  timer row. So roll timers out in this order: migration `0029_feat084_timers`,
+  then every Discord, Slack and MCP process on a timer-aware build. Only then
+  may `create_timer` be called, and it is only exposed by that MCP build.
+  Downgrading `0029_feat084_timers` deletes every timer row, fired or not.
+  A timer only runs as the agent it was set with. If the thread answers to
+  another agent when the timer fires, the adapter refuses it after
+  `admit()` and before anything is bound or billed. It settles the row
+  `skipped/skip_target_changed` and posts a notice in the thread.
+
 If you add another, reuse `admit()` rather than re-deriving the gate order.
 
 ## Standalone apps
