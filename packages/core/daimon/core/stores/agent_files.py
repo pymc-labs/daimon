@@ -8,7 +8,7 @@ from datetime import datetime
 import structlog
 from cryptography.fernet import MultiFernet
 from daimon.core._models import AgentFile
-from daimon.core.agent_env_crypto import PREFIX, decode_value, encode_value
+from daimon.core.agent_env_crypto import decode_value, encode_value
 from daimon.core.config import load_crypto_settings
 from daimon.core.errors import StoreError
 from daimon.core.github_credentials import build_multifernet
@@ -29,7 +29,7 @@ def _cipher(session: AsyncSession) -> MultiFernet | None:
 
 
 def _row(cipher: MultiFernet | None, orm: AgentFile) -> AgentFileRow:
-    if cipher is not None and not orm.content.startswith(PREFIX):
+    if cipher is not None and orm.encoding == "plain":
         structlog.get_logger(__name__).warning(
             "agent_env.legacy_plaintext",
             tenant_id=str(orm.tenant_id),
@@ -37,7 +37,7 @@ def _row(cipher: MultiFernet | None, orm: AgentFile) -> AgentFileRow:
             key=orm.key,
         )
     return AgentFileRow.model_validate(orm).model_copy(
-        update={"content": decode_value(cipher, orm.content)}
+        update={"content": decode_value(cipher, orm.content, encoding=orm.encoding)}
     )
 
 
@@ -68,7 +68,7 @@ async def put_agent_file(
         raise StoreError("key must not be empty")
 
     cipher = _cipher(session)
-    content = encode_value(cipher, content)
+    content, encoding = encode_value(cipher, content)
     stmt = (
         pg_insert(AgentFile)
         .values(
@@ -76,6 +76,7 @@ async def put_agent_file(
             agent_id=agent_id,
             key=key,
             content=content,
+            encoding=encoding,
             created_by_account_id=set_by_account_id,
             last_set_by_account_id=set_by_account_id,
         )
@@ -83,6 +84,7 @@ async def put_agent_file(
             constraint="pk_agent_files",
             set_={
                 "content": content,
+                "encoding": encoding,
                 "updated_at": func.now(),
                 "last_set_by_account_id": set_by_account_id,
             },
@@ -133,7 +135,7 @@ async def put_agent_file_if_unchanged(
         raise StoreError("key must not be empty")
 
     cipher = _cipher(session)
-    content = encode_value(cipher, content)
+    content, encoding = encode_value(cipher, content)
     if expected_updated_at is None:
         insert_stmt = (
             pg_insert(AgentFile)
@@ -142,11 +144,13 @@ async def put_agent_file_if_unchanged(
                 agent_id=agent_id,
                 key=key,
                 content=content,
+                encoding=encoding,
                 created_by_account_id=set_by_account_id,
                 last_set_by_account_id=set_by_account_id,
             )
             .on_conflict_do_nothing(constraint="pk_agent_files")
             .returning(AgentFile)
+            .execution_options(populate_existing=True)
         )
         result = await session.execute(insert_stmt)
     else:
@@ -160,10 +164,12 @@ async def put_agent_file_if_unchanged(
             )
             .values(
                 content=content,
+                encoding=encoding,
                 updated_at=func.now(),
                 last_set_by_account_id=set_by_account_id,
             )
             .returning(AgentFile)
+            .execution_options(populate_existing=True)
         )
         result = await session.execute(update_stmt)
     orm = result.scalar_one_or_none()

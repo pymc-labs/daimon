@@ -324,15 +324,20 @@ factory starts; initialization and environment writes continue to work.
 Stop old application readers and writers before upgrading through
 `0028_agent_env_encryption`, since old readers cannot decode encrypted values.
 With keys configured, the migration encrypts existing rows in one transaction;
-without keys it is a no-op. The migration uses a five-second lock timeout, so a
+without keys it adds storage metadata but leaves every value unchanged. The
+migration uses a five-second lock timeout, so a
 busy database fails the migration instead of waiting indefinitely. Retry during
 a maintenance window. It requires an online database connection.
 
-Encrypted values use a reserved `enc:v1:` prefix. Migration retries and writes
-validate and preserve existing envelopes instead of encrypting them twice.
-New code accepts unmarked legacy plaintext, logs a warning containing only row
-identifiers when encryption is enabled, and encrypts it on the next write.
-Wrong keys or corrupt marked ciphertext fail closed. Do not remove keys while
+The separate `agent_files.encoding` column defaults to `plain` for legacy rows
+and keyless writes. Encrypted rows are tagged `fernet_v1`; each write updates the
+value and tag atomically. No text prefix is reserved: even literal values starting
+with `enc:v1:` or resembling valid Fernet tokens round-trip unchanged. Store APIs
+always accept plaintext user values. Migration retries encrypt only `plain` rows
+and preserve existing `fernet_v1` ciphertext without double encryption.
+New code reads legacy `plain` rows, logs a warning containing only row identifiers
+when encryption is enabled, and encrypts them on the next write. Wrong keys or
+corrupt rows tagged `fernet_v1` fail closed. Do not remove keys while
 encrypted values remain. When enabling keys after a keyless migration, rewrite
 existing values through the application or re-run this migration's data upgrade
 under maintenance; setting keys alone does not rewrite existing rows.
@@ -341,7 +346,8 @@ For rollback, stop application readers and writers and run the migration's
 Alembic downgrade with the original keys available before starting old code.
 When this revision is the head, use `alembic downgrade -1`. The downgrade restores
 plaintext in the same transaction and refuses to decrypt encrypted rows without
-valid keys. Keyless plaintext-only downgrades remain a no-op.
+valid keys. It removes the encoding column only after successful decryption;
+keyless plaintext-only downgrades leave the values unchanged.
 
 To rotate keys, prepend a new key and retain older keys for reads. Rewriting a
 decrypted environment value encrypts it with the first key. Do not retire old
