@@ -1071,6 +1071,7 @@ async def test_run_turn_provisions_copilot_credential_from_pat(
                 "data": [
                     {
                         "id": "vcrd_daimon_mcp",
+                        "metadata": {"daimon_chat_identity": str(agent_uuid)},
                         "type": "credential",
                         "vault_id": "vlt_existing",
                         "auth": {"type": "static_bearer", "mcp_server_url": public_url},

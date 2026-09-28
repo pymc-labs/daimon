@@ -496,6 +496,7 @@ async def test_reused_session_refresh_succeeds_when_the_caller_holds_an_oauth_gr
             [
                 {
                     "id": "vcrd_jwt",
+                    "metadata": {"daimon_chat_identity": str(agent_id)},
                     "type": "vault_credential",
                     "vault_id": "vlt_me",
                     "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -503,7 +504,6 @@ async def test_reused_session_refresh_succeeds_when_the_caller_holds_an_oauth_gr
                     "updated_at": "2026-09-01T00:00:00Z",
                     "archived_at": None,
                     "display_name": None,
-                    "metadata": None,
                 },
                 {
                     "id": "vcrd_grant",

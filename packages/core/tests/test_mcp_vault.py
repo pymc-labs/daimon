@@ -45,8 +45,10 @@ def _vault_obj(vault_id: str, display_name: str, created_at: str) -> dict[str, A
     }
 
 
+@pytest.mark.parametrize("legacy", [False, True])
 async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
     db_session_factory: async_sessionmaker[AsyncSession],
+    legacy: bool,
 ) -> None:
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
@@ -76,6 +78,7 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
                     "data": [
                         {
                             "id": "vcrd_existing",
+                            "metadata": {} if legacy else {"daimon_chat_identity": str(agent_id)},
                             "type": "credential",
                             "vault_id": "vlt_old",
                             "auth": {
@@ -85,6 +88,25 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
                         }
                     ],
                     "has_more": False,
+                },
+            )
+        if req.method == "POST" and req.url.path == "/v1/vaults/vlt_old/credentials/vcrd_existing":
+            body = json.loads(req.content)
+            claims = pyjwt.decode(body["auth"]["token"], b"a" * 32, algorithms=["HS256"])
+            assert claims["chat_agent_id"] == str(agent_id)
+            assert claims["sub"] == str(account_id)
+            assert "agent_id" not in claims and "internal" not in claims
+            assert body["metadata"] == {"daimon_chat_identity": str(agent_id)}
+            return httpx.Response(
+                200,
+                json={
+                    "id": "vcrd_existing",
+                    "type": "credential",
+                    "vault_id": "vlt_old",
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": "https://mcp.example.com/mcp",
+                    },
                 },
             )
         raise AssertionError(f"unexpected call: {req.method} {req.url}")
@@ -102,7 +124,10 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
 
     assert vault_id == "vlt_old", "must pick oldest matching display_name"
     # Warm path verifies the credential URL matches; no rebind needed when it does.
-    assert calls == ["GET /v1/vaults", "GET /v1/vaults/vlt_old/credentials"], (
+    expected = ["GET /v1/vaults", "GET /v1/vaults/vlt_old/credentials"]
+    if legacy:
+        expected.append("POST /v1/vaults/vlt_old/credentials/vcrd_existing")
+    assert calls == expected, (
         "must list creds to verify URL match, but not create/delete when matching"
     )
 
@@ -198,10 +223,10 @@ def _cold_path_handler(
     return handler
 
 
-async def test_ensure_agent_mcp_vault_cold_path_mints_claimless_jwt(
+async def test_ensure_agent_mcp_vault_cold_path_mints_chat_identity_jwt(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Cold-path credential carries no platform/guild_id wire claims (account-scoped only)."""
+    """Cold-path credentials identify the executing agent without platform wire claims."""
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
@@ -223,6 +248,8 @@ async def test_ensure_agent_mcp_vault_cold_path_mints_claimless_jwt(
     token = captured[0]["auth"]["token"]
     # Inspect-only: signature verification is the MCP verifier's job; here we assert claim shape.
     claims = pyjwt.decode(token, secret, algorithms=["HS256"])
+    assert claims["chat_agent_id"] == str(agent_id)
+    assert "agent_id" not in claims
     assert "platform" not in claims, "minted token must carry no platform wire claim"
     assert "guild_id" not in claims, "minted token must carry no guild_id wire claim"
 
@@ -366,6 +393,7 @@ async def test_ensure_agent_mcp_vault_warm_path_with_matching_url_skips_rebind(
                     "data": [
                         {
                             "id": "vcrd_ok",
+                            "metadata": {"daimon_chat_identity": str(agent_id)},
                             "type": "credential",
                             "vault_id": "vlt_warm",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -976,6 +1004,7 @@ async def test_ensure_agent_mcp_vault_does_not_restamp_matching_url_credential(
                     "data": [
                         {
                             "id": "vcrd_existing",
+                            "metadata": {"daimon_chat_identity": str(agent_id)},
                             "type": "credential",
                             "vault_id": "vlt_warm",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -1045,14 +1074,10 @@ async def test_ensure_agent_mcp_vault_long_lived_credential_never_carries_is_adm
     )
 
 
-async def test_minted_jwt_has_no_agent_claim(
+async def test_minted_jwt_has_chat_identity_without_restricted_agent_claim(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """SC-4: the daimon-mcp JWT minted into the vault carries no agent or agent_id claim.
-
-    The vault is per-agent (storage location), but the JWT content stays
-    account-scoped (account/platform/guild/is_admin). No agent claim is added.
-    """
+    """Chat execution identity must not select the external agent-chat surface."""
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
@@ -1074,13 +1099,14 @@ async def test_minted_jwt_has_no_agent_claim(
     token = captured[0]["auth"]["token"]
     claims = pyjwt.decode(token, secret, algorithms=["HS256"])
 
+    assert claims["chat_agent_id"] == str(agent_id)
     assert "agent" not in claims, "daimon-mcp JWT must NOT carry an 'agent' claim (SC-4)"
     assert "agent_id" not in claims, "daimon-mcp JWT must NOT carry an 'agent_id' claim (SC-4)"
     # Verify the expected account-scoped claims are present.
     # The account UUID is carried as the JWT `sub` claim.
     assert "sub" in claims, "JWT must carry sub (account) claim"
     # platform and guild_id are NOT carried as wire claims —
-    # the JWT is account-scoped only (sub + iat).
+    # they are resolved live from the account.
     assert "platform" not in claims, "daimon-mcp JWT must NOT carry a platform wire claim (58.5)"
     assert "guild_id" not in claims, "daimon-mcp JWT must NOT carry a guild_id wire claim (58.5)"
 
@@ -1156,7 +1182,7 @@ async def test_ensure_agent_mcp_vault_concurrent_calls_create_exactly_one_vault(
                 "id": "vcrd_race",
                 "type": "vault_credential",
                 "vault_id": "vlt_race",
-                "metadata": {},
+                "metadata": body["metadata"],
                 "created_at": "2026-04-24T00:00:00Z",
                 "updated_at": "2026-04-24T00:00:00Z",
                 "auth": body["auth"],

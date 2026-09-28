@@ -2,8 +2,8 @@
 
 A chat turn's daimon-mcp vault credential is minted exactly the way
 ``ensure_agent_mcp_vault`` mints it: subject is the account, no ``agent_id``
-claim, no ``is_admin``, no ``internal``. This module drives that exact shape
-of session through the real ``httpx.ASGITransport`` + ``create_mcp_app``
+claim (it carries ``chat_agent_id``), no ``is_admin``, no ``internal``. This module
+drives that exact shape of session through the real ``httpx.ASGITransport`` + ``create_mcp_app``
 handshake and records, per tool the seeded system prompt currently mentions,
 whether it is discoverable via ``search_tools`` and, when it is, whether a
 ``call_tool`` invocation is refused specifically because the session carries
@@ -18,15 +18,11 @@ exist) and the ``set_repo_binding``-from-chat gap were both this same class
 of mistake: prompt prose describing mechanism the live tool surface
 contradicts.
 
-One outcome is recorded rather than treated as a bug:
+Chat execution identity uses ``chat_agent_id``, preserving the ordinary chat
+surface. ``agent_id`` remains the restricted external agent-chat credential.
 
-- ``set_repo_binding`` / ``get_repo_binding`` are tagged ``agent-chat`` and
-  therefore invisible to a chat-turn session entirely — a chat-turn vault
-  credential carries no ``agent_id`` claim, so it can never satisfy the
-  precondition these tools' own ``_require_agent_id`` gate enforces.
-  Minting an agent claim into the account-scoped vault credential would
-  make them reachable, but that credential is deliberately account-scoped,
-  not agent-scoped, so it is out of scope here.
+- ``set_repo_binding`` / ``get_repo_binding`` remain tagged ``agent-chat``
+  and invisible to ordinary chat sessions.
 - ``request_mcp_token`` / ``request_agent_key`` are available on Discord and
   Slack and require a platform-bound caller. This suite exercises Discord;
   the golden-query and authorization journeys cover the platform distinction.
@@ -56,8 +52,6 @@ from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
-
-from .harness import make_jwt
 
 SECRET = "a" * 32
 _NOW = dt.datetime(2026, 4, 24, tzinfo=dt.UTC)
@@ -191,7 +185,7 @@ def _build_client() -> AsyncAnthropic:
 async def _seed_chat_turn_session(sessionmaker: async_sessionmaker[AsyncSession]) -> str:
     """Seed a tenant + account shaped exactly like a Discord chat turn and
     return the daimon-mcp-vault-shaped JWT for it: account-scoped subject, no
-    agent_id claim, no is_admin, default (non-admin) role, Discord platform
+    agent_id claim, chat_agent_id execution identity, no is_admin, default role, Discord platform
     with a bound platform_user_id."""
     async with sessionmaker() as s, s.begin():
         tenant = await make_tenant(s, platform="discord", workspace_id="chat-turn-reachability")
@@ -203,7 +197,9 @@ async def _seed_chat_turn_session(sessionmaker: async_sessionmaker[AsyncSession]
             tenant=tenant,
             account=account,
         )
-    return make_jwt(account_id=account.id)
+    return mint_jwt(
+        account_id=account.id, secret=SECRET.encode(), now=_NOW, chat_agent_id=uuid.uuid4()
+    )
 
 
 @pytest.mark.parametrize("tool_name,expected", sorted(CHAT_TURN_TOOL_REACHABILITY.items()))
@@ -269,7 +265,13 @@ async def test_agent_id_claim_session_discovers_agent_chat_and_self_edit_tools_o
     async with sessionmaker() as s, s.begin():
         tenant = await make_tenant(s, platform="discord", workspace_id="agent-chat-reachability")
         account = await make_account(s, tenant=tenant)
-    token = mint_jwt(account_id=account.id, secret=SECRET.encode(), now=_NOW, agent_id=uuid.uuid4())
+    token = mint_jwt(
+        account_id=account.id,
+        secret=SECRET.encode(),
+        now=_NOW,
+        agent_id=uuid.uuid4(),
+        chat_agent_id=uuid.uuid4(),
+    )
     app = _make_app(sessionmaker, _build_client())
 
     result = await mcp_session(app, token=token, method="tools/list")

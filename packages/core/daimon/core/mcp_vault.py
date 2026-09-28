@@ -158,17 +158,38 @@ async def _ensure_agent_mcp_vault_locked(
                 continue
             if same_server_url(cred.auth.mcp_server_url, public_url):
                 has_matching_url = True
+                # Bearer secrets cannot be read back. Version our own credential
+                # metadata so pre-identity vaults are upgraded once, in place.
+                if cred.auth.type == "static_bearer" and (cred.metadata or {}).get(
+                    "daimon_chat_identity"
+                ) != str(agent_id):
+                    await client.beta.vaults.credentials.update(
+                        cred.id,
+                        vault_id=oldest.id,
+                        auth={
+                            "type": "static_bearer",
+                            "token": mint_jwt(
+                                account_id=account_id,
+                                chat_agent_id=agent_id,
+                                secret=jwt_secret,
+                                now=now,
+                            ),
+                        },
+                        metadata={**(cred.metadata or {}), "daimon_chat_identity": str(agent_id)},
+                    )
                 break
         url_mismatch = not has_matching_url
         if url_mismatch:
             # No credential for the current URL yet — create fresh.
             await client.beta.vaults.credentials.create(
                 vault_id=oldest.id,
+                metadata={"daimon_chat_identity": str(agent_id)},
                 auth={
                     "type": "static_bearer",
                     "mcp_server_url": public_url,
                     "token": mint_jwt(
                         account_id=account_id,
+                        chat_agent_id=agent_id,
                         secret=jwt_secret,
                         now=now,
                     ),
@@ -179,11 +200,13 @@ async def _ensure_agent_mcp_vault_locked(
     vault = await client.beta.vaults.create(display_name=display_name)
     token = mint_jwt(
         account_id=account_id,
+        chat_agent_id=agent_id,
         secret=jwt_secret,
         now=now,
     )
     await client.beta.vaults.credentials.create(
         vault_id=vault.id,
+        metadata={"daimon_chat_identity": str(agent_id)},
         auth={
             "type": "static_bearer",
             "mcp_server_url": public_url,
@@ -215,10 +238,10 @@ async def ensure_agent_mcp_vault(
 ) -> str:
     """Return the ``ma_vault_id`` for this agent's daimon-mcp vault.
 
-    Creates the vault + credential on cold path. On warm path, only acts when
-    there is no credential matching the current ``public_url`` (URL-drift case,
-    e.g. cloudflare-tunnel → fly URL migration) — a fresh credential is created
-    at the new URL; the prior credential is left as an inert orphan.
+    Creates the vault + credential on cold path. On warm path, upgrades legacy
+    static-bearer credentials once to carry ``chat_agent_id``. If no credential
+    matches ``public_url`` (URL drift), creates one at the new URL and leaves
+    the prior credential as an inert orphan. OAuth credentials are preserved.
 
     The long-lived credential is always non-admin and never carries the ``internal``
     discriminator claim — admin is resolved live from the DB ``role`` by the verifier
@@ -226,10 +249,10 @@ async def ensure_agent_mcp_vault(
     never elevates a non-admin caller at the MCP gate (#162 escalation closed).
 
     Per-turn delete+recreate (the old re-stamp limb) is intentionally removed (Phase
-    88-03 T-88-03-02): the credential is identity-stable (``sub`` = account, no
-    ``is_admin``, no ``internal``), so nothing per-turn needs to mutate it. Removing
-    the re-stamp limb eliminates the cross-thread race where an in-flight session
-    re-reads the shared per-(account,agent) vault credential mid-turn (A3).
+    88-03 T-88-03-02): the credential is identity-stable (``sub`` = account,
+    ``chat_agent_id`` = agent, no ``is_admin``, no ``internal``), so nothing per-turn
+    needs to mutate it. Removing the re-stamp limb eliminates the cross-thread race
+    where an in-flight session re-reads its shared vault credential mid-turn (A3).
 
     We do NOT delete credentials on URL drift. The vault is shared with user-added
     external MCP credentials (``add_external_mcp_credential``) whose URLs we cannot
