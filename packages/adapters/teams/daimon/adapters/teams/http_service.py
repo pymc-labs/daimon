@@ -8,12 +8,13 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import structlog
-from daimon.adapters.teams import card, routines_card
+from daimon.adapters.teams import card, privacy_card, routines_card
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import CommandHandler, fresh_start
 from daimon.adapters.teams.feedback import record_feedback
 from daimon.adapters.teams.help import send_help
 from daimon.adapters.teams.memory import show_memory
+from daimon.adapters.teams.privacy_panel import PrivacyPanel
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import TeamsSettings
@@ -186,10 +187,12 @@ def create_teams_http_service(
         return str(token) if token is not None else None
 
     routines = RoutinesPanel(runtime)
+    privacy = PrivacyPanel(runtime)
     commands: dict[str, CommandHandler] = {
         "new": fresh_start,
         "routines": routines.command,
         "memory": show_memory,
+        "privacy": privacy.command,
     }
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
     turns = TeamsApp(runtime=runtime, sender=teams_app, commands=commands, bot_token=bot_token)
@@ -205,6 +208,7 @@ def create_teams_http_service(
     teams_app.on_message(turns.handle_message)
     teams_app.on_card_action_execute(card.CANCEL_VERB, turns.handle_cancel)
     teams_app.on_card_action_execute(routines_card.VERB, routines.on_action)
+    teams_app.on_card_action_execute(privacy_card.VERB, privacy.on_action)
     teams_app.on_dialog_open(routines_card.CREATE_DIALOG, routines.on_dialog_open)
     teams_app.on_dialog_submit(routines_card.CREATE_DIALOG, routines.on_dialog_submit)
     teams_app.on_message_submit_feedback(handle_feedback)
