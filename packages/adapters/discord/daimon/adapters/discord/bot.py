@@ -300,14 +300,14 @@ async def _requester_role(guild: discord.Guild, external_user_id: str) -> Role:
     """The requester's live guild role, for a turn that has no message to read it from.
 
     Same test a mention applies (`is_member_guild_admin`), against the member
-    fetched now. Anything short of a resolved member -- left the guild, a
-    Discord error, a malformed id -- is USER: a continuation never runs with
-    more than its requester provably holds.
+    fetched from Discord now. Never the member cache: a cached member can
+    still carry a role the requester has since lost, and a continuation can
+    run long after the form was submitted. Anything short of a fetched member
+    -- left the guild, a Discord error, a malformed id -- is USER: a
+    continuation never runs with more than its requester provably holds.
     """
     try:
-        member = guild.get_member(int(external_user_id)) or await guild.fetch_member(
-            int(external_user_id)
-        )
+        member = await guild.fetch_member(int(external_user_id))
     except (discord.HTTPException, ValueError) as exc:
         log.warning("continuation.requester_role_lookup_failed", exc_info=exc)
         return Role.USER

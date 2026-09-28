@@ -61,19 +61,28 @@ class _AsyncIter:
             raise StopAsyncIteration from err
 
 
-def _make_guild(*, member: object = None, fetch_error: Exception | None = None) -> MagicMock:
-    """A guild whose cache holds `member` (None = not cached) for the requester.
+def _make_guild(
+    *,
+    member: object = None,
+    fetch_error: Exception | None = None,
+    cached_member: object = None,
+) -> MagicMock:
+    """A guild whose `fetch_member` returns `member` for the requester.
 
-    An uncached requester falls through to `fetch_member`, which raises
-    `fetch_error` -- by default Discord's "unknown member".
+    With no `member`, `fetch_member` raises `fetch_error` -- by default
+    Discord's "unknown member" (the requester left). `cached_member` is what
+    the member cache (`get_member`) would say, which may be stale.
     """
     guild = MagicMock(spec=discord.Guild)
     guild.owner_id = 1
-    guild.get_member = MagicMock(return_value=member)
-    guild.fetch_member = AsyncMock(
-        side_effect=fetch_error
-        or discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Member")
-    )
+    guild.get_member = MagicMock(return_value=cached_member)
+    if member is not None:
+        guild.fetch_member = AsyncMock(return_value=member)
+    else:
+        guild.fetch_member = AsyncMock(
+            side_effect=fetch_error
+            or discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Member")
+        )
     return guild
 
 
@@ -460,6 +469,16 @@ async def test_continuation_turn_runs_as_admin_when_requester_is_a_guild_admin(
             "710000020", _make_guild(member=_make_member(admin=False)), id="non-admin-member"
         ),
         pytest.param("710000021", _make_guild(), id="requester-left-the-guild"),
+        pytest.param(
+            "710000023",
+            _make_guild(member=_make_member(admin=False), cached_member=_make_member(admin=True)),
+            id="stale-cached-admin-lost-the-role",
+        ),
+        pytest.param(
+            "710000024",
+            _make_guild(cached_member=_make_member(admin=True)),
+            id="stale-cached-admin-left-the-guild",
+        ),
         pytest.param(
             "710000022",
             _make_guild(fetch_error=discord.HTTPException(MagicMock(status=503), "unavailable")),
