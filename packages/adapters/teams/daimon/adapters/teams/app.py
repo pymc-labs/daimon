@@ -22,6 +22,7 @@ import anthropic
 import structlog
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
+from daimon.adapters.teams.card_actions import toast
 from daimon.adapters.teams.commands import (
     CHANNEL_POINTER,
     CommandContext,
@@ -92,7 +93,6 @@ from daimon.core.turn_origin import (
     turn_origin,
 )
 from microsoft_teams.api import (
-    AdaptiveCardActionMessageResponse,
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
     MessageActivity,
@@ -135,11 +135,33 @@ def session_state(continuity: ContinuityOutcome) -> SessionState:
     return SessionState(state=continuity.state, applied=tuple(continuity.applied), lost=lost)
 
 
-def _compose_queued(items: list[TeamsInbound]) -> TeamsInbound:
-    """One author's queued messages as one turn, replying where the last one came from."""
-    text = "\n\n".join(item.text for item in items)
-    files = tuple(file for item in items for file in item.files)
-    return dataclasses.replace(items[-1], text=text, files=files)
+def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
+    """One turn per author, replying where that author's last message came from."""
+    by_author: dict[str, list[TeamsInbound]] = {}
+    for item in queued:
+        by_author.setdefault(item.user_id, []).append(item)
+    return [
+        dataclasses.replace(
+            items[-1],
+            text="\n\n".join(item.text for item in items),
+            files=tuple(file for item in items for file in item.files),
+        )
+        for items in by_author.values()
+    ]
+
+
+def _admission_refusal(
+    err: MissingTurnConfigError | MAResolverMissError | AdmissionDenied, tenant_id: uuid.UUID
+) -> str:
+    """Log a refused admission; what to tell the person."""
+    if isinstance(err, MissingTurnConfigError):
+        log.info("teams.missing_config", missing=list(err.missing))
+        return f"No {' or '.join(err.missing)} configured here. Ask the operator to set one."
+    if isinstance(err, MAResolverMissError):
+        log.warning("teams.resolver.miss", kind=err.kind, daimon_tag=err.daimon_tag)
+        return _RESOLVER_MISS
+    log.info(_DENIAL_EVENTS[err.reason], tenant_id=str(tenant_id))
+    return _BALANCE_DEPLETED if err.reason == "balance_depleted" else _CAP_REACHED
 
 
 class TeamsApp:
@@ -338,25 +360,16 @@ class TeamsApp:
         self._processing.add(key)
         self._last_message_at[key] = datetime.now(UTC)
         try:
-            await self._run_turn_guarded(inbound, tenant_id)
-            await self._dispatch_continuations(inbound.thread_id, tenant_id, inbound.service_url)
-            while queued := self._pending.pop(key, []):
-                by_author: dict[str, list[TeamsInbound]] = {}
-                for item in queued:
-                    by_author.setdefault(item.user_id, []).append(item)
-                for items in by_author.values():
-                    composed = _compose_queued(items)
-                    await self._run_turn_guarded(composed, tenant_id)
-                    await self._dispatch_continuations(
-                        composed.thread_id, tenant_id, composed.service_url
-                    )
+            turns = [inbound]
+            while turns:
+                for turn in turns:
+                    await self._run_turn_guarded(turn, tenant_id)
+                    await self._dispatch_continuations(turn.thread_id, tenant_id, turn.service_url)
+                turns = _compose_queued(self._pending.pop(key, []))
         finally:
             self._release(key)
-            remaining = self._inflight.get(tenant_id, 1) - 1
-            if remaining > 0:
+            if (remaining := self._inflight.pop(tenant_id, 1) - 1) > 0:
                 self._inflight[tenant_id] = remaining
-            else:
-                self._inflight.pop(tenant_id, None)
             for item in self._pending.pop(key, []):
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
                     await self._say(item, _FAILED)
@@ -396,31 +409,15 @@ class TeamsApp:
                 role=self._role(inbound),
                 now=datetime.now(UTC),
             )
-        except MissingTurnConfigError as err:
-            log.info("teams.missing_config", missing=list(err.missing))
-            missing = " or ".join(err.missing)
-            await self._say(inbound, f"No {missing} configured here. Ask the operator to set one.")
-            if reraise:
-                raise
-            return
-        except MAResolverMissError as err:
-            log.warning("teams.resolver.miss", kind=err.kind, daimon_tag=err.daimon_tag)
-            await self._say(inbound, _RESOLVER_MISS)
-            if reraise:
-                raise
-            return
-        except AdmissionDenied as err:
-            log.info(_DENIAL_EVENTS[err.reason], tenant_id=str(tenant_id))
-            await self._say(
-                inbound, _BALANCE_DEPLETED if err.reason == "balance_depleted" else _CAP_REACHED
-            )
+        except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
+            await self._say(inbound, _admission_refusal(err, tenant_id))
             if reraise:
                 raise
             return
 
         agent = admission.agent
         # Committed before the post so a lost response still leaves a record.
-        async with self.runtime.sessionmaker() as session:
+        async with self.runtime.sessionmaker.begin() as session:
             intent = await create_turn_card_intent(
                 session,
                 tenant_id=tenant_id,
@@ -429,12 +426,13 @@ class TeamsApp:
                 turn_token=uuid.uuid4(),
                 channel_id=inbound.conversation_id,
             )
-            await session.commit()
         cancel_key = intent.id.hex
+        # Every attempt's lifecycle; dead-session recovery adds one, the last is current.
+        holder: list[TeamsTurnLifecycle] = []
 
         def new_lifecycle(cancel: asyncio.Event, adopt: str | None) -> TeamsTurnLifecycle:
             self._cancel_registry[cancel_key] = (cancel, inbound.user_id)
-            return TeamsTurnLifecycle(
+            attempt = TeamsTurnLifecycle(
                 sender=self._sender,
                 conversation_id=inbound.conversation_id,
                 service_url=inbound.service_url,
@@ -443,22 +441,21 @@ class TeamsApp:
                 model_id=agent.model.id,
                 adopt_message_id=adopt,
             )
+            holder.append(attempt)
+            return attempt
 
-        lifecycle = new_lifecycle(asyncio.Event(), None)
-        cancel = self._cancel_registry[cancel_key][0]
-        # Every attempt's lifecycle; dead-session recovery appends, the last is current.
-        holder: list[TeamsTurnLifecycle] = [lifecycle]
+        cancel = asyncio.Event()
+        lifecycle = new_lifecycle(cancel, None)
         markers: set[uuid.UUID] = set()
         try:
             # Posted before bind: session creation can take minutes.
             await lifecycle.post_initial()
             try:
                 # A gate: no untracked turn runs behind a visible card.
-                async with self.runtime.sessionmaker() as session:
+                async with self.runtime.sessionmaker.begin() as session:
                     recorded = await record_turn_card_message(
                         session, id=intent.id, message_id=lifecycle.message_id or ""
                     )
-                    await session.commit()
                 if not recorded:
                     raise DaimonError("Teams card intent could not record its message id")
                 await self._bind_and_run(
@@ -519,14 +516,13 @@ class TeamsApp:
                 reuse_existing=True,
                 deadline=deadline,
             )
-        except SessionPreparationFailed:
-            await lifecycle.close_with_notice(render_preparation_failed(admission.agent.name))
-            if reraise:
-                raise
-            return
-        except SessionBusyError:
-            text = render_current_work_must_finish(admission.agent.name, handoff=True)
-            await lifecycle.close_with_notice(text)
+        except (SessionPreparationFailed, SessionBusyError) as error:
+            name = admission.agent.name
+            await lifecycle.close_with_notice(
+                render_preparation_failed(name)
+                if isinstance(error, SessionPreparationFailed)
+                else render_current_work_must_finish(name, handoff=True)
+            )
             if reraise:
                 raise
             return
@@ -548,7 +544,7 @@ class TeamsApp:
             summary = render_replacement_summary(prepared.continuity.transfer_kind, lost=[])
             lifecycle.answer_prefix = summary
         if prepared.mapping_id is not None and lifecycle.message_id is not None:
-            async with self.runtime.sessionmaker() as session:
+            async with self.runtime.sessionmaker.begin() as session:
                 await mark_turn_active(
                     session,
                     id=prepared.mapping_id,
@@ -556,14 +552,12 @@ class TeamsApp:
                     active_turn_channel_id=inbound.conversation_id,
                     now=datetime.now(UTC),
                 )
-                await session.commit()
             markers.add(prepared.mapping_id)
 
         def recovery_lifecycle(fresh_cancel: asyncio.Event) -> TurnLifecycle:
             # Keep rendering into the card the person is already watching.
             adopted = new_lifecycle(fresh_cancel, lifecycle.message_id)
             adopted.answer_prefix = lifecycle.answer_prefix
-            holder.append(adopted)
             return adopted
 
         attachments = await prepare_attachments(
@@ -635,11 +629,10 @@ class TeamsApp:
         if summary is not None and not final.answer_prefix_applied:
             await self._say(inbound, summary)
         if outcome.mapping_id is not None and final.final_message_id is not None:
-            async with self.runtime.sessionmaker() as session:
+            async with self.runtime.sessionmaker.begin() as session:
                 await update_watermark(
                     session, id=outcome.mapping_id, watermark_message_id=final.final_message_id
                 )
-                await session.commit()
         if prepared.continuity.pending:
             await self._say(
                 inbound, render_current_work_must_finish(admission.agent.name, handoff=False)
@@ -660,9 +653,8 @@ class TeamsApp:
     ) -> None:
         """Run what a saved private input queued here, from outside a turn.
 
-        Mirrors Slack's `dispatch_continuations_in_thread`: a busy conversation
-        is left to its turn's own tail dispatch, and re-run on release in case
-        that tail already passed. Messages queued meanwhile run afterwards.
+        A busy conversation is left to its turn's tail dispatch, and re-run on
+        release in case that tail already passed. Messages queued meanwhile follow.
         """
         if self.draining:
             return
@@ -677,11 +669,8 @@ class TeamsApp:
             await self._dispatch_continuations(thread_id, tenant_id, service_url)
         finally:
             self._release(conversation_id)
-        by_author: dict[str, list[TeamsInbound]] = {}
-        for item in self._pending.pop(conversation_id, []):
-            by_author.setdefault(item.user_id, []).append(item)
-        for items in by_author.values():
-            await self._orchestrate(_compose_queued(items), tenant_id)
+        for turn in _compose_queued(self._pending.pop(conversation_id, [])):
+            await self._orchestrate(turn, tenant_id)
 
     async def _dispatch_continuations(
         self, thread_id: str, tenant_id: uuid.UUID, service_url: str | None
@@ -775,14 +764,13 @@ class TeamsApp:
         the next boot's sweep is the backstop.
         """
         try:
-            async with self.runtime.sessionmaker() as session:
+            async with self.runtime.sessionmaker.begin() as session:
                 if closed:
                     await retire_turn_card_intent(
                         session, id=intent_id, expected_message_id=message_id
                     )
                 for marker_id in markers:
                     await clear_active_turn(session, id=marker_id)
-                await session.commit()
         except SQLAlchemyError:
             log.exception("teams.turn.settle_failed", intent_id=str(intent_id))
 
@@ -793,9 +781,9 @@ class TeamsApp:
         action = ctx.activity.value.action
         entry = self._cancel_registry.get(str(action.data.get("turn") or ""))
         if entry is None:
-            return AdaptiveCardActionMessageResponse(value=_CANCEL_TURN_ENDED)
+            return toast(_CANCEL_TURN_ENDED)
         cancel, author = entry
         if canonical_uuid(ctx.activity.from_.aad_object_id) != author:
-            return AdaptiveCardActionMessageResponse(value=_CANCEL_NOT_AUTHOR)
+            return toast(_CANCEL_NOT_AUTHOR)
         cancel.set()
-        return AdaptiveCardActionMessageResponse(value=_CANCELLING)
+        return toast(_CANCELLING)
