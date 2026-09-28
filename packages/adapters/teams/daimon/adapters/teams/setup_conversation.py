@@ -41,14 +41,14 @@ Send = Callable[[MessageActivityInput], Awaitable[SentActivity]]
 async def route_to_setup(
     sessionmaker: async_sessionmaker[AsyncSession], inbound: TeamsInbound, tenant_id: uuid.UUID
 ) -> TeamsInbound:
-    """A 1:1 message, keyed to the chat's live setup conversation if one is open."""
+    """A 1:1 message, keyed to the chat's live setup conversation, or to the chat if none."""
     if inbound.kind != "dm":
         return inbound
     async with sessionmaker() as session:
         live = await list_active_bindings(
             session, tenant_id=tenant_id, platform="teams", parent_channel_id=inbound.channel_id
         )
-    return dataclasses.replace(inbound, setup_thread_id=live[0].thread_id) if live else inbound
+    return dataclasses.replace(inbound, setup_thread_id=live[0].thread_id if live else None)
 
 
 async def open_setup_conversation(

@@ -13,15 +13,19 @@ from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import fresh_start
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import TurnCardIntentRow
+from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.state import TextBlock, TurnState
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CONVERSATION_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     FakeSender,
@@ -51,17 +55,18 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     teams = _app(db_session_factory, FakeSender())
-    release = asyncio.Event()
+    started, release = asyncio.Event(), asyncio.Event()
     ran: list[TeamsInbound] = []
 
     async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
         ran.append(inbound)
         if len(ran) == 1:
+            started.set()
             await release.wait()
 
     with patch.object(TeamsApp, "_run_turn", _turn):
         first = asyncio.create_task(teams._orchestrate(make_inbound("one"), TENANT))
-        await asyncio.sleep(0)
+        await started.wait()
         await teams._orchestrate(make_inbound("two"), TENANT)
         await teams._orchestrate(make_inbound("three"), TENANT)
         await teams._orchestrate(make_inbound("other", user=OTHER_AAD_OBJECT_ID), TENANT)
@@ -74,6 +79,52 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
         (AAD_OBJECT_ID, "two\n\nthree"),
         (OTHER_AAD_OBJECT_ID, "other"),
     ]
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_queued_message_follows_a_setup_conversation_that_ended_meanwhile(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    teams = _app(db_session_factory, FakeSender())
+    setup = new_setup_thread_id(CONVERSATION_ID)
+    key = {"tenant_id": TENANT, "platform": "teams", "parent_channel_id": CONVERSATION_ID}
+    async with db_session_factory.begin() as session:
+        await create_binding(
+            session, **key, thread_id=setup, responder_ma_agent_id="agt", responder_name="s"
+        )
+    started, release = asyncio.Event(), asyncio.Event()
+    ran: list[str] = []
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        ran.append(inbound.thread_id)
+        started.set()
+        await release.wait()
+
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        first = asyncio.create_task(teams._orchestrate(make_inbound("one"), TENANT))
+        await started.wait()
+        await teams._orchestrate(make_inbound("two"), TENANT)
+        async with db_session_factory.begin() as session:
+            await update_lifecycle(session, **key, thread_id=setup, deleted=True)
+        release.set()
+        await first
+    assert ran == [setup, CONVERSATION_ID], "routed when it runs, not when it arrived"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_failing_command_is_answered(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    failing = AsyncMock(side_effect=DaimonError("database unavailable"))
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=sender,
+        commands={"new": failing},
+        bot_token=bot_token,
+    )
+    await teams._handle(make_inbound("new"))
+    assert [a.text for a in sender.activities] == [app_module._FAILED]
 
 
 async def test_the_tenant_cap_sheds_a_new_thread(

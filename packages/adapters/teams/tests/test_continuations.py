@@ -18,6 +18,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.errors import SessionAgentMismatch, SessionBusyError
@@ -96,13 +97,23 @@ async def _status(db: async_sessionmaker[AsyncSession], key: uuid.UUID) -> tuple
     return row.status, row.skip_reason
 
 
-@pytest.mark.parametrize(
-    "setup", [None, new_setup_thread_id(CONVERSATION_ID)], ids=["chat", "setup"]
-)
+@pytest.mark.parametrize("in_setup", [False, True], ids=["chat", "setup"])
 async def test_a_handoff_runs_after_the_turn_as_the_requester(
-    db_session_factory: async_sessionmaker[AsyncSession], setup: str | None
+    db_session_factory: async_sessionmaker[AsyncSession], in_setup: bool
 ) -> None:
     teams, account_id = await _app(db_session_factory, FakeSender())
+    setup = new_setup_thread_id(CONVERSATION_ID) if in_setup else None
+    if setup is not None:
+        async with db_session_factory.begin() as session:
+            await create_binding(
+                session,
+                tenant_id=TENANT,
+                platform="teams",
+                parent_channel_id=CONVERSATION_ID,
+                thread_id=setup,
+                responder_ma_agent_id=_TARGET,
+                responder_name="stats-bot",
+            )
     calls: list[tuple[TeamsInbound, dict[str, Any]]] = []
     keys: list[uuid.UUID] = []
 
@@ -112,9 +123,7 @@ async def test_a_handoff_runs_after_the_turn_as_the_requester(
             keys.append(await _hand_off(db_session_factory, account_id, inbound.thread_id))
 
     with patch.object(TeamsApp, "_run_turn", _turn):
-        await teams._orchestrate(
-            make_inbound("hand this to stats-bot", setup_thread_id=setup), TENANT
-        )
+        await teams._orchestrate(make_inbound("hand this to stats-bot"), TENANT)
 
     (_, _), (follow, kw) = calls
     assert (follow.text, follow.user_id, follow.conversation_id, follow.kind) == (

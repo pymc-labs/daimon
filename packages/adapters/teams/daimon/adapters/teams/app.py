@@ -14,7 +14,7 @@ import dataclasses
 import functools
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -319,19 +319,29 @@ class TeamsApp:
         )
 
     async def _handle(self, inbound: TeamsInbound) -> None:
+        """Error boundary around tenant lookup, routing, commands and the turn loop."""
+        try:
+            await self._route(inbound)
+        except _TURN_ERRORS as exc:
+            log.error("teams.message.failed", conversation_id=inbound.conversation_id, exc_info=exc)
+            capture_exception_with_scope(exc)
+            with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                await self._say(inbound, _FAILED)
+
+    async def _route(self, inbound: TeamsInbound) -> None:
         if self._recovery is not None:
             await asyncio.shield(self._recovery)
         tenant_id = await resolve_tenant(self.runtime.sessionmaker, inbound)
         if tenant_id is None:
             await self._say(inbound, DENIED)
             return
-        inbound = await route_to_setup(self.runtime.sessionmaker, inbound, tenant_id)
         command = parse_command(inbound.text, self._commands)
         if command is not None:
             name, args = command
             if inbound.kind != "dm":
                 await self._say(inbound, CHANNEL_POINTER.format(name=name))
                 return
+            inbound = await route_to_setup(self.runtime.sessionmaker, inbound, tenant_id)
             await self._commands[name](
                 CommandContext(
                     inbound=inbound,
@@ -361,16 +371,17 @@ class TeamsApp:
             )
             await self._say(inbound, _SHED)
             return
-        self._inflight[tenant_id] = count + 1
-        self._processing.add(key)
         self._last_message_at[key] = datetime.now(UTC)
+        async with self._holding(key, tenant_id):
+            await self._run_turns(key, tenant_id, [inbound])
+
+    @contextlib.asynccontextmanager
+    async def _holding(self, key: str, tenant_id: uuid.UUID) -> AsyncIterator[None]:
+        """Hold a chat and a tenant turn slot; on exit, answer what could not run."""
+        self._inflight[tenant_id] = self._inflight.get(tenant_id, 0) + 1
+        self._processing.add(key)
         try:
-            turns = [inbound]
-            while turns:
-                for turn in turns:
-                    await self._run_turn_guarded(turn, tenant_id)
-                    await self._dispatch_continuations(turn.thread_id, tenant_id, turn.service_url)
-                turns = _compose_queued(self._pending.pop(key, []))
+            yield
         finally:
             self._release(key)
             if (remaining := self._inflight.pop(tenant_id, 1) - 1) > 0:
@@ -378,6 +389,16 @@ class TeamsApp:
             for item in self._pending.pop(key, []):
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
                     await self._say(item, _FAILED)
+
+    async def _run_turns(self, key: str, tenant_id: uuid.UUID, turns: list[TeamsInbound]) -> None:
+        """Run `turns`, then what queued behind them, in order, until the queue is empty."""
+        while turns:
+            for queued in turns:
+                # Routed now, not on arrival: the setup conversation may have ended since.
+                turn = await route_to_setup(self.runtime.sessionmaker, queued, tenant_id)
+                await self._run_turn_guarded(turn, tenant_id)
+                await self._dispatch_continuations(turn.thread_id, tenant_id, turn.service_url)
+            turns = _compose_queued(self._pending.pop(key, []))
 
     async def _run_turn_guarded(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
         """Error boundary for failures before the status card exists."""
@@ -669,13 +690,10 @@ class TeamsApp:
         if conversation_id in self._processing:
             self._deferred_dispatch[thread_id] = (tenant_id, service_url)
             return
-        self._processing.add(conversation_id)
-        try:
+        async with self._holding(conversation_id, tenant_id):
             await self._dispatch_continuations(thread_id, tenant_id, service_url)
-        finally:
-            self._release(conversation_id)
-        for turn in _compose_queued(self._pending.pop(conversation_id, [])):
-            await self._orchestrate(turn, tenant_id)
+            queued = _compose_queued(self._pending.pop(conversation_id, []))
+            await self._run_turns(conversation_id, tenant_id, queued)
 
     async def _dispatch_continuations(
         self, thread_id: str, tenant_id: uuid.UUID, service_url: str | None
