@@ -146,7 +146,6 @@ def _offer_token(sender: FakeSender) -> str:
     return cast("dict[str, str]", card.accept_context)["offer"]
 
 
-@pytest.mark.asyncio
 async def test_accepted_offer_uploads_then_deletes_and_shows_the_file(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -169,7 +168,6 @@ async def test_accepted_offer_uploads_then_deletes_and_shows_the_file(
     assert (info.content_type, info.content_url) == (FILE_INFO_CONTENT_TYPE, CONTENT_URL)
 
 
-@pytest.mark.asyncio
 async def test_declined_offer_deletes_the_file_and_says_so(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -184,7 +182,6 @@ async def test_declined_offer_deletes_the_file_and_says_so(
     assert harness.sender.activities[-1].text == "Okay, I won't send `data.csv`."
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("token", "user"), [("forged", AAD_OBJECT_ID), (None, OTHER_AAD_OBJECT_ID)]
 )
@@ -206,7 +203,6 @@ async def test_unknown_token_or_another_person_cannot_claim_an_offer(
     assert harness.deletes == ["file_csv"], "the owner can still accept afterwards"
 
 
-@pytest.mark.asyncio
 async def test_upload_url_off_sharepoint_is_refused_and_the_file_stays_listed(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -226,7 +222,6 @@ async def test_upload_url_off_sharepoint_is_refused_and_the_file_stays_listed(
     )
 
 
-@pytest.mark.asyncio
 async def test_a_pending_offer_is_not_sent_twice(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -239,7 +234,6 @@ async def test_a_pending_offer_is_not_sent_twice(
     assert len(harness.sender.activities) == 1 and harness.deletes == []
 
 
-@pytest.mark.asyncio
 async def test_channel_outputs_get_a_note_and_are_deleted(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -258,7 +252,6 @@ async def test_channel_outputs_get_a_note_and_are_deleted(
     assert harness.deletes == ["file_csv"]
 
 
-@pytest.mark.asyncio
 async def test_oversize_output_in_a_dm_gets_the_limit_notice(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

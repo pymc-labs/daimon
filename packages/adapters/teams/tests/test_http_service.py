@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-import pytest
 from daimon.adapters.teams.http_service import (
     MAX_TEAMS_HTTP_BODY_BYTES,
     TeamsHttpService,
@@ -50,7 +49,6 @@ async def _request(
         return await client.request(method, path, **kwargs)
 
 
-@pytest.mark.asyncio
 async def test_healthz_is_live_without_lifespan(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -59,7 +57,6 @@ async def test_healthz_is_live_without_lifespan(
     assert response.json()["status"] == "live"
 
 
-@pytest.mark.asyncio
 async def test_readyz_is_503_before_sdk_init_and_ready_after(
     db_session_factory: async_sessionmaker[AsyncSession],
     entra_env: None,
@@ -74,7 +71,6 @@ async def test_readyz_is_503_before_sdk_init_and_ready_after(
         assert during.json()["status"] == "ready"
 
 
-@pytest.mark.asyncio
 async def test_disabled_ingress_returns_503_while_health_stays_live(
     db_session_factory: async_sessionmaker[AsyncSession],
     entra_env: None,
@@ -88,7 +84,6 @@ async def test_disabled_ingress_returns_503_while_health_stays_live(
         assert health.status_code == 200
 
 
-@pytest.mark.asyncio
 async def test_oversized_body_is_413_before_sdk_parsing(
     db_session_factory: async_sessionmaker[AsyncSession],
     entra_env: None,
@@ -101,7 +96,6 @@ async def test_oversized_body_is_413_before_sdk_parsing(
     assert response.status_code == 413
 
 
-@pytest.mark.asyncio
 async def test_api_messages_is_sdk_owned_and_authenticated(
     db_session_factory: async_sessionmaker[AsyncSession],
     entra_env: None,
@@ -115,7 +109,6 @@ async def test_api_messages_is_sdk_owned_and_authenticated(
     assert response.status_code in (200, 201, 202), response.text
 
 
-@pytest.mark.asyncio
 async def test_unauthenticated_request_is_rejected_by_sdk(
     db_session_factory: async_sessionmaker[AsyncSession],
     stub_bot_token: None,

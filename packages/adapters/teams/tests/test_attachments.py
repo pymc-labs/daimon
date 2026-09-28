@@ -77,7 +77,6 @@ def test_parse_caps_the_attachment_count() -> None:
     assert len(parse_attachments(many, personal=True)) == MAX_ATTACHMENTS
 
 
-@pytest.mark.asyncio
 async def test_pasted_image_is_fetched_with_the_bot_token_and_inlined() -> None:
     requests: list[httpx.Request] = []
 
@@ -99,7 +98,6 @@ async def test_pasted_image_is_fetched_with_the_bot_token_and_inlined() -> None:
     assert (prepared.prefix, prepared.notice) == ("", None), "nothing to explain"
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "url", ["https://images.example.com/cat.png", f"{SERVICE_URL}/redirects-away"]
 )
@@ -125,7 +123,6 @@ async def test_bot_token_never_reaches_a_host_outside_bot_framework(url: str) ->
     )
 
 
-@pytest.mark.asyncio
 async def test_shared_file_is_linked_for_the_agent_without_a_download() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("a non-image file must not be downloaded")
@@ -142,7 +139,6 @@ async def test_shared_file_is_linked_for_the_agent_without_a_download() -> None:
     assert prepared.notice is None
 
 
-@pytest.mark.asyncio
 async def test_oversize_shared_image_falls_back_to_a_link_without_the_token() -> None:
     requests: list[httpx.Request] = []
 
@@ -163,7 +159,6 @@ async def test_oversize_shared_image_falls_back_to_a_link_without_the_token() ->
     assert "larger than 5 MiB" in prepared.prefix and DOWNLOAD_URL in prepared.prefix
 
 
-@pytest.mark.asyncio
 async def test_image_past_the_pixel_cap_and_channel_shares_are_explained() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=_png(width=MAX_VISION_IMAGE_DIMENSION + 1, height=1))

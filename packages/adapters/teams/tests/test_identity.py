@@ -126,7 +126,6 @@ def test_oversize_input_is_refused() -> None:
     assert _parse(make_message_activity(text=text)) == Refusal(INPUT_TOO_LONG)
 
 
-@pytest.mark.asyncio
 async def test_resolve_tenant_accepts_a_live_tenant_for_dms_and_channels(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -137,7 +136,6 @@ async def test_resolve_tenant_accepts_a_live_tenant_for_dms_and_channels(
         assert await resolve_tenant(db_session_factory, inbound) == TENANT_UUID
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["missing", "pending", "archived"])
 async def test_resolve_tenant_denies_a_tenant_that_is_not_live(
     db_session_factory: async_sessionmaker[AsyncSession], state: str

@@ -102,7 +102,6 @@ async def _live(db_factory: async_sessionmaker[AsyncSession]) -> list[ThreadAgen
         )
 
 
-@pytest.mark.asyncio
 async def test_setup_lists_every_agent_with_the_panel_actions(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -115,7 +114,6 @@ async def test_setup_lists_every_agent_with_the_panel_actions(
     assert "New agent" in card and "Who answers where" in card
 
 
-@pytest.mark.asyncio
 async def test_details_and_routing_replace_the_card_and_a_gone_agent_says_so(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -130,7 +128,6 @@ async def test_details_and_routing_replace_the_card_and_a_gone_agent_says_so(
     assert setup_panel.GONE in json.dumps(gone), "the roster returns with a notice"
 
 
-@pytest.mark.asyncio
 async def test_manage_switches_the_chat_into_setup_until_new_ends_it(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -156,7 +153,6 @@ async def test_manage_switches_the_chat_into_setup_until_new_ends_it(
     assert keys == {binding.thread_id, CONVERSATION_ID}, "setup never touches the chat's session"
 
 
-@pytest.mark.asyncio
 async def test_end_button_ends_once_and_reopening_replaces_the_live_conversation(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -174,7 +170,6 @@ async def test_end_button_ends_once_and_reopening_replaces_the_live_conversation
     assert ENDED in json.dumps(ended) and remaining == []
 
 
-@pytest.mark.asyncio
 async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -194,7 +189,6 @@ async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(
     assert edits and edits[-1].url.endswith("/activities/m-7"), "the panel lands on Details"
 
 
-@pytest.mark.asyncio
 async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:

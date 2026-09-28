@@ -69,7 +69,6 @@ async def _has_principal(db_factory: async_sessionmaker[AsyncSession], user: str
     return principal is not None
 
 
-@pytest.mark.asyncio
 async def test_command_without_data_says_so_and_creates_nothing(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -81,7 +80,6 @@ async def test_command_without_data_says_so_and_creates_nothing(
     assert not await _has_principal(db_session_factory, AAD_OBJECT_ID), "the read is read-only"
 
 
-@pytest.mark.asyncio
 async def test_command_shows_holdings_and_export_summarises_them(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -97,7 +95,6 @@ async def test_command_shows_holdings_and_export_summarises_them(
     assert "holds: 1 linked principal(s)" in json.dumps(export), "export shows the summary"
 
 
-@pytest.mark.asyncio
 async def test_delete_asks_for_the_typed_name_and_refuses_a_mismatch(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -113,7 +110,6 @@ async def test_delete_asks_for_the_typed_name_and_refuses_a_mismatch(
     assert await _has_principal(db_session_factory, AAD_OBJECT_ID), "nothing was deleted"
 
 
-@pytest.mark.asyncio
 async def test_a_forwarded_confirmation_deletes_nothing(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -130,7 +126,6 @@ async def test_a_forwarded_confirmation_deletes_nothing(
     assert await _has_principal(db_session_factory, OTHER_AAD_OBJECT_ID), "so does the clicker"
 
 
-@pytest.mark.asyncio
 async def test_a_confirmed_delete_purges_and_edits_the_card_in_place(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -150,7 +145,6 @@ async def test_a_confirmed_delete_purges_and_edits_the_card_in_place(
     assert not await _has_principal(db_session_factory, AAD_OBJECT_ID), "the account is purged"
 
 
-@pytest.mark.asyncio
 async def test_a_click_from_another_organisation_is_refused(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:

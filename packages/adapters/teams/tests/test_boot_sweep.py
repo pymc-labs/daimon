@@ -39,7 +39,6 @@ async def _intent(session: AsyncSession, *, thread_id: str, message_id: str | No
     return intent.id
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_markers_and_intents_are_interrupted_cleared_and_retired(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]

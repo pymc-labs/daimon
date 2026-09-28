@@ -78,7 +78,6 @@ async def _replies(
     return [json.dumps(r.body, ensure_ascii=False) for r in fake.activity_requests]
 
 
-@pytest.mark.asyncio
 async def test_memory_lists_paths_then_shows_one_and_reports_a_missing_path(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -93,7 +92,6 @@ async def test_memory_lists_paths_then_shows_one_and_reports_a_missing_path(
     assert "No memory at /nope.md" in missing
 
 
-@pytest.mark.asyncio
 async def test_memory_without_a_store_says_so(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:

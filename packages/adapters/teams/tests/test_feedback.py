@@ -40,7 +40,6 @@ def test_feedback_text_reads_teams_json_and_tolerates_plain_text() -> None:
     assert feedback_text("plain") == "plain"
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_dislike_with_text_is_stored_against_the_answer(
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -58,7 +57,6 @@ async def test_a_dislike_with_text_is_stored_against_the_answer(
     )
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_feedback_from_another_organisation_is_dropped(
     db_session_factory: async_sessionmaker[AsyncSession],

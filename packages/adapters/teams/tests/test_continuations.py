@@ -94,7 +94,6 @@ async def _status(db: async_sessionmaker[AsyncSession], key: uuid.UUID) -> tuple
     return row.status, row.skip_reason
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "setup", [None, new_setup_thread_id(CONVERSATION_ID)], ids=["chat", "setup"]
 )
@@ -127,7 +126,6 @@ async def test_a_handoff_runs_after_the_turn_as_the_requester(
     assert await _status(db_session_factory, keys[0]) == ("delivered", None)
 
 
-@pytest.mark.asyncio
 async def test_a_newer_message_supersedes_the_queued_work(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -148,7 +146,6 @@ async def test_a_newer_message_supersedes_the_queued_work(
     assert await _status(db_session_factory, keys[0]) == ("skipped", "skip_superseded")
 
 
-@pytest.mark.asyncio
 async def test_a_refused_continuation_raises_after_telling_the_person(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -165,7 +162,6 @@ async def test_a_refused_continuation_raises_after_telling_the_person(
     assert [a.text for a in sender.activities] == [app_module._BALANCE_DEPLETED]
 
 
-@pytest.mark.asyncio
 async def test_a_saved_input_runs_its_work_now_or_once_the_busy_turn_ends(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

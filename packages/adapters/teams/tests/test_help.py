@@ -27,7 +27,6 @@ def test_help_card_lists_only_registered_commands() -> None:
     assert "@mention daimon" in card, "channels need an @mention"
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_help_command_replies_with_every_registered_command(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake

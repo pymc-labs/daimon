@@ -64,7 +64,6 @@ def _click(op: str, *, user: str = AAD_OBJECT_ID, **extra: str) -> dict[str, obj
     return make_card_action("billing", op, user=user, **extra)
 
 
-@pytest.mark.asyncio
 async def test_only_the_admin_view_offers_top_ups(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -77,7 +76,6 @@ async def test_only_the_admin_view_offers_top_ups(
     assert "admin view" in admin
 
 
-@pytest.mark.asyncio
 async def test_top_up_clicks_recheck_admin_and_the_amount(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -98,7 +96,6 @@ async def test_top_up_clicks_recheck_admin_and_the_amount(
     assert posts == [], "no checkout was created"
 
 
-@pytest.mark.asyncio
 async def test_an_admin_top_up_links_to_checkout(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -118,7 +115,6 @@ async def test_an_admin_top_up_links_to_checkout(
     assert "Action.OpenUrl" in card and CHECKOUT_URL in card, "payment opens as a link"
 
 
-@pytest.mark.asyncio
 async def test_a_top_up_without_payments_says_so(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:

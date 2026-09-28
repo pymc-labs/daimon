@@ -48,7 +48,6 @@ async def _running(
             yield service, turns
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("provisioned_tenant")
 @pytest.mark.parametrize(
     ("payload", "conversation"),
@@ -73,7 +72,6 @@ async def test_message_runs_a_turn_and_the_answer_replaces_the_card(
     assert "Hello from Teams!" in json.dumps(edits[-1].body)
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_duplicate_delivery_runs_one_turn(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
@@ -85,7 +83,6 @@ async def test_duplicate_delivery_runs_one_turn(
     assert len(turns) == 1
 
 
-@pytest.mark.asyncio
 async def test_unprovisioned_organisation_is_told_no_turn_runs(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -96,7 +93,6 @@ async def test_unprovisioned_organisation_is_told_no_turn_runs(
     assert [r.body.get("text") for r in teams_api_fake.activity_requests] == [DENIED]
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_new_in_a_dm_asks_for_a_fresh_session(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
@@ -119,7 +115,6 @@ async def test_new_in_a_dm_asks_for_a_fresh_session(
     assert row.fresh_start_requested_at is not None
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("provisioned_tenant")
 @pytest.mark.parametrize(("admins", "role"), [((), "user"), ((AAD_OBJECT_ID,), "admin")])
 async def test_turn_carries_its_origin_and_the_senders_role(
@@ -137,7 +132,6 @@ async def test_turn_carries_its_origin_and_the_senders_role(
     assert f'"current_role":"{role}"' in message.replace(" ", "")
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_command_in_a_channel_points_to_the_one_to_one_chat(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake

@@ -83,7 +83,6 @@ async def _load(db_factory: async_sessionmaker[AsyncSession], row: RoutineRow) -
         return await get_routine(session, row.id, tenant_id=TENANT)
 
 
-@pytest.mark.asyncio
 async def test_command_lists_every_routine_with_buttons_only_where_the_viewer_may_act(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -100,7 +99,6 @@ async def test_command_lists_every_routine_with_buttons_only_where_the_viewer_ma
     assert "New routine" not in card, "only an admin is offered create"
 
 
-@pytest.mark.asyncio
 async def test_pause_and_resume_update_the_row_and_replace_the_card(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -117,7 +115,6 @@ async def test_pause_and_resume_update_the_row_and_replace_the_card(
     assert "Pause" in json.dumps(resumed_card)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("op", ["pause", "output", "delete", "confirm_delete"])
 async def test_a_non_owner_is_refused_and_the_row_is_untouched(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake, op: str
@@ -130,7 +127,6 @@ async def test_a_non_owner_is_refused_and_the_row_is_untouched(
     assert await _load(db_session_factory, row) == row, "the routine is unchanged"
 
 
-@pytest.mark.asyncio
 async def test_an_admin_deletes_any_routine_after_confirming(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -146,7 +142,6 @@ async def test_an_admin_deletes_any_routine_after_confirming(
     assert "Routine deleted" in json.dumps(done), "the panel returns with a notice"
 
 
-@pytest.mark.asyncio
 async def test_create_dialog_is_admin_only(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -162,7 +157,6 @@ async def test_create_dialog_is_admin_only(
     assert user["task"] == {"type": "message", "value": ADMIN_ONLY}
 
 
-@pytest.mark.asyncio
 async def test_create_rejects_a_bad_cron_then_creates_the_routine_for_the_admin(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:

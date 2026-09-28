@@ -45,7 +45,6 @@ def _card_json(sender: FakeSender, index: int) -> str:
     return sender.activities[index].model_dump_json(by_alias=True)
 
 
-@pytest.mark.asyncio
 async def test_initial_card_carries_the_cancel_key_and_later_renders_edit_it() -> None:
     sender, clock = FakeSender(), Clock()
     lifecycle = await _posted(sender, clock)
@@ -62,7 +61,6 @@ async def test_initial_card_carries_the_cancel_key_and_later_renders_edit_it() -
     assert len(sender.sent) == 2 and sender.activities[1].id == "m-1"
 
 
-@pytest.mark.asyncio
 async def test_answer_replaces_the_card_with_footer_and_feedback() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
@@ -79,7 +77,6 @@ async def test_answer_replaces_the_card_with_footer_and_feedback() -> None:
     assert lifecycle.card_closed and lifecycle.final_message_id == "m-1"
 
 
-@pytest.mark.asyncio
 async def test_a_long_answer_overflows_into_new_messages_with_the_footer_last() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
@@ -94,7 +91,6 @@ async def test_a_long_answer_overflows_into_new_messages_with_the_footer_last() 
     assert lifecycle.final_message_id == f"m-{len(sender.sent)}"
 
 
-@pytest.mark.asyncio
 async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark() -> None:
     sender = FakeSender(fail_on={1})
     lifecycle = await _posted(sender)
@@ -105,7 +101,6 @@ async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark()
     assert lifecycle.card_closed and lifecycle.final_message_id is None
 
 
-@pytest.mark.asyncio
 async def test_no_answer_reads_as_cancelled_or_done() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
@@ -119,7 +114,6 @@ async def test_no_answer_reads_as_cancelled_or_done() -> None:
     assert "✅ daimon" in _card_json(sender, -1)
 
 
-@pytest.mark.asyncio
 async def test_failure_closes_the_card_with_the_reason_once() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
@@ -140,7 +134,6 @@ class _HungSender:
         raise AssertionError("unreachable")
 
 
-@pytest.mark.asyncio
 async def test_a_hung_send_times_out_as_a_send_error() -> None:
     """A half-open socket must not hold a turn, its slots or the boot sweep forever."""
     sender = TimedSender(_HungSender(), timeout=0.01)

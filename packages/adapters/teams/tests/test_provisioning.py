@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
@@ -48,7 +47,6 @@ async def _provision(db_factory: async_sessionmaker[AsyncSession], *, failed: bo
     return await get_tenant_liveness(db_factory, TENANT)
 
 
-@pytest.mark.asyncio
 async def test_first_boot_provisions_a_ready_tenant(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -57,7 +55,6 @@ async def test_first_boot_provisions_a_ready_tenant(
     assert tenant.external_id == ENTRA_TENANT_ID and tenant.provision_status == "ready"
 
 
-@pytest.mark.asyncio
 async def test_a_failed_first_reconcile_leaves_the_tenant_failed(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -66,7 +63,6 @@ async def test_a_failed_first_reconcile_leaves_the_tenant_failed(
     assert tenant.last_reconcile_error == "agent 'daimon': boom"
 
 
-@pytest.mark.asyncio
 async def test_a_failed_reconcile_keeps_a_ready_tenant_ready(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -76,7 +72,6 @@ async def test_a_failed_reconcile_keeps_a_ready_tenant_ready(
     assert tenant.last_reconcile_error == "agent 'daimon': boom"
 
 
-@pytest.mark.asyncio
 async def test_an_archived_tenant_is_left_alone(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

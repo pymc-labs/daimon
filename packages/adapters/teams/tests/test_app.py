@@ -47,7 +47,6 @@ def _app(
     )
 
 
-@pytest.mark.asyncio
 async def test_messages_during_a_turn_queue_and_run_once_per_author(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -77,7 +76,6 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
     ]
 
 
-@pytest.mark.asyncio
 async def test_the_tenant_cap_sheds_a_new_thread(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -106,7 +104,6 @@ def _click(key: str, clicker: str) -> Any:
     return SimpleNamespace(activity=activity)
 
 
-@pytest.mark.asyncio
 async def test_only_the_author_can_cancel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -127,7 +124,6 @@ async def _open_intents(db_factory: async_sessionmaker[AsyncSession]) -> list[Tu
         return await list_recoverable_turn_card_intents(session, platform="teams")
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_finished_turn_retires_its_card_intent(
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -143,7 +139,6 @@ async def test_a_finished_turn_retires_its_card_intent(
     assert teams._cancel_registry == {}, "the Cancel key is dropped with the turn"
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_turn_cut_off_by_shutdown_keeps_its_intent_for_the_boot_sweep(
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -167,7 +162,6 @@ async def test_a_turn_cut_off_by_shutdown_keeps_its_intent_for_the_boot_sweep(
     assert (intent.status, intent.message_id) == ("posted", "m-1"), "left for the boot sweep"
 
 
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_shutdown_after_the_answer_still_retires_the_intent(
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -192,7 +186,6 @@ async def test_shutdown_after_the_answer_still_retires_the_intent(
     assert await _open_intents(db_session_factory) == [], "a closed card is not left for the sweep"
 
 
-@pytest.mark.asyncio
 async def test_a_denied_turn_says_why_without_a_card(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

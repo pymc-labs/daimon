@@ -8,7 +8,6 @@ import pytest
 from daimon.adapters.teams.__main__ import main
 
 
-@pytest.mark.asyncio
 async def test_main_exits_cleanly_without_teams_settings() -> None:
     settings = MagicMock()
     settings.teams = None
@@ -20,7 +19,6 @@ async def test_main_exits_cleanly_without_teams_settings() -> None:
     assert exc.value.code == 0
 
 
-@pytest.mark.asyncio
 async def test_main_requires_crypto_keys_for_token_decryption() -> None:
     settings = MagicMock()
     settings.crypto.keys = ()
