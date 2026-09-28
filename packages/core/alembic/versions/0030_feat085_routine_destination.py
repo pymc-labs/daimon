@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0030_feat085_routine_destination"
-down_revision = "0029_sys050_security_audit"
+down_revision = "0030_feat001_direct_messages"
 branch_labels = None
 depends_on = None
 
