@@ -12,6 +12,7 @@ import os
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from daimon.core.thread_participation import ParticipationMode
 from pydantic import BaseModel, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
@@ -415,6 +416,82 @@ class SlackSettings(BaseModel):
             "scheduler process (8082) — all process groups share one host."
         ),
     )
+
+
+class TeamsSettings(BaseModel):
+    """Microsoft Teams adapter config.
+
+    Optional so non-Teams deployments boot unchanged — the block is ``None``
+    when no ``DAIMON_TEAMS__*`` env vars are present. Mirrors ``SlackSettings``.
+
+    ``client_id`` / ``client_secret`` / ``tenant_id`` are the Entra app
+    registration the Bot Framework posts activities to; ``port`` is the HTTP
+    ingress the SDK's FastAPI adapter binds (``/api/messages`` plus the
+    ``/healthz`` / ``/readyz`` endpoints served by the same listener);
+    ``enabled`` gates ``/api/messages`` without taking the process down.
+    """
+
+    client_id: str = Field(
+        description=(
+            "Entra (Azure AD) app registration client ID the Teams bot "
+            "authenticates as — also the audience inbound Bot Framework JWTs "
+            "are validated against."
+        ),
+    )
+    client_secret: SecretStr = Field(
+        description=(
+            "Entra app registration client secret, used to mint Bot Framework "
+            "tokens for outbound sends."
+        ),
+    )
+    tenant_id: str = Field(
+        description=(
+            "Entra tenant ID the app registration lives in. A single-tenant "
+            "bot only answers activities whose conversation and channel-data "
+            "tenant both equal this value."
+        ),
+    )
+    max_concurrent_turns_per_tenant: int = Field(
+        default=3,
+        description=(
+            "Maximum number of agent turns a single Teams tenant may have "
+            "in flight at once. Caps one noisy tenant from starving others "
+            "on the shared Anthropic key."
+        ),
+    )
+    port: int = Field(
+        default=3978,
+        description=(
+            "Port for the Teams process's HTTP ingress and health endpoints "
+            "(/api/messages, /healthz, /readyz). The Bot Framework messaging "
+            "endpoint must be configured to reach this listener."
+        ),
+    )
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "When False, /api/messages answers 503 while the health endpoints "
+            "stay live — the process keeps running so ingress can be "
+            "re-enabled without a redeploy."
+        ),
+    )
+
+    @field_validator("tenant_id")
+    @classmethod
+    def _canonicalize_tenant_id(cls, value: str) -> str:
+        """Normalize to the canonical lowercase UUID form and reject non-UUIDs.
+
+        The resolver canonicalizes activity tenant ids and compares them to
+        this value, and ``provision_tenant`` hashes ``workspace_id`` into the
+        deterministic tenant uuid — an uppercase portal paste must not yield
+        a provisioned row the resolver cannot match.
+        """
+        try:
+            return str(UUID(value))
+        except ValueError:
+            raise ValueError(
+                "DAIMON_TEAMS__TENANT_ID must be the Entra directory tenant's UUID"
+            ) from None
 
 
 class GithubSettings(BaseModel):
@@ -836,6 +913,7 @@ class Settings(BaseSettings):
         description="Replying in threads unprompted. See ThreadParticipationSettings.",
     )
     slack: SlackSettings | None = None
+    teams: TeamsSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)

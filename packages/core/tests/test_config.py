@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from decimal import Decimal
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from cryptography.fernet import Fernet
@@ -14,6 +15,7 @@ from daimon.core.config import (
     McpSettings,
     Settings,
     SlackSettings,
+    TeamsSettings,
     load_settings,
 )
 from pydantic import HttpUrl, PostgresDsn, SecretStr, ValidationError
@@ -706,4 +708,24 @@ def test_slack_display_name_rejects_invalid_names(name: str) -> None:
             signing_secret=SecretStr("test"),
             app_token=SecretStr("xapp-test"),
             bot_display_name=name,
+        )
+
+
+def test_teams_tenant_id_canonicalizes_uuid_case() -> None:
+    """An uppercase Entra portal paste normalizes to the canonical UUID form
+    the resolver and provision_tenant both compare against."""
+    settings = TeamsSettings(
+        client_id=str(UUID(int=1)),
+        client_secret=SecretStr("test"),
+        tenant_id=str(UUID(int=0xABCDEF)).upper(),
+    )
+    assert settings.tenant_id == str(UUID(int=0xABCDEF))
+
+
+def test_teams_tenant_id_rejects_non_uuid() -> None:
+    with pytest.raises(ValidationError):
+        TeamsSettings(
+            client_id=str(UUID(int=1)),
+            client_secret=SecretStr("test"),
+            tenant_id="not-a-tenant-uuid",
         )
