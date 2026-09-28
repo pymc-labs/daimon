@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Literal, cast
+from typing import Annotated, cast
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -19,7 +19,7 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.continuity import timers
 from daimon.core.continuity.timers import TimerError
-from daimon.core.stores.domain import TaskContinuationRow
+from daimon.core.stores.domain import ChatPlatform, TaskContinuationRow
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
@@ -65,7 +65,8 @@ async def _create_timer_impl(
             "A timer runs as the person who asked for it, and this connection does not "
             "carry their platform identity. Ask from the conversation itself."
         )
-    platform = cast(Literal["discord", "slack"], origin.platform)
+    # require_turn_origin admits only a chat platform's own turn origin.
+    platform = cast(ChatPlatform, origin.platform)
     try:
         when = timers.parse_fire_at(fire_at, now=datetime.now(UTC))
         timer_id = await timers.schedule_timer(
