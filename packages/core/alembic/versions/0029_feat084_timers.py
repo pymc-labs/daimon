@@ -14,7 +14,7 @@ from __future__ import annotations
 from alembic import op
 
 revision: str = "0029_feat084_timers"
-down_revision: str | None = "0028_agent_env_encryption"
+down_revision: str | None = "0029_sys081_turn_outcomes"
 branch_labels: str | None = None
 depends_on: str | None = None
 
