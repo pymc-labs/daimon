@@ -839,3 +839,54 @@ async def test_admit_refuses_when_the_stored_policy_is_unreadable(
             now=_NOW,
             role=Role.ADMIN,
         )
+
+
+@pytest.mark.parametrize(
+    ("policy", "channel_id", "thread_id", "is_dm", "expected"),
+    [
+        (None, "chan-1", None, False, False),
+        (TenantAccessPolicy(sealed_channel_ids=("vault",)), "vault", None, False, True),
+        (TenantAccessPolicy(sealed_channel_ids=("vault",)), "vault", "thr-1", False, True),
+        (TenantAccessPolicy(sealed_channel_ids=("vault",)), "chan-1", "thr-1", False, False),
+        (TenantAccessPolicy(dm_memory_read_only=True), "dm-1", None, True, True),
+        (TenantAccessPolicy(dm_memory_read_only=True), "chan-1", None, False, False),
+        (None, "dm-1", None, True, False),
+    ],
+    ids=[
+        "open",
+        "sealed-channel",
+        "thread-under-sealed",
+        "unsealed",
+        "dm-read-only",
+        "dm-flag-not-a-dm",
+        "dm-default",
+    ],
+)
+async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    policy: TenantAccessPolicy | None,
+    channel_id: str,
+    thread_id: str | None,
+    is_dm: bool,
+    expected: bool,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="anyone",
+        channel_id=channel_id,
+        thread_id=thread_id,
+        now=_NOW,
+        role=Role.USER,
+        is_dm=is_dm,
+    )
+
+    assert admission.memory_read_only is expected, "memory_read_only must follow the policy"

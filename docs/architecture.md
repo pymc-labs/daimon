@@ -143,7 +143,8 @@ and skips the policy, as it skips billing. Ids are the platform's own (Discord s
 | --- | --- | --- |
 | `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
 | `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | not yet |
-| `sealed_channel_ids` | nothing is sealed | not yet |
+| `sealed_channel_ids` | nothing is sealed | `admit()` sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
+| `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
 
 A sealed channel's content is readable only from a turn inside it (the channel
 or a thread under it). There is no editor yet; operators write the row directly.

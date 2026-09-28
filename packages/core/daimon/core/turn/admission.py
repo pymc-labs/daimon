@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from daimon.core.access_policy import is_invoker_allowed
+from daimon.core.access_policy import is_invoker_allowed, is_sealed
 from daimon.core.billing import is_over_cap
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
@@ -52,6 +52,9 @@ class Admission:
     agent: BetaManagedAgentsAgent
     environment: BetaEnvironment
     config: ResolvedConfig
+    # Turn from a sealed channel (or a thread under one), or from a DM when the
+    # tenant asks for it: memory mounts must be read-only.
+    memory_read_only: bool = False
 
 
 async def admit(
@@ -64,6 +67,7 @@ async def admit(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
+    is_dm: bool = False,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool."""
     # --- Identity resolution ---
@@ -187,7 +191,12 @@ async def admit(
     ):
         raise AdmissionDenied(reason="cap_exceeded")
 
+    memory_read_only = is_sealed(
+        policy, channel_id=thread_id or channel_id, parent_channel_id=channel_id
+    ) or (is_dm and policy.dm_memory_read_only)
+
     return Admission(
+        memory_read_only=memory_read_only,
         account_id=principal.account_id,
         agent=agent,
         environment=environment,

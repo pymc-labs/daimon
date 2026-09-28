@@ -27,6 +27,8 @@ class TenantAccessPolicy(BaseModel):
     protected_category_ids: tuple[str, ...] = ()
     # Channels whose content is readable only from a turn inside them.
     sealed_channel_ids: tuple[str, ...] = ()
+    # Whether turns started from a DM get read-only memory mounts.
+    dm_memory_read_only: bool = False
 
 
 OPEN_ACCESS_POLICY = TenantAccessPolicy()
