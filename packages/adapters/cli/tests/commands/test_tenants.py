@@ -9,6 +9,7 @@ from typing import cast
 import pytest
 import typer
 from anthropic import AsyncAnthropic
+from click import Group, Option
 from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.commands import tenants as tenants_mod
 from daimon.adapters.cli.commands.tenants import (
@@ -32,7 +33,7 @@ from daimon.testing.factories import make_tenant
 from rich.console import Console
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
-from typer.testing import CliRunner
+from typer.main import get_command
 
 from ..harness import build_cli_runtime
 
@@ -466,9 +467,16 @@ async def test_access_policy_commands_refuse_an_unknown_tenant(
 
 
 def test_access_policy_set_is_registered_with_its_flags() -> None:
-    result = CliRunner().invoke(main_mod.app, ["tenants", "access-policy", "set", "--help"])
-
-    assert result.exit_code == 0, result.stdout
+    command = get_command(main_mod.app)
+    for name in ("tenants", "access-policy", "set"):
+        assert isinstance(command, Group)
+        command = command.commands[name]
+    flags = {
+        flag
+        for param in command.params
+        if isinstance(param, Option)
+        for flag in (*param.opts, *param.secondary_opts)
+    }
     for flag in (
         "--invoker",
         "--protected-channel",
@@ -477,7 +485,7 @@ def test_access_policy_set_is_registered_with_its_flags() -> None:
         "--dm-memory-read-only",
         "--clear",
     ):
-        assert flag in result.stdout, f"{flag} missing from help"
+        assert flag in flags, f"{flag} missing from registered options"
 
 
 @pytest.mark.parametrize("as_json", [False, True])
