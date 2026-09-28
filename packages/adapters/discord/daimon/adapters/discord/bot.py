@@ -1653,7 +1653,8 @@ class DaimonBot(commands.Bot):
                 requester_id=int(row.requester_external_user_id),
                 notify_on_completion=self.runtime.settings.completion_pings.get(
                     str(tenant_id), False
-                ),
+                )
+                is True,
                 send=_send_embed,
                 edit=_edit_message,
                 delete=_delete_message,
@@ -1764,7 +1765,8 @@ class DaimonBot(commands.Bot):
                 requester_id=int(row.requester_external_user_id),
                 notify_on_completion=self.runtime.settings.completion_pings.get(
                     str(tenant_id), False
-                ),
+                )
+                is True,
                 send=_send_embed,
                 edit=_edit_message,
                 delete=_delete_message,
@@ -2091,7 +2093,8 @@ class DaimonBot(commands.Bot):
                 requester_id=message.author.id,
                 notify_on_completion=self.runtime.settings.completion_pings.get(
                     str(tenant_id), False
-                ),
+                )
+                is True,
                 trigger_message=message,
                 send=_send_embed,
                 edit=_edit_message,
@@ -2456,7 +2459,8 @@ class DaimonBot(commands.Bot):
                 requester_id=message.author.id,
                 notify_on_completion=self.runtime.settings.completion_pings.get(
                     str(tenant_id), False
-                ),
+                )
+                is True,
                 trigger_message=message,
                 send=_send_embed,
                 edit=_edit_message,
