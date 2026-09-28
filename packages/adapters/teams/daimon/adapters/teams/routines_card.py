@@ -8,19 +8,11 @@ opens the create dialog, which Action.Execute cannot do.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Literal, cast
+from typing import Literal
 
-from daimon.adapters.teams.card_actions import button
+from daimon.adapters.teams.card_actions import button, error_text, submitted_fields
 from daimon.core.routines import PANEL_CAP, can_manage_routine, derive_glyph, routine_label
 from daimon.core.stores.domain import RoutineRow
-from microsoft_teams.api import (
-    AdaptiveCardAttachment,
-    CardTaskModuleTaskInfo,
-    TaskModuleContinueResponse,
-    TaskModuleMessageResponse,
-    TaskModuleResponse,
-    card_attachment,
-)
 from microsoft_teams.cards import (
     Action,
     ActionSet,
@@ -134,7 +126,7 @@ def create_form(
     """The New routine form, refilled with `values` and topped by `error` on a retry."""
     body: list[CardElement] = []
     if error:
-        body.append(TextBlock(text=error, color="Attention", wrap=True))
+        body.append(error_text(error))
     body += [
         ChoiceSetInput(
             id="agent",
@@ -170,17 +162,5 @@ def create_form(
 
 def form_values(data: object) -> dict[str, str]:
     """The trimmed form fields of a dialog submit; a missing field is empty."""
-    submitted: Mapping[str, object] = {}
-    if isinstance(data, Mapping):
-        submitted = cast(Mapping[str, object], data)
+    submitted = submitted_fields(data)
     return {field: str(submitted.get(field) or "").strip() for field in FORM_FIELDS}
-
-
-def dialog(card: AdaptiveCard) -> TaskModuleResponse:
-    attachment = card_attachment(AdaptiveCardAttachment(content=card))
-    info = CardTaskModuleTaskInfo(title="New routine", card=attachment)
-    return TaskModuleResponse(task=TaskModuleContinueResponse(value=info))
-
-
-def dialog_message(text: str) -> TaskModuleResponse:
-    return TaskModuleResponse(task=TaskModuleMessageResponse(value=text))

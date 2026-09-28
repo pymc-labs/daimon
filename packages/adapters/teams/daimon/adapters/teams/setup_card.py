@@ -11,6 +11,7 @@ import re
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal
 
+from daimon.adapters.teams.card_actions import button, heading
 from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap
@@ -24,14 +25,6 @@ from daimon.core.setup_conversations import (
     setup_target_label,
     setup_thread_name,
     shared_keys_sentence,
-)
-from microsoft_teams.api import (
-    AdaptiveCardAttachment,
-    CardTaskModuleTaskInfo,
-    TaskModuleContinueResponse,
-    TaskModuleMessageResponse,
-    TaskModuleResponse,
-    card_attachment,
 )
 from microsoft_teams.cards import (
     Action,
@@ -70,8 +63,7 @@ Op = Literal["agents", "details", "routing", "manage", "end"]
 def _button(
     title: str, op: Op, style: ActionStyle | None = None, **fields: str | int
 ) -> ExecuteAction:
-    data: dict[str, str | int] = {"action": VERB, "op": op, **fields}
-    return ExecuteAction(title=title, verb=VERB, data=data, style=style)
+    return button(VERB, title, op, style=style, **fields)
 
 
 def _text(text: str, *, bold: bool = False, subtle: bool = False) -> TextBlock:
@@ -86,9 +78,8 @@ def _text(text: str, *, bold: bool = False, subtle: bool = False) -> TextBlock:
 
 
 def _card(title: str, body: list[CardElement], actions: list[Action]) -> AdaptiveCard:
-    head: list[CardElement] = [TextBlock(text=title, weight="Bolder", size="Medium", wrap=True)]
     tail: list[CardElement] = [ActionSet(actions=actions)] if actions else []
-    return AdaptiveCard(body=head + body + tail, fallback_text=title)
+    return AdaptiveCard(body=[heading(title), *body, *tail], fallback_text=title)
 
 
 def _manage(ma_agent_id: str | None, name: str | None) -> ExecuteAction:
@@ -151,9 +142,9 @@ def _detail_lists(details: AgentDetails) -> list[CardElement]:
     }
     lists = format_detail_lists(items, expanded=None, max_chars=_DETAIL_LIST_MAX_CHARS)
     body: list[CardElement] = []
-    for kind, heading in _LIST_HEADINGS.items():
+    for kind, title in _LIST_HEADINGS.items():
         if items[kind]:
-            body.append(_text(f"**{heading}**\n\n{lists[kind]}"))
+            body.append(_text(f"**{title}**\n\n{lists[kind]}"))
     if details.skills_listing_truncated:
         body.append(_text("Some skill names may be missing.", subtle=True))
     if details.keys:
@@ -275,14 +266,3 @@ def welcome_card(*, target_name: str | None, opener: str, thread_id: str) -> Ada
 
 def notice_card(text: str) -> AdaptiveCard:
     return AdaptiveCard(body=[_text(text)], fallback_text=text)
-
-
-def dialog(title: str, card: AdaptiveCard) -> TaskModuleResponse:
-    info = CardTaskModuleTaskInfo(
-        title=title, card=card_attachment(AdaptiveCardAttachment(content=card))
-    )
-    return TaskModuleResponse(task=TaskModuleContinueResponse(value=info))
-
-
-def dialog_message(text: str) -> TaskModuleResponse:
-    return TaskModuleResponse(task=TaskModuleMessageResponse(value=text))

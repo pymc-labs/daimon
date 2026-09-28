@@ -17,10 +17,12 @@ from daimon.adapters.teams.card_actions import (
     FAILED,
     button,
     card_actor,
+    get_or_create_account,
     guarded,
     heading,
     replace_card,
     text_card,
+    text_lines,
     toast,
 )
 from daimon.adapters.teams.commands import CommandContext
@@ -40,12 +42,7 @@ from daimon.core.billing_panel import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.stores.identity import get_or_create_platform_principal
-from microsoft_teams.api import (
-    AdaptiveCardInvokeActivity,
-    AdaptiveCardInvokeResponse,
-    MessageActivityInput,
-)
+from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import (
     Action,
@@ -54,7 +51,6 @@ from microsoft_teams.cards import (
     CardElement,
     ExecuteAction,
     OpenUrlAction,
-    TextBlock,
 )
 
 log = structlog.get_logger()
@@ -69,10 +65,6 @@ NOT_CONFIGURED = (
 _TOP_SHOWN = 5
 
 
-def _lines(*lines: str) -> list[CardElement]:
-    return [TextBlock(text=line, wrap=True) for line in lines]
-
-
 def _member_body(state: BillingPanelState, since: datetime) -> list[CardElement]:
     used = "no usage yet this period"
     if state.caller_spend or state.caller_turns:
@@ -81,8 +73,8 @@ def _member_body(state: BillingPanelState, since: datetime) -> list[CardElement]
     balance = fmt_usd(state.guild_balance_usd)
     return [
         heading("💸 Billing"),
-        *_lines(period_label(since), f"**You**{over}: {used}"),
-        *_lines(f"🏦 **Credit**: {balance} balance (top-ups are admin-only)"),
+        *text_lines(period_label(since), f"**You**{over}: {used}"),
+        *text_lines(f"🏦 **Credit**: {balance} balance (top-ups are admin-only)"),
     ]
 
 
@@ -107,9 +99,8 @@ def _admin_body(state: BillingPanelState, since: datetime) -> list[CardElement]:
     balance = fmt_usd(state.guild_balance_usd)
     return [
         heading("💸 Billing · admin view"),
-        *_lines(totals, f"🏦 **Credit**: {balance} balance", "🏆 **Top spenders**"),
-        *_lines(*(top or ["no usage yet this period"])),
-        *_lines("💳 **Top up credit**"),
+        *text_lines(totals, f"🏦 **Credit**: {balance} balance", "🏆 **Top spenders**"),
+        *text_lines(*(top or ["no usage yet this period"]), "💳 **Top up credit**"),
         ActionSet(actions=[_topup(amount, state) for amount in TOPUP_AMOUNTS]),
     ]
 
@@ -128,7 +119,7 @@ def checkout_card(url: str, amount: int) -> AdaptiveCard:
     pay: list[Action] = [OpenUrlAction(title="Complete payment", url=url), _back()]
     body: list[CardElement] = [
         heading(f"💳 Top up ${amount}"),
-        *_lines("Complete the payment in your browser; the credit lands once Stripe confirms."),
+        *text_lines("Complete the payment in your browser; the credit lands once Stripe confirms."),
         ActionSet(actions=pay),
     ]
     return AdaptiveCard(body=body, fallback_text="Complete payment")
@@ -141,8 +132,9 @@ class BillingPanel:
         self._runtime = runtime
 
     async def command(self, context: CommandContext) -> None:
-        card = await self._panel(context.tenant_id, context.inbound.user_id, context.is_admin)
-        await context.send(MessageActivityInput().add_card(card))
+        await context.send_card(
+            await self._panel(context.tenant_id, context.inbound.user_id, context.is_admin)
+        )
 
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
@@ -173,15 +165,12 @@ class BillingPanel:
         amount = next((a for a in TOPUP_AMOUNTS if str(a) == str(data.get("amount"))), None)
         if amount is None:
             return toast(UNKNOWN_AMOUNT)
-        async with self._runtime.sessionmaker.begin() as session:
-            principal = await get_or_create_platform_principal(
-                session, tenant_id=actor.tenant_id, platform="teams", external_id=actor.user_id
-            )
+        account_id = await get_or_create_account(self._runtime, actor)
         try:
             url = await create_checkout(
                 self._runtime.http_client,
                 settings=self._runtime.settings.mcp,
-                account_id=principal.account_id,
+                account_id=account_id,
                 amount=amount,
             )
         except (DaimonError, httpx.HTTPError) as exc:

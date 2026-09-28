@@ -16,7 +16,6 @@ from daimon.core.memory_view import (
     get_memory_content,
     list_memory_paths,
 )
-from microsoft_teams.api import MessageActivityInput
 from microsoft_teams.cards import AdaptiveCard, CardElement, TextBlock
 
 log = structlog.get_logger()
@@ -72,4 +71,4 @@ async def show_memory(context: CommandContext) -> None:
     except (DaimonError, anthropic.APIError) as exc:
         log.warning("teams.memory.failed", exc_info=exc)
         card = _card(str(exc) if isinstance(exc, DaimonError) else _FAILED)
-    await context.send(MessageActivityInput().add_card(card))
+    await context.send_card(card)

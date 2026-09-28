@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Collection
 
-from daimon.adapters.teams.card_actions import heading
+from daimon.adapters.teams.card_actions import heading, text_lines
 from daimon.adapters.teams.commands import CommandContext
-from microsoft_teams.api import MessageActivityInput
 from microsoft_teams.cards import AdaptiveCard, CardElement, Fact, FactSet, TextBlock
 
 # One line per command, in display order. Only registered commands are listed,
@@ -39,11 +38,10 @@ def help_card(names: Collection[str], *, bot: str) -> AdaptiveCard:
         TextBlock(text="Send these in our 1:1 chat.", is_subtle=True, wrap=True),
         FactSet(facts=facts),
         heading(f"💬 Or just talk to {bot}"),
-        *(TextBlock(text=line, wrap=True) for line in talk),
+        *text_lines(*talk),
     ]
     return AdaptiveCard(body=body, fallback_text=f"{bot} command reference")
 
 
 async def send_help(context: CommandContext, *, names: Collection[str]) -> None:
-    card = help_card(names, bot=context.inbound.bot_name or "daimon")
-    await context.send(MessageActivityInput().add_card(card))
+    await context.send_card(help_card(names, bot=context.inbound.bot_name or "daimon"))

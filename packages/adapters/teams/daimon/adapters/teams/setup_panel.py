@@ -10,21 +10,29 @@ clicker and re-reads state, so a stale card grants nothing.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import re
 import uuid
 from collections.abc import Awaitable, Mapping
 from datetime import UTC, datetime
-from typing import cast
 
-import anthropic
 import structlog
 from daimon.adapters.teams import setup_card as cards
+from daimon.adapters.teams.card_actions import (
+    FAILED,
+    SENDING_PANEL_ERRORS,
+    Actor,
+    card_actor,
+    dialog,
+    dialog_message,
+    edit_origin_card,
+    get_or_create_account,
+    guarded,
+    replace_card,
+    submitted_fields,
+    toast,
+)
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED
-from daimon.adapters.teams.interactions import Actor, resolve_actor
-from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import (
     end_setup_conversation,
@@ -39,24 +47,17 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import coding_tool_config, mint_agent_mcp_token, token_jti
 from daimon.core.models_catalog import ModelChoice, list_model_choices
-from daimon.core.observability import capture_exception_with_scope
 from daimon.core.roster import Roster, load_roster, paginate
-from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
 from microsoft_teams.api import (
-    AdaptiveCardActionCardResponse,
-    AdaptiveCardActionMessageResponse,
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
-    InvokeActivity,
-    MessageActivityInput,
     TaskFetchInvokeActivity,
     TaskModuleInvokeResponse,
     TaskSubmitInvokeActivity,
 )
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import AdaptiveCard
-from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
 
@@ -67,36 +68,20 @@ NOT_MINTER = "Only the person who minted this token can revoke it."
 DM_ONLY = "Open setup from our 1:1 chat to start a setup conversation."
 STARTED = "Setup conversation started. Reply in this chat."
 ALREADY_ENDED = "This setup conversation has already ended."
-_FAILED = "Sorry, something went wrong. Please try again."
 _NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
 
 
 async def _guarded[T](work: Awaitable[T], failed: T) -> T:
-    """Invoke boundary: log and report a failure, answer with `failed`."""
-    try:
-        return await work
-    except _ERRORS as exc:
-        log.error("teams.agent_setup.failed", exc_info=exc)
-        capture_exception_with_scope(exc)
-        return failed
-
-
-def _replace(card: AdaptiveCard) -> AdaptiveCardInvokeResponse:
-    return AdaptiveCardActionCardResponse(value=card)
-
-
-def _toast(text: str) -> AdaptiveCardInvokeResponse:
-    return AdaptiveCardActionMessageResponse(value=text)
-
-
-def _fields(data: object) -> Mapping[str, object]:
-    return cast(Mapping[str, object], data) if isinstance(data, Mapping) else {}
+    return await guarded(work, failed, "teams.agent_setup.failed", errors=SENDING_PANEL_ERRORS)
 
 
 def _page(data: Mapping[str, object]) -> int:
     page = data.get("page")
     return page if isinstance(page, int) else 0
+
+
+def _models() -> tuple[ModelChoice, ...]:
+    return list_model_choices(default=DEFAULT_AGENT_MODEL)
 
 
 class SetupPanel:
@@ -106,45 +91,36 @@ class SetupPanel:
         self._runtime = runtime
 
     async def command(self, context: CommandContext) -> None:
-        card = await self._agents(context.tenant_id, chat=context.inbound.channel_id, page=0)
-        await context.send(MessageActivityInput().add_card(card))
+        await context.send_card(
+            await self._agents(context.tenant_id, chat=context.inbound.channel_id, page=0)
+        )
 
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
     ) -> AdaptiveCardInvokeResponse:
-        return await _guarded(self._act(ctx), _toast(_FAILED))
+        return await _guarded(self._act(ctx), toast(FAILED))
 
     async def on_create_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        if await self._actor(ctx.activity) is None:
-            return cards.dialog_message(DENIED)
-        return cards.dialog("New agent", cards.new_agent_form(self._models(), {}))
+        if await card_actor(self._runtime, ctx.activity) is None:
+            return dialog_message(DENIED)
+        return dialog("New agent", cards.new_agent_form(_models(), {}))
 
     async def on_create_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._create(ctx), cards.dialog_message(_FAILED))
+        return await _guarded(self._create(ctx), dialog_message(FAILED))
 
     async def on_token_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._mint(ctx.activity), cards.dialog_message(_FAILED))
+        return await _guarded(self._mint(ctx.activity), dialog_message(FAILED))
 
     async def on_token_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._revoke(ctx.activity), cards.dialog_message(_FAILED))
-
-    async def _actor(self, activity: InvokeActivity) -> Actor | None:
-        return await resolve_actor(
-            self._runtime,
-            conversation=activity.conversation,
-            aad_object_id=activity.from_.aad_object_id,
-        )
-
-    def _models(self) -> tuple[ModelChoice, ...]:
-        return list_model_choices(default=DEFAULT_AGENT_MODEL)
+        return await _guarded(self._revoke(ctx.activity), dialog_message(FAILED))
 
     async def _roster(self, tenant_id: uuid.UUID, chat: str | None) -> Roster:
         async with self._runtime.sessionmaker() as session:
@@ -186,10 +162,6 @@ class SetupPanel:
             answering_map, window, is_admin=actor.is_admin, request_agent=request_agent
         )
 
-    def _coding_tools_ready(self) -> bool:
-        mcp = self._runtime.settings.mcp
-        return mcp.public_url is not None and mcp.jwt_secret is not None
-
     async def _details(self, actor: Actor, name: str, page: int) -> AdaptiveCard | None:
         """The Details card for `name`, or None when it left the roster.
 
@@ -199,8 +171,7 @@ class SetupPanel:
         match = next((row for row in roster.rows if row.name == name), None)
         if match is None:
             return None
-        github = self._runtime.settings.github
-        mcp_url = self._runtime.settings.mcp.public_url
+        github, mcp = self._runtime.settings.github, self._runtime.settings.mcp
         async with self._runtime.sessionmaker() as session:
             details = await load_agent_details(
                 session,
@@ -215,38 +186,39 @@ class SetupPanel:
                     has_fallback_pat=github.fallback_pat is not None,
                     app_configured=github.app_id is not None and github.app_private_key is not None,
                 ),
-                public_mcp_url=str(mcp_url) if mcp_url is not None else None,
+                public_mcp_url=str(mcp.public_url) if mcp.public_url is not None else None,
                 is_admin=actor.is_admin,
                 channel_label=None,
             )
+        coding_tools = mcp.public_url is not None and mcp.jwt_secret is not None
         return cards.details_card(
-            details, here=actor.conversation_id, page=page, coding_tools=self._coding_tools_ready()
+            details, here=actor.conversation_id, page=page, coding_tools=coding_tools
         )
 
     async def _act(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
     ) -> AdaptiveCardInvokeResponse:
         activity = ctx.activity
-        actor = await self._actor(activity)
+        actor = await card_actor(self._runtime, activity)
         if actor is None:
-            return _toast(DENIED)
+            return toast(DENIED)
         data = activity.value.action.data
         op, page, chat = data.get("op"), _page(data), actor.conversation_id
         if op == "details":
             card = await self._details(actor, str(data.get("agent") or ""), page)
-            return _replace(
+            return replace_card(
                 card or await self._agents(actor.tenant_id, chat=chat, page=page, notice=GONE)
             )
         if op == "routing":
-            return _replace(await self._routing(actor, page))
+            return replace_card(await self._routing(actor, page))
         if op == "manage":
             if activity.conversation.conversation_type != "personal":
-                return _toast(DM_ONLY)
+                return toast(DM_ONLY)
             target = str(data.get("agent") or "") or None
             await open_setup_conversation(
                 self._runtime, actor, target_ma_agent_id=target, send=ctx.send
             )
-            return _toast(STARTED)
+            return toast(STARTED)
         if op == "end":
             ended = await end_setup_conversation(
                 self._runtime.sessionmaker,
@@ -254,16 +226,16 @@ class SetupPanel:
                 chat_id=chat,
                 thread_id=str(data.get("thread") or ""),
             )
-            return _replace(cards.notice_card(cards.ENDED if ended else ALREADY_ENDED))
-        return _replace(await self._agents(actor.tenant_id, chat=chat, page=page))
+            return replace_card(cards.notice_card(cards.ENDED if ended else ALREADY_ENDED))
+        return replace_card(await self._agents(actor.tenant_id, chat=chat, page=page))
 
     async def _create(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        actor = await self._actor(ctx.activity)
+        actor = await card_actor(self._runtime, ctx.activity)
         if actor is None:
-            return cards.dialog_message(DENIED)
-        data = _fields(ctx.activity.value.data)
+            return dialog_message(DENIED)
+        data = submitted_fields(ctx.activity.value.data)
         values = {key: str(data.get(key) or "").strip() for key in ("name", "purpose", "model")}
         name = values["name"]
         error = None
@@ -288,40 +260,30 @@ class SetupPanel:
             except DaimonError as exc:
                 error = str(exc)
         if error is not None:
-            return cards.dialog("New agent", cards.new_agent_form(self._models(), values, error))
+            return dialog("New agent", cards.new_agent_form(_models(), values, error))
         log.info("teams.agent_setup.created", tenant_id=str(actor.tenant_id), agent_name=name)
         details = await self._details(actor, name, 0)
         if ctx.activity.reply_to_id and details is not None:
-            # Best effort, like Slack landing on Details: the panel shows the new agent.
-            edit = MessageActivityInput(id=ctx.activity.reply_to_id).add_card(details)
-            with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                await asyncio.wait_for(ctx.send(edit), 5.0)
-        return cards.dialog_message(f"Created {name}. It does not answer anywhere yet.")
-
-    async def _account(self, actor: Actor) -> uuid.UUID:
-        async with self._runtime.sessionmaker.begin() as session:
-            principal = await get_or_create_platform_principal(
-                session, tenant_id=actor.tenant_id, platform="teams", external_id=actor.user_id
-            )
-        return principal.account_id
+            await edit_origin_card(ctx, details)  # Like Slack, the panel lands on Details.
+        return dialog_message(f"Created {name}. It does not answer anywhere yet.")
 
     async def _mint(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
-        actor = await self._actor(activity)
+        actor = await card_actor(self._runtime, activity)
         if actor is None:
-            return cards.dialog_message(DENIED)
-        name = str(_fields(activity.value.data).get("agent") or "")
+            return dialog_message(DENIED)
+        name = str(submitted_fields(activity.value.data).get("agent") or "")
         secret = self._runtime.settings.mcp.jwt_secret
         public_url = self._runtime.settings.mcp.public_url
         if secret is None or public_url is None:
-            return cards.dialog_message(NOT_CONFIGURED)
+            return dialog_message(NOT_CONFIGURED)
         if not actor.is_admin:
             log.info("teams.coding_tools.refused_non_admin", agent_name=name)
-            return cards.dialog_message(NEEDS_ADMIN.format(name=name))
+            return dialog_message(NEEDS_ADMIN.format(name=name))
         roster = await self._roster(actor.tenant_id, None)
         target = next((row for row in roster.rows if row.name == name), None)
         if target is None:
-            return cards.dialog_message(GONE)
-        account_id = await self._account(actor)
+            return dialog_message(GONE)
+        account_id = await get_or_create_account(self._runtime, actor)
         async with self._runtime.sessionmaker.begin() as session:
             token = await mint_agent_mcp_token(
                 session,
@@ -338,24 +300,24 @@ class SetupPanel:
         log.info("teams.coding_tools.minted", agent_name=name, jti=str(jti))  # never the token
         cli, mcp_json = coding_tool_config(agent_name=name, public_url=str(public_url), jwt=token)
         card = cards.token_card(agent_name=name, cli=cli, mcp_json=mcp_json, jti=str(jti))
-        return cards.dialog("Use from your coding tools", card)
+        return dialog("Use from your coding tools", card)
 
     async def _revoke(self, activity: TaskSubmitInvokeActivity) -> TaskModuleInvokeResponse:
-        actor = await self._actor(activity)
+        actor = await card_actor(self._runtime, activity)
         if actor is None:
-            return cards.dialog_message(DENIED)
+            return dialog_message(DENIED)
         try:
-            jti = uuid.UUID(str(_fields(activity.value.data).get("jti")))
+            jti = uuid.UUID(str(submitted_fields(activity.value.data).get("jti")))
         except ValueError:
-            return cards.dialog_message(NOT_MINTER)
-        account_id = await self._account(actor)
+            return dialog_message(NOT_MINTER)
+        account_id = await get_or_create_account(self._runtime, actor)
         async with self._runtime.sessionmaker.begin() as session:
             row = await get_mcp_token(session, jti=jti)
             if row is None or row.tenant_id != actor.tenant_id or row.account_id != account_id:
                 log.info("teams.coding_tools.revoke_refused", jti=str(jti))
-                return cards.dialog_message(NOT_MINTER)
+                return dialog_message(NOT_MINTER)
             revoked = await revoke_mcp_token(session, jti=jti, now=datetime.now(UTC))
         if revoked is None:
-            return cards.dialog_message("That token was already revoked.")
+            return dialog_message("That token was already revoked.")
         log.info("teams.coding_tools.revoked", jti=str(jti))
-        return cards.dialog_message("Token revoked.")
+        return dialog_message("Token revoked.")

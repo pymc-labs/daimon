@@ -16,9 +16,9 @@ import dataclasses
 import uuid
 from collections.abc import Awaitable, Callable
 
+from daimon.adapters.teams.card_actions import Actor
 from daimon.adapters.teams.commands import CommandContext, fresh_start
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.adapters.teams.interactions import Actor
 from daimon.adapters.teams.lifecycle import SEND_TIMEOUT_S
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_card import ENDED, welcome_card

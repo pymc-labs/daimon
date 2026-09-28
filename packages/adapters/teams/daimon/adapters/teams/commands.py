@@ -18,6 +18,7 @@ from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.thread_session_lineage import request_fresh_start
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from microsoft_teams.api import MessageActivityInput, SentActivity
+from microsoft_teams.cards import AdaptiveCard
 
 CHANNEL_POINTER = "Commands work in our 1:1 chat. Open a chat with me and send `{name}` there."
 
@@ -32,6 +33,9 @@ class CommandContext:
     is_admin: bool
     runtime: TeamsRuntime
     send: Callable[[MessageActivityInput], Awaitable[SentActivity]]
+
+    async def send_card(self, card: AdaptiveCard) -> None:
+        await self.send(MessageActivityInput().add_card(card))
 
 
 CommandHandler = Callable[[CommandContext], Awaitable[None]]

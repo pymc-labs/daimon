@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from daimon.adapters.teams.card_actions import button, heading, text_card
+from daimon.adapters.teams.card_actions import button, error_text, heading, text_card, text_lines
 from daimon.core.privacy import PurgePreview, summary_line
 from daimon.core.purge import AccountPurgeResult
 from microsoft_teams.cards import (
@@ -19,7 +19,6 @@ from microsoft_teams.cards import (
     CardElement,
     ExecuteAction,
     OpenUrlAction,
-    TextBlock,
     TextInput,
 )
 
@@ -56,10 +55,6 @@ def back() -> ExecuteAction:
     return button(VERB, "Back", "refresh")
 
 
-def _lines(*lines: str) -> list[CardElement]:
-    return [TextBlock(text=line, wrap=True) for line in lines]
-
-
 def no_data_card(bot: str) -> AdaptiveCard:
     return text_card("🔒 Privacy", f"You have no data on file with {bot}.")
 
@@ -73,7 +68,7 @@ def panel_card(preview: PurgePreview, *, bot: str, policy_url: str) -> AdaptiveC
     ]
     body: list[CardElement] = [
         heading("🔒 Privacy"),
-        *_lines(f"{bot} holds: {summary_line(preview)}", *_HOLD, *_MANAGED_AGENTS, *_NOT_HELD),
+        *text_lines(f"{bot} holds: {summary_line(preview)}", *_HOLD, *_MANAGED_AGENTS, *_NOT_HELD),
         ActionSet(actions=actions),
     ]
     return AdaptiveCard(body=body, fallback_text="Privacy")
@@ -119,8 +114,8 @@ def confirm_card(
     """What deleting removes and keeps, then a typed-name confirmation."""
     body: list[CardElement] = [heading("Confirm delete")]
     if error:
-        body.append(TextBlock(text=error, color="Attention", wrap=True))
-    body += _lines("⚡ **What will happen**", *_will_happen(preview), *_MANAGED_AGENTS, *_KEPT)
+        body.append(error_text(error))
+    body += text_lines("⚡ **What will happen**", *_will_happen(preview), *_MANAGED_AGENTS, *_KEPT)
     body.append(TextInput(id=CONFIRM_INPUT, label=f"Type '{name}' to confirm", placeholder=name))
     delete = button(VERB, "Delete", "confirm_delete", style="destructive", account=str(account_id))
     body.append(ActionSet(actions=[delete, button(VERB, "Cancel", "refresh")]))

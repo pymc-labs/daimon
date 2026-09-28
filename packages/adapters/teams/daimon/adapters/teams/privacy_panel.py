@@ -63,8 +63,9 @@ class PrivacyPanel:
 
     async def command(self, context: CommandContext) -> None:
         bot = context.inbound.bot_name or "daimon"
-        card = await self._panel(context.tenant_id, context.inbound.user_id, bot=bot)
-        await context.send(MessageActivityInput().add_card(card))
+        await context.send_card(
+            await self._panel(context.tenant_id, context.inbound.user_id, bot=bot)
+        )
 
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]

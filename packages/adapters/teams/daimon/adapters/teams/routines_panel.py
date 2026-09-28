@@ -8,23 +8,27 @@ the clicker and re-reads the row, so a stale card grants nothing.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import uuid
 from datetime import UTC, datetime
 
 import structlog
-from daimon.adapters.teams.card_actions import FAILED, card_actor, guarded, replace_card, toast
+from daimon.adapters.teams.card_actions import (
+    FAILED,
+    Actor,
+    card_actor,
+    dialog,
+    dialog_message,
+    edit_origin_card,
+    guarded,
+    replace_card,
+    toast,
+)
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED
-from daimon.adapters.teams.interactions import Actor
-from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.routines_card import (
     FORM_FIELDS,
     confirm_delete_card,
     create_form,
-    dialog,
-    dialog_message,
     form_values,
     output_card,
     panel_card,
@@ -38,8 +42,6 @@ from daimon.core.stores import routines as store
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
-    InvokeActivity,
-    MessageActivityInput,
     TaskFetchInvokeActivity,
     TaskModuleInvokeResponse,
     TaskSubmitInvokeActivity,
@@ -52,7 +54,7 @@ log = structlog.get_logger()
 GONE = "This routine no longer exists."
 NOT_OWNER = "Only the routine's creator or an admin can do that."
 ADMIN_ONLY = "Only an admin can create routines."
-_PANEL_EDIT_TIMEOUT_S = 5.0
+_EVENT = "teams.routines.failed"
 
 
 class RoutinesPanel:
@@ -63,28 +65,24 @@ class RoutinesPanel:
 
     async def command(self, context: CommandContext) -> None:
         user_id, is_admin = context.inbound.user_id, context.is_admin
-        card = await self._panel(context.tenant_id, user_id=user_id, is_admin=is_admin)
-        await context.send(MessageActivityInput().add_card(card))
+        await context.send_card(
+            await self._panel(context.tenant_id, user_id=user_id, is_admin=is_admin)
+        )
 
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
     ) -> AdaptiveCardInvokeResponse:
-        return await guarded(self._act(ctx.activity), toast(FAILED), "teams.routines.failed")
+        return await guarded(self._act(ctx.activity), toast(FAILED), _EVENT)
 
     async def on_dialog_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await guarded(
-            self._open(ctx.activity), dialog_message(FAILED), "teams.routines.failed"
-        )
+        return await guarded(self._open(ctx.activity), dialog_message(FAILED), _EVENT)
 
     async def on_dialog_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await guarded(self._submit(ctx), dialog_message(FAILED), "teams.routines.failed")
-
-    async def _actor(self, activity: InvokeActivity) -> Actor | None:
-        return await card_actor(self._runtime, activity)
+        return await guarded(self._submit(ctx), dialog_message(FAILED), _EVENT)
 
     async def _panel(
         self, tenant_id: uuid.UUID, *, user_id: str, is_admin: bool, notice: str | None = None
@@ -95,7 +93,7 @@ class RoutinesPanel:
         return panel_card(shown, hidden, user_id=user_id, is_admin=is_admin, notice=notice)
 
     async def _act(self, activity: AdaptiveCardInvokeActivity) -> AdaptiveCardInvokeResponse:
-        actor = await self._actor(activity)
+        actor = await card_actor(self._runtime, activity)
         if actor is None:
             return toast(DENIED)
         data = activity.value.action.data
@@ -130,37 +128,36 @@ class RoutinesPanel:
         )
         return replace_card(card)
 
-    async def _agent_names(self, tenant_id: uuid.UUID) -> list[str]:
-        agents = await list_agents_by_tenant(self._runtime.anthropic, tenant_id=tenant_id)
+    async def _form(
+        self, actor: Actor, values: dict[str, str], error: str | None = None
+    ) -> TaskModuleInvokeResponse:
+        agents = await list_agents_by_tenant(self._runtime.anthropic, tenant_id=actor.tenant_id)
         names = (agent.metadata.get(MA_METADATA_KEY_NAME) for agent in agents)
-        return sorted(name for name in names if name)
+        form = create_form(sorted(name for name in names if name), values, error)
+        return dialog("New routine", form)
 
     async def _open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
-        actor = await self._actor(activity)
+        actor = await card_actor(self._runtime, activity)
         if actor is None or not actor.is_admin:
             return dialog_message(DENIED if actor is None else ADMIN_ONLY)
-        return dialog(create_form(await self._agent_names(actor.tenant_id), {}))
+        return await self._form(actor, {})
 
     async def _submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        actor = await self._actor(ctx.activity)
+        actor = await card_actor(self._runtime, ctx.activity)
         if actor is None or not actor.is_admin:
             return dialog_message(DENIED if actor is None else ADMIN_ONLY)
         values = form_values(ctx.activity.value.data)
         error = await self._create(actor, values)
         if error is not None:
-            names = await self._agent_names(actor.tenant_id)
-            return dialog(create_form(names, values, error))
+            return await self._form(actor, values, error)
         created = f"✅ Created routine on {values['agent']} ({values['cron']})."
         if ctx.activity.reply_to_id:
-            # Best effort: refresh the panel the dialog was opened from.
-            card = await self._panel(
+            panel = await self._panel(
                 actor.tenant_id, user_id=actor.user_id, is_admin=True, notice=created
             )
-            edit = MessageActivityInput(id=ctx.activity.reply_to_id).add_card(card)
-            with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                await asyncio.wait_for(ctx.send(edit), _PANEL_EDIT_TIMEOUT_S)
+            await edit_origin_card(ctx, panel)
         return dialog_message(created)
 
     async def _create(self, actor: Actor, values: dict[str, str]) -> str | None:

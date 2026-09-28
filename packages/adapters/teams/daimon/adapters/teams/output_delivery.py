@@ -18,14 +18,14 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 import anthropic
 import httpx
 import structlog
 from daimon.adapters.teams.attachments import FetchRefused, is_sharepoint_host
+from daimon.adapters.teams.card_actions import card_actor, submitted_fields
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.adapters.teams.interactions import resolve_actor
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.media.filenames import display_filename_for, sanitize_title
@@ -188,16 +188,10 @@ class TeamsOutputDelivery:
     async def handle_consent(self, ctx: ActivityContext[FileConsentInvokeActivity]) -> None:
         """Accept or Decline on a consent card, from its offer's own person only."""
         activity = ctx.activity
-        actor = await resolve_actor(
-            self._runtime,
-            conversation=activity.conversation,
-            aad_object_id=activity.from_.aad_object_id,
-        )
+        actor = await card_actor(self._runtime, activity)
         if actor is None:
             return
-        context = activity.value.context
-        wire = cast("dict[str, object]", context) if isinstance(context, dict) else {}
-        token = str(wire.get("offer", ""))
+        token = str(submitted_fields(activity.value.context).get("offer", ""))
         offer = self._offers.get(token)
         if (
             offer is None

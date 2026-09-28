@@ -14,13 +14,23 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
-from typing import Literal, cast
+from typing import Literal
 
 import anthropic
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.adapters.teams.card_actions import (
+    FAILED,
+    SENDING_PANEL_ERRORS,
+    Actor,
+    card_actor,
+    dialog,
+    dialog_message,
+    error_text,
+    guarded,
+    submitted_fields,
+)
 from daimon.adapters.teams.identity import DENIED
-from daimon.adapters.teams.interactions import Actor, resolve_actor
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -36,7 +46,6 @@ from daimon.core.mcp_attach import attach_mcp_server_to_agent
 from daimon.core.mcp_oauth import INVITE_BUTTON_LABEL, begin_mcp_oauth_flow, invite_copy, start_url
 from daimon.core.mcp_token_check import is_token_rejected
 from daimon.core.mcp_vault import add_external_mcp_credential
-from daimon.core.observability import capture_exception_with_scope
 from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
 from daimon.core.posted_controls import (
     ALREADY_USED_MESSAGE,
@@ -57,18 +66,13 @@ from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.teams_threads import conversation_of
 from microsoft_teams.api import (
-    AdaptiveCardAttachment,
     Attachment,
-    CardTaskModuleTaskInfo,
     InvokeActivity,
     MessageActivityInput,
     TaskFetchInvokeActivity,
-    TaskModuleContinueResponse,
     TaskModuleInvokeResponse,
-    TaskModuleMessageResponse,
     TaskModuleResponse,
     TaskSubmitInvokeActivity,
-    card_attachment,
 )
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import (
@@ -80,7 +84,6 @@ from microsoft_teams.cards import (
     TextBlock,
     TextInput,
 )
-from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
 
@@ -100,8 +103,6 @@ _UNCONFIGURED_OAUTH = (
     "This deployment cannot sign you in yet. Ask the operator to finish the daimon-mcp "
     "setup, then ask again. Nothing was saved."
 )
-_FAILED = "Sorry, something went wrong. Please try again."
-_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
 _MESSAGES: dict[Refusal, str] = {
     "invalid": NO_LONGER_VALID_MESSAGE,
     "wrong_org": _WRONG_ORG,
@@ -133,23 +134,10 @@ def refusal(
     return "used" if row.used_at is not None else None
 
 
-def _dialog(title: str, card: AdaptiveCard) -> TaskModuleResponse:
-    info = CardTaskModuleTaskInfo(
-        title=title, card=card_attachment(AdaptiveCardAttachment(content=card))
-    )
-    return TaskModuleResponse(task=TaskModuleContinueResponse(value=info))
-
-
-def _message(text: str) -> TaskModuleResponse:
-    return TaskModuleResponse(task=TaskModuleMessageResponse(value=text))
-
-
 def credential_form(row: CredentialRequestRow, error: str | None = None) -> TaskModuleResponse:
     """The password form for an env key or MCP token. Never prefilled."""
     env = row.kind == "env"
-    body: list[CardElement] = []
-    if error:
-        body.append(TextBlock(text=error, color="Attention", wrap=True))
+    body: list[CardElement] = [error_text(error)] if error else []
     body.append(
         TextInput(
             id="secret",
@@ -164,29 +152,21 @@ def credential_form(row: CredentialRequestRow, error: str | None = None) -> Task
     save = SubmitAction(title="Save", data=SubmitData(SUBMIT, {"token": row.token}))
     agent = row.target_name or "the agent"
     title = f"{row.target} for {agent}" if env else f"{row.target} token"
-    return _dialog(title, AdaptiveCard(body=body, actions=[save], fallback_text=title))
+    return dialog(title, AdaptiveCard(body=body, actions=[save], fallback_text=title))
 
 
-def oauth_dialog(row: CredentialRequestRow, url: str) -> TaskModuleResponse:
+def oauthdialog(row: CredentialRequestRow, url: str) -> TaskModuleResponse:
     """The requester's own sign-in link, shown only in their dialog."""
     text = invite_copy(server_name=row.target, agent_name=row.target_name or "the agent")
     link = OpenUrlAction(title=INVITE_BUTTON_LABEL, url=url)
     card = AdaptiveCard(body=[TextBlock(text=text, wrap=True)], actions=[link], fallback_text=text)
-    return _dialog(f"Connect {row.target}", card)
-
-
-def _fields(data: object) -> Mapping[str, object]:
-    return cast(Mapping[str, object], data) if isinstance(data, Mapping) else {}
+    return dialog(f"Connect {row.target}", card)
 
 
 async def _guarded(work: Awaitable[TaskModuleResponse]) -> TaskModuleResponse:
     """Invoke boundary. The submit payload is not logged, only the error."""
-    try:
-        return await work
-    except _ERRORS as exc:
-        log.error("teams.credential.failed", exc_info=exc)
-        capture_exception_with_scope(exc)
-        return _message(_FAILED)
+    failed = dialog_message(FAILED)
+    return await guarded(work, failed, "teams.credential.failed", errors=SENDING_PANEL_ERRORS)
 
 
 class TeamsCredentialRequests:
@@ -214,11 +194,7 @@ class TeamsCredentialRequests:
         self, activity: InvokeActivity, fields: Mapping[str, object]
     ) -> tuple[Actor | None, CredentialRequestRow | None, Refusal | None]:
         """The verified clicker, the request row, and why it is refused."""
-        actor = await resolve_actor(
-            self._runtime,
-            conversation=activity.conversation,
-            aad_object_id=activity.from_.aad_object_id,
-        )
+        actor = await card_actor(self._runtime, activity)
         token = fields.get("token")
         if actor is None or not isinstance(token, str) or not token:
             return actor, None, "invalid"
@@ -236,16 +212,16 @@ class TeamsCredentialRequests:
         return actor, row, reason
 
     async def _open(self, activity: TaskFetchInvokeActivity) -> TaskModuleResponse:
-        actor, row, reason = await self._checked(activity, _fields(activity.value.data))
+        actor, row, reason = await self._checked(activity, submitted_fields(activity.value.data))
         if actor is None:
-            return _message(DENIED)
+            return dialog_message(DENIED)
         if row is not None and reason == "expired":
             # The only sweep there is; it runs past the requester check, so a
             # stranger's click cannot change the requester's card.
             self._spawn(self._edit(row, "expired", activity.service_url), name="teams.cred.edit")
-            return _message(card_text(card_for_request(row, state="expired")))
+            return dialog_message(card_text(card_for_request(row, state="expired")))
         if row is None or reason is not None:
-            return _message(_MESSAGES[reason or "invalid"])
+            return dialog_message(_MESSAGES[reason or "invalid"])
         if row.kind == "mcp_oauth":
             return await self._start_oauth(row, activity.service_url)
         return credential_form(row)
@@ -256,7 +232,7 @@ class TeamsCredentialRequests:
         mcp = self._runtime.settings.mcp
         root = mcp.app_root_url
         if root is None or mcp.jwt_secret is None or self._runtime.turn_deps.fernet is None:
-            return _message(_UNCONFIGURED_OAUTH)
+            return dialog_message(_UNCONFIGURED_OAUTH)
         now = datetime.now(UTC)
         async with self._runtime.sessionmaker.begin() as session:
             consumed = await store.consume_credential_request(session, token=row.token, now=now)
@@ -266,18 +242,18 @@ class TeamsCredentialRequests:
                 else None
             )
         if consumed is None or flow is None:
-            return _message(NO_LONGER_VALID_MESSAGE)
+            return dialog_message(NO_LONGER_VALID_MESSAGE)
         # The mcp process edits the card again once sign-in completes.
         self._spawn(self._edit(consumed, "received", service_url), name="teams.cred.edit")
-        return oauth_dialog(consumed, start_url(root, state=flow.state))
+        return oauthdialog(consumed, start_url(root, state=flow.state))
 
     async def _submit(self, activity: TaskSubmitInvokeActivity) -> TaskModuleResponse:
-        fields = _fields(activity.value.data)
+        fields = submitted_fields(activity.value.data)
         actor, row, reason = await self._checked(activity, fields)
         if actor is None:
-            return _message(DENIED)
+            return dialog_message(DENIED)
         if row is None or reason is not None or row.kind not in _FORM_KINDS:
-            return _message(NO_LONGER_VALID_MESSAGE)
+            return dialog_message(NO_LONGER_VALID_MESSAGE)
         secret = str(fields.get("secret") or "")
         if not secret.strip():
             return credential_form(row, "Value cannot be empty — try again.")
@@ -285,12 +261,12 @@ class TeamsCredentialRequests:
             return credential_form(row, f"Value is too large. Max {MAX_SECRET_VALUE_BYTES} bytes.")
         mcp = self._runtime.settings.mcp
         if row.kind == "mcp" and (mcp.public_url is None or mcp.jwt_secret is None):
-            return _message(_UNCONFIGURED)
+            return dialog_message(_UNCONFIGURED)
         agent = await find_agent_by_derived_uuid(
             self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
         )
         if agent is None:
-            return _message(_AGENT_GONE)
+            return dialog_message(_AGENT_GONE)
         url = activity.service_url
         work = (
             self._save_env(row, agent, secret, is_admin=actor.is_admin, service_url=url)

@@ -158,7 +158,14 @@ async def resolve_tenant(
         except NoDmTenantError:
             return None
         return candidate.tenant_id
-    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=inbound.entra_tenant_id)
+    return await live_tenant_id(sessionmaker, inbound.entra_tenant_id)
+
+
+async def live_tenant_id(
+    sessionmaker: async_sessionmaker[AsyncSession], entra_tenant_id: str
+) -> uuid.UUID | None:
+    """The organisation's tenant id while it is provisioned and not archived."""
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=entra_tenant_id)
     async with sessionmaker() as session:
         tenant = await get_tenant(session, tenant_id)
     live = (
