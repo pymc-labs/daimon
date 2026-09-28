@@ -253,6 +253,8 @@ async def ensure_agent_mcp_vault(
     ``chat_agent_id`` = agent, no ``is_admin``, no ``internal``), so nothing per-turn
     needs to mutate it. Removing the re-stamp limb eliminates the cross-thread race
     where an in-flight session re-reads its shared vault credential mid-turn (A3).
+    The one-time legacy upgrade is an exception: an active session may observe
+    the new chat identity during the upgrade. Subsequent warm calls stay stable.
 
     We do NOT delete credentials on URL drift. The vault is shared with user-added
     external MCP credentials (``add_external_mcp_credential``) whose URLs we cannot
@@ -260,8 +262,8 @@ async def ensure_agent_mcp_vault(
     ``public_url`` would silently nuke user data on the first deploy-URL change.
     Cost: O(deploys-with-URL-change) orphan creds per agent, bounded and harmless.
 
-    The daimon-mcp JWT claims are account-scoped only — no agent claim is added (SC-4).
-    Only the vault's storage location is per-agent.
+    The JWT subject stays account-scoped. Its separate chat_agent_id claim is
+    consumed only by the Google broker; it does not confer agent-chat authority.
 
     The entire list-then-create body runs inside a blocking Postgres
     advisory-transaction lock keyed on ``(account_id, agent_id)`` (SYNC-01):

@@ -3,8 +3,8 @@
 The agent calls this tool from inside its MA sandbox. Identity comes
 from the JWT middleware: ``auth.account_id`` (always populated) and
 ``auth.agent_id`` (populated when the JWT was minted for an agent
-session — the tool dispatches to the
-broker, audit-logs metadata, and returns the plaintext token.
+session). For Google only, ordinary chat supplies ``auth.chat_agent_id``.
+The tool dispatches to the broker, audit-logs metadata, and returns the token.
 
 The CLI never calls this tool. (The former ``daimon auth github`` OAuth
 flow and its ``/oauth/github/*`` + ``/cli/auth/status`` routes were removed
@@ -43,13 +43,14 @@ async def _get_cli_token_impl(
     no tool-supplied agent_id; confused-deputy by construction).
     """
     auth = await _auth(ctx)
+    agent_id = auth.agent_id or (auth.chat_agent_id if service == "gcloud" else None)
     try:
-        # Resolves only a credential bound to this agent; the deployment-wide
-        # operator service default is never handed out here.
+        # Only Google uses chat execution identity. GitHub chat callers retain
+        # their account principal-default PAT; operator defaults are never returned.
         token = await dispatch_mint_token(
             service=service,
             account_id=auth.account_id,
-            agent_id=auth.agent_id,
+            agent_id=agent_id,
             sessionmaker=runtime.session_factory,
             settings=runtime.settings,
             allow_service_default=False,
@@ -59,7 +60,7 @@ async def _get_cli_token_impl(
             "cli_token outcome=no_binding service=%s account=%s agent=%s",
             service,
             auth.account_id,
-            auth.agent_id,
+            agent_id,
         )
         raise ToolError(str(e)) from e
     except ProviderConfigError as e:
@@ -73,7 +74,7 @@ async def _get_cli_token_impl(
         "cli_token outcome=success service=%s account=%s agent=%s",
         service,
         auth.account_id,
-        auth.agent_id,
+        agent_id,
     )
     return token
 

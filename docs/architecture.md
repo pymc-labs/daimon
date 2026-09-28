@@ -293,7 +293,10 @@ Chat sessions attach a per-account, per-agent vault whose signed JWT carries
 as the executing agent identity for `get_cli_token(service="gcloud")`, while
 preserving the ordinary chat tool surface and live account-role checks. The
 separate `agent_id` claim still selects the restricted external agent-chat surface.
-Neither claim is supplied through tool arguments.
+Neither claim is supplied through tool arguments. Chat identity is stored separately
+from `AuthIdentity.agent_id` and is consumed only by the Google broker path. GitHub
+chat calls still resolve the account principal-default PAT; other identity gates
+and the two-tool search interface remain unchanged.
 
 The operator must configure `credentials.google_sa_json`, authorize domain-wide
 delegation, and bind the agent with `daimon agents bind-google <agent> <email>

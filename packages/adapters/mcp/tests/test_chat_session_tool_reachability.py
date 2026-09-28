@@ -313,3 +313,24 @@ async def test_agent_id_claim_session_discovers_agent_chat_and_self_edit_tools_o
         f"an agent_id-claim session must not discover any tenant-wide roster tool; "
         f"got: {tool_names}"
     )
+
+
+async def test_chat_execution_identity_preserves_exact_tools_list(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Execution identity must not bypass the two-tool search transform."""
+    async with sessionmaker() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id="chat-list")
+        account = await make_account(session, tenant=tenant)
+    app = _make_app(sessionmaker, _build_client())
+    plain_token = mint_jwt(account_id=account.id, secret=SECRET.encode(), now=_NOW)
+    chat_token = mint_jwt(
+        account_id=account.id, secret=SECRET.encode(), now=_NOW, chat_agent_id=uuid.uuid4()
+    )
+    plain = await mcp_session(app, token=plain_token, method="tools/list")
+    chat = await mcp_session(app, token=chat_token, method="tools/list")
+    # Compare serialized full schemas, not just tool names or callability.
+    import json
+
+    assert json.dumps(chat["result"], sort_keys=True) == json.dumps(plain["result"], sort_keys=True)
+    assert {tool["name"] for tool in chat["result"]["tools"]} == {"call_tool", "search_tools"}

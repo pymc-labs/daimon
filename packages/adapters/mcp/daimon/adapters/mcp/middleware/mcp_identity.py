@@ -150,12 +150,15 @@ class IdentityMiddleware(Middleware):
         pu_claim = _token.claims.get("platform_user_id") if _token else None
         platform_user_id: str | None = pu_claim if isinstance(pu_claim, str) else None
         raw_agent_id = await self._agent_id_resolver(context)
-        # Chat execution identity does not select the restricted external
-        # agent-chat tool surface. Dedicated agent_id claims retain precedence.
-        restricted_agent_chat = raw_agent_id is not None
-        if raw_agent_id is None and _token is not None:
-            chat_agent_id = _token.claims.get("chat_agent_id")
-            raw_agent_id = chat_agent_id if isinstance(chat_agent_id, str) else None
+        # Keep chat execution identity separate from external agent credentials:
+        # agent_id controls tool visibility and several authorization gates.
+        raw_chat_agent_id = _token.claims.get("chat_agent_id") if _token else None
+        chat_agent_id: uuid.UUID | None = None
+        if isinstance(raw_chat_agent_id, str):
+            try:
+                chat_agent_id = uuid.UUID(raw_chat_agent_id)
+            except ValueError:
+                chat_agent_id = None  # Fail closed at the Google broker.
         agent_id: uuid.UUID | None
         if raw_agent_id is None:
             agent_id = None
@@ -181,6 +184,7 @@ class IdentityMiddleware(Middleware):
             platform=platform,
             external_id=external_id,
             agent_id=agent_id,
+            chat_agent_id=chat_agent_id,
             platform_user_id=platform_user_id,
             is_admin=is_admin,
         )
@@ -196,7 +200,7 @@ class IdentityMiddleware(Middleware):
         # Only dedicated external agent_id credentials select the restricted
         # agent-chat surface. Chat execution identity leaves visibility intact.
         # Malformed identity fails closed at tools that require an agent.
-        if agent_id is not None and restricted_agent_chat:
+        if agent_id is not None:
             await disable_components(fastmcp_ctx, match_all=True)
             await enable_components(fastmcp_ctx, tags={"agent-chat"})
         return await call_next(context)

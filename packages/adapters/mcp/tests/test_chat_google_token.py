@@ -123,3 +123,59 @@ async def test_chat_google_token_is_scoped_to_executing_agent(
         assert "bind-google" in payload
         assert "mock-google-access-token" not in payload
         google_factory.assert_not_called()
+
+
+async def test_chat_github_keeps_account_principal_pat_without_agent_overlay(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Adding Google execution identity must not change GitHub resolution."""
+    import datetime as dt
+    import uuid
+
+    from cryptography.fernet import Fernet
+    from daimon.core.config import CryptoSettings
+    from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
+    from daimon.core.mcp_auth import mint_jwt
+
+    async with sessionmaker() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord")
+        account = await make_account(session, tenant=tenant)
+    key = Fernet.generate_key().decode()
+    await upsert_credential_encrypted(
+        sessionmaker=sessionmaker,
+        fernet=build_multifernet((key,)),
+        principal_id=account.id,
+        github_login="chat-user",
+        plaintext_token="test-account-pat",
+        scopes=("repo",),
+    )
+    settings = Settings(
+        database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+        anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+        crypto=CryptoSettings(keys=(SecretStr(key),)),
+        mcp=McpSettings(jwt_secret=SecretStr("a" * 32), public_url=HttpUrl("https://x/mcp")),
+    )
+
+    def unexpected(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected MA request: {request.method} {request.url.path}")
+
+    app = create_mcp_app(
+        settings=settings, sessionmaker=sessionmaker, anthropic=build_fake_anthropic(unexpected)
+    )
+    for chat_agent_id in (None, uuid.uuid4()):
+        token = mint_jwt(
+            account_id=account.id,
+            secret=b"a" * 32,
+            now=dt.datetime.now(dt.UTC),
+            chat_agent_id=chat_agent_id,
+        )
+        result = await mcp_session(
+            app,
+            token=token,
+            method="tools/call",
+            params={
+                "name": "call_tool",
+                "arguments": {"name": "get_cli_token", "arguments": {"service": "github"}},
+            },
+        )
+        assert "test-account-pat" in json.dumps(result)
