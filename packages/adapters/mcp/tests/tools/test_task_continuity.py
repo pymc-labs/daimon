@@ -23,7 +23,7 @@ from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_snapshot import SessionSnapshot
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import Platform, Role
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.core.stores.task_continuations import list_pending_continuations
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
@@ -280,13 +280,24 @@ async def test_handoff_nulls_a_fabricated_or_switch_only_continuation(
     assert pending == [], "nothing is queued when the continuation was nulled"
 
 
+@pytest.mark.parametrize(
+    ("platform", "parent", "mention"),
+    [
+        ("discord", "C_PARENT", "<#C_PARENT>"),
+        ("teams", "19:C_PARENT@thread.tacv2", "this channel"),
+        ("teams", "a:C_PARENT", "this chat"),
+    ],
+)
 async def test_handoff_confirmation_renders_the_channel_as_a_mention(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
+    platform: Platform,
+    parent: str,
+    mention: str,
 ) -> None:
     """Issue 3 (staging QA, 2026-09-13): the confirmation must never print a
     raw platform channel id."""
-    tenant = await make_tenant(db_session)
+    tenant = await make_tenant(db_session, platform=platform)
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
@@ -294,7 +305,7 @@ async def test_handoff_confirmation_renders_the_channel_as_a_mention(
         account_id=caller.id,
         tenant_id=tenant.id,
         role=Role.USER,
-        platform="discord",
+        platform=platform,
         platform_user_id="42",
     )
 
@@ -302,8 +313,8 @@ async def test_handoff_confirmation_renders_the_channel_as_a_mention(
         committing_sessionmaker,
         tenant_id=tenant.id,
         account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
+        platform=platform,
+        parent_channel_id=parent,
         thread_id="T_THREAD",
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
@@ -313,7 +324,7 @@ async def test_handoff_confirmation_renders_the_channel_as_a_mention(
             runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
         )
 
-    assert "<#C_PARENT>" in result.confirmation, (
+    assert mention in result.confirmation, (
         f"expected a channel mention, got: {result.confirmation!r}"
     )
     assert "C_PARENT is unchanged" not in result.confirmation, (

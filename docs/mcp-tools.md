@@ -18,10 +18,11 @@ tool is hidden by default and restored only for a matching caller.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **Discord callers** — carries the `discord` tag.
 - **Slack callers** — carries the `slack` tag.
+- **Teams callers** — carries the `teams` tag.
 
-A CLI token matches no platform tag, so it sees neither the Discord nor the Slack tools.
-An agent token is narrowed to the agent-chat tools alone — everything else is disabled
-for it, admin tools included.
+A CLI token matches no platform tag, so it sees none of the Discord, Slack or Teams
+tools. An agent token is narrowed to the agent-chat tools alone — everything else is
+disabled for it, admin tools included.
 
 A caller does not necessarily receive this list in one response: the server applies a
 BM25 search transform, so an ordinary session discovers tools by searching the catalogue
@@ -77,7 +78,7 @@ Shared channel MCP tools with per-platform dispatch.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_thread` | Discord callers, Slack callers | Create a new thread and post content as its first message. |
+| `create_thread` | Discord callers, Slack callers, Teams callers | Create a new thread and post content as its first message. |
 | `get_message` | Discord callers, Slack callers | Fetch a single message by channel and message id (Slack: the message ts). |
 | `list_channels` | Discord callers, Slack callers | List channels in this server/workspace that you can view. |
 | `list_threads` | Discord callers | List active and archived public threads for a channel. |
@@ -86,7 +87,7 @@ Shared channel MCP tools with per-platform dispatch.
 | `read_thread` | Discord callers, Slack callers | Read messages from a thread, oldest-first. |
 | `rename_thread` | Discord callers | Rename a Discord thread; ``name`` is the new title (1-100 characters). |
 | `search_messages` | Discord callers, Slack callers | Search messages with server-side filters. |
-| `send_message` | Discord callers, Slack callers | Post a message to a channel. |
+| `send_message` | Discord callers, Slack callers, Teams callers | Post a message to a channel. |
 | `set_display_identity` | Discord callers | Change how daimon appears in this Discord server: its display name, its avatar, or both. |
 
 ## `cli_token`
@@ -127,7 +128,7 @@ GitHub App install-link tool: post_github_app_install_link.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `post_github_app_install_link` | Discord callers, Slack callers | Install the GitHub App: post a link inviting the user to grant repository access. |
+| `post_github_app_install_link` | Discord callers, Slack callers, Teams callers | Install the GitHub App: post a link inviting the user to grant repository access. |
 
 ## `media`
 
@@ -174,7 +175,7 @@ Bind an agent to a public GitHub repo from inside an ordinary chat turn.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `bind_public_repo` | Discord callers, Slack callers | Have an agent work in a public GitHub repo: "work in github.com/owner/project", "point it at our open-source repository". |
+| `bind_public_repo` | Discord callers, Slack callers, Teams callers | Have an agent work in a public GitHub repo: "work in github.com/owner/project", "point it at our open-source repository". |
 
 ## `routines`
 

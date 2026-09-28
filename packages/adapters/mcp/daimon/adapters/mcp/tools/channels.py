@@ -1,9 +1,10 @@
 """Shared channel MCP tools with per-platform dispatch.
 
-One registration serves both platforms: ``auth.platform == "slack"`` routes to
-``tools/slack/`` impls, anything else to ``tools/discord/`` impls (which raise
-their own identity errors for non-discord callers). Slack-unsupported tools
-raise a uniform ToolError.
+One registration serves every platform: ``auth.platform == "slack"`` routes to
+``tools/slack/`` impls, ``"teams"`` (send_message and create_thread only) to
+``tools/teams/``, anything else to ``tools/discord/`` impls (which raise their
+own identity errors for non-discord callers). Slack-unsupported tools raise a
+uniform ToolError.
 """
 
 from __future__ import annotations
@@ -54,6 +55,11 @@ from daimon.adapters.mcp.tools.slack._search import (
 from daimon.adapters.mcp.tools.slack._send import (
     _slack_create_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _slack_send_message_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.teams._send import (
+    TeamsMessageRow,
+    _teams_create_thread_impl,  # pyright: ignore[reportPrivateUsage]
+    _teams_send_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -159,23 +165,23 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             raise _slack_unsupported("list_threads")
         return await _list_threads_impl(runtime, auth, channel_id=channel_id)
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def create_thread(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
         name: str,
         content: str,
-    ) -> ThreadRow | SlackMessageRow:
+    ) -> ThreadRow | SlackMessageRow | TeamsMessageRow:
         """Create a new thread and post content as its first message.
 
-        ``content`` is required on both platforms and becomes the thread's
+        ``content`` is required on every platform and becomes the thread's
         first message — Slack cannot open a thread without a root message,
         and a Discord forum post is rejected by the API without a starter
         message.
 
         Discord: ``name`` is the thread's title (1-100 characters). On a text
         channel this creates a PUBLIC thread; on a forum channel it creates a
-        post. ``name`` is ignored on Slack — Slack threads have no title.
+        post. ``name`` is ignored on Slack and Teams.
 
         Slack: posts ``content`` as a channel-root message and returns its
         ``ts``. Combine that ``ts`` with ``channel_id`` to address the new
@@ -184,11 +190,20 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``ts="1717171717.123456"`` for channel ``C0123456789``, reply with
         ``send_message(channel_id="C0123456789:1717171717.123456", ...)``).
 
+        Teams: ``channel_id`` is the channel (``parent_channel_id`` in
+        turn_controls, no ``;messageid=``); this starts a new post and returns
+        its ``conversation_id``, which ``send_message`` takes to reply in it.
+        Text only, and you must be a member of the channel.
+
         Only create a thread when the user asked for one.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
             return await _slack_create_thread_impl(
+                runtime, auth, channel_id=channel_id, content=content
+            )
+        if auth.platform == "teams":
+            return await _teams_create_thread_impl(
                 runtime, auth, channel_id=channel_id, content=content
             )
         return await _create_thread_impl(
@@ -264,14 +279,14 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             return _slack_parse_link_impl(url)
         return _parse_link_impl(url, caller_guild_id=auth.external_id)
 
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def send_message(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str,
         content: str,
         attachments: list[dict[str, str]] | None = None,
         file_handles: list[str] | None = None,
-    ) -> MessageRow | SlackMessageRow:
+    ) -> MessageRow | SlackMessageRow | TeamsMessageRow:
         """Post a message to a channel.
 
         For TEXT: only call this when the user explicitly asks you to send or
@@ -298,15 +313,29 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         returns — never base64 a file into a tool argument. Combined
         cap of 10 attachments per message. Both FILES paragraphs are
         Discord-only for now — Slack file posting needs a scope this
-        install does not have.
+        install does not have, and Teams file posting is not built yet.
 
         Slack: ``channel_id`` may be ``channel_id:thread_ts`` (e.g.
         ``C0123456789:1717171717.123456``) to post into a thread. Content is
         sent as-is — nothing is escaped, so ``<@U…>`` mentions work — and is
         capped at 12,000 characters. daimon must already be in the channel
         (a member can run ``/invite @daimon``).
+
+        Teams: ``channel_id`` is a conversation id — ``thread_id`` from
+        turn_controls replies here; a 1:1 chat is ``a:…``, a channel thread
+        ``19:…@thread.tacv2;messageid=…``. Text only (markdown), capped at
+        6,000 characters, and you must be a member of that conversation.
         """
         auth = await _auth(ctx)
+        if auth.platform == "teams":
+            return await _teams_send_message_impl(
+                runtime,
+                auth,
+                channel_id=channel_id,
+                content=content,
+                attachments=attachments,
+                file_handles=file_handles,
+            )
         if auth.platform == "slack":
             return await _slack_send_message_impl(
                 runtime,

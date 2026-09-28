@@ -395,7 +395,7 @@ async def test_explanation_separates_setup_responder_target_and_parent_defaults(
     )
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_explanation_reports_deleted_setup_without_parent_fallback(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     platform: str,

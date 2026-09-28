@@ -59,6 +59,7 @@ from daimon.adapters.mcp.tools.publish import register_publish_tools
 from daimon.adapters.mcp.tools.repo_binding import register_repo_binding_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
+from daimon.adapters.mcp.tools.teams._client import build_teams_client
 from daimon.adapters.mcp.tools.thread_participation import (
     register_thread_participation_tools,
 )
@@ -232,6 +233,7 @@ def create_mcp_app(
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     mcp.add_transform(Visibility(False, tags={"discord"}))
     mcp.add_transform(Visibility(False, tags={"slack"}))
+    mcp.add_transform(Visibility(False, tags={"teams"}))
     mcp.add_transform(
         AgentChatAwareBM25SearchTransform(
             max_results=5,
@@ -278,6 +280,11 @@ def create_mcp_app(
         bundle_rate_limiter=bundle_rate_limiter,
         fernet=fernet,
         artifact_store=artifact_store,
+        teams_client=(
+            build_teams_client(effective_settings.teams)
+            if effective_settings.teams is not None
+            else None
+        ),
     )
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
@@ -295,10 +302,10 @@ def create_mcp_app(
     time.register_time_tools(mcp, runtime)
     routines.register_routines_tools(mcp, runtime)
     register_cli_token_tool(mcp, runtime)
-    if effective_settings.discord is not None or effective_settings.slack is not None:
+    if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
         register_channel_tools(mcp, runtime)
     else:
-        log.info("channel tools disabled", reason="no discord or slack settings")
+        log.info("channel tools disabled", reason="no discord, slack or teams settings")
     self_edit.register_self_edit_tools(mcp, runtime)  # agent self-edit tools
     register_notebook_tools(mcp, runtime)  # notebook publish (raises when unconfigured)
     register_publish_tools(mcp, runtime)  # report publish/delete (raises when unconfigured)

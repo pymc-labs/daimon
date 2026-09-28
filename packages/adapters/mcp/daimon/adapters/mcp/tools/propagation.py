@@ -34,7 +34,7 @@ from daimon.core.scope import (
     TenantScopeRef,
     merge,
 )
-from daimon.core.stores.domain import ThreadAgentBindingRow
+from daimon.core.stores.domain import CHAT_PLATFORMS, ThreadAgentBindingRow
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields, unset_fields
 from daimon.core.stores.thread_agent_bindings import get_binding, list_active_bindings
@@ -80,7 +80,7 @@ async def _set_agent_default_impl(
     expected_ma_agent_id: str | None = None,
 ) -> SetDefaultResult:
     _require_admin(auth)
-    if expected_ma_agent_id is not None or auth.platform in ("discord", "slack"):
+    if expected_ma_agent_id is not None or auth.platform in CHAT_PLATFORMS:
         await resolve_setup_agent(
             runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
         )
@@ -221,7 +221,7 @@ async def _explain_agent_resolution_impl(
         tenant_row = await get_scope(session, scope=TenantScopeRef(tenant_id=tenant_id))
         binding = None
         recent: list[ThreadAgentBindingRow] = []
-        if auth.platform in ("discord", "slack"):
+        if auth.platform in CHAT_PLATFORMS:
             if thread_id is not None:
                 binding = await get_binding(
                     session,
@@ -310,7 +310,8 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``<channel platform="discord" id="..." role="parent_channel">``.
         Never pass the current thread's id here. Slack: use the id from
         ``<channel platform="slack" id="...">`` — Slack's context always
-        names the parent channel. A channel default is resolved from the parent;
+        names the parent channel. Teams: use ``parent_channel_id`` from
+        turn_controls. A channel default is resolved from the parent;
         setup threads keep their bound responder. A default
         written against a thread id is a scope nothing ever reads: the write
         succeeds, this tool reports success, and the channel keeps answering
@@ -336,7 +337,8 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
         never the current thread's id. Slack: use the id from
-        ``<channel platform="slack" id="...">``. Clearing a thread id is a
+        ``<channel platform="slack" id="...">``. Teams: use
+        ``parent_channel_id`` from turn_controls. Clearing a thread id is a
         silent no-op that leaves the channel's real default in place.
         """
         return await _clear_agent_default_impl(runtime, await _auth(ctx), channel_id)
@@ -366,7 +368,8 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
         never the current thread's id. Slack: use the id from
-        ``<channel platform="slack" id="...">``. Asking about a thread id
+        ``<channel platform="slack" id="...">``. Teams: ``parent_channel_id``
+        from turn_controls, with its ``thread_id``. Asking about a thread id
         reports that thread's own (almost always empty) scope, which reads
         as a confident answer about the channel and is not one — and if the
         same wrong id was just passed to ``set_agent_default``, this tool
