@@ -61,10 +61,16 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSystemMessageEventParams,
     BetaManagedAgentsTextBlockParam,
     BetaManagedAgentsUserMessageEventParams,
+    BetaManagedAgentsUserToolConfirmationEventParams,
 )
 from daimon.core.errors import TurnError
 from daimon.core.ma import replay_events, send_interrupt_and_wait, terminal_stop_reason
-from daimon.core.turn.approvals import build_confirmation_events, pending_confirmation_ids
+from daimon.core.turn.approvals import (
+    build_confirmation_events,
+    build_decision_events,
+    pending_confirmation_ids,
+    tool_calls_for,
+)
 from daimon.core.turn.ceiling import ceiling_error, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge
@@ -74,8 +80,10 @@ from daimon.core.turn.posture import (
     Billed,
     BillingExempt,
     BillingPosture,
+    PolicyApproval,
     RequireApproval,
     ToolConfirmation,
+    ToolConfirmationResult,
 )
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState
@@ -92,6 +100,69 @@ InterruptPhase = Literal["pre-stream", "stream-open", "send-initial", "replay", 
 _DEFAULT_TOOL_CONFIRMATION: ToolConfirmation = RequireApproval()
 
 T = TypeVar("T")
+
+
+def _answers_in_turn(tool_confirmation: ToolConfirmation) -> bool:
+    """Whether this posture answers a `requires_action` idle and keeps going."""
+    return isinstance(tool_confirmation, AutoApprove | PolicyApproval)
+
+
+async def _decide_blocked(
+    tool_confirmation: AutoApprove | PolicyApproval, state: TurnState, fresh: list[str]
+) -> list[BetaManagedAgentsUserToolConfirmationEventParams]:
+    """The `user.tool_confirmation` batch for `fresh` under an answering posture.
+
+    `PolicyApproval` awaits its decider once per id, concurrently: two writes
+    in one pause post two cards, and neither waits on the other's click.
+    """
+    match tool_confirmation:
+        case AutoApprove():
+            return build_confirmation_events(fresh)
+        case PolicyApproval(decide=decide):
+            calls = tool_calls_for(state, fresh)
+            results = await asyncio.gather(*(decide(call) for call in calls))
+            return build_decision_events(zip(fresh, results, strict=True))
+
+
+async def _decide_or_refuse_on_cancel(
+    tool_confirmation: AutoApprove | PolicyApproval,
+    state: TurnState,
+    fresh: list[str],
+    *,
+    cancel_task: asyncio.Task[Any],
+    anthropic: AsyncAnthropic,
+    session_id: str,
+) -> list[BetaManagedAgentsUserToolConfirmationEventParams]:
+    """`_decide_blocked`, raced against the turn's cancel signal.
+
+    On cancel the pending cards are abandoned, every fresh id is refused (the
+    session is on a `requires_action` idle, so the send is accepted), and
+    `_InterruptInConsume` hands the turn to the normal interrupt path.
+    """
+    decide_task = asyncio.create_task(
+        _decide_blocked(tool_confirmation, state, fresh), name="turn.decide_blocked"
+    )
+    done, _pending = await asyncio.wait(
+        {decide_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+    )
+    if decide_task in done:
+        return decide_task.result()
+    decide_task.cancel()
+    with _suppress_task_exc():
+        await decide_task
+    refusals = build_decision_events(
+        (
+            tool_use_id,
+            ToolConfirmationResult(
+                allow=False, deny_message="The user stopped this turn; the call did not run."
+            ),
+        )
+        for tool_use_id in fresh
+    )
+    with contextlib.suppress(_anthropic.APIError):
+        await anthropic.beta.sessions.events.send(session_id, events=refusals)
+    raise _InterruptInConsume()
+
 
 # The SDK only wraps httpx failures raised while *opening* a request into
 # `APIConnectionError`. Once an SSE stream is open, a mid-body drop surfaces
@@ -551,14 +622,16 @@ async def _pump(
                         )
                     if session.status == "idle":
                         match tool_confirmation:
-                            case AutoApprove():
+                            case AutoApprove() | PolicyApproval():
                                 fresh = pending_confirmation_ids(
                                     state_cell[0].stop_reason,
                                     confirmed=confirmed_tool_use_ids,
                                 )
                                 if fresh:
                                     confirmed_tool_use_ids.update(fresh)
-                                    decisions = build_confirmation_events(fresh)
+                                    decisions = await _decide_blocked(
+                                        tool_confirmation, state_cell[0], fresh
+                                    )
                                     # Safe to send here (and only here on this
                                     # branch): `session.status` just came back
                                     # `idle` from the `sessions.retrieve` above,
@@ -740,8 +813,7 @@ def _events_since_last_turn_boundary(
         if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
             return False
         return not (
-            isinstance(tool_confirmation, AutoApprove)
-            and event.stop_reason.type == "requires_action"
+            _answers_in_turn(tool_confirmation) and event.stop_reason.type == "requires_action"
         )
 
     current_start = max(
@@ -967,18 +1039,29 @@ async def _consume_with_reconnect(
             stop = terminal_stop_reason(event)
             if stop == "requires_action":
                 match tool_confirmation:
-                    case AutoApprove():
+                    case AutoApprove() | PolicyApproval():
                         assert isinstance(event, BetaManagedAgentsSessionStatusIdleEvent)
                         fresh = pending_confirmation_ids(
                             event.stop_reason, confirmed=confirmed_tool_use_ids
                         )
                         if fresh:
                             confirmed_tool_use_ids.update(fresh)
-                            # decisions: one `user.tool_confirmation` event
-                            # with `"result": "allow"` per fresh id (built by
-                            # approvals.build_confirmation_events, decision 6
-                            # -- driver.py only sends).
-                            decisions = build_confirmation_events(fresh)
+                            # decisions: one `user.tool_confirmation` event per
+                            # fresh id -- `allow` for AutoApprove, the
+                            # decider's own answer for PolicyApproval (built
+                            # in approvals, decision 6 -- driver.py only
+                            # sends). A decider may wait on a person, so the
+                            # wait races the cancel signal; a cancel refuses
+                            # every pending call before the interrupt, so the
+                            # session is not left paused on them.
+                            decisions = await _decide_or_refuse_on_cancel(
+                                tool_confirmation,
+                                state_cell[0],
+                                fresh,
+                                cancel_task=cancel_task,
+                                anthropic=anthropic,
+                                session_id=session_id,
+                            )
                             # Safe to send here (and ONLY here): this is a
                             # `requires_action` idle, i.e. the session is
                             # NOT running. A bare `user.*` event sent into a
@@ -1058,7 +1141,7 @@ async def _finalize_success_or_error(
         #   confirmed" wording would be a lie in this case; a second wording
         #   names what actually happened.
         match tool_confirmation:
-            case AutoApprove():
+            case AutoApprove() | PolicyApproval():
                 unsent = pending_confirmation_ids(
                     final_state.stop_reason, confirmed=confirmed_tool_use_ids
                 )

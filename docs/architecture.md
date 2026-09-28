@@ -217,6 +217,25 @@ Every call must declare a billing posture, from
 `span.model_request_end` event through the bound recorder, `BillingExempt`
 meters nothing and logs why.
 
+It also declares a tool-confirmation posture: what the driver does when MA
+pauses the session on a `requires_action` idle. `RequireApproval` ends the
+turn, `AutoApprove` allows every blocked call, and `PolicyApproval` asks a
+decider per call and sends each answer on the same stream. The decider comes
+from `packages/core/daimon/core/turn/approvals.py`, over the pure read/write
+model in `packages/core/daimon/core/tool_safety.py`. With
+`DAIMON_TOOL_SAFETY__ENABLED` on, `create_session` sends every attached
+third-party toolset as `always_ask` (a per-session override, so it holds
+however the agent was written); reads then run, a write in a routine is
+refused unless the operator allowed it there, and a write in chat waits for
+the requester to press Approve on a confirmation card. The card is a platform
+hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
+(`packages/core/daimon/core/confirmation.py`), Discord and Slack each draw the
+shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
+and an adapter that passes no hook gets `no_confirmation_surface`, which
+refuses the write. Plugins can build their own `ConfirmationPrompt` and call
+the same hook. Daimon's own `daimon-mcp` tools are never gated here; they
+keep their `operation_policy` checks.
+
 ### How a turn ended
 
 `packages/core/daimon/core/turn/termination.py` defines `TerminationReason`,

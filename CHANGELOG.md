@@ -56,6 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tools; routines whose creator is no longer allowed skip with
   `invoker_not_allowed`. Tenants without a policy are unchanged. The policy also carries protected and sealed channel lists for
   the channel tools.
+- Opt-in write safety for attached third-party MCP tools
+  (`DAIMON_TOOL_SAFETY__ENABLED`, off by default). Each tool is classified read
+  or write (operator override, then MCP annotations, then its name; unknown
+  means write). In chat, a write waits for the requester to press Approve on a
+  Discord or Slack confirmation card showing the exact input; in routines,
+  writes are refused unless listed in `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`;
+  `DAIMON_TOOL_SAFETY__DENIED` blocks a server or tool everywhere. The
+  confirmation card is a reusable `ConfirmationHook`; surfaces without one
+  refuse the write.
 
 - `send_direct_message` delivers private agent messages to verified Discord/Slack
   tenant members, with per-tenant disabled/allowlist policies and delivery receipts.

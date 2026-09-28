@@ -5,7 +5,7 @@ Open a fresh MA session, then delegate the drain to the core turn driver
 tail. A routine turn inherits the driver's full liveness story — status-
 checked eventless-cycle reconnect, the per-call read timeout, the cancel
 race, the hardened render error policy — instead of a bespoke bare drain
-loop, and still auto-approves tool confirmations via `AutoApprove()`.
+loop, and answers tool confirmations via `headless_tool_confirmation`.
 
 A routine/headless turn is bounded end to end by the core per-turn ceiling
 (`daimon.core.turn.ceiling`, ~45 minutes): one shared deadline covers BOTH
@@ -60,12 +60,13 @@ from cryptography.fernet import MultiFernet
 from daimon.core.config import McpSettings
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.sessions import create_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.turn.approvals import headless_tool_confirmation
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.driver import run_turn as drive_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import (
-    AutoApprove,
     Billed,
     BillingExempt,
     BillingPosture,
@@ -134,6 +135,7 @@ async def run_turn(
     github_app_id: str | None = None,
     github_app_private_key: str | None = None,
     deadline: datetime | None = None,
+    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -228,8 +230,11 @@ async def run_turn_impl(
        ``github_fallback_pat`` clones ``anon:`` (verified-public) bindings
        even without a per-agent PAT.
     3. The drain is delegated to ``daimon.core.turn.driver.run_turn`` with a
-       no-op lifecycle (nothing to render to), ``tool_confirmation=AutoApprove()``
-       (a routine still auto-allows tool calls), ``deadline=effective_deadline``
+       no-op lifecycle (nothing to render to), ``tool_confirmation`` from
+       ``headless_tool_confirmation(tool_safety)`` (``AutoApprove`` while the
+       tool-safety policy is off; with it on, reads run and third-party
+       writes are refused unless the operator allowed them in unattended
+       runs — nobody is here to press Approve), ``deadline=effective_deadline``
        (the same instant that bounded step 1/2's assembly, so the driver's own
        ``remaining_s`` naturally subtracts the time assembly already spent —
        one window, two disjoint legs, no double enforcement), and a billing
@@ -294,6 +299,7 @@ async def run_turn_impl(
             github_app_private_key=github_app_private_key,
             billing_exempt=billing_exempt,
             memory_read_only=origin == "routine",
+            tool_safety=tool_safety,
         )
 
     try:
@@ -341,7 +347,7 @@ async def run_turn_impl(
         cancel=asyncio.Event(),  # never set — headless has no cancel source
         render_interval_s=2.0,  # nothing renders; do not spin the diff timer
         billing=billing,
-        tool_confirmation=AutoApprove(),
+        tool_confirmation=headless_tool_confirmation(tool_safety),
         deadline=effective_deadline,
     )
 

@@ -24,6 +24,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.errors import TurnError
 from daimon.core.handoff_context import (
@@ -40,6 +41,7 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
     mark_dead,
 )
+from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn
@@ -481,6 +483,8 @@ async def run_prepared_turn(
     render_interval_s: float = 2.0,
     deadline: datetime | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    confirm_write: ConfirmationHook | None = None,
+    attended: bool | None = None,
 ) -> RunOutcome:
     observation = (
         prepared.admission.observation
@@ -564,6 +568,15 @@ async def run_prepared_turn_impl(
     platform user id explicitly, exactly as `bind_session` did to build the
     original recorder.
 
+    `confirm_write` is the adapter's confirmation-card hook and `attended`
+    says whether a person is waiting on this turn (default: every origin but
+    `routine`). Both only matter while
+    `deps.tool_safety` is enabled: a third-party write then waits for the
+    requester to approve it on a card (`attended=True`) or is refused under
+    the unattended rules (`attended=False`). An adapter that passes no hook
+    gets `no_confirmation_surface`, so its writes are refused, never run
+    unseen. With the policy off the posture stays `RequireApproval`.
+
     `deadline`/`now` bound the WHOLE body -- first attempt, recovery setup,
     and the recovery re-run -- against the per-turn ceiling (D-08/D-09).
     `deadline=None` is fail-safe, not off: it computes
@@ -581,6 +594,12 @@ async def run_prepared_turn_impl(
     breach can never loop into a second wall-clock-priced attempt.
     """
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
+    tool_confirmation = chat_tool_confirmation(
+        deps.tool_safety,
+        requester_platform_user_id=external_user_id,
+        confirm=confirm_write,
+        attended=attended if attended is not None else origin != "routine",
+    )
 
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
@@ -610,6 +629,7 @@ async def run_prepared_turn_impl(
             cancel=cancel,
             render_interval_s=render_interval_s,
             billing=Billed(record=prepared._record),  # pyright: ignore[reportPrivateUsage]
+            tool_confirmation=tool_confirmation,
             image_blocks=image_blocks,
             system_blocks=prepared.continuity.system_blocks,
         )
@@ -739,6 +759,7 @@ async def run_prepared_turn_impl(
                     cancel=fresh_cancel,
                     render_interval_s=render_interval_s,
                     billing=Billed(record=new_record),
+                    tool_confirmation=tool_confirmation,
                     image_blocks=image_blocks,
                     system_blocks=loss_system_blocks,
                 )

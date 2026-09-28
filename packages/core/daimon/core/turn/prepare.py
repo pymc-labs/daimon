@@ -191,6 +191,7 @@ async def create_ma_session(
         github_app_private_key=deps.github_app_private_key,
         extra_resources=extra_resources,
         memory_read_only=admission.memory_read_only,
+        tool_safety=deps.tool_safety,
     )
 
     has_repo = any(

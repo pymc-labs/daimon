@@ -35,6 +35,7 @@ typo is silent — check the spelling here.
 - [Billing Policy](#billing-policy)
 - [Support](#support)
 - [Thread Naming](#thread-naming)
+- [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
 - [Notebook host (standalone service)](#notebook-host-standalone-service)
@@ -742,6 +743,49 @@ here. Bounds the per-thread naming cost.
 Seconds to wait for the naming model before the thread opens under the static title. The
 thread is created only after this call, so this is the most a mention can wait before
 anything appears.
+
+## Tool Safety
+
+Read from `daimon.core.config.ToolSafetyPolicy`. Prefix `DAIMON_TOOL_SAFETY__`.
+
+What the operator decided about attached tools.
+
+Keys name a server (`linear`) or one tool on it (`linear/create_issue`); a tool key is
+more specific than its server key and wins.
+
+Read/write classes and confirmation for attached third-party MCP tools. See
+ToolSafetyPolicy.
+
+### `DAIMON_TOOL_SAFETY__ENABLED`
+
+`bool` · optional · default `False`
+
+Classify attached (third-party) MCP tools as read or write and gate the writes: a write
+in chat waits for the requester to press Approve on a confirmation card, and a write in
+a routine or other unattended run is refused unless listed in unattended_writes. Applies
+to sessions created after it is set; a chat thread keeps its current session until that
+is replaced. Off keeps every tool auto-approved.
+
+### `DAIMON_TOOL_SAFETY__EFFECTS`
+
+`dict[str, 'read' | 'write']` · optional · default `{}`
+
+Override the read/write class, e.g. {"linear/get_team": "read", "notion": "write"}. Keys
+are a server name or server/tool. Unlisted tools are classified from their name (get_,
+list_, search_ ... are reads) and anything unknown is a write.
+
+### `DAIMON_TOOL_SAFETY__DENIED`
+
+`tuple[str, ...]` · optional · default unset
+
+Servers or server/tool pairs that are always refused, e.g. ["hubspot/delete_deal"].
+
+### `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`
+
+`tuple[str, ...]` · optional · default unset
+
+Servers or server/tool pairs whose writes may run in routines and other unattended runs,
+e.g. ["linear/create_issue"]. "*" allows every write there.
 
 ## Artifacts
 

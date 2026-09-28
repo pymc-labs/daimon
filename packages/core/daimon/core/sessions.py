@@ -11,7 +11,7 @@ import datetime as dt
 import time
 import uuid
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import anthropic as anthropic_pkg
 import httpx
@@ -51,6 +51,7 @@ from daimon.core.mcp_vault import (
 from daimon.core.memory_resource import ensure_memory_store_and_mount
 from daimon.core.repo_resource import build_repo_resource
 from daimon.core.stores.agent_repo_binding import get_binding
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, session_tools_for_policy
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -105,6 +106,7 @@ async def create_session(
     extra_resources: Sequence[Resource] = (),
     billing_exempt: ExemptReason | None = None,
     memory_read_only: bool = False,
+    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -170,6 +172,11 @@ async def create_session(
     assembles, for a caller that has a file the new session must start with —
     today, the bundle carrying a replaced session's work. They are passed
     through untouched; this function never inspects or filters them.
+
+    ``tool_safety`` is the deployment's attached-tool policy. When enabled,
+    every gated third-party toolset is sent as ``always_ask`` through the same
+    ``agent_with_overrides`` the personal-server filter uses, whatever the
+    agent itself stores; disabled (the default) sends the agent unchanged.
 
     ``billing_exempt`` is the creating caller's ``ExemptReason`` when it runs
     ``BillingExempt``; it is stamped as ``daimon_billing_exempt`` so the usage
@@ -347,7 +354,12 @@ async def create_session(
     # only buys them a failed MCP init and a degraded-turn notice every turn.
     # Overrides keep it off THIS session without touching the agent spec the
     # people who did connect it still answer from.
+    #
+    # The same override carries the deployment's tool-safety policy: gated
+    # third-party toolsets are sent as `always_ask` whatever the agent itself
+    # stores, so every new session is gated however the agent was written.
     agent_argument: Agent = agent.id
+    hidden: frozenset[str] = frozenset()
     if (
         account_id is not None
         and tenant_id is not None
@@ -362,30 +374,35 @@ async def create_session(
             server_urls={server.name: server.url for server in agent.mcp_servers},
         )
         if hidden:
-            overrides: BetaManagedAgentsAgentWithOverridesParams = {
-                "type": "agent_with_overrides",
-                "id": agent.id,
-                # No `version`: a bare id pins the latest, which is what every
-                # other session gets, and both arrays below are full
-                # replacements — there is nothing left for a version to pin.
-                "mcp_servers": [
-                    BetaManagedAgentsURLMCPServerParams(
-                        name=server.name, type="url", url=server.url
-                    )
-                    for server in visible_mcp_servers(agent, hidden)
-                ],
-                "tools": [
-                    cast(Tool, tool.model_dump(mode="json", exclude_none=True))
-                    for tool in visible_tools(agent, hidden)
-                ],
-            }
-            agent_argument = overrides
             _log.info(
                 "session.personal_mcp_servers_hidden",
                 agent_uuid=str(agent_uuid),
                 account_id=str(account_id),
                 server_names=sorted(hidden),
             )
+    session_tools: list[dict[str, Any]] = [
+        tool.model_dump(mode="json", exclude_none=True) for tool in visible_tools(agent, hidden)
+    ]
+    gated_tools = session_tools_for_policy(tool_safety, session_tools)
+    if hidden or gated_tools is not None:
+        overrides: BetaManagedAgentsAgentWithOverridesParams = {
+            "type": "agent_with_overrides",
+            "id": agent.id,
+            # No `version`: a bare id pins the latest, which is what every
+            # other session gets, and both arrays below are full
+            # replacements — there is nothing left for a version to pin.
+            "mcp_servers": [
+                BetaManagedAgentsURLMCPServerParams(name=server.name, type="url", url=server.url)
+                for server in visible_mcp_servers(agent, hidden)
+            ],
+            "tools": [
+                cast(Tool, tool)
+                for tool in (gated_tools if gated_tools is not None else session_tools)
+            ],
+        }
+        agent_argument = overrides
+        if gated_tools is not None:
+            _log.info("session.tool_safety_applied", agent_id=agent.id)
 
     metadata = _session_metadata(
         account_id=account_id, tenant_id=tenant_id, billing_exempt=billing_exempt

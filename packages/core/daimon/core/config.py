@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 from daimon.core.thread_participation import ParticipationMode
+from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -891,6 +892,13 @@ class Settings(BaseSettings):
     billing: BillingSettings = Field(default_factory=BillingSettings)
     support: SupportSettings = Field(default_factory=SupportSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
+    tool_safety: ToolSafetyPolicy = Field(
+        default_factory=ToolSafetyPolicy,
+        description=(
+            "Read/write classes and confirmation for attached third-party MCP tools. "
+            "See ToolSafetyPolicy."
+        ),
+    )
     artifacts: ArtifactsSettings | None = Field(
         default=None,
         description=(

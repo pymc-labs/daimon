@@ -148,9 +148,13 @@ stamps — and then hands the drain to the same driver,
 whole liveness story: status-checked reconnects, the per-call read timeout,
 the cancel race. What it does not inherit is the chat chokepoint. It does not
 call `admit()` or `bind_session()`, so there is no thread-session binding, no
-continuity or handoff, and no dead-session recovery. Tool confirmations are
-auto-approved, because nobody is there to click. See
-[architecture.md](architecture.md).
+continuity or handoff, and no dead-session recovery. Nobody is there to
+click, so tool confirmations are answered without a person: with
+`DAIMON_TOOL_SAFETY__ENABLED` off (the default) every call is auto-approved;
+with it on, reads from attached third-party MCP servers run, and a write is
+refused (the agent is told why) unless its server or `server/tool` is listed
+in `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`. Daimon's own tools are not
+affected. See [architecture.md](architecture.md).
 
 On success the runner returns the tail of the final message, truncated to
 1000 characters, and that is what lands in `last_result_tail`.

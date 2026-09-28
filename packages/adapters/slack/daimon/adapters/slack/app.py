@@ -94,6 +94,10 @@ from daimon.adapters.slack.runtime import (
     responder_handle,
 )
 from daimon.adapters.slack.setup_conversations import handle_setup_lifecycle
+from daimon.adapters.slack.tool_confirmation import (
+    CONFIRMATION_CUSTOM_ID_PREFIX,
+    SlackConfirmationCards,
+)
 from daimon.adapters.slack.vision import (
     SlackFile,
     download_as_image_blocks,
@@ -293,6 +297,9 @@ class SlackApp:
         self._mention_acks_pending: int = 0
         # Cancel registry: status_ts -> (cancel Event, author_id).
         self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
+        # Tool-write confirmation cards awaiting a click (in-process, like the
+        # cancel registry above).
+        self._confirmations = SlackConfirmationCards()
         # Output-delivery abort-notice dedup, keyed "{team_id}:{error_code}".
         self._delivery_notice_keys: set[str] = set()
         # Chains output sweeps per MA session so two never overlap.
@@ -848,6 +855,8 @@ class SlackApp:
                     self._spawn(handle_credential_request_click(self.runtime, payload))
                 elif action_id.startswith("feedback_vote:"):
                     self._spawn(handle_feedback_vote(self.runtime, payload))
+                elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
+                    self._spawn(self._confirmations.handle_click(payload))
         else:
             # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs (T-82-20).
@@ -2093,6 +2102,9 @@ class SlackApp:
                         image_blocks=image_blocks or None,
                         render_interval_s=2.0,
                         deadline=turn_deadline_at,
+                        confirm_write=self._confirmations.hook(
+                            web_client, channel=channel, thread_ts=thread_id
+                        ),
                     )
                     intent_terminal = lifecycle_holder[0].final_ts is not None
             finally:
@@ -2524,6 +2536,9 @@ class SlackApp:
                     recovery_lifecycle=_follow_up_recovery_lifecycle,
                     render_interval_s=2.0,
                     deadline=follow_deadline,
+                    confirm_write=self._confirmations.hook(
+                        web_client, channel=channel, thread_ts=thread_id
+                    ),
                 )
         finally:
             final_lifecycle = lifecycle_holder[0]

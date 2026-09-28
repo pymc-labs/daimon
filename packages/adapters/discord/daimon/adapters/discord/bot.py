@@ -31,6 +31,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
 from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.adapters.discord.thread_send import safe_thread_send
+from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.turn_card_recovery import (
     post_initial_turn_card,
     reconcile_turn_card_intent,
@@ -1920,6 +1921,7 @@ class DaimonBot(commands.Bot):
                     recovery_lifecycle=_recovery_lifecycle,
                     render_interval_s=2.0,
                     deadline=turn_deadline_at,
+                    confirm_write=discord_confirmation_hook(thread),
                 )
         finally:
             done_ids = {prepared.mapping_id}
@@ -2660,6 +2662,7 @@ class DaimonBot(commands.Bot):
                     image_blocks=image_blocks,
                     render_interval_s=2.0,
                     deadline=turn_deadline_at,
+                    confirm_write=discord_confirmation_hook(thread),
                 )
         finally:
             # Runs on any exception, not just the happy path: whatever else

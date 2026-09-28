@@ -1,0 +1,330 @@
+"""`PolicyApproval`: per-call answers to a `requires_action` idle.
+
+The two exit checks for attached-tool write safety live here at the driver
+level: an unattended (routine) run refuses a third-party write and still lets
+reads through, and a chat turn holds a write until the requester answers the
+confirmation card, sending `allow` only after the answer.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from typing import cast
+
+from anthropic import AsyncAnthropic
+from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.turn import run_turn
+from daimon.core.turn.approvals import (
+    chat_tool_confirmation,
+    headless_tool_confirmation,
+    interactive_decider,
+    unattended_decider,
+)
+from daimon.core.turn.posture import (
+    AutoApprove,
+    BillingExempt,
+    PolicyApproval,
+    RequireApproval,
+)
+from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
+
+from .conftest import (
+    make_agent_message,
+    make_end_turn,
+    make_mcp_tool_use,
+    make_requires_action,
+    make_status_idle,
+)
+
+_EXEMPT = BillingExempt(reason="cli-operator-run")
+_ON = ToolSafetyPolicy(enabled=True)
+_NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+
+
+def _cast(fa: FakeAnthropic) -> AsyncAnthropic:
+    return cast(AsyncAnthropic, fa)
+
+
+def _script(fa: FakeAnthropic, *tool_uses: tuple[str, str, str]) -> None:
+    """One stream: the tool uses, a pause on all of them, then a finished turn."""
+    events: list[YieldEvent] = [
+        YieldEvent(
+            make_mcp_tool_use(
+                event_id=tu_id, name=tool, mcp_server_name=server, input={"title": "Bug"}
+            )
+        )
+        for tu_id, server, tool in tool_uses
+    ]
+    events.append(
+        YieldEvent(
+            make_status_idle(
+                event_id="sevt_pause",
+                stop_reason=make_requires_action(event_ids=[t[0] for t in tool_uses]),
+            )
+        )
+    )
+    events.append(YieldEvent(make_agent_message(event_id="sevt_msg", text="done")))
+    events.append(YieldEvent(make_status_idle(event_id="sevt_end", stop_reason=make_end_turn())))
+    fa.beta.sessions.events.stream_scripts = [events]
+
+
+def _confirmations(fa: FakeAnthropic) -> list[dict[str, object]]:
+    return [
+        event
+        for _session, batch in fa.beta.sessions.events.sent_events
+        for event in batch
+        if event["type"] == "user.tool_confirmation"
+    ]
+
+
+async def test_routine_write_is_denied_and_read_is_allowed() -> None:
+    fa = FakeAnthropic()
+    _script(fa, ("tu_read", "linear", "get_issue"), ("tu_write", "linear", "create_issue"))
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="nightly triage",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=headless_tool_confirmation(_ON),
+    )
+
+    assert final.error is None
+    sent = _confirmations(fa)
+    assert sent[0] == {
+        "type": "user.tool_confirmation",
+        "result": "allow",
+        "tool_use_id": "tu_read",
+    }
+    assert sent[1]["result"] == "deny"
+    assert sent[1]["tool_use_id"] == "tu_write"
+    assert "linear/create_issue" in str(sent[1]["deny_message"])
+    assert len(sent) == 2
+
+
+async def test_routine_write_runs_when_the_operator_allowed_it_unattended() -> None:
+    fa = FakeAnthropic()
+    _script(fa, ("tu_write", "linear", "create_issue"))
+    policy = ToolSafetyPolicy(enabled=True, unattended_writes=("linear/create_issue",))
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="nightly triage",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=PolicyApproval(decide=unattended_decider(policy)),
+    )
+
+    assert _confirmations(fa) == [
+        {"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "tu_write"}
+    ]
+
+
+async def test_chat_write_shows_a_card_and_runs_only_after_confirm() -> None:
+    fa = FakeAnthropic()
+    _script(fa, ("tu_write", "linear", "create_issue"))
+    prompts: list[ConfirmationPrompt] = []
+    clicked = asyncio.Event()
+    sent_before_click: list[dict[str, object]] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        await clicked.wait()
+        sent_before_click.extend(_confirmations(fa))
+        return "approved"
+
+    decide = interactive_decider(
+        _ON, requester_platform_user_id="U1", confirm=card, now=lambda: _NOW
+    )
+    turn = asyncio.create_task(
+        run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="file a bug",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=_EXEMPT,
+            tool_confirmation=PolicyApproval(decide=decide),
+        )
+    )
+    for _ in range(200):
+        if prompts:
+            break
+        await asyncio.sleep(0.005)
+
+    assert len(prompts) == 1, "the write must surface as one card"
+    prompt = prompts[0]
+    assert prompt.title == "Approve a write to linear?"
+    assert ("Tool", "create_issue") in prompt.fields
+    assert prompt.detail is not None and '"title": "Bug"' in prompt.detail
+    assert prompt.requester_platform_user_id == "U1"
+    assert not turn.done(), "the turn waits on the card"
+    assert _confirmations(fa) == [], "nothing is confirmed before the click"
+
+    clicked.set()
+    final = await turn
+
+    assert sent_before_click == []
+    assert final.error is None
+    assert _confirmations(fa) == [
+        {"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "tu_write"}
+    ]
+
+
+async def test_chat_write_denied_on_the_card_is_refused() -> None:
+    fa = FakeAnthropic()
+    _script(fa, ("tu_write", "hubspot", "update_deal"))
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        return "denied"
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="close the deal",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=PolicyApproval(
+            decide=interactive_decider(_ON, requester_platform_user_id="U1", confirm=card)
+        ),
+    )
+
+    (sent,) = _confirmations(fa)
+    assert sent["result"] == "deny"
+    assert "denied" in str(sent["deny_message"])
+
+
+async def test_chat_read_runs_without_a_card() -> None:
+    fa = FakeAnthropic()
+    _script(fa, ("tu_read", "linear", "list_teams"))
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        raise AssertionError("a read must not post a card")
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="which teams?",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=PolicyApproval(
+            decide=interactive_decider(_ON, requester_platform_user_id="U1", confirm=card)
+        ),
+    )
+
+    assert _confirmations(fa) == [
+        {"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "tu_read"}
+    ]
+
+
+async def test_a_surface_without_cards_refuses_writes() -> None:
+    fa = FakeAnthropic()
+    _script(fa, ("tu_write", "linear", "create_issue"))
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="file a bug",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=chat_tool_confirmation(
+            _ON, requester_platform_user_id="U1", confirm=None
+        ),
+    )
+
+    (sent,) = _confirmations(fa)
+    assert sent["result"] == "deny"
+
+
+async def test_a_card_that_fails_to_post_refuses_the_write() -> None:
+    fa = FakeAnthropic()
+    _script(fa, ("tu_write", "linear", "create_issue"))
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        raise RuntimeError("chat API down")
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="file a bug",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=PolicyApproval(
+            decide=interactive_decider(_ON, requester_platform_user_id="U1", confirm=card)
+        ),
+    )
+
+    (sent,) = _confirmations(fa)
+    assert sent["result"] == "deny"
+
+
+async def test_cancel_while_the_card_is_up_refuses_the_write() -> None:
+    fa = FakeAnthropic()
+    _script(fa, ("tu_write", "linear", "create_issue"))
+    # The interrupt path reattaches to wait for the session to acknowledge.
+    fa.beta.sessions.events.stream_scripts.append(
+        [YieldEvent(make_status_idle(event_id="ack", stop_reason=make_end_turn()))]
+    )
+    cancel = asyncio.Event()
+    card_up = asyncio.Event()
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        card_up.set()
+        await asyncio.Event().wait()  # nobody ever clicks
+        return "approved"
+
+    turn = asyncio.create_task(
+        run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="file a bug",
+            lifecycle=RecordingLifecycle(),
+            cancel=cancel,
+            render_interval_s=0.001,
+            interrupt_timeout_s=0.05,
+            billing=_EXEMPT,
+            tool_confirmation=PolicyApproval(
+                decide=interactive_decider(_ON, requester_platform_user_id="U1", confirm=card)
+            ),
+        )
+    )
+    await asyncio.wait_for(card_up.wait(), timeout=2)
+    cancel.set()
+    await asyncio.wait_for(turn, timeout=5)
+
+    sent = _confirmations(fa)
+    assert [(e["tool_use_id"], e["result"]) for e in sent] == [("tu_write", "deny")]
+    types = [ev["type"] for _sid, batch in fa.beta.sessions.events.sent_events for ev in batch]
+    assert types.index("user.tool_confirmation") < types.index("user.interrupt")
+
+
+def test_disabled_policy_keeps_the_old_postures() -> None:
+    assert isinstance(headless_tool_confirmation(OPEN_TOOL_SAFETY), AutoApprove)
+    assert isinstance(
+        chat_tool_confirmation(OPEN_TOOL_SAFETY, requester_platform_user_id="U1", confirm=None),
+        RequireApproval,
+    )
+
+
+def test_unattended_chat_turn_gets_the_unattended_rules() -> None:
+    posture = chat_tool_confirmation(
+        _ON, requester_platform_user_id="U1", confirm=None, attended=False
+    )
+    assert isinstance(posture, PolicyApproval)

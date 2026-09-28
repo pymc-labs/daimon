@@ -37,21 +37,23 @@ approved) is handled. `RequireApproval` is the interactive default: a
 approval/resume UX is wired for interactive surfaces yet. `AutoApprove`
 answers every blocked `tool_use_id` with a `user.tool_confirmation` `allow`
 and keeps consuming on the same stream — the unattended-routine posture.
-Both are field-less today and modeled as types rather than a bare
-`auto_approve_tools: bool` so the call site is self-documenting and so a
-future variant (e.g. a policy callback deciding allow/deny per tool) is an
-additive change to the union rather than a signature change at every
-existing call site.
+Both are field-less and modeled as types rather than a bare
+`auto_approve_tools: bool` so the call site is self-documenting. The third
+member, `PolicyApproval`, is the per-tool variant: it carries a callback that
+decides each blocked call (allow, deny, or ask a person first), built from
+the operator's `ToolSafetyPolicy` by `daimon.core.turn.approvals`.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
+from daimon.core.tool_safety import ToolCall
 
 ExemptReason = Literal["cli-operator-run", "headless-unrecorded", "mcp-internal-caller"]
 
@@ -86,4 +88,25 @@ class AutoApprove:
     turn keeps consuming on the same stream."""
 
 
-ToolConfirmation = RequireApproval | AutoApprove
+@dataclass(frozen=True)
+class ToolConfirmationResult:
+    """One blocked call's answer. `deny_message` reaches the model."""
+
+    allow: bool
+    deny_message: str | None = None
+
+
+ToolCallDecider = Callable[[ToolCall], Awaitable[ToolConfirmationResult]]
+
+
+@dataclass(frozen=True)
+class PolicyApproval:
+    """Per-call posture: a `requires_action` idle is answered by awaiting
+    `decide` once per blocked id (concurrently), then sending each result as
+    a `user.tool_confirmation` on the same stream. `decide` may take as long
+    as a person needs to press a button; the session sits idle meanwhile."""
+
+    decide: ToolCallDecider
+
+
+ToolConfirmation = RequireApproval | AutoApprove | PolicyApproval
