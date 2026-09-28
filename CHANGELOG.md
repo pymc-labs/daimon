@@ -74,6 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ordinary chat sessions carry their executing agent identity to the Google token broker,
+  including existing vaults on the next session creation, while preserving chat tool
+  visibility and caller isolation.
+
 - A continuation turn (the follow-up after a private form or a task handoff)
   on Discord or Slack now runs with the requester's live role, re-read from
   the guild or workspace at dispatch, instead of always as a plain user. An

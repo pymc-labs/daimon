@@ -286,3 +286,25 @@ Operator recovery tools: `daimon backup platform-export` exports the dedicated
 MA workspace through core; `scripts/backup/postgres.sh` backs up/restores Postgres.
 See [self-hosting](self-hosting.md#backup-and-disaster-recovery) for the recovery
 contract and limits.
+### Google tokens in ordinary chat
+
+Chat sessions attach a per-account, per-agent vault whose signed JWT carries
+`chat_agent_id`, derived from the tenant and Managed Agent ID. MCP resolves this
+as the executing agent identity for `get_cli_token(service="gcloud")`, while
+preserving the ordinary chat tool surface and live account-role checks. The
+separate `agent_id` claim still selects the restricted external agent-chat surface.
+Neither claim is supplied through tool arguments. Chat identity is stored separately
+from `AuthIdentity.agent_id` and is consumed only by the Google broker path. GitHub
+chat calls still resolve the account principal-default PAT; other identity gates
+and the two-tool search interface remain unchanged.
+
+The operator must configure `credentials.google_sa_json`, authorize domain-wide
+delegation, and bind the agent with `daimon agents bind-google <agent> <email>
+--scopes <scope>...`. The broker impersonates only that agent's bound Workspace
+user and scopes; an unbound agent receives a clear operator-binding error.
+Core does not ship curated Workspace tools. Agents may use the token themselves
+or a deployment-provided Google MCP server.
+
+Existing static-bearer vault credentials are upgraded in place on the next
+session creation. Credential metadata records the identity version so subsequent
+creates leave the token stable; unrelated and OAuth credentials are preserved.

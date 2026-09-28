@@ -110,7 +110,7 @@ def _warm_rebind_handler(
     call_log: list[tuple[str, str]],
     captured_credential_bodies: list[dict[str, Any]],
 ) -> Callable[[httpx.Request], httpx.Response]:
-    """Existing vault with one claim-less credential: expect DELETE + POST + session."""
+    """Existing vault with an upgraded chat credential stays stable."""
     display = f"daimon-mcp:{account_id}:{agent_uuid}"
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -127,7 +127,12 @@ def _warm_rebind_handler(
             return httpx.Response(
                 200,
                 json={
-                    "data": [_credential_obj("vcrd_old", "vlt_warm")],
+                    "data": [
+                        {
+                            **_credential_obj("vcrd_old", "vlt_warm"),
+                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
+                        }
+                    ],
                     "has_more": False,
                 },
             )

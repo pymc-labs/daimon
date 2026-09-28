@@ -31,6 +31,7 @@ def mint_jwt(
     now: dt.datetime,
     agent_id: uuid.UUID | None = None,
     is_admin: bool = False,
+    chat_agent_id: uuid.UUID | None = None,
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
 
@@ -45,6 +46,8 @@ def mint_jwt(
     - When ``agent_id`` is supplied, the optional ``"agent_id"`` claim is added
       Used by the MCP ``get_cli_token`` tool to mint per-service tokens
       scoped to the agent without trusting tool-supplied parameters.
+    - ``chat_agent_id`` identifies the agent executing an ordinary chat session
+      without selecting the restricted external agent-chat tool surface.
     - When ``is_admin`` is ``True``, an ``"is_admin": True`` claim is added
       Omitted when ``False`` to keep non-admin tokens minimal. Note: the MCP
       admin gate only trusts ``is_admin`` when the token also carries ``internal=True``
@@ -57,6 +60,8 @@ def mint_jwt(
     }
     if agent_id is not None:
         claims["agent_id"] = str(agent_id)
+    if chat_agent_id is not None:
+        claims["chat_agent_id"] = str(chat_agent_id)
     if is_admin:
         claims["is_admin"] = True
     return pyjwt.encode(claims, secret, algorithm="HS256")
