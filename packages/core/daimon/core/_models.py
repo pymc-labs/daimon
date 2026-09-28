@@ -1971,3 +1971,29 @@ class TurnOutcome(Base):
     cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
     unpriced_calls: Mapped[int | None] = mapped_column(Integer)
     billing_posture: Mapped[str | None] = mapped_column(Text)
+
+class SecurityAuditEvent(Base):
+    """Append-only security metadata with dedicated erasure and retention maintenance."""
+
+    __tablename__ = "security_audit_events"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('allowed', 'denied', 'error')", name="ck_security_audit_outcome"
+        ),
+        Index("ix_security_audit_tenant_time", "tenant_id", "occurred_at", "id"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    platform: Mapped[str | None] = mapped_column(Text)
+    platform_user_id: Mapped[str | None] = mapped_column(Text)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    operation: Mapped[str | None] = mapped_column(Text)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )

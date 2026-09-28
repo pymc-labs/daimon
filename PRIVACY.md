@@ -19,6 +19,15 @@ bot), daimon stores:
   messages.
 - **Usage and billing events** — turn counts and credit/usage records used
   to enforce the operator's configured usage limits.
+- **Security audit metadata** — authenticated main-JWT MCP tool names, authorization outcomes,
+  reason codes, timestamps and tenant/account/platform-user/agent identifiers.
+  Tool arguments, messages, credentials and response bodies are excluded. These
+  records have a default retention age of 90 days, enforced by the operator's
+  scheduled `daimon audit prune TENANT_UUID` command. A privacy deletion clears
+  account and platform-user identifiers; tenant deletion removes its audit rows.
+  Database deletion triggers enforce erasure even for older privacy workers.
+  Separate hub OAuth tools are not included in this audit trail. Operators can
+  configure a different age or explicitly select indefinite retention.
 - **Agent credentials** — any bound external credentials (e.g. a GitHub
   personal access token used by `get_cli_token`), encrypted at rest.
 
@@ -36,6 +45,13 @@ channel. It lets you:
 - **Export** your stored data.
 - **Delete** your stored data ("delete me"), removing your per-user records
   from that tenant.
+
+The per-user deletion flow clears account and platform-user identifiers from
+security audit rows across that account's tenants, including previously unlinked
+tenants. Remaining event metadata expires under the operator's retention schedule.
+Operators include audit records in privacy exports with `daimon audit list TENANT_UUID
+--account ACCOUNT_UUID --json`, paging through all records with `--limit` and
+`--offset`. Existing privacy panels do not deliver the audit JSON themselves.
 
 These actions apply to the tenant the command is run in. If you interact
 with daimon across multiple servers/workspaces, each tenant's data is

@@ -614,3 +614,64 @@ observes billed and exempt spans without changing metering; natural
 The operator command `daimon usage turns` queries tenant-scoped rows and channel /
 origin summaries without upstream requests. See [billing](billing.md#per-turn-usage-telemetry)
 for unknown-cost and historical-row semantics.
+### Security audit trail
+
+Authenticated requests through the main JWT MCP application (`tools/call` and
+`tools/list`) produce one tenant-scoped
+`security_audit_events` row. The identity middleware records the tenant, account,
+platform user and agent identifiers, tool name, timestamp, outcome and a fixed
+reason code. Agent identity includes the signed external `agent_id` or ordinary
+chat `chat_agent_id` claim. The shared operation policy annotates that same request with the
+operation name and its decision; a policy denial remains a denial even if a tool
+catches it. Arguments, messages, credentials, response bodies and exception text
+are never copied into the row. Tool names outside the supported identifier syntax
+are recorded as `<invalid>`.
+
+The audit transaction is independent of the tool transaction. Request completion
+queues an immutable metadata snapshot without awaiting the database. Timestamps
+capture request completion, preserving chronology when inserts finish out of order.
+The middleware
+tracks at most 128 writes, with two database writes in flight and a two-second
+bound including queue wait. Shutdown drains tracked writes. Writes are best effort:
+timeouts, cancellation, overflow and database failures emit `security_audit.write_failed`
+with an error type, never the error body. An unavailable audit store does not delay
+the tool response or change authorization behavior. Tool failures use outcome
+`error`; authorization and policy rejections use `denied`. Calls rejected before the JWT verifier
+establishes a tenant cannot be safely attributed and are outside this trail.
+The policy remains synchronous and does no I/O outside an MCP audit scope;
+Discord/Slack setup-panel actions and the separate hub OAuth applications
+(`/discord/mcp` and `/slack/mcp`, which use `HubIdentityMiddleware`) are not
+audited in this version. This trail is not a complete record of hub tool activity.
+
+Operators can read records using `daimon audit list TENANT_UUID --since
+2026-09-28T00:00:00Z --json`. Use `--account ACCOUNT_UUID` to include that person's
+audit metadata in an operator-assisted privacy export. Results are chronological;
+`--limit` (1–1000) and `--offset` paginate retained records. Repeat per tenant for
+a person active in multiple workspaces. This operator command uses local database
+access; it is not an MCP tool and is not exposed to tenant users.
+
+Retention defaults to 90 days (`security_audit_retention_days`). Operators must
+schedule `daimon audit prune TENANT_UUID` for each tenant, for example daily. The
+command removes only that tenant's events older than the configured age; `0`
+explicitly opts into indefinite retention. Privacy erasure still applies. Include
+the schedule and backup expiry in the deployment's published retention policy.
+
+The shared account privacy purge clears account and platform-user identifiers in
+all of that account's audit tenants, even when no principal remains. Tenant deletion
+removes its audit rows in the same transaction. PostgreSQL AFTER DELETE triggers
+on accounts and tenants enforce these same erasure rules even when an older
+application binary issues the deletion during a rolling upgrade. The triggers
+restore the previous transaction-local maintenance flag after scoped erasure;
+rollback restores both data and flag on failure. Install the migration before
+starting audit-producing services; privacy workers need no coordinated upgrade.
+Queued writes lock live identity
+rows: after account deletion they omit personal identifiers, and after tenant
+deletion they are discarded, so delayed writes cannot restore erased data.
+
+Ordinary UPDATE, DELETE and TRUNCATE remain blocked by a statement trigger.
+Dedicated store maintenance functions enable a transaction-local GUC only within
+a savepoint, perform scoped erasure or expiry, then reset the GUC. Rollback also
+resets it; TRUNCATE is never allowed. This guards accidental application mutation,
+not a malicious database administrator or SQL caller able to set arbitrary GUCs.
+Existing privacy panels do not yet deliver a full audit export: operators include
+the CLI JSON export in the requested bundle.

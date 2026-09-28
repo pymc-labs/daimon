@@ -48,6 +48,15 @@ typo is silent — check the spelling here.
 Read from `daimon.core.config.Settings`. Prefix `DAIMON_`. Every other `DAIMON_*`
 section below is a nested block on this model, reached with the `__` delimiter.
 
+### `DAIMON_SECURITY_AUDIT_RETENTION_DAYS`
+
+`int` · optional · default `90`
+
+Security audit retention age in days, default 90. Operators must schedule daimon audit
+prune TENANT_UUID for each tenant (for example daily). The command deletes older events.
+Set 0 to explicitly retain events forever; privacy erasure and tenant deletion still
+apply.
+
 ### `DAIMON_COMPLETION_PINGS`
 
 `dict[UUID, bool]` · optional · default `{}`

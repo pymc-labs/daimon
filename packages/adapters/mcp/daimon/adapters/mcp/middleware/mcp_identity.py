@@ -19,16 +19,21 @@ Tool handlers always read via `await ctx.get_state("auth")`.
 
 from __future__ import annotations
 
+import asyncio
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 
+import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
+from daimon.core.security_audit import capture_decision
 from daimon.core.stores.domain import Role
-from fastmcp.exceptions import AuthorizationError
+from daimon.core.stores.security_audit import SecurityAuditEntry, append_event
+from fastmcp.exceptions import AuthorizationError, NotFoundError, ToolError
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.transforms.visibility import disable_components, enable_components
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 ClaimResolver = Callable[[MiddlewareContext], Awaitable[str | None]]
 SubjectResolver = ClaimResolver
@@ -112,9 +117,129 @@ class IdentityMiddleware(Middleware):
         self._agent_id_resolver = agent_id_resolver
         self._is_admin_resolver = is_admin_resolver
         self._internal_resolver = internal_resolver
-        self._sessionmaker = sessionmaker
+        bind = sessionmaker.kw.get("bind")
+        # A caller may supply a factory bound to one transaction/connection.
+        # Background writes must acquire their own connection, never concurrently
+        # use the tool's connection or join its rollback scope.
+        self._audit_sessionmaker = (
+            async_sessionmaker(bind.engine, expire_on_commit=False)
+            if isinstance(bind, AsyncConnection)
+            else sessionmaker
+        )
+        self._audit_tasks: set[asyncio.Task[None]] = set()
+        self._audit_timeout = 2.0
+        self._audit_max_pending = 128
+        self._audit_slots = asyncio.Semaphore(2)
 
-    async def on_request(
+    async def on_request(self, context: MiddlewareContext, call_next: CallNext) -> object:
+        if context.method not in {"tools/call", "tools/list"}:
+            return await self._resolve_request(context, call_next)
+        # The verifier has already authenticated the tenant claim. Requests with
+        # no attributable tenant cannot be placed in another tenant's audit log.
+        tenant_id = _uuid_or_none(await self._tenant_resolver(context))
+        if tenant_id is None:
+            return await self._resolve_request(context, call_next)
+        account_id = _uuid_or_none(await self._subject_resolver(context))
+        agent_id = _uuid_or_none(await self._agent_id_resolver(context))
+        token = get_access_token()
+        claims = token.claims if token is not None else {}
+        chat_agent = claims.get("chat_agent_id")
+        if agent_id is None and isinstance(chat_agent, str):
+            agent_id = _uuid_or_none(chat_agent)
+        platform = claims.get("platform")
+        user_id = claims.get("platform_user_id")
+        name = (
+            getattr(context.message, "name", None)
+            if context.method == "tools/call"
+            else "tools/list"
+        )
+        tool_name = (
+            name
+            if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", name)
+            else "<invalid>"
+        )
+        with capture_decision() as decision:
+            try:
+                result = await self._resolve_request(context, call_next)
+                if getattr(result, "isError", False) is True and decision.reason in {
+                    "completed",
+                    "policy_allow",
+                }:
+                    decision.reason = "tool_error"
+                return result
+            except BaseException as exc:
+                if isinstance(exc, (AuthorizationError, NotFoundError)):
+                    decision.denied = True
+                if decision.reason in {"completed", "policy_allow"}:
+                    decision.reason = (
+                        "authorization_error"
+                        if isinstance(exc, (AuthorizationError, NotFoundError))
+                        else "tool_error"
+                        if isinstance(exc, ToolError)
+                        else "cancelled"
+                        if isinstance(exc, asyncio.CancelledError)
+                        else "request_error"
+                    )
+                raise
+            finally:
+                # Snapshot only metadata before leaving the request-local scope.
+                # Scheduling does no I/O and never waits for the database.
+                self._queue_audit(
+                    SecurityAuditEntry(
+                        tenant_id=tenant_id,
+                        account_id=account_id,
+                        agent_id=agent_id,
+                        platform=platform if isinstance(platform, str) else None,
+                        platform_user_id=user_id if isinstance(user_id, str) else None,
+                        tool_name=tool_name,
+                        operation=decision.operation,
+                        outcome=(
+                            "denied"
+                            if decision.denied
+                            else "error"
+                            if decision.reason in {"tool_error", "request_error", "cancelled"}
+                            else "allowed"
+                        ),
+                        reason=decision.reason,
+                    )
+                )
+
+    def _queue_audit(self, event: SecurityAuditEntry) -> None:
+        if len(self._audit_tasks) >= self._audit_max_pending:
+            structlog.get_logger(__name__).warning(
+                "security_audit.write_failed",
+                tenant_id=str(event.tenant_id),
+                error_type="QueueFull",
+            )
+            return
+        task = asyncio.create_task(self._write_audit(event), name="security-audit-write")
+        self._audit_tasks.add(task)
+        task.add_done_callback(self._audit_tasks.discard)
+
+    async def _write_audit(self, event: SecurityAuditEntry) -> None:
+        try:
+            async with (
+                asyncio.timeout(self._audit_timeout),
+                self._audit_slots,
+                self._audit_sessionmaker() as session,
+                session.begin(),
+            ):
+                await append_event(session, **event.model_dump())
+        except (Exception, asyncio.CancelledError) as exc:
+            structlog.get_logger(__name__).warning(
+                "security_audit.write_failed",
+                tenant_id=str(event.tenant_id),
+                error_type=type(exc).__name__,
+            )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+
+    async def drain_audit(self) -> None:
+        """Wait for tracked, timeout-bounded writes during orderly teardown."""
+        if self._audit_tasks:
+            await asyncio.gather(*tuple(self._audit_tasks), return_exceptions=True)
+
+    async def _resolve_request(
         self,
         context: MiddlewareContext,
         call_next: CallNext,
@@ -204,3 +329,10 @@ class IdentityMiddleware(Middleware):
             await disable_components(fastmcp_ctx, match_all=True)
             await enable_components(fastmcp_ctx, tags={"agent-chat"})
         return await call_next(context)
+
+
+def _uuid_or_none(raw: str | None) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(raw) if raw is not None else None
+    except ValueError:
+        return None

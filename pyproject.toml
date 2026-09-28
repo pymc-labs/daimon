@@ -143,6 +143,7 @@ source_modules = [
     "daimon.core.notebooks",
     "daimon.core.observability",
     "daimon.core.operation_policy",
+    "daimon.core.security_audit",
     "daimon.core.output_delivery",
     "daimon.core.pending_file_sweeper",
     "daimon.core.posted_controls",

@@ -835,6 +835,16 @@ class DirectMessagePolicy(BaseModel):
 
 
 class Settings(BaseSettings):
+    security_audit_retention_days: int = Field(
+        default=90,
+        ge=0,
+        description=(
+            "Security audit retention age in days, default 90. Operators must schedule "
+            "daimon audit prune TENANT_UUID for each tenant (for example daily). "
+            "The command deletes older events. Set 0 to explicitly retain events forever; "
+            "privacy erasure and tenant deletion still apply."
+        ),
+    )
     completion_pings: dict[uuid.UUID, bool] = Field(
         default_factory=dict[uuid.UUID, bool],
         description=(

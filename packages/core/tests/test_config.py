@@ -733,3 +733,21 @@ def test_table_rendering_map_validates_and_normalizes_uuid_keys(monkeypatch):
     monkeypatch.setenv("DAIMON_TABLE_RENDERING", '{"not-a-uuid": true}')
     with pytest.raises(ValidationError):
         load_settings(_env_file=None)
+
+
+@pytest.mark.parametrize("days", ["90", "7", "0"])
+def test_security_audit_retention_environment(monkeypatch, days):
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", days)
+    assert load_settings(_env_file=None).security_audit_retention_days == int(days)
+
+
+def test_security_audit_retention_default_and_negative_rejection(monkeypatch):
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", raising=False)
+    assert load_settings(_env_file=None).security_audit_retention_days == 90
+    monkeypatch.setenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", "-1")
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        load_settings(_env_file=None)
