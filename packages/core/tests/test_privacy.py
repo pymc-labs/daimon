@@ -741,7 +741,6 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
         "support_escalations": "support_escalations",
-        "dm_tenant_selections": "dm_tenant_selections",
     }
 
     uncovered = report_fields - set(mapping.keys())

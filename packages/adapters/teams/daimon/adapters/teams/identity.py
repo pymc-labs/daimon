@@ -3,9 +3,8 @@
 The only place inbound activity fields are trusted. `parse_inbound` checks an
 authenticated activity is a channel @mention or a personal-chat message from
 the configured Entra tenant and reduces it to `TeamsInbound`. `resolve_tenant`
-then maps it to a live daimon tenant: a channel by its organisation, a
-personal chat through core's DM routing. A Teams DM always names one
-organisation, so it never needs a picker. Group chats are refused for now.
+then maps it to the organisation's live daimon tenant; a 1:1 chat names its
+organisation, so it needs no DM workspace choice. Group chats are refused for now.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 from daimon.adapters.teams.attachments import InboundFile, parse_attachments
-from daimon.core.dm_routing import NoDmTenantError, resolve_dm_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import get_tenant
 from microsoft_teams.api import MessageActivity
@@ -147,17 +145,6 @@ async def resolve_tenant(
     sessionmaker: async_sessionmaker[AsyncSession], inbound: TeamsInbound
 ) -> uuid.UUID | None:
     """The live tenant this message belongs to, or None to deny."""
-    if inbound.kind == "dm":
-        try:
-            candidate = await resolve_dm_tenant(
-                sessionmaker,
-                platform="teams",
-                external_user_id=inbound.user_id,
-                workspace_ids=[inbound.entra_tenant_id],
-            )
-        except NoDmTenantError:
-            return None
-        return candidate.tenant_id
     return await live_tenant_id(sessionmaker, inbound.entra_tenant_id)
 
 

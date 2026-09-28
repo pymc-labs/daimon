@@ -1849,24 +1849,3 @@ class TaskContinuation(Base):
     )
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
-class DmTenantSelection(Base):
-    """The tenant a person picked for their direct messages.
-
-    Only written when a DM could belong to more than one tenant. Keyed by a
-    platform-global user id (a Discord user, an Entra object id), so the row
-    follows the person across every workspace they share with the bot.
-    """
-
-    __tablename__ = "dm_tenant_selections"
-    __table_args__ = (Index("ix_dm_tenant_selections_tenant_id", "tenant_id"),)
-
-    platform: Mapped[str] = mapped_column(Text, primary_key=True)
-    external_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    selected_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )

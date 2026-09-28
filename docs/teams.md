@@ -26,9 +26,7 @@ principal is created on first contact.
 
 ### Where it answers
 
-- **1:1 chat.** Every message is a turn. DMs go through the platform-neutral
-  DM routing in `daimon.core.dm_routing`; with one organisation per deployment
-  there is always exactly one tenant, so no picker is shown.
+- **1:1 chat.** Every message is a turn, in the organisation's tenant.
 - **Channels.** Only messages that @mention the bot. Each root post is its own
   thread and session; replies that @mention it continue that thread.
 - **Group chats** get a short refusal.

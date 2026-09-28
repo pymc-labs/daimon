@@ -21,9 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Agent keys, MCP tokens and MCP sign-ins are collected privately through
   Teams dialogs.
   Builds on #220 by @jchu96. See `docs/teams.md`.
-- Platform-neutral DM tenant routing in core: a direct message resolves to the
-  one tenant the sender shares with the bot; with several, a stored choice
-  decides. Teams uses it with its single organisation; no picker exists yet.
 - Core selects chat, routine, relay and handoff prompt fragments per invocation.
   Agent specs can replace or extend each fragment; default chat is unchanged.
 - Added durable initial-card intent rows and bounded Discord and Slack history

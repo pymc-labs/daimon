@@ -310,7 +310,6 @@ def _make_preview(**overrides: Any) -> PurgePreview:
         "wizard_sessions": PurgePreviewRow(count=0, example=None),
         "message_feedback": PurgePreviewRow(count=0, example=None),
         "support_escalations": PurgePreviewRow(count=0, example=None),
-        "dm_tenant_selections": PurgePreviewRow(count=0, example=None),
     }
     base.update(overrides)
     return PurgePreview(**base)

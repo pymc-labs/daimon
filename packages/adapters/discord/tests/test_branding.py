@@ -92,7 +92,6 @@ def _make_preview() -> PurgePreview:
         wizard_sessions=zero,
         message_feedback=zero,
         support_escalations=zero,
-        dm_tenant_selections=zero,
     )
 
 

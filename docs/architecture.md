@@ -176,13 +176,6 @@ derived, not allocated: `derive_tenant_uuid(platform, workspace_id)` in
 namespace, so the same workspace maps to the same tenant across database
 resets and processes.
 
-A direct message names no workspace. `packages/core/daimon/core/dm_routing.py`
-picks its tenant before `admit()`: the adapter passes the workspaces the sender
-shares with the bot, one live match is used directly, and several raise
-`DmTenantSelectionRequired` for the adapter to render a picker, and
-`choose_dm_tenant` stores the choice per platform user. Teams passes its one
-organisation, so no adapter renders a picker yet.
-
 Isolation is enforced in two places at once.
 
 **In Postgres.** Tenant-scoped tables carry `tenant_id` with a cascading FK to
