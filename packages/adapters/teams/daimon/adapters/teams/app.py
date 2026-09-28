@@ -607,6 +607,7 @@ class TeamsApp:
                 platform="teams",
                 thread_id=inbound.thread_id,
                 external_user_id=inbound.user_id,
+                origin="handoff" if notice is not None else "chat",
                 user_message=message,
                 lifecycle=lifecycle,
                 cancel=cancel,

@@ -24,6 +24,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.errors import TurnError
 from daimon.core.handoff_context import (
     render_lost_workspace_framing,
@@ -453,6 +454,7 @@ async def run_prepared_turn(
     cancel: asyncio.Event,
     reseed_user_message: Callable[[], Awaitable[str]],
     recovery_lifecycle: Callable[[asyncio.Event], TurnLifecycle],
+    origin: TurnContext = "chat",
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     render_interval_s: float = 2.0,
     deadline: datetime | None = None,
@@ -513,7 +515,8 @@ async def run_prepared_turn(
     # A replacement session's first user message opens with daimon's framing
     # for the work it inherited (`daimon.core.handoff_context`). Empty for
     # every ordinary turn, which then sends byte-identical bytes to before.
-    prefix = prepared.continuity.user_prefix
+    context = context_prompt(origin, system=prepared.admission.agent.system)
+    prefix = context + prepared.continuity.user_prefix
 
     async def _run() -> RunOutcome:
         ma_session_id = prepared.ma_session_id
@@ -652,7 +655,7 @@ async def run_prepared_turn(
                 recovered_state = await run_turn(
                     anthropic=deps.anthropic,
                     session_id=new_session_id,
-                    user_message=reseeded_message,
+                    user_message=context + reseeded_message,
                     lifecycle=new_lifecycle,
                     cancel=fresh_cancel,
                     render_interval_s=render_interval_s,

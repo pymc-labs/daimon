@@ -195,3 +195,7 @@ the six `DAIMON_SCHEDULER__*` settings in
 
 Per run, two gates still apply — the tenant's credit balance and the
 per-person monthly cap. See [billing.md](billing.md).
+
+Routine turns receive core unattended-run framing: avoid clarification questions,
+verify evidence, and use delivery tools for requested output. Agents can customize
+it with `context_fragments.routine` in their YAML spec; see [architecture](architecture.md#invocation-context-fragments).

@@ -259,3 +259,28 @@ credential; they reach daimon over HTTP with capability tokens, and the
 - [defaults.md](defaults.md) — what is seeded and how reconciliation works.
 - [mcp-tools.md](mcp-tools.md) — every tool the agent can call.
 - [configuration.md](configuration.md) — every setting.
+
+### Invocation context fragments
+
+Core adds a `turn_context` block before the user message, chosen by the trusted
+caller origin (`chat`, `routine`, `relay`, or `handoff`). Default chat adds nothing.
+Scheduler runs use routine framing; Discord and Slack handoff continuations use
+handoff framing. Callers drafting a relay pass `origin="relay"` to the core runner.
+The block is included again on dead-session recovery.
+
+Agent YAML accepts `context_fragments`, keyed by origin, with `text` and an optional
+`mode` (`replace`, the default, or `extend`). For example:
+
+```yaml
+context_fragments:
+  routine:
+    mode: extend
+    text: "Include the source timestamps in the result."
+  relay:
+    text: "Write a concise client-ready answer in Spanish."
+```
+
+The spec converter stores this configuration in the agent's system field so it
+survives upload, forks and defaults fingerprints. Replacing that system field
+without the configuration removes the overrides. An empty replacement disables a
+fragment. These blocks affect prompting only and grant no extra permissions.
