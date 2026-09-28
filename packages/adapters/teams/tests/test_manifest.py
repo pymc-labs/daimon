@@ -52,3 +52,11 @@ def test_manifest_uses_v116_schema_keys() -> None:
         manifest
     )
     assert {"short", "full"} <= set(manifest["name"])
+
+
+def test_manifest_offers_what_the_adapter_answers() -> None:
+    manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
+    [bot] = manifest["bots"]
+    assert bot["scopes"] == ["personal", "team"], "group chats are refused, so not offered"
+    [commands] = bot["commandLists"]
+    assert [c["title"] for c in commands["commands"]] == ["new"]

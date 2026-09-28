@@ -22,12 +22,10 @@
 #      - Channels → add Microsoft Teams.
 # 3. Build the Teams app package from the manifest below (manifest.json +
 #    two icons zipped), then sideload it or publish to the org catalog.
-# 4. Provision the daimon tenant row by hand — there is no install flow.
-#    See "Identity" in docs/teams.md.
 #
-# The manifest fields mirror what the adapter assumes: a personal-scope bot
-# whose only surface is 1:1 chat. Adding team/channel scopes here changes
-# nothing in code — non-personal conversations are still refused.
+# The adapter provisions the tenant for DAIMON_TEAMS__TENANT_ID at boot; there
+# is no install flow. The bot answers in 1:1 chat and when @mentioned in a
+# channel; group chats are refused, so the manifest does not offer them.
 
 manifestVersion: "1.16"
 id: "${DAIMON_TEAMS__CLIENT_ID}"        # must equal the Entra app id
@@ -42,7 +40,7 @@ name:
   full: daimon
 description:
   short: Data-science agent that writes and runs code, fits models, and answers in chat.
-  full: Data-science agent that writes and runs code, fits models, and delivers answers in a personal chat.
+  full: Data-science agent that writes and runs code, fits models, and delivers answers in a chat or channel thread.
 icons:
   outline: outline.png
   color: color.png
@@ -50,7 +48,14 @@ accentColor: "#0b110e"
 bots:
   - botId: "${DAIMON_TEAMS__CLIENT_ID}"
     scopes:
-      - personal                        # 1:1 chat only — no team/channel scope
+      - personal
+      - team                            # channels: answers when @mentioned
+    commandLists:
+      - scopes:
+          - personal
+        commands:
+          - title: new
+            description: Start a fresh conversation.
     supportsFiles: false
     isNotificationOnly: false
 permissions:
