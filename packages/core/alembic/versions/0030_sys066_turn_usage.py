@@ -8,7 +8,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "0030_sys066_turn_usage"
-down_revision = "0029_sys081_turn_outcomes"
+down_revision = "0029_feat084_timers"
 branch_labels = None
 depends_on = None
 
