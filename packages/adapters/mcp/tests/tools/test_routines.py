@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock
 
 import daimon.adapters.mcp.tools.routines as _routines_mod
@@ -830,3 +831,402 @@ async def test_catch_up_policy_create_update_and_owner_gate(
     assert updated.catch_up_policy == "skip"
     assert updated.next_fire_at == row.next_fire_at
     await client.close()
+
+
+# --- FEAT-085: destination -----------------------------------------------------
+
+_GUILD = "424242"
+
+
+def _discord_channels(monkeypatch: pytest.MonkeyPatch, channels: dict[int, object]) -> None:
+    """Fake the REST client: `fetch_channel` returns from `channels` or 404s."""
+    import contextlib
+
+    import discord
+
+    class _Client:
+        async def fetch_channel(self, channel_id: int) -> object:
+            if channel_id not in channels:
+                raise discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Channel")
+            return channels[channel_id]
+
+    @contextlib.asynccontextmanager
+    async def fake_rest_client(token: object) -> Any:
+        yield _Client()
+
+    monkeypatch.setattr(_routines_mod, "rest_client", fake_rest_client)
+    monkeypatch.setattr(_routines_mod, "_require_bot_token", lambda runtime: "token")
+
+    async def fake_resolve_member(c: object, guild_id: str, user_id: str) -> tuple[None, object]:
+        return None, _CALLER
+
+    monkeypatch.setattr(_routines_mod, "_resolve_member", fake_resolve_member)
+
+
+# The caller as a guild member; channel permissions come from the fakes below.
+_CALLER = MagicMock(guild_permissions=MagicMock(administrator=False))
+
+
+def _perms(*, view: bool = True, send: bool = True, manage_threads: bool = False) -> object:
+    return MagicMock(
+        view_channel=view,
+        send_messages=send,
+        send_messages_in_threads=send,
+        manage_threads=manage_threads,
+    )
+
+
+def _text_channel(
+    *, guild_id: str = _GUILD, category_id: int | None = None, perms: object | None = None
+) -> object:
+    from types import SimpleNamespace
+
+    import discord
+
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.guild = SimpleNamespace(id=int(guild_id))
+    channel.category_id = category_id
+    channel.permissions_for = MagicMock(return_value=perms if perms is not None else _perms())
+    return channel
+
+
+def _private_thread(*, parent: object, caller_is_member: bool) -> object:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import discord
+
+    thread = MagicMock(spec=discord.Thread)
+    thread.guild = SimpleNamespace(id=int(_GUILD))
+    thread.parent = parent
+    thread.parent_id = 444
+    thread.type = discord.ChannelType.private_thread
+    thread.permissions_for = MagicMock(return_value=_perms())
+    if caller_is_member:
+        thread.fetch_member = AsyncMock(return_value=object())
+    else:
+        thread.fetch_member = AsyncMock(
+            side_effect=discord.NotFound(MagicMock(status=404, reason="Not Found"), "no")
+        )
+    return thread
+
+
+def _slack_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    is_member: bool = True,
+    info_error: str | None = None,
+    thread_found: bool = True,
+    is_private: bool = False,
+    caller_in_channel: bool = True,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from slack_sdk.errors import SlackApiError
+    from slack_sdk.web.async_slack_response import AsyncSlackResponse
+
+    client = MagicMock()
+    if info_error is not None:
+        response = MagicMock(spec=AsyncSlackResponse)
+        response.data = {"ok": False, "error": info_error}
+        client.conversations_info = AsyncMock(side_effect=SlackApiError("err", response))
+    else:
+        client.conversations_info = AsyncMock(
+            return_value={
+                "channel": {"id": "C0123ABC", "is_member": is_member, "is_private": is_private}
+            }
+        )
+    client.users_info = AsyncMock(return_value={"user": {"id": "u_test"}})
+    client.conversations_members = AsyncMock(
+        return_value={"members": ["u_test"] if caller_in_channel else ["U_OTHER"]}
+    )
+    replies: dict[str, object] = {"messages": [{"ts": "1717.5"}] if thread_found else []}
+    client.conversations_replies = AsyncMock(return_value=replies)
+
+    async def fake_client(runtime: object, *, team_id: str) -> object:
+        assert team_id == "T_TEST", "resolved in the caller's own workspace"
+        return client
+
+    monkeypatch.setattr(_routines_mod, "slack_web_client", fake_client)
+
+
+async def _create(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    *,
+    platform: str,
+    kind: str,
+    destination_id: str,
+    policy: object | None = None,
+) -> object:
+    from daimon.core.stores.access_policy import set_access_policy
+
+    tenant = await make_tenant(db_session, platform=platform)  # type: ignore[arg-type]
+    if policy is not None:
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)  # type: ignore[arg-type]
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    return await _create_routine_impl(
+        _runtime(committing_sessionmaker, client=client),
+        _auth_identity(
+            tenant_id=tenant.id,
+            platform=platform,
+            external_id=_GUILD if platform == "discord" else "T_TEST",
+            platform_user_id="111" if platform == "discord" else "u_test",
+        ),
+        agent_name="daimon",
+        cron_expr="0 9 * * 1",
+        timezone="UTC",
+        trigger_message="weekly summary",
+        destination_kind=kind,  # type: ignore[arg-type]
+        destination_id=destination_id,
+    )
+
+
+async def test_create_routine_saves_a_reachable_destination_in_this_guild(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _discord_channels(monkeypatch, {1234: _text_channel()})
+    row = await _create(
+        committing_sessionmaker,
+        db_session,
+        platform="discord",
+        kind="channel",
+        destination_id="1234",
+    )
+    assert (row.destination_kind, row.destination_id) == ("channel", "1234")  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("channels", "destination_id", "kind", "message"),
+    [
+        ({1234: "other-guild"}, "1234", "channel", "not in this server"),
+        ({}, "1234", "channel", "cannot see"),
+        ({1234: "text"}, "general", "channel", "invalid destination_id"),
+        ({1234: "text"}, "1234", "thread", "use destination_kind=channel"),
+    ],
+)
+async def test_create_routine_refuses_an_unusable_discord_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    channels: dict[int, str],
+    destination_id: str,
+    kind: str,
+    message: str,
+) -> None:
+    built = {
+        cid: _text_channel(guild_id="999" if what == "other-guild" else _GUILD)
+        for cid, what in channels.items()
+    }
+    _discord_channels(monkeypatch, built)
+    with pytest.raises(ToolError, match=message):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="discord",
+            kind=kind,
+            destination_id=destination_id,
+        )
+
+
+async def test_create_routine_refuses_a_channel_in_a_protected_category(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    _discord_channels(monkeypatch, {1234: _text_channel(category_id=77)})
+    with pytest.raises(ToolError, match="protected channel"):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="discord",
+            kind="channel",
+            destination_id="1234",
+            policy=TenantAccessPolicy(protected_category_ids=("77",)),
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "kind", "destination_id", "message"),
+    [
+        ({}, "thread", "C0123ABC", "invalid destination_id"),
+        ({"is_member": False}, "channel", "C0123ABC", "invite it"),
+        ({"info_error": "channel_not_found"}, "channel", "C0123ABC", "could not find"),
+        ({"thread_found": False}, "thread", "C0123ABC:1717.5", "no thread"),
+    ],
+)
+async def test_create_routine_refuses_an_unusable_slack_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, object],
+    kind: str,
+    destination_id: str,
+    message: str,
+) -> None:
+    _slack_client(monkeypatch, **kwargs)  # type: ignore[arg-type]
+    with pytest.raises(ToolError, match=message):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="slack",
+            kind=kind,
+            destination_id=destination_id,
+        )
+
+
+async def test_create_routine_saves_a_slack_thread_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _slack_client(monkeypatch)
+    row = await _create(
+        committing_sessionmaker,
+        db_session,
+        platform="slack",
+        kind="thread",
+        destination_id="C0123ABC:1717.5",
+    )
+    assert row.destination_id == "C0123ABC:1717.5"  # type: ignore[attr-defined]
+
+
+async def test_create_routine_needs_both_destination_fields(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    with pytest.raises(ToolError, match="together"):
+        await _create_routine_impl(
+            _runtime(committing_sessionmaker),
+            _auth_identity(tenant_id=tenant.id),
+            agent_name="daimon",
+            cron_expr="0 9 * * 1",
+            timezone="UTC",
+            trigger_message="x",
+            destination_kind="channel",
+        )
+
+
+async def test_update_routine_sets_and_clears_a_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _discord_channels(monkeypatch, {55: _text_channel()})
+    tenant = await make_tenant(db_session)
+    created = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u_test",
+        agent_id="agent_a",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="orig",
+    )
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity(tenant_id=tenant.id, external_id=_GUILD)
+
+    set_ = await _update_routine_impl(
+        runtime, auth, routine_id=created.id, destination_kind="channel", destination_id="55"
+    )
+    cleared = await _update_routine_impl(
+        runtime, auth, routine_id=created.id, clear_destination=True
+    )
+
+    assert (set_.destination_kind, set_.destination_id) == ("channel", "55")
+    assert set_.trigger_message == "orig"
+    assert (cleared.destination_kind, cleared.destination_id) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("channel", "message"),
+    [
+        (lambda: _text_channel(perms=_perms(send=False)), "you cannot post"),
+        (lambda: _text_channel(perms=_perms(view=False)), "you cannot post"),
+    ],
+)
+async def test_create_routine_refuses_a_discord_channel_the_caller_cannot_post_in(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    channel: Any,
+    message: str,
+) -> None:
+    """Review regression (round 3): the bot could post there, the caller could
+    not — a routine must not become a way around send_message's checks."""
+    _discord_channels(monkeypatch, {1234: channel()})
+    with pytest.raises(ToolError, match=message):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="discord",
+            kind="channel",
+            destination_id="1234",
+        )
+
+
+async def test_create_routine_refuses_a_private_thread_the_caller_is_not_in(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = _text_channel()
+    _discord_channels(
+        monkeypatch, {1234: _private_thread(parent=parent, caller_is_member=False), 444: parent}
+    )
+    with pytest.raises(ToolError, match="you cannot post"):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="discord",
+            kind="thread",
+            destination_id="1234",
+        )
+
+
+async def test_create_routine_accepts_a_private_thread_the_caller_is_in(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = _text_channel()
+    _discord_channels(
+        monkeypatch, {1234: _private_thread(parent=parent, caller_is_member=True), 444: parent}
+    )
+    row = await _create(
+        committing_sessionmaker,
+        db_session,
+        platform="discord",
+        kind="thread",
+        destination_id="1234",
+    )
+    assert row.destination_kind == "thread"  # type: ignore[attr-defined]
+
+
+async def test_create_routine_refuses_a_private_slack_channel_the_caller_is_not_in(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review regression (round 3): daimon is in the private channel, the
+    caller is not."""
+    _slack_client(monkeypatch, is_private=True, caller_in_channel=False)
+    with pytest.raises(ToolError, match="you cannot post"):
+        await _create(
+            committing_sessionmaker,
+            db_session,
+            platform="slack",
+            kind="channel",
+            destination_id="C0123ABC",
+        )

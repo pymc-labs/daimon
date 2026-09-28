@@ -1472,6 +1472,13 @@
         
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
         
+        ``destination_kind`` (``channel`` or ``thread``) and ``destination_id``
+        optionally name where each run's result goes. The run is told where,
+        and if the agent does not post there itself, daimon posts the end of
+        its final reply there. On Slack a thread is ``<channel id>:<thread
+        ts>``. A protected channel is refused. Without a destination the
+        result is only recorded (``last_result_tail``), as before.
+        
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
         ``"research-bot"``). It is NOT:
@@ -1511,6 +1518,32 @@
           }),
           'cron_expr': dict({
             'type': 'string',
+          }),
+          'destination_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'destination_kind': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'channel',
+                  'thread',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'enabled': dict({
             'default': True,
@@ -4825,6 +4858,9 @@
       'description': '''
         PATCH-update a routine. Only provided fields are changed.
         
+        ``destination_kind`` + ``destination_id`` set where results go (see
+        ``create_routine``); ``clear_destination=true`` removes it.
+        
         ``catch_up_policy`` selects ``skip`` or one coalesced ``run-once`` after downtime.
         
         ``agent_name`` reassigns the routine to a different daimon-tagged agent;
@@ -4859,9 +4895,39 @@
             ]),
             'default': None,
           }),
+          'clear_destination': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
           'cron_expr': dict({
             'anyOf': list([
               dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'destination_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'destination_kind': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'channel',
+                  'thread',
+                ]),
                 'type': 'string',
               }),
               dict({

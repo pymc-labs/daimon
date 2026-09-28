@@ -12,19 +12,43 @@ JWT claims. Cross-partition access raises ``ToolError("routine not found")``
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.discord._client import (
+    _require_bot_token,  # pyright: ignore[reportPrivateUsage]
+    _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
+    _require_guild_id,  # pyright: ignore[reportPrivateUsage]
+    _resolve_member,  # pyright: ignore[reportPrivateUsage]
+    rest_client,
+)
+from daimon.adapters.mcp.tools.discord._visibility import (
+    _check_send_permission,  # pyright: ignore[reportPrivateUsage]
+    _check_thread_view,  # pyright: ignore[reportPrivateUsage]
+    _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.slack._client import (
+    _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
+    _require_team_id,  # pyright: ignore[reportPrivateUsage]
+    slack_web_client,
+)
+from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
+from daimon.core.access_policy import is_write_protected
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.routine_delivery import destination_shape_error
 from daimon.core.stores import routines as routines_store
-from daimon.core.stores.domain import CatchUpPolicy, RoutineRow
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
+from slack_sdk.errors import SlackApiError
 
 
 class DeleteResult(BaseModel):
@@ -84,6 +108,150 @@ def _compute_next_fire_at(cron_expr: str, tz: str) -> datetime:
         raise ToolError(f"invalid cron expression: {cron_expr!r}") from e
 
 
+async def _resolve_discord_destination(
+    runtime: McpRuntime, auth: AuthIdentity, *, kind: str, destination_id: str
+) -> tuple[str | None, str | None]:
+    """(parent_channel_id, category_id) of a channel or thread in the caller's
+    guild that the CALLER may post in.
+
+    A routine posts on its creator's behalf, so its destination passes the
+    exact checks the `send_message` tool applies to a caller: the member is
+    resolved with roles hydrated, a thread's parent is cached, a thread must
+    be viewable (a private one needs membership or manage_threads), and the
+    caller needs view + send there.
+    """
+    guild_id = _require_guild_id(auth)
+    caller = _require_discord_identity(auth)
+    try:
+        async with rest_client(_require_bot_token(runtime)) as client:
+            _, member = await _resolve_member(client, guild_id, caller)
+            channel = await client.fetch_channel(int(destination_id))
+            if isinstance(channel, discord.Thread):
+                if kind != "thread":
+                    raise ToolError(f"{destination_id} is a thread: use destination_kind=thread")
+                parent = await _ensure_thread_parent_cached(channel)
+                category = getattr(parent, "category_id", None)
+                placement = (str(channel.parent_id), str(category) if category else None)
+            elif isinstance(channel, discord.TextChannel):
+                if kind != "channel":
+                    raise ToolError(f"{destination_id} is a channel: use destination_kind=channel")
+                category = channel.category_id
+                placement = (None, str(category) if category else None)
+            else:
+                raise ToolError(f"{destination_id} is not a text channel or thread")
+            if str(channel.guild.id) != guild_id:
+                raise ToolError(f"{destination_id} is not in this server")
+            try:
+                if isinstance(channel, discord.Thread):
+                    await _check_thread_view(client, channel, member, caller)
+                _check_send_permission(channel, member)
+            except ToolError as err:
+                raise ToolError(
+                    f"you cannot post in {destination_id} ({err}), so a routine cannot deliver "
+                    "there for you. Nothing was saved."
+                ) from err
+            return placement
+    except (discord.NotFound, discord.Forbidden) as err:
+        raise ToolError(
+            f"daimon cannot see {destination_id} in this server; check the id and that "
+            "daimon has access to it"
+        ) from err
+
+
+async def _resolve_slack_destination(
+    runtime: McpRuntime, auth: AuthIdentity, *, kind: str, destination_id: str
+) -> tuple[str | None, str | None]:
+    """Check the channel (and thread) exists in the caller's workspace, with daimon in it."""
+    channel_id, _, thread_ts = destination_id.partition(":")
+    client = await slack_web_client(runtime, team_id=_require_team_id(auth))
+    try:
+        info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
+        channel = cast("dict[str, object]", info["channel"])
+        if channel.get("is_archived"):
+            raise ToolError(f"{channel_id} is archived")
+        if not channel.get("is_member"):
+            raise ToolError(
+                f"daimon is not in {channel_id}; invite it to the channel first. Nothing was saved."
+            )
+        # The routine posts on the caller's behalf: the caller must have the
+        # same access the channel tools require of them (private channel or
+        # guest → membership).
+        try:
+            await check_channel_access(
+                client, channel=channel, user_id=_require_slack_identity(auth)
+            )
+        except ToolError as err:
+            raise ToolError(
+                f"you cannot post in {channel_id} ({err}), so a routine cannot deliver there "
+                "for you. Nothing was saved."
+            ) from err
+        if kind == "thread":
+            replies = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id, ts=thread_ts, limit=1
+            )
+            if not cast("list[object]", replies.get("messages") or []):  # pyright: ignore[reportUnknownMemberType]
+                raise ToolError(f"no thread {thread_ts} in {channel_id}")
+    except SlackApiError as err:
+        raise ToolError(
+            f"Slack could not find {destination_id} in this workspace "
+            f"({cast('dict[str, object]', err.response.data).get('error')}). Nothing was saved."  # pyright: ignore[reportUnknownMemberType]
+        ) from err
+    return None, None
+
+
+async def _check_destination(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    kind: RoutineDestinationKind | None,
+    destination_id: str | None,
+) -> None:
+    """Refuse a destination that could never be posted to, before it is saved.
+
+    The pair must come together; the id must have the platform's shape; the
+    channel (and thread) must exist in the caller's own server or workspace
+    with daimon able to post; and the tenant access policy must not protect
+    it, checked with the parent channel and category resolved here. The
+    adapter re-checks all of it at post time, so a channel protected or
+    removed later is still honoured.
+    """
+    if (kind is None) != (destination_id is None):
+        raise ToolError("destination_kind and destination_id must be given together")
+    if kind is None or destination_id is None:
+        return
+    platform = auth.platform or ""
+    shape_error = destination_shape_error(platform, kind, destination_id)
+    if shape_error is not None:
+        raise ToolError(f"invalid destination_id: {shape_error}. Nothing was saved.")
+    if platform == "discord":
+        parent_channel_id, category_id = await _resolve_discord_destination(
+            runtime, auth, kind=kind, destination_id=destination_id
+        )
+        channel_id = destination_id
+    else:
+        parent_channel_id, category_id = await _resolve_slack_destination(
+            runtime, auth, kind=kind, destination_id=destination_id
+        )
+        channel_id = destination_id.partition(":")[0]
+    async with runtime.session_factory() as session:
+        try:
+            policy = await load_access_policy(session, tenant_id=auth.tenant_id)
+        except AccessPolicyUnreadable as err:
+            raise ToolError(
+                "the workspace access policy could not be read; no destination was saved"
+            ) from err
+    if is_write_protected(
+        policy,
+        channel_id=channel_id,
+        parent_channel_id=parent_channel_id,
+        category_id=category_id,
+    ):
+        raise ToolError(
+            f"{channel_id} is a protected channel: daimon does not post there, so a routine "
+            "cannot deliver to it. Pick another channel. Nothing was saved."
+        )
+
+
 async def _create_routine_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -94,10 +262,13 @@ async def _create_routine_impl(
     trigger_message: str,
     enabled: bool = True,
     catch_up_policy: CatchUpPolicy = "skip",
+    destination_kind: RoutineDestinationKind | None = None,
+    destination_id: str | None = None,
 ) -> RoutineRow:
     tenant_id = auth.tenant_id
     platform_user_id = _require_platform_user_id(auth)
     next_fire_at = _compute_next_fire_at(cron_expr, timezone)
+    await _check_destination(runtime, auth, kind=destination_kind, destination_id=destination_id)
 
     match = await find_agent_by_daimon_tag(
         runtime.client,
@@ -121,6 +292,8 @@ async def _create_routine_impl(
             enabled=enabled,
             catch_up_policy=catch_up_policy,
             next_fire_at=next_fire_at,
+            destination_kind=destination_kind,
+            destination_id=destination_id,
         )
 
 
@@ -158,8 +331,14 @@ async def _update_routine_impl(
     trigger_message: str | None = None,
     enabled: bool | None = None,
     catch_up_policy: CatchUpPolicy | None = None,
+    destination_kind: RoutineDestinationKind | None = None,
+    destination_id: str | None = None,
+    clear_destination: bool = False,
 ) -> RoutineRow:
     tenant_id = auth.tenant_id
+    if clear_destination and (destination_kind is not None or destination_id is not None):
+        raise ToolError("clear_destination cannot be combined with a new destination")
+    await _check_destination(runtime, auth, kind=destination_kind, destination_id=destination_id)
     async with runtime.session_factory() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
         if row is None:
@@ -199,6 +378,9 @@ async def _update_routine_impl(
             agent_id=new_agent_id,
             agent_name=agent_name if new_agent_id is not None else None,
             next_fire_at=next_fire_at,
+            destination_kind=destination_kind,
+            destination_id=destination_id,
+            clear_destination=clear_destination,
         )
         if updated is None:
             raise ToolError("routine not found")
@@ -233,10 +415,19 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         trigger_message: str,
         enabled: bool = True,
         catch_up_policy: CatchUpPolicy = "skip",
+        destination_kind: RoutineDestinationKind | None = None,
+        destination_id: str | None = None,
     ) -> RoutineRow:
         """Create a routine in the caller's tenant partition.
 
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
+
+        ``destination_kind`` (``channel`` or ``thread``) and ``destination_id``
+        optionally name where each run's result goes. The run is told where,
+        and if the agent does not post there itself, daimon posts the end of
+        its final reply there. On Slack a thread is ``<channel id>:<thread
+        ts>``. A protected channel is refused. Without a destination the
+        result is only recorded (``last_result_tail``), as before.
 
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
@@ -270,6 +461,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             trigger_message=trigger_message,
             enabled=enabled,
             catch_up_policy=catch_up_policy,
+            destination_kind=destination_kind,
+            destination_id=destination_id,
         )
 
     @mcp.tool
@@ -292,8 +485,14 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         trigger_message: str | None = None,
         enabled: bool | None = None,
         catch_up_policy: CatchUpPolicy | None = None,
+        destination_kind: RoutineDestinationKind | None = None,
+        destination_id: str | None = None,
+        clear_destination: bool = False,
     ) -> RoutineRow:
         """PATCH-update a routine. Only provided fields are changed.
+
+        ``destination_kind`` + ``destination_id`` set where results go (see
+        ``create_routine``); ``clear_destination=true`` removes it.
 
         ``catch_up_policy`` selects ``skip`` or one coalesced ``run-once`` after downtime.
 
@@ -310,6 +509,9 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             trigger_message=trigger_message,
             enabled=enabled,
             catch_up_policy=catch_up_policy,
+            destination_kind=destination_kind,
+            destination_id=destination_id,
+            clear_destination=clear_destination,
         )
 
     @mcp.tool

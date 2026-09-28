@@ -285,6 +285,24 @@ class Routine(Base):
         CheckConstraint(
             "catch_up_policy IN ('skip', 'run-once')", name="ck_routines_catch_up_policy"
         ),
+        CheckConstraint(
+            "destination_kind IS NULL OR destination_kind IN ('channel', 'thread')",
+            name="ck_routines_destination_kind",
+        ),
+        CheckConstraint(
+            "(destination_kind IS NULL) = (destination_id IS NULL)",
+            name="ck_routines_destination_pair",
+        ),
+        CheckConstraint(
+            "delivery_status IS NULL OR delivery_status IN "
+            "('pending', 'claimed', 'delivered', 'skipped')",
+            name="ck_routines_delivery_status",
+        ),
+        Index(
+            "routines_delivery_due_idx",
+            "delivery_status",
+            postgresql_where=text("delivery_status IN ('pending', 'claimed')"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -316,6 +334,19 @@ class Routine(Base):
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_result_tail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # FEAT-085: optional place the result goes, and the outbox that posts it.
+    destination_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    destination_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivery_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivery_lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivery_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    delivery_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The text a pending post carries: that fire's result, copied so a writer
+    # that only knows `last_result_tail` cannot change what gets posted.
+    delivery_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

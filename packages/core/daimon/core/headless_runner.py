@@ -136,6 +136,7 @@ async def run_turn(
     github_app_private_key: str | None = None,
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    on_state: Callable[[TurnState], None] | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -160,6 +161,7 @@ async def run_turn(
             github_app_private_key=github_app_private_key,
             deadline=deadline,
             tool_safety=tool_safety,
+            on_state=on_state,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -184,6 +186,7 @@ async def run_turn(
                 github_app_private_key=github_app_private_key,
                 deadline=deadline,
                 tool_safety=tool_safety,
+                on_state=on_state,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -212,6 +215,7 @@ async def run_turn_impl(
     github_app_private_key: str | None = None,
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    on_state: Callable[[TurnState], None] | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its tail.
 
@@ -251,6 +255,9 @@ async def run_turn_impl(
        the hardened render error policy — instead of a bespoke bare drain
        loop with no reconnect and stream-end-as-success.
     4. After the driver returns: ``extract_final_response(state.content)[:1000]``.
+       ``on_state``, when given, is called first with the final ``TurnState``
+       of a successful turn, for a caller that needs more than the tail (the
+       scheduler checks whether the agent posted a routine's result itself).
 
     Errors:
 
@@ -366,4 +373,6 @@ async def run_turn_impl(
     if state.error is not None:
         raise state.error
 
+    if on_state is not None:
+        on_state(state)
     return extract_final_response(state.content)[:LAST_RESULT_TAIL_MAX]
