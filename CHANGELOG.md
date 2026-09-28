@@ -67,6 +67,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A continuation turn (the follow-up after a private form or a task handoff)
+  on Discord or Slack now runs with the requester's live role, re-read from
+  the guild or workspace at dispatch, instead of always as a plain user. An
+  admin's setup run no longer loses its admin tools on the turn that applies
+  their answer; a non-admin's form, or a failed role lookup, still runs as a
+  user.
+
 - Bound GitHub skill resyncs now preserve the binding's exact Managed Agents
   identity through ledger updates and skill attachment. Duplicate active agent
   names already present at bridge resolution refuse the resync before

@@ -27,7 +27,9 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger
-from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
+from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.domain import ContinuationReason, Role, TaskContinuationRow
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import (
     get_continuation,
     list_pending_continuations,
@@ -59,9 +61,43 @@ class _AsyncIter:
             raise StopAsyncIteration from err
 
 
-def _make_thread(*, thread_id: int = _THREAD_ID) -> MagicMock:
+def _make_guild(
+    *,
+    member: object = None,
+    fetch_error: Exception | None = None,
+    cached_member: object = None,
+) -> MagicMock:
+    """A guild whose `fetch_member` returns `member` for the requester.
+
+    With no `member`, `fetch_member` raises `fetch_error` -- by default
+    Discord's "unknown member" (the requester left). `cached_member` is what
+    the member cache (`get_member`) would say, which may be stale.
+    """
+    guild = MagicMock(spec=discord.Guild)
+    guild.owner_id = 1
+    guild.get_member = MagicMock(return_value=cached_member)
+    if member is not None:
+        guild.fetch_member = AsyncMock(return_value=member)
+    else:
+        guild.fetch_member = AsyncMock(
+            side_effect=fetch_error
+            or discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Member")
+        )
+    return guild
+
+
+def _make_member(*, admin: bool) -> MagicMock:
+    member = MagicMock(spec=discord.Member)
+    member.id = 555
+    member.guild_permissions.administrator = admin
+    member.guild_permissions.manage_guild = False
+    return member
+
+
+def _make_thread(*, thread_id: int = _THREAD_ID, guild: MagicMock | None = None) -> MagicMock:
     thread = MagicMock(spec=discord.Thread)
     thread.id = thread_id
+    thread.guild = guild if guild is not None else _make_guild()
     thread.parent_id = thread_id - 1
     thread.history = MagicMock(return_value=_AsyncIter([]))
     message_ref = MagicMock()
@@ -286,6 +322,26 @@ async def _run_continuation_and_capture_controls(
     reason: ContinuationReason,
 ) -> str:
     """Run one continuation turn and return the `user_message` it ran with."""
+    controls, _ = await _run_continuation(
+        db_session_factory, workspace_id=workspace_id, reason=reason
+    )
+    return controls
+
+
+async def _run_continuation(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_id: str,
+    reason: ContinuationReason,
+    guild: MagicMock | None = None,
+    prior_role: Role | None = None,
+) -> tuple[str, uuid.UUID]:
+    """Run one continuation turn; return its `user_message` and the tenant id.
+
+    `prior_role` pre-stamps the requester's account as a previous turn would
+    have, so a test can show the continuation re-derives the role rather than
+    inheriting it.
+    """
     async with db_session_factory() as session, session.begin():
         tenant = await make_tenant(session, platform="discord", workspace_id=workspace_id)
         await tenant_ledger.insert_entry(
@@ -296,9 +352,14 @@ async def _run_continuation_and_capture_controls(
             idempotency_key=f"trial:{tenant.id}",
         )
         account = await make_account(session, tenant=tenant)
+        if prior_role is not None:
+            principal = await get_or_create_platform_principal(
+                session, tenant_id=tenant.id, platform="discord", external_id="555"
+            )
+            await set_role(session, principal.account_id, prior_role)
 
     bot = make_bot(_make_runtime(db_session_factory))
-    thread = _make_thread()
+    thread = _make_thread(guild=guild)
     row = _make_continuation_row(tenant_id=tenant.id, account_id=account.id, reason=reason)
     decision = ContinuationDecision(action="dispatch", seed_user_message="finish the migration")
 
@@ -335,7 +396,7 @@ async def _run_continuation_and_capture_controls(
     assert run_turn.await_args is not None, "the follow-up turn should have run"
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
-    return user_message
+    return user_message, tenant.id
 
 
 async def test_continuation_turn_omits_handoff_notice_for_private_input(
@@ -364,6 +425,82 @@ async def test_continuation_turn_omits_handoff_notice_for_private_input(
     )
     assert '"handoff"' in handoff_controls, (
         f"a task handoff must still carry the one-time notice, got {handoff_controls}"
+    )
+
+
+async def _requester_account_role(
+    db_session_factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> Role:
+    async with db_session_factory() as session, session.begin():
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant_id, platform="discord", external_id="555"
+        )
+        account = await get_account(session, principal.account_id)
+    assert account is not None, "admit must have resolved the requester's account"
+    return account.role
+
+
+async def test_continuation_turn_runs_as_admin_when_requester_is_a_guild_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A private form an admin submitted resumes as admin.
+
+    The continuation used to hardcode USER, so an admin's setup run lost its
+    admin tools on the turn that applied their answer and stopped there.
+    """
+    controls, tenant_id = await _run_continuation(
+        db_session_factory,
+        workspace_id="710000010",
+        reason="private_input_applied",
+        guild=_make_guild(member=_make_member(admin=True)),
+    )
+    assert '"current_role": "admin"' in controls, (
+        f"an admin requester's continuation must carry the admin role, got {controls}"
+    )
+    assert await _requester_account_role(db_session_factory, tenant_id) == Role.ADMIN, (
+        "the live-role gate the resumed turn's MCP calls read must say admin"
+    )
+
+
+@pytest.mark.parametrize(
+    ("workspace_id", "guild"),
+    [
+        pytest.param(
+            "710000020", _make_guild(member=_make_member(admin=False)), id="non-admin-member"
+        ),
+        pytest.param("710000021", _make_guild(), id="requester-left-the-guild"),
+        pytest.param(
+            "710000023",
+            _make_guild(member=_make_member(admin=False), cached_member=_make_member(admin=True)),
+            id="stale-cached-admin-lost-the-role",
+        ),
+        pytest.param(
+            "710000024",
+            _make_guild(cached_member=_make_member(admin=True)),
+            id="stale-cached-admin-left-the-guild",
+        ),
+        pytest.param(
+            "710000022",
+            _make_guild(fetch_error=discord.HTTPException(MagicMock(status=503), "unavailable")),
+            id="discord-lookup-failed",
+        ),
+    ],
+)
+async def test_continuation_turn_never_runs_as_admin_without_a_live_admin_requester(
+    db_session_factory: async_sessionmaker[AsyncSession], workspace_id: str, guild: MagicMock
+) -> None:
+    """A non-admin's form never produces an admin continuation -- even when
+    the requester's account was admin on an earlier turn."""
+    controls, tenant_id = await _run_continuation(
+        db_session_factory,
+        workspace_id=workspace_id,
+        reason="private_input_applied",
+        guild=guild,
+        prior_role=Role.ADMIN,
+    )
+    assert '"current_role": "user"' in controls, f"continuation must run as user, got {controls}"
+    assert await _requester_account_role(db_session_factory, tenant_id) == Role.USER, (
+        "a stale admin stamp must not survive into the continuation"
     )
 
 
