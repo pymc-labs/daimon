@@ -71,18 +71,43 @@ def _before_object(before: str | None) -> discord.Object | None:
     return discord.Object(id=value)
 
 
+def _sealed_thread_named(
+    message: discord.Message, read_policy: ChannelReadPolicy, *, parent_id: str
+) -> str | None:
+    """The thread a THREAD_CREATED system message names, if the policy withholds
+    it: its content is the thread's name, which is content too. A notice whose
+    thread can't be told is withheld whenever anything is sealed."""
+    if message.type is not discord.MessageType.thread_created:
+        return None
+    reference = message.reference
+    thread_id = reference.channel_id if reference is not None else None
+    if thread_id is None:
+        return "" if read_policy.policy.sealed_channel_ids else None
+    return None if read_policy.allows(str(thread_id), parent_id) else str(thread_id)
+
+
 async def _history_page(
-    channel: discord.abc.Messageable, *, limit: int, before: discord.Object | None
+    channel: discord.abc.Messageable,
+    *,
+    limit: int,
+    before: discord.Object | None,
+    read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
+    parent_id: str = "",
 ) -> tuple[list[MessageRow], str | None, str | None]:
     """Fetch one history page; return oldest-first rows, cursor, and hint.
 
     Discord's history API reports no has_more, so a full page is the only
     signal that older history may exist. A channel holding exactly ``limit``
     messages therefore still advertises a cursor; the follow-up read comes
-    back empty and ends the sweep.
+    back empty and ends the sweep. Notices naming a sealed thread are dropped;
+    the cursor still follows the page as Discord returned it.
     """
     page = [m async for m in channel.history(limit=limit, before=before)]
-    rows = [_to_message_row(m) for m in reversed(page)]
+    rows = [
+        _to_message_row(m)
+        for m in reversed(page)
+        if _sealed_thread_named(m, read_policy, parent_id=parent_id) is None
+    ]
     next_before = str(page[-1].id) if len(page) == limit else None
     hint = (
         f"more messages available — pass before={next_before} to read older messages"
@@ -130,7 +155,11 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support message history")
         rows, next_before, hint = await _history_page(
-            channel, limit=bounded_limit, before=before_obj
+            channel,
+            limit=bounded_limit,
+            before=before_obj,
+            read_policy=read_policy,
+            parent_id=str(channel.id),
         )
         return ReadChannelResult(rows=rows, next_before=next_before, hint=hint)
 
@@ -205,6 +234,11 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
             message = await channel.fetch_message(int(message_id))
         except discord.NotFound as e:
             raise ToolError("message not found") from e
+        sealed_thread = _sealed_thread_named(message, read_policy, parent_id=str(channel.id))
+        if sealed_thread:
+            read_policy.require(sealed_thread, str(channel.id))  # refuses: it's sealed
+        if sealed_thread is not None:
+            raise ToolError("message not found")  # a notice naming no thread: withheld
         return _to_message_row(message).model_copy(update={"trust": "untrusted"})
 
 
@@ -295,7 +329,11 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
         read_policy.require(str(channel.id), str(channel.parent_id))
 
         rows, next_before, hint = await _history_page(
-            channel, limit=bounded_limit, before=before_obj
+            channel,
+            limit=bounded_limit,
+            before=before_obj,
+            read_policy=read_policy,
+            parent_id=str(channel.id),
         )
         return ReadThreadResult(rows=rows, next_before=next_before, hint=hint)
 

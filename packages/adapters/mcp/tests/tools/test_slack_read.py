@@ -14,6 +14,7 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy
 from daimon.adapters.mcp.tools.slack._read import (  # pyright: ignore[reportPrivateUsage]
     _slack_get_message_impl,
     _slack_list_channels_impl,
@@ -23,6 +24,7 @@ from daimon.adapters.mcp.tools.slack._read import (  # pyright: ignore[reportPri
 from daimon.adapters.mcp.tools.slack._visibility import (
     MISSING_ACCESS,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
     CredentialsSettings,
@@ -1387,3 +1389,62 @@ async def test_read_thread_clamps_limit_to_the_slack_page_cap(
         limit = _recorded_limit(m, "/api/conversations.replies")
     assert limit == "15"
     assert result.has_more is True, "truncation must reach the caller"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token_path", ["bot", "user"])
+@pytest.mark.parametrize("inside", [False, True], ids=["outside", "inside-the-thread"])
+async def test_read_channel_withholds_a_thread_sealed_on_its_own(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    token_path: str,
+    inside: bool,
+) -> None:
+    """SYS-029: channel history carries a sealed thread's root and its
+    broadcast replies; both are withheld outside the thread, kept inside it."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    if token_path == "user":
+        await _seed_user_token(runtime, committing_sessionmaker)
+        await _seed_turn_context(committing_sessionmaker, auth, channel_id="C1")
+    sealed = "C1:1700000000.000100"
+    read_policy = ChannelReadPolicy(
+        policy=TenantAccessPolicy(sealed_channel_ids=(sealed,)),
+        origin_channel_ids=frozenset({sealed}) if inside else frozenset(),
+    )
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, payload=_FULL_MEMBER, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_HISTORY,
+            payload={
+                "ok": True,
+                "messages": [
+                    {
+                        "ts": "1700000000.000500",
+                        "thread_ts": "1700000000.000100",
+                        "subtype": "thread_broadcast",
+                        "user": "U_A",
+                        "text": "SECRET-BROADCAST",
+                    },
+                    {
+                        "ts": "1700000000.000100",
+                        "thread_ts": "1700000000.000100",
+                        "reply_count": 3,
+                        "user": "U_A",
+                        "text": "SECRET-ROOT",
+                    },
+                    {"ts": "1699999999.000100", "user": "U_A", "text": "open"},
+                ],
+            },
+        )
+        result = await _slack_read_channel_impl(
+            runtime, auth, channel_id="C1", limit=50, read_policy=read_policy
+        )
+    texts = [r.text for r in result.messages]
+    if inside:
+        assert texts == ["open", "SECRET-ROOT", "SECRET-BROADCAST"], texts
+    else:
+        assert texts == ["open"], f"the sealed thread must not leak through history: {texts}"

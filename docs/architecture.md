@@ -182,11 +182,13 @@ The origin must also belong to the agent the token executes as (`agent_id`,
 or `chat_agent_id` for ordinary chat); a token bound to neither can't claim
 one. A single thread can be sealed on its own: a Discord thread by its id, a
 Slack thread as `channel_id:thread_ts`. Such a thread, its messages and (on
-Discord) its name in `list_threads` are withheld from outside turns. (The
-CLI's Slack id validation doesn't accept the `channel_id:thread_ts` form yet,
-so a Slack thread seal is written to the row directly.) Once anything is
-sealed, search reports only the hits it shows as its total, on both
-platforms, so the count can't reveal sealed matches. An origin is any active
+Discord) its name are withheld from outside turns: in `read_thread` and
+`get_message`, in channel history (a Slack thread's root and broadcast replies;
+Discord's thread-created notice, whose text is the name), in `list_threads`
+and in search. The CLI's `--sealed-channel` accepts the Slack form. Once
+anything is sealed, search reports only the hits it shows as its total, scoped
+or not, on both platforms, so the count can't reveal sealed matches. A Slack
+turn inside a thread sealed on its own also gets read-only memory. An origin is any active
 one of the same account and responder, not only the current turn's: a member
 who copies an origin id out of a sealed-channel turn can read that channel
 from elsewhere until it expires -- someone who could read it anyway.
@@ -206,7 +208,8 @@ fields not given keep their stored value, including concurrent CLI edits.
 Edits and clears lock the tenant row for their transaction, even when no policy
 row exists yet. Every supplied id is validated before writing: Discord ids are
 15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with
-`C`, `G` or `D`, followed by uppercase letters or digits. CLI ids must be
+`C`, `G` or `D`, followed by uppercase letters or digits (a sealed Slack
+thread is `channel_id:thread_ts`). CLI ids must be
 non-blank. Invalid input names the field and value and writes nothing.
 To empty a single field, `--clear`
 and set the rest again. `set` refuses to overwrite an unreadable row, so

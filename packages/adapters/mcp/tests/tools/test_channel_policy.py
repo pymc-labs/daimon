@@ -680,3 +680,104 @@ async def test_every_read_is_refused_when_the_policy_is_unreadable(
 
     assert payload.get("isError") and "could not be read" in _text(payload), f"got {payload!r}"
     assert discord_calls == []
+
+
+def _thread_created_notice(*, message_id: str, thread_id: str) -> dict[str, Any]:
+    """Discord's THREAD_CREATED system message: its content is the thread's name."""
+    return {
+        **_payloads._message_payload(  # pyright: ignore[reportPrivateUsage]
+            message_id=message_id, channel_id=_OTHER, content="sealed acquisition target"
+        ),
+        "type": 18,
+        "message_reference": {"channel_id": thread_id, "guild_id": _GUILD},
+    }
+
+
+def _history_handler(fetched: list[str]) -> Any:
+    open_message = _payloads._message_payload(  # pyright: ignore[reportPrivateUsage]
+        message_id="4999", channel_id=_OTHER, content="open talk"
+    )
+    notice = _thread_created_notice(message_id="5000", thread_id="902")
+    base = _discord_handler([])
+
+    async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
+        if route.method == "GET" and route.path == "/channels/{channel_id}/messages":
+            fetched.append("history")
+            return [notice, open_message]
+        if route.method == "GET" and route.path == "/channels/{channel_id}/messages/{message_id}":
+            fetched.append("message")
+            return notice
+        return await base(route, kwargs)
+
+    return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inside", [False, True], ids=["outside", "inside-the-thread"])
+async def test_discord_thread_created_notices_do_not_name_a_sealed_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    inside: bool,
+) -> None:
+    """The parent's THREAD_CREATED notice carries the sealed thread's name; it is
+    withheld from read_channel and refused by get_message outside the thread."""
+    token, origin_id = await _caller(
+        db_session,
+        platform="discord",
+        workspace_id=_GUILD,
+        user_id=_CALLER,
+        policy=TenantAccessPolicy(sealed_channel_ids=("902",)),
+        origin_channel_id=_OTHER if inside else None,
+        origin_thread_id="902",
+    )
+    fetched: list[str] = []
+    patch_discord_http(monkeypatch, _history_handler(fetched))
+    app = _app(sessionmaker)
+    extra: dict[str, object] = {"origin_context_id": origin_id} if origin_id else {}
+
+    history = await _call(app, token, "read_channel", {"channel_id": _OTHER, **extra})
+    message = await _call(
+        app, token, "get_message", {"channel_id": _OTHER, "message_id": "5000", **extra}
+    )
+
+    assert not history.get("isError"), f"got {history!r}"
+    assert "open talk" in _text(history)
+    if inside:
+        assert "sealed acquisition target" in _text(history)
+        assert not message.get("isError") and "sealed acquisition target" in _text(message)
+    else:
+        assert "sealed acquisition target" not in _text(history), "the name is withheld"
+        assert message.get("isError") and "sealed" in _text(message), f"got {message!r}"
+        assert "sealed acquisition target" not in _text(message)
+
+
+@pytest.mark.asyncio
+async def test_discord_scoped_search_counts_only_what_it_shows_once_anything_is_sealed(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A scope on an open parent could count hits in a thread sealed under it."""
+    token, _ = await _caller(
+        db_session,
+        platform="discord",
+        workspace_id=_GUILD,
+        user_id=_CALLER,
+        policy=TenantAccessPolicy(sealed_channel_ids=("999",)),
+    )
+    patch_discord_http(monkeypatch, _discord_search_handler([]))
+
+    result = await call_mcp_tool(
+        _app(sessionmaker),
+        token=token,
+        name="search_messages",
+        arguments={"content": "x", "channel_ids": [_OTHER]},
+    )
+
+    payload = result.get("result", result)
+    structured = payload.get("structuredContent") or {}  # type: ignore[union-attr]
+    structured = structured.get("result", structured)
+    shown = len(structured["rows"])
+    assert structured["total_results"] == shown, "the total must not count withheld hits"
+    assert not structured.get("hint"), "no hint that hidden matches exist"

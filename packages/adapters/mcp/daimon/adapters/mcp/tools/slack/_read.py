@@ -272,6 +272,22 @@ async def _fetch_channel_history(
     )
 
 
+def _withhold_sealed_threads(
+    read_policy: ChannelReadPolicy, channel_id: str, result: SlackChannelResult
+) -> SlackChannelResult:
+    """Drop a sealed thread's root and its broadcast replies from channel history:
+    both carry the thread's ``thread_ts`` (a root's is its own ts). Pagination is
+    left as Slack returned it."""
+    kept = [
+        m
+        for m in result.messages
+        if read_policy.allows(f"{channel_id}:{m.thread_ts or m.ts}", channel_id)
+    ]
+    if len(kept) == len(result.messages):
+        return result
+    return result.model_copy(update={"messages": kept})
+
+
 async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -290,8 +306,12 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
             channel = await _channel_info(rc.client, channel_id=channel_id)
             await _gate_user_source(runtime, auth, channel=channel)
             read_policy.require(channel_id)
-            return await _fetch_channel_history(
-                rc.client, channel_id=channel_id, limit=limit, cursor=cursor
+            return _withhold_sealed_threads(
+                read_policy,
+                channel_id,
+                await _fetch_channel_history(
+                    rc.client, channel_id=channel_id, limit=limit, cursor=cursor
+                ),
             )
         except SlackApiError as err:
             # Any not_in_channel from the user token (typically a public channel
@@ -308,8 +328,12 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
         channel = await _channel_info(bot_client, channel_id=channel_id)
         await check_channel_access(bot_client, channel=channel, user_id=user_id)
         read_policy.require(channel_id)
-        return await _fetch_channel_history(
-            bot_client, channel_id=channel_id, limit=limit, cursor=cursor
+        return _withhold_sealed_threads(
+            read_policy,
+            channel_id,
+            await _fetch_channel_history(
+                bot_client, channel_id=channel_id, limit=limit, cursor=cursor
+            ),
         )
     except ToolError as terr:
         if rc.runs_as_user or isinstance(terr, SealedChannelError):

@@ -273,7 +273,12 @@ def tenants_access_policy_set_command(
     ] = None,
     sealed_channel: Annotated[
         list[str] | None,
-        typer.Option(help="Channel id readable only from a turn inside it (repeatable)."),
+        typer.Option(
+            help=(
+                "Channel id readable only from a turn inside it (repeatable). A single "
+                "thread: its Discord id, or Slack channel_id:thread_ts."
+            )
+        ),
     ] = None,
     dm_memory_read_only: Annotated[
         bool | None,
@@ -346,6 +351,9 @@ async def tenants_access_policy_set(
                     if validated_platform == "discord"
                     else r"[UW][A-Z0-9]+"
                     if field == "invoker_user_ids"
+                    # A Slack thread is sealed on its own as channel_id:thread_ts.
+                    else r"[CGD][A-Z0-9]+(?::[0-9]+\.[0-9]+)?"
+                    if field == "sealed_channel_ids"
                     else r"[CGD][A-Z0-9]+"
                 )
                 if not cleaned or (

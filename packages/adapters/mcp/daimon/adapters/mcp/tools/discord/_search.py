@@ -319,10 +319,13 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         # When channel_ids is not provided, total_results is the guild-wide
         # count from the bot's perspective — suppress it to avoid leaking the
         # existence/volume of messages in channels the caller cannot view.
-        effective_total = parsed.total_results if channel_ids else showing
+        # Once anything is sealed, a scoped count could include hits in a sealed
+        # thread under a scoped parent, so it reports only what is shown too.
+        exact_count = bool(channel_ids) and not read_policy.policy.sealed_channel_ids
+        effective_total = parsed.total_results if exact_count else showing
         hint: str | None = None
         if clamped_offset + consumed < parsed.total_results:
-            if channel_ids:
+            if exact_count:
                 hint = (
                     f"More results available. Use offset={clamped_offset + consumed} to continue."
                 )
