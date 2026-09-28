@@ -3,6 +3,7 @@
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -10,7 +11,7 @@ from uuid import uuid4
 import pytest
 from daimon.adapters.cli.commands import usage
 from daimon.adapters.cli.main import app
-from daimon.core.stores.turn_usage import TurnUsageRow
+from daimon.core.stores.turn_usage import ChannelUsageRow, TurnUsageRow
 from typer.testing import CliRunner
 
 pytestmark = pytest.mark.no_cli_local_seed
@@ -44,7 +45,22 @@ def test_usage_command_is_read_only_and_scoped(
         unpriced_calls=1,
         billing_posture="exempt",
     )
-    query = AsyncMock(return_value=[row])
+    group = ChannelUsageRow(
+        platform="slack",
+        channel_id="channel",
+        origin="routine",
+        turns=1,
+        measured_turns=1,
+        input_tokens=10,
+        output_tokens=20,
+        cache_read_input_tokens=30,
+        cache_creation_input_tokens=40,
+        model_calls=1,
+        cost_usd=None,
+        known_cost_usd=Decimal(0),
+        unpriced_calls=1,
+    )
+    query = AsyncMock(return_value=[group] if summary else [row])
     session = object()
 
     @asynccontextmanager
@@ -73,7 +89,11 @@ def test_usage_command_is_read_only_and_scoped(
     result = CliRunner().invoke(app, args)
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload[0]["tenant_id"] == str(tenant_id)
+    assert payload[0]["channel_id"] == "channel"
+    if summary:
+        assert payload[0]["turns"] == 1
+    else:
+        assert payload[0]["tenant_id"] == str(tenant_id)
     assert payload[0]["cost_usd"] is None
     assert query.await_args is not None
     assert query.await_args.args == (session,)

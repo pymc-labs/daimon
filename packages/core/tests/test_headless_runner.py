@@ -427,8 +427,9 @@ async def test_run_turn_calls_usage_record_for_span_model_request_end() -> None:
     assert call.kwargs["event"].id == "evt_span_1"
 
 
+@pytest.mark.parametrize("model_id", [_MODEL_ID, "claude-sonnet-4-6"])
 async def test_run_turn_without_usage_record_factory_completes_unbilled(
-    db_session: AsyncSession, db_engine: AsyncEngine
+    db_session: AsyncSession, db_engine: AsyncEngine, model_id: str
 ) -> None:
     """No usage_record_factory -> BillingExempt(reason="headless-unrecorded"):
     the turn still completes and returns its tail, and no span event is ever
@@ -457,7 +458,7 @@ async def test_run_turn_without_usage_record_factory_completes_unbilled(
     tenant = await make_tenant(db_session)
     await db_session.commit()
     sm = async_sessionmaker(db_engine)
-    client = _build_client(events)
+    client = _build_client(events, model_id=model_id)
 
     tail = await run_turn(
         anthropic=client,
@@ -481,8 +482,12 @@ async def test_run_turn_without_usage_record_factory_completes_unbilled(
     assert rows[0].billing_posture == "exempt"
     assert rows[0].model_calls == 1
     assert rows[0].input_tokens == 10 and rows[0].output_tokens == 5
-    assert rows[0].model_ids == [_MODEL_ID]
-    assert rows[0].cost_usd is not None and rows[0].cost_usd > 0
+    assert rows[0].model_ids == [model_id]
+    if model_id == _MODEL_ID:  # This fixture uses a model absent from the price table.
+        assert rows[0].cost_usd is None and rows[0].unpriced_calls == 1
+    else:
+        assert rows[0].cost_usd is not None and rows[0].cost_usd > 0
+        assert rows[0].unpriced_calls == 0
 
 
 async def test_run_turn_reconnects_through_a_clean_close_and_returns_post_reconnect_tail() -> None:
