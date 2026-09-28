@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Annotated
 
@@ -18,6 +19,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import (
     clear_access_policy,
     load_access_policy,
+    lock_access_policy,
     set_access_policy,
 )
 from daimon.core.stores.domain import Platform
@@ -326,6 +328,7 @@ async def tenants_access_policy_set(
     clear: bool = False,
     as_json: bool = False,
 ) -> None:
+    validated_platform = _validate_platform(platform)
     changes: dict[str, object] = {}
     for field, ids in (
         ("invoker_user_ids", invoker),
@@ -334,10 +337,22 @@ async def tenants_access_policy_set(
         ("sealed_channel_ids", sealed_channel),
     ):
         if ids is not None:
-            cleaned = tuple(dict.fromkeys(i.strip() for i in ids if i.strip()))
-            if not cleaned:
+            if not ids:
                 raise typer.BadParameter(f"{field}: pass at least one non-empty id")
-            changes[field] = cleaned
+            for value in ids:
+                cleaned = value.strip()
+                pattern = (
+                    r"[0-9]{15,21}"
+                    if validated_platform == "discord"
+                    else r"[UW][A-Z0-9]+"
+                    if field == "invoker_user_ids"
+                    else r"[CGD][A-Z0-9]+"
+                )
+                if not cleaned or (
+                    validated_platform != "cli" and re.fullmatch(pattern, cleaned) is None
+                ):
+                    raise typer.BadParameter(f"{field}: invalid {validated_platform} id {value!r}")
+            changes[field] = tuple(dict.fromkeys(value.strip() for value in ids))
     if dm_memory_read_only is not None:
         changes["dm_memory_read_only"] = dm_memory_read_only
     if clear and changes:
@@ -348,6 +363,7 @@ async def tenants_access_policy_set(
     label = f"{platform}:{external_id}"
     tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=external_id)
     async with rt.sessionmaker() as session, session.begin():
+        await lock_access_policy(session, tenant_id=tenant_id)
         if clear:
             await clear_access_policy(session, tenant_id=tenant_id)
             policy = OPEN_ACCESS_POLICY

@@ -158,7 +158,13 @@ daimon tenants access-policy set discord GUILD_ID --clear   # back to open
 ```
 
 Each flag given replaces that whole field (repeat it for several ids);
-fields not given keep their stored value. To empty a single field, `--clear`
+fields not given keep their stored value, including concurrent CLI edits.
+Edits and clears lock the tenant row for their transaction, even when no policy
+row exists yet. Every supplied id is validated before writing: Discord ids are
+15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with
+`C`, `G` or `D`, followed by uppercase letters or digits. CLI ids must be
+non-blank. Invalid input names the field and value and writes nothing.
+To empty a single field, `--clear`
 and set the rest again. `set` refuses to overwrite an unreadable row, so
 `--clear` is also the way out of that state. There is no setup-panel editor.
 

@@ -48,7 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `daimon tenants access-policy get|set PLATFORM EXTERNAL_ID` shows and edits a
   tenant's access policy (invoker allowlist, protected channels and
   categories, sealed channels, DM memory); `--clear` puts the tenant back on
-  the open default.
+  the open default. IDs are validated per platform before writing, and concurrent
+  edits preserve fields changed by other CLI commands.
 - Tenant access policy: a tenant can limit who may start a turn to a list of
   platform user ids (admins are always allowed). Discord and Slack refuse
   anyone else at admission with a notice, and so do the MCP and hub turn
