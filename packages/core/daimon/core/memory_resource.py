@@ -56,6 +56,7 @@ async def ensure_memory_store_and_mount(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     agent_name: str,
+    read_only: bool = False,
 ) -> BetaManagedAgentsMemoryStoreResourceParam:
     """Return the memory-store session resource, provisioning on first use.
 
@@ -109,7 +110,7 @@ async def ensure_memory_store_and_mount(
     return {
         "type": "memory_store",
         "memory_store_id": store_id,
-        "access": "read_write",
+        "access": "read_only" if read_only else "read_write",
         "instructions": MEMORY_INSTRUCTIONS,
     }
 

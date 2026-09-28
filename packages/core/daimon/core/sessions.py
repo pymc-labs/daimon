@@ -104,6 +104,7 @@ async def create_session(
     http_client: httpx.AsyncClient | None = None,
     extra_resources: Sequence[Resource] = (),
     billing_exempt: ExemptReason | None = None,
+    memory_read_only: bool = False,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -329,6 +330,7 @@ async def create_session(
                 tenant_id=tenant_id,
                 agent_id=agent_uuid,
                 agent_name=agent.name,
+                read_only=memory_read_only,
             )
             resources.append(memory_mount)
         except (anthropic_pkg.APIError, StoreError) as exc:
@@ -407,6 +409,7 @@ async def create_isolated_session(
     tenant_id: uuid.UUID | None,
     resources: list[Resource],
     billing_exempt: ExemptReason | None = None,
+    memory_read_only: bool = False,
 ) -> BetaManagedAgentsSession:
     """Create an MA session for an isolated agent — `create_session` with every
     optional mount removed.

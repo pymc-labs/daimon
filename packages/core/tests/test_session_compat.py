@@ -86,6 +86,7 @@ def test_decision_ignores_handles_and_diagnostics_when_only_those_differ() -> No
         ("environment_id", "env_other", "environment"),
         ("repo_url", "https://github.com/acme/other", "repo_url"),
         ("repo_branch", "topic", "repo_branch"),
+        ("memory_read_only", True, "memory_access"),
         ("memory_store_id", "memstore_other", "memory_store"),
         ("vault_id", "vault_other", "vault"),
     ],

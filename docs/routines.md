@@ -237,3 +237,6 @@ admin role exempts the creator.
 Routine turns receive core unattended-run framing: avoid clarification questions,
 verify evidence, and use delivery tools for requested output. Agents can customize
 it with `context_fragments.routine` in their YAML spec; see [architecture](architecture.md#invocation-context-fragments).
+
+Routine sessions always mount persistent agent memory read-only, regardless of the
+tenant's chat or DM policy. They can use saved memory but cannot change it.

@@ -74,6 +74,7 @@ _IDENTITY_FIELDS = (
     "repo_url",
     "repo_branch",
     "memory_store_id",
+    "memory_read_only",
     "vault_id",
 )
 _MUTABLE_FIELDS = ("schema_version", "tools_sha256", "mcp_servers_sha256", "env_sha256")
@@ -95,6 +96,7 @@ class SessionSnapshot(BaseModel):
     repo_url: str | None
     repo_branch: str | None
     memory_store_id: str | None
+    memory_read_only: bool = False
     vault_id: str | None
 
     # Mutable axis — a difference here can be applied to the live session.
@@ -230,6 +232,7 @@ def _snapshot_from_session(
     repo_branch: str | None = None
     repo_mount_path: str | None = None
     memory_store_id: str | None = None
+    memory_read_only = False
 
     for resource in session.resources:
         if isinstance(resource, BetaManagedAgentsFileResource):
@@ -244,6 +247,7 @@ def _snapshot_from_session(
                 repo_branch = resource.checkout.name
         else:
             memory_store_id = resource.memory_store_id
+            memory_read_only = resource.access == "read_only"
 
     agent = session.agent
     return SessionSnapshot(
@@ -255,6 +259,7 @@ def _snapshot_from_session(
         repo_url=repo_url,
         repo_branch=repo_branch,
         memory_store_id=memory_store_id,
+        memory_read_only=memory_read_only,
         vault_id=vault_id if vault_id is not None else next(iter(session.vault_ids), None),
         tools_sha256=hash_tools(agent.tools),
         mcp_servers_sha256=hash_mcp_servers(agent.mcp_servers),
@@ -280,6 +285,7 @@ def desired_snapshot(
     memory_store_id: str | None,
     vault_id: str | None,
     env_file_id: str | None = None,
+    memory_read_only: bool = False,
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
 ) -> SessionSnapshot:
@@ -304,6 +310,9 @@ def desired_snapshot(
         repo_url=repo_url,
         repo_branch=repo_branch,
         memory_store_id=memory_store_id,
+        # No mount has no writable memory. Match the observed snapshot so a
+        # provisioning outage does not cause a replacement on every turn.
+        memory_read_only=memory_read_only and memory_store_id is not None,
         vault_id=vault_id,
         tools_sha256=hash_tools(visible_tools(agent, hidden_mcp_server_names)),
         mcp_servers_sha256=hash_mcp_servers(visible_mcp_servers(agent, hidden_mcp_server_names)),

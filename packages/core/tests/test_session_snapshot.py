@@ -488,3 +488,19 @@ def test_a_hidden_server_is_not_in_the_desired_mutable_fingerprint() -> None:
     assert filtered.mcp_servers_sha256 != hash_mcp_servers([personal, daimon]), (
         "hashing the agent's own list is exactly the drift loop this prevents"
     )
+
+
+def test_read_only_policy_without_a_memory_store_does_not_create_phantom_drift() -> None:
+    desired = desired_snapshot(
+        _agent(),
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env_science",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        memory_read_only=True,
+        vault_id=None,
+    )
+    absent_mount = desired.model_copy(update={"memory_read_only": False})
+    assert fingerprint_identity(desired) == fingerprint_identity(absent_mount)

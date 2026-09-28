@@ -523,7 +523,7 @@ async def prepare_session_for_turn(
                 recorded = await recorded_snapshot(
                     deps.anthropic, deps.sessionmaker, existing=row, observed=identity.observed
                 )
-            if recorded is None:
+            if recorded is None and not admission.memory_read_only:
                 # No readable configuration to compare: the session is gone or
                 # unreadable, which the turn's own recovery handles. Bind it as
                 # every pre-continuity turn did.
@@ -545,10 +545,15 @@ async def prepare_session_for_turn(
             agent_uuid=agent_uuid,
             account_id=admission.account_id,
             recorded=recorded,
+            memory_read_only=admission.memory_read_only,
         )
         fresh_start = row.fresh_start_requested_at is not None
         if handed_over:
             decision = ReplaceSession(reasons=("agent_identity",))
+        elif recorded is None:
+            # A restricted turn must get a new read-only session when the
+            # previous mount cannot be established, never reuse unknown access.
+            decision = ReplaceSession(reasons=("memory_access",))
         elif fresh_start:
             decision = ReplaceSession(reasons=())
         else:
@@ -569,15 +574,16 @@ async def prepare_session_for_turn(
 
         current_model = admission.agent.model.id if recorded is None else recorded.model_id
 
+        tightening_memory = admission.memory_read_only and (
+            recorded is None or not recorded.memory_read_only
+        )
         if (
             isinstance(decision, ReplaceSession)
-            and "agent_identity" in decision.reasons
+            and ("agent_identity" in decision.reasons or tightening_memory)
             and turn_is_active(row, now=moment)
         ):
-            # The one change that cannot be deferred onto the current session:
-            # that session belongs to the responder being replaced, so running
-            # this turn there would run the incoming agent's work with the
-            # outgoing agent's credentials, memory and prompt.
+            # Neither a different responder nor stricter memory access may
+            # execute against the old session while replacement is deferred.
             log.info(
                 "session_preparation.busy",
                 mapping_id=str(row.id),
@@ -608,7 +614,9 @@ async def prepare_session_for_turn(
                 desired=desired,
                 reasons=decision.reasons,
                 fresh_start=fresh_start,
-                transfer=transfer,
+                # A checkpoint executes the old session. Never run it with
+                # a writable mount after the origin has become read-only.
+                transfer=None if tightening_memory else transfer,
                 tenant_id=tenant_id,
                 platform=platform,
                 thread_id=thread_id,
