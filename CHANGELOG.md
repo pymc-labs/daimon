@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `invoker_not_allowed`. Tenants without a policy are unchanged. The policy also carries protected and sealed channel lists for
   the channel tools.
 
+- `send_direct_message` delivers private agent messages to verified Discord/Slack
+  tenant members, with per-tenant disabled/allowlist policies and delivery receipts.
+
 - Added durable initial-card intent rows and bounded Discord and Slack history
   lookup. Both adapters now commit an intent before posting, record the
   returned message ID, and reconcile unresolved cards after a restart. A
@@ -89,9 +92,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Direct-message policies normalize tenant UUID keys and reject invalid keys at
+  settings load, so restrictive policies cannot silently miss their tenant.
+
 - Ordinary chat sessions carry their executing agent identity to the Google token broker,
   including existing vaults on the next session creation, while preserving chat tool
   visibility and caller isolation.
+- Slack direct-message errors explain the required `im:write` scope and workspace
+  admin reinstall for missing scopes or invalid authorization, preserving the
+  count of messages already delivered.
 
 - A continuation turn (the follow-up after a private form or a task handoff)
   on Discord or Slack now runs with the requester's live role, re-read from
