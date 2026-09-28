@@ -35,6 +35,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
+from daimon.core.access_policy import is_invoker_allowed
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -63,7 +64,9 @@ from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
-from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.accounts import get_account
+from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import record_result, update_routine_agent_id
 from daimon.core.stores.tenants import get_tenant
@@ -188,6 +191,31 @@ async def _build_fire(
                 external_id=row.created_by_user_id,
             )
             account_id = principal.account_id
+
+            # Invoker policy at fire time: someone taken off the allowlist
+            # stops running headless turns through routines they created. The
+            # stored role is the only admin signal a fire has. Unreadable
+            # policy fails closed.
+            try:
+                policy = await load_access_policy(s, tenant_id=row.tenant_id)
+            except AccessPolicyUnreadable:
+                policy_error: str | None = "access_policy_unreadable"
+            else:
+                account = await get_account(s, account_id)
+                is_admin = account is not None and account.role is Role.ADMIN
+                allowed = is_invoker_allowed(
+                    policy, external_user_id=row.created_by_user_id, is_admin=is_admin
+                )
+                policy_error = None if allowed else "invoker_not_allowed"
+            if policy_error is not None:
+                log.info(
+                    "routine.skipped.invoker_policy",
+                    routine_id=str(row.id),
+                    tenant_id=str(row.tenant_id),
+                    reason=policy_error,
+                )
+                await record_result(s, row.id, tail=None, error=policy_error)
+                return
 
         # Admission gate: per-tenant balance — independent of Stripe config.
         # Keys on row.tenant_id (NOT NULL). Mirror run_one_tick's cap_exceeded skip.

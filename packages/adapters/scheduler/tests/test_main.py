@@ -42,6 +42,7 @@ from daimon.core.usage_recording import record_turn_usage
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import make_tenant
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -866,3 +867,69 @@ async def test_sweep_retired_turn_card_intents_forwards_sessionmaker_and_now(
 
     assert captured[0][0] is db_session_factory
     assert captured[0][1].tzinfo is not None
+
+
+@pytest.mark.parametrize(
+    ("policy_sql", "expected_error"),
+    [
+        ('{"invoker_user_ids": ["staff"]}', "invoker_not_allowed"),
+        ("null", "access_policy_unreadable"),
+    ],
+    ids=["creator-not-allowlisted", "unreadable-policy"],
+)
+async def test_fire_skips_routine_the_invoker_policy_refuses(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    policy_sql: str,
+    expected_error: str,
+) -> None:
+    """SYS-047: a routine fires as its creator, so taking the creator off the
+    allowlist stops it; a policy that can't be read stops it too."""
+    now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10"),
+        reason="trial_credit",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    await db_session.execute(
+        text(
+            "INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, CAST(:p AS jsonb))"
+        ),
+        {"t": tenant.id, "p": policy_sql},
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u1",
+        agent_id="agent_x",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+    )
+    await db_session.commit()
+
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    with unittest.mock.patch(
+        "daimon.adapters.scheduler.main.run_turn",
+        side_effect=AssertionError("a refused routine must not run a turn"),
+    ):
+        await fire(row)
+
+    async with db_session_factory() as s:
+        fetched = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert fetched is not None, "routine row must still exist after the skip"
+    assert fetched.last_error == expected_error, f"got {fetched.last_error!r}"
+    await fake_client.close()

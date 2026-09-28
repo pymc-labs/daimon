@@ -22,22 +22,27 @@ class AccessPolicyUnreadable(DaimonError):
     """The stored policy does not parse; callers must refuse, never assume open."""
 
     def __init__(self, *, tenant_id: uuid.UUID) -> None:
-        super().__init__(f"access policy for tenant {tenant_id} is unreadable")
+        # Adapters render this text as-is, so it names no tenant id.
+        super().__init__(
+            "this workspace's access settings can't be read, so no turn was started; "
+            "ask an admin to fix them"
+        )
         self.tenant_id = tenant_id
 
 
 async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
-    stored = (
+    # Select the row, not just its payload: a JSON `null` payload would
+    # otherwise read as "no row" and fall open.
+    record = (
         await session.execute(
-            select(TenantAccessPolicyRecord.policy).where(
-                TenantAccessPolicyRecord.tenant_id == tenant_id
-            )
+            select(TenantAccessPolicyRecord).where(TenantAccessPolicyRecord.tenant_id == tenant_id)
         )
     ).scalar_one_or_none()
-    if stored is None:
+    if record is None:
         return OPEN_ACCESS_POLICY
     try:
-        return TenantAccessPolicy.model_validate(stored)
+        # JSON null, an array or a string fail validation like a bad field does.
+        return TenantAccessPolicy.model_validate(record.policy)
     except ValidationError as exc:
         raise AccessPolicyUnreadable(tenant_id=tenant_id) from exc
 

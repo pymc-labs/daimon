@@ -26,8 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only the requester on Discord and Slack with `completion_pings`; defaults stay unchanged.
 - Tenant access policy: a tenant can limit who may start a turn to a list of
   platform user ids (admins are always allowed). Discord and Slack refuse
-  anyone else at admission with a notice. Tenants without a policy are
-  unchanged. The policy also carries protected and sealed channel lists for
+  anyone else at admission with a notice, and so do the MCP and hub turn
+  tools; routines whose creator is no longer allowed skip with
+  `invoker_not_allowed`. Tenants without a policy are unchanged. The policy also carries protected and sealed channel lists for
   the channel tools.
 
 - Added durable initial-card intent rows and bounded Discord and Slack history

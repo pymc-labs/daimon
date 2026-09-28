@@ -8,11 +8,19 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
+from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-async def test_admit_denies_when_over_balance() -> None:
+async def test_admit_denies_when_over_balance(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, platform_user_id="u1"
     )
@@ -20,7 +28,7 @@ async def test_admit_denies_when_over_balance() -> None:
         patch("daimon.adapters.mcp.tools._ctx.is_over_balance", new=AsyncMock(return_value=True)),
         pytest.raises(ToolError, match="credit is depleted"),
     ):
-        await _admit(auth, sessionmaker=AsyncMock(), billing_config=None, tool_name="ask")
+        await _admit(auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask")
 
 
 async def test_admit_skips_billing_for_internal_identity() -> None:
@@ -31,3 +39,72 @@ async def test_admit_skips_billing_for_internal_identity() -> None:
     ):
         result = await _admit(auth, sessionmaker=AsyncMock(), billing_config=None, tool_name="ask")
     assert result is auth
+
+
+async def _member(
+    db_session: AsyncSession, *, policy: TenantAccessPolicy | None, role: Role = Role.USER
+) -> AuthIdentity:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await set_role(db_session, account.id, role)
+    if policy is not None:
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+    await db_session.commit()
+    return AuthIdentity(
+        account_id=account.id, tenant_id=tenant.id, role=role, platform_user_id="u1"
+    )
+
+
+_BALANCE_OK = patch(
+    "daimon.adapters.mcp.tools._ctx.is_over_balance", new=AsyncMock(return_value=False)
+)
+
+
+@pytest.mark.parametrize(
+    ("policy", "role"),
+    [
+        (None, Role.USER),
+        (TenantAccessPolicy(invoker_user_ids=("u1",)), Role.USER),
+        (TenantAccessPolicy(invoker_user_ids=("staff",)), Role.ADMIN),
+    ],
+    ids=["no-policy-row", "allowlisted", "stored-admin"],
+)
+async def test_admit_passes_whoever_the_invoker_policy_allows(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    policy: TenantAccessPolicy | None,
+    role: Role,
+) -> None:
+    auth = await _member(db_session, policy=policy, role=role)
+    with _BALANCE_OK:
+        result = await _admit(
+            auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask"
+        )
+    assert result is auth, "an allowed caller must pass through to the billing gates"
+
+
+async def test_admit_refuses_a_member_outside_the_allowlist_before_billing(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    auth = await _member(db_session, policy=TenantAccessPolicy(invoker_user_ids=("staff",)))
+    with (
+        patch(
+            "daimon.adapters.mcp.tools._ctx.is_over_balance",
+            new=AsyncMock(side_effect=AssertionError("policy runs before billing")),
+        ),
+        pytest.raises(ToolError, match="TERMINAL ERROR: You aren't on"),
+    ):
+        await _admit(auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask")
+
+
+async def test_admit_refuses_when_the_policy_is_unreadable(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    auth = await _member(db_session, policy=None)
+    await db_session.execute(
+        text("INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, 'null'::jsonb)"),
+        {"t": auth.tenant_id},
+    )
+    await db_session.commit()
+    with _BALANCE_OK, pytest.raises(ToolError, match="TERMINAL ERROR: this workspace's access"):
+        await _admit(auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask")

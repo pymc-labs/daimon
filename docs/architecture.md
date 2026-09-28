@@ -125,13 +125,23 @@ reason literal; each adapter renders its own notice. See [billing.md](billing.md
 **Tenant access policy — `packages/core/daimon/core/access_policy.py`.** One
 `TenantAccessPolicy` per tenant, stored as JSON in `tenant_access_policies`
 (`packages/core/daimon/core/stores/access_policy.py`). A tenant with no row
-gets the open default, so nothing changes until a policy is written; a row that
-no longer parses raises `AccessPolicyUnreadable` and callers refuse rather than
-fall open. Ids are the platform's own (Discord snowflakes, Slack ids):
+gets the open default, so nothing changes until a policy is written; a present
+row that is not a valid policy object (JSON `null` included) raises
+`AccessPolicyUnreadable` and callers refuse rather than fall open. Unknown
+fields are rejected too, so rolling back past a release that added a field
+locks the tenant out until the row is rewritten.
+
+Who counts as an admin differs by path. `admit()` trusts only the live role the
+adapter passes; no role means non-admin. The MCP turn tools (`ask`,
+`start_turn`, `continue_turn`, on the hub and per agent, plus billed media)
+and routine fires have no live platform role, so they use the account's
+stored role, refreshed on every chat turn. The operator path
+(`platform_user_id` unset: CLI and internal tokens) is not a platform member
+and skips the policy, as it skips billing. Ids are the platform's own (Discord snowflakes, Slack ids):
 
 | Field | Empty means | Enforced by |
 | --- | --- | --- |
-| `invoker_user_ids` | anyone may start a turn; admins always may | `admit()` |
+| `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
 | `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | not yet |
 | `sealed_channel_ids` | nothing is sealed | not yet |
 

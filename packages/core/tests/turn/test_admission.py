@@ -12,14 +12,13 @@ from pathlib import Path
 
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core._models import Tenant, TenantAccessPolicyRecord
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.billing import BillingConfig
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
-from daimon.core.stores.domain import FundingMode, Role
+from daimon.core.stores.domain import FundingMode, Role, TenantRow
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_funding_mode
@@ -33,6 +32,7 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from daimon.testing.factories import (  # isort: skip
@@ -670,7 +670,7 @@ async def test_handoff_thread_refuses_an_agent_from_another_workspace(
 
 async def _seed_admittable_tenant(
     db_session: AsyncSession, *, policy: TenantAccessPolicy | None
-) -> Tenant:
+) -> TenantRow:
     tenant = await make_tenant(db_session)
     await make_tenant_config(
         db_session, tenant=tenant, agent_name="daimon", environment_name="default"
@@ -682,7 +682,7 @@ async def _seed_admittable_tenant(
     return tenant
 
 
-def _admittable_router(tenant: Tenant) -> MARouter:
+def _admittable_router(tenant: TenantRow) -> MARouter:
     return resolved_agent_env_router(
         ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
         ma_environment(id="env_1", name="default", tenant_id=tenant.id),
@@ -749,38 +749,41 @@ async def test_admit_admits_whoever_the_policy_allows(
     assert isinstance(admission, Admission)
 
 
-async def test_admit_uses_the_stored_role_when_the_adapter_passes_none(
+async def test_admit_treats_a_missing_live_role_as_non_admin_even_for_a_stored_admin(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A stored admin role may be stale (the user was demoted since), so only a
+    live role the adapter passes can exempt a caller from the allowlist."""
     tenant = await _seed_admittable_tenant(
         db_session, policy=TenantAccessPolicy(invoker_user_ids=("staff-1",))
     )
     deps = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
     )
-    # First admission records the live admin role, as a mention would.
+    # An earlier mention recorded the user as admin.
     await admit(
         deps,
         tenant_id=tenant.id,
         platform="discord",
-        external_user_id="owner-1",
+        external_user_id="ex-admin",
         channel_id="chan-1",
         now=_NOW,
         role=Role.ADMIN,
     )
 
-    admission = await admit(
-        deps,
-        tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="owner-1",
-        channel_id="chan-1",
-        now=_NOW,
-    )
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="ex-admin",
+            channel_id="chan-1",
+            now=_NOW,
+        )
 
-    assert isinstance(admission, Admission)
+    assert exc_info.value.reason == "invoker_not_allowed", "no live role must mean non-admin"
 
 
 async def test_admit_gate_order_invoker_refusal_wins_over_missing_config_and_balance(
@@ -809,13 +812,20 @@ async def test_admit_gate_order_invoker_refusal_wins_over_missing_config_and_bal
     assert exc_info.value.reason == "invoker_not_allowed"
 
 
+@pytest.mark.parametrize("stored", ['{"bogus": true}', "null"], ids=["bad-object", "json-null"])
 async def test_admit_refuses_when_the_stored_policy_is_unreadable(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    stored: str,
 ) -> None:
     tenant = await _seed_admittable_tenant(db_session, policy=None)
-    db_session.add(TenantAccessPolicyRecord(tenant_id=tenant.id, policy={"bogus": True}))
+    await db_session.execute(
+        text(
+            "INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, CAST(:p AS jsonb))"
+        ),
+        {"t": tenant.id, "p": stored},
+    )
     await db_session.commit()
     deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=MARouter())
 
@@ -827,5 +837,5 @@ async def test_admit_refuses_when_the_stored_policy_is_unreadable(
             external_user_id="anyone",
             channel_id="chan-1",
             now=_NOW,
-            role=Role.USER,
+            role=Role.ADMIN,
         )

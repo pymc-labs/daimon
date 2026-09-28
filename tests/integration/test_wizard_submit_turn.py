@@ -26,13 +26,15 @@ import httpx
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
 from daimon.adapters.discord.wizard_submit import WizardSubmitButton
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenant_ledger, usage_events
-from daimon.core.stores.accounts import get_account
-from daimon.core.stores.domain import TenantRow, WizardSessionRow
+from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.domain import Role, TenantRow, WizardSessionRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import get_live_thread_session, list_orphaned_turns
 from daimon.core.stores.wizard_session import get_wizard_session
@@ -596,6 +598,54 @@ async def test_a_submitter_over_balance_is_told_and_no_turn_runs(
     assert after.status == "submitted", (
         "the row must stay claimed -- the claim commits before admission runs, so a "
         "post-hoc refusal must not lose the submitter's answers"
+    )
+
+
+async def test_a_demoted_admin_outside_the_allowlist_is_refused_on_submit(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """SYS-047: the stored role still says admin, but the live interaction does
+    not; the invoker policy must judge the live role and refuse the turn."""
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800007001")
+    async with db_session_factory() as session, session.begin():
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant.id, platform="discord", external_id=_REQUESTER_ID
+        )
+        await set_role(session, principal.account_id, Role.ADMIN)
+        await set_access_policy(
+            session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_user_ids=("staff",))
+        )
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+
+    channel = _make_channel(thread_id=7007, parent_id=6007)
+    stream_hits: list[str] = []
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=stream_hits)
+    bot = _make_bot(_make_runtime(db_session_factory, router))
+    # No spec=Member on the user -> the live role is non-admin.
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+
+    with patch("daimon.core.turn.prepare.create_session") as mock_create_session:
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]  # drain the spawned turn
+        mock_create_session.assert_not_called()
+
+    assert stream_hits == [], "a refused submitter must never reach the turn stream"
+    posted_texts = [
+        call.args[0]
+        for call in channel.send.call_args_list
+        if call.args and isinstance(call.args[0], str)
+    ]
+    assert any("recorded" in t and "can start a turn" in t for t in posted_texts), (
+        f"the refusal must say the answers were recorded and why, got: {posted_texts}"
+    )
+    async with db_session_factory() as session:
+        account = await get_account(session, principal.account_id)
+    assert account is not None and account.role is Role.USER, (
+        "the live non-admin role must be persisted, replacing the stale admin one"
     )
 
 

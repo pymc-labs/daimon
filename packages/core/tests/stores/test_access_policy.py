@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from daimon.core._models import TenantAccessPolicyRecord
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
@@ -11,6 +10,7 @@ from daimon.core.stores.access_policy import (
     set_access_policy,
 )
 from daimon.testing.factories import make_tenant
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -33,12 +33,23 @@ async def test_set_then_load_round_trips_and_overwrites(db_session: AsyncSession
     assert await load_access_policy(db_session, tenant_id=tenant.id) == second
 
 
-async def test_unreadable_row_raises_instead_of_falling_open(db_session: AsyncSession) -> None:
+@pytest.mark.parametrize(
+    "stored",
+    ['{"invoker_user_ids": "not-a-list!"}', '{"typo_ids": []}', "null", "[]", '"open"'],
+    ids=["bad-field", "unknown-field", "json-null", "array", "string"],
+)
+async def test_unreadable_row_raises_instead_of_falling_open(
+    db_session: AsyncSession, stored: str
+) -> None:
+    """Only an absent row is open; a present row that isn't a valid policy object
+    -- JSON null included -- fails closed."""
     tenant = await make_tenant(db_session)
-    db_session.add(
-        TenantAccessPolicyRecord(tenant_id=tenant.id, policy={"invoker_user_ids": "not-a-list!"})
+    await db_session.execute(
+        text(
+            "INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, CAST(:p AS jsonb))"
+        ),
+        {"t": tenant.id, "p": stored},
     )
-    await db_session.flush()
 
     with pytest.raises(AccessPolicyUnreadable):
         await load_access_policy(db_session, tenant_id=tenant.id)

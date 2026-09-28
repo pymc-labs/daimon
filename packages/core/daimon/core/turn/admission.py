@@ -32,7 +32,7 @@ from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
@@ -79,14 +79,11 @@ async def admit(
         await session.commit()
         # Read after the role commit, so a refused turn still records the role.
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        if role is None:
-            account = await get_account(session, principal.account_id)
-            role = account.role if account is not None else None
 
-    # --- Invoker policy: a tenant may restrict who can start a turn. Admin is
-    # the live role when the adapter supplied one, else the stored one. An
-    # unreadable policy raised `AccessPolicyUnreadable` above -- refused, never
-    # open. ---
+    # --- Invoker policy: a tenant may restrict who can start a turn. Only a
+    # live ADMIN role passed by the adapter exempts the caller; no role means
+    # non-admin, never a stored role the user may have lost. An unreadable
+    # policy raised `AccessPolicyUnreadable` above -- refused, never open. ---
     if not is_invoker_allowed(
         policy, external_user_id=external_user_id, is_admin=role is Role.ADMIN
     ):
