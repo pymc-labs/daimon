@@ -385,7 +385,7 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
         try:
             channel = await _channel_info(rc.client, channel_id=channel_id)
             await _gate_user_source(runtime, auth, channel=channel)
-            read_policy.require(channel_id)
+            read_policy.require(f"{channel_id}:{thread_ts}", channel_id)
             return await _fetch_thread_replies(
                 rc.client, channel_id=channel_id, thread_ts=thread_ts, limit=limit
             )
@@ -403,7 +403,7 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
     try:
         channel = await _channel_info(bot_client, channel_id=channel_id)
         await check_channel_access(bot_client, channel=channel, user_id=user_id)
-        read_policy.require(channel_id)
+        read_policy.require(f"{channel_id}:{thread_ts}", channel_id)
         return await _fetch_thread_replies(
             bot_client, channel_id=channel_id, thread_ts=thread_ts, limit=limit
         )
@@ -452,6 +452,15 @@ async def _fetch_single_message(
     return _to_message_rows([match], usernames)[0].model_copy(update={"trust": "untrusted"})
 
 
+def _require_thread_readable(
+    read_policy: ChannelReadPolicy, channel_id: str, row: SlackMessageRow
+) -> SlackMessageRow:
+    """A message inside a thread sealed on its own (``channel_id:thread_ts``) is
+    withheld like the thread itself; only fetching it says which thread it is in."""
+    read_policy.require(f"{channel_id}:{row.thread_ts or row.ts}", channel_id)
+    return row
+
+
 async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -469,8 +478,12 @@ async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
             channel = await _channel_info(rc.client, channel_id=channel_id)
             await _gate_user_source(runtime, auth, channel=channel)
             read_policy.require(channel_id)
-            return await _fetch_single_message(
-                rc.client, channel_id=channel_id, message_id=message_id
+            return _require_thread_readable(
+                read_policy,
+                channel_id,
+                await _fetch_single_message(
+                    rc.client, channel_id=channel_id, message_id=message_id
+                ),
             )
         except SlackApiError as err:
             # Any not_in_channel from the user token (typically a public channel
@@ -487,7 +500,11 @@ async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
         channel = await _channel_info(bot_client, channel_id=channel_id)
         await check_channel_access(bot_client, channel=channel, user_id=user_id)
         read_policy.require(channel_id)
-        return await _fetch_single_message(bot_client, channel_id=channel_id, message_id=message_id)
+        return _require_thread_readable(
+            read_policy,
+            channel_id,
+            await _fetch_single_message(bot_client, channel_id=channel_id, message_id=message_id),
+        )
     except ToolError as terr:
         if rc.runs_as_user or isinstance(terr, SealedChannelError):
             raise

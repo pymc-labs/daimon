@@ -178,6 +178,11 @@ own permission check so it never reveals a channel the caller cannot see. A
 sealed channel's content is readable only from a turn inside it (the channel
 or a thread under it): the read must pass the `origin_context_id` from that
 turn's controls, and a missing, expired or foreign origin counts as outside.
+The origin must also belong to the agent the token executes as (`agent_id`,
+or `chat_agent_id` for ordinary chat); a token bound to neither can't claim
+one. A single thread can be sealed on its own: a Discord thread by its id, a
+Slack thread as `channel_id:thread_ts`. Such a thread, its messages and (on
+Discord) its name in `list_threads` are withheld from outside turns.
 Outside reads are refused after the platform's own caller check, and search
 drops sealed hits. Operators edit the policy with the CLI:
 

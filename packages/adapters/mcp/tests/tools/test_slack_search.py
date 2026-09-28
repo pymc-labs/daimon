@@ -332,3 +332,41 @@ async def test_search_withholds_sealed_channel_hits_outside_the_channel(
         )
     assert [x.text for x in result.matches] == expected_texts, "sealed hits follow the origin"
     assert result.total == expected_total, "a withheld hit must not be counted"
+
+
+@pytest.mark.asyncio
+async def test_search_withholds_hits_from_a_thread_sealed_on_its_own(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A reply's permalink names its thread; a thread sealed as channel:thread_ts
+    loses both its root and its replies from outside results."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    await _seed_user_token(runtime, committing_sessionmaker)
+    await _seed_turn_context(committing_sessionmaker, auth, channel_id="C_OPEN")
+    read_policy = ChannelReadPolicy(policy=TenantAccessPolicy(sealed_channel_ids=("C_OPEN:1.0",)))
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _SEARCH_MESSAGES,
+            payload={
+                "ok": True,
+                "messages": {
+                    "paging": {"count": 20, "total": 3, "page": 1, "pages": 1},
+                    "matches": [
+                        {"channel": {"id": "C_OPEN"}, "ts": "1.0", "text": "sealed root"},
+                        {
+                            "channel": {"id": "C_OPEN"},
+                            "ts": "1.5",
+                            "text": "sealed reply",
+                            "permalink": "https://x.slack.com/archives/C_OPEN/p15?thread_ts=1.0&cid=C_OPEN",
+                        },
+                        {"channel": {"id": "C_OPEN"}, "ts": "2.0", "text": "open hit"},
+                    ],
+                },
+            },
+        )
+        result = await _slack_search_messages_impl(
+            runtime, auth, content="q", limit=10, read_policy=read_policy
+        )
+    assert [x.text for x in result.matches] == ["open hit"], "the sealed thread is withheld"
+    assert result.total == 1, "withheld hits must not be counted"

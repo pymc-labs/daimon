@@ -348,11 +348,14 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
                     await _check_thread_view(c, t, member, _require_discord_identity(auth))
                 except ToolError:
                     continue  # silently omit (no existence leak)
-            result.append(_to_thread_row(t))
+            # A thread sealed on its own keeps even its name from outside turns.
+            if read_policy.allows(str(t.id), str(parent.id)):
+                result.append(_to_thread_row(t))
 
         # Archived public threads (private=False is default)
         async for t in parent.archived_threads(limit=50):
-            result.append(_to_thread_row(t))
+            if read_policy.allows(str(t.id), str(parent.id)):
+                result.append(_to_thread_row(t))
 
         return result
 

@@ -33,6 +33,7 @@ from daimon.core.config import (
     SlackSettings,
 )
 from daimon.core.github_credentials import build_multifernet, encrypt_token
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_jwt
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
@@ -100,8 +101,14 @@ async def _caller(
     user_id: str,
     policy: TenantAccessPolicy,
     origin_channel_id: str | None = None,
+    origin_thread_id: str = "thread-of-the-turn",
+    chat_agent: str | None = "agent_x",
 ) -> tuple[str, str | None]:
-    """Seed the tenant, the caller and the policy; return (token, origin_context_id)."""
+    """Seed the tenant, the caller and the policy; return (token, origin_context_id).
+
+    The token is a real signed ordinary-chat token executing as ``chat_agent``
+    (None: an unbound token); the origin's responder is always ``agent_x``.
+    """
     tenant = await make_tenant(db_session, platform=platform, workspace_id=workspace_id)  # pyright: ignore[reportArgumentType]
     principal = await make_platform_principal(
         db_session, platform=platform, external_id=user_id, tenant=tenant
@@ -116,7 +123,7 @@ async def _caller(
             account_id=principal.account_id,
             platform=platform,
             parent_channel_id=origin_channel_id,
-            thread_id="thread-of-the-turn",
+            thread_id=origin_thread_id,
             responder_ma_agent_id="agent_x",
             responder_name="daimon",
             configuration_target_ma_agent_id=None,
@@ -132,7 +139,16 @@ async def _caller(
             db_session, team_id=workspace_id, encrypted_token=encrypt_token(fernet, "xoxb-x")
         )
     await db_session.commit()
-    token = mint_jwt(account_id=principal.account_id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = mint_jwt(
+        account_id=principal.account_id,
+        secret=_SECRET,
+        now=dt.datetime.now(dt.UTC),
+        chat_agent_id=(
+            derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=chat_agent)
+            if chat_agent is not None
+            else None
+        ),
+    )
     return token, origin_id
 
 
@@ -164,6 +180,19 @@ def _discord_handler(history_hits: list[str]) -> Any:
             return _payloads._text_channel_payload(  # pyright: ignore[reportPrivateUsage]
                 channel_id=str(route.channel_id), guild_id=_GUILD
             )
+        if route.path == "/guilds/{guild_id}/threads/active":
+            return {
+                "threads": [
+                    _payloads._thread_payload(thread_id="901", parent_id=_OTHER),  # pyright: ignore[reportPrivateUsage]
+                    {
+                        **_payloads._thread_payload(thread_id="902", parent_id=_OTHER),  # pyright: ignore[reportPrivateUsage]
+                        "name": "sealed acquisition target",
+                    },
+                ],
+                "members": [],
+            }
+        if route.path == "/channels/{channel_id}/threads/archived/public":
+            return {"threads": [], "members": [], "has_more": False}
         if route.method == "GET" and route.path == "/channels/{channel_id}/messages":
             history_hits.append(str(route.channel_id))
             return []
@@ -340,3 +369,146 @@ def test_read_policy_allows_a_sealed_channel_only_from_inside_it(
         policy=TenantAccessPolicy(sealed_channel_ids=("vault",)), origin_channel_ids=origin
     )
     assert read_policy.allows(channel_id, parent_channel_id) is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "chat_agent", ["agent_other", None], ids=["foreign-responder", "unbound-token"]
+)
+async def test_discord_sealed_origin_is_refused_to_a_token_of_another_responder(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    chat_agent: str | None,
+) -> None:
+    """The origin belongs to agent_x. A chat token executing as another agent,
+    or bound to none, can't borrow it to read the sealed channel."""
+    token, origin_id = await _caller(
+        db_session,
+        platform="discord",
+        workspace_id=_GUILD,
+        user_id=_CALLER,
+        policy=TenantAccessPolicy(sealed_channel_ids=(_SEALED,)),
+        origin_channel_id=_SEALED,
+        chat_agent=chat_agent,
+    )
+    history_hits: list[str] = []
+    patch_discord_http(monkeypatch, _discord_handler(history_hits))
+
+    payload = await _call(
+        _app(sessionmaker),
+        token,
+        "read_channel",
+        {"channel_id": _SEALED, "origin_context_id": origin_id},
+    )
+
+    assert payload.get("isError") and "sealed" in _text(payload), f"got {payload!r}"
+    assert history_hits == [], "a borrowed origin must never reach the sealed history"
+
+
+@pytest.mark.asyncio
+async def test_discord_list_threads_withholds_an_individually_sealed_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    token, _ = await _caller(
+        db_session,
+        platform="discord",
+        workspace_id=_GUILD,
+        user_id=_CALLER,
+        policy=TenantAccessPolicy(sealed_channel_ids=("902",)),
+    )
+    patch_discord_http(monkeypatch, _discord_handler([]))
+
+    payload = await _call(_app(sessionmaker), token, "list_threads", {"channel_id": _OTHER})
+
+    assert not payload.get("isError"), f"got {payload!r}"
+    assert "901" in _text(payload), "the open thread is still listed"
+    assert "902" not in _text(payload) and "sealed acquisition target" not in _text(payload), (
+        "a sealed thread's id and name must not reach an outside turn"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("origin_thread", "allowed"),
+    [(None, False), ("1700000000.000100", True)],
+    ids=["outside", "inside-the-thread"],
+)
+async def test_slack_read_thread_honours_a_seal_on_the_thread_itself(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    origin_thread: str | None,
+    allowed: bool,
+) -> None:
+    """A Slack thread is sealed as channel_id:thread_ts; its open channel doesn't
+    open it."""
+    token, origin_id = await _caller(
+        db_session,
+        platform="slack",
+        workspace_id="T_TEST",
+        user_id="U_CALLER",
+        policy=TenantAccessPolicy(sealed_channel_ids=("C_OPEN:1700000000.000100",)),
+        origin_channel_id="C_OPEN" if origin_thread else None,
+        origin_thread_id=origin_thread or "unused",
+    )
+    arguments: dict[str, object] = {"thread_id": "C_OPEN:1700000000.000100"}
+    if origin_id is not None:
+        arguments["origin_context_id"] = origin_id
+    with aioresponses(passthrough=["http://127.0.0.1", "http://testserver"]) as m:
+        _mock_public_channel(m, "C_OPEN")
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            re.compile(r"https://slack\.com/api/conversations\.replies.*"),
+            payload={"ok": True, "messages": [{"ts": "1700000000.000100", "text": "secret"}]},
+            repeat=True,
+        )
+        payload = await _call(_app(sessionmaker), token, "read_thread", arguments)
+
+    if allowed:
+        assert not payload.get("isError") and "secret" in _text(payload), f"got {payload!r}"
+    else:
+        assert payload.get("isError") and "sealed" in _text(payload), f"got {payload!r}"
+        assert "secret" not in _text(payload)
+
+
+@pytest.mark.asyncio
+async def test_slack_get_message_withholds_a_reply_inside_a_sealed_thread(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    token, _ = await _caller(
+        db_session,
+        platform="slack",
+        workspace_id="T_TEST",
+        user_id="U_CALLER",
+        policy=TenantAccessPolicy(sealed_channel_ids=("C_OPEN:1700000000.000100",)),
+    )
+    with aioresponses(passthrough=["http://127.0.0.1", "http://testserver"]) as m:
+        _mock_public_channel(m, "C_OPEN")
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_HISTORY, payload={"ok": True, "messages": []}, repeat=True
+        )
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            re.compile(r"https://slack\.com/api/conversations\.replies.*"),
+            payload={
+                "ok": True,
+                "messages": [
+                    {
+                        "ts": "1700000000.000200",
+                        "thread_ts": "1700000000.000100",
+                        "text": "secret reply",
+                    }
+                ],
+            },
+            repeat=True,
+        )
+        payload = await _call(
+            _app(sessionmaker),
+            token,
+            "get_message",
+            {"channel_id": "C_OPEN", "message_id": "1700000000.000200"},
+        )
+
+    assert payload.get("isError") and "sealed" in _text(payload), f"got {payload!r}"
+    assert "secret reply" not in _text(payload)

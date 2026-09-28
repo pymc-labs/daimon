@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 from typing import Any, cast
+from urllib.parse import parse_qs, urlparse
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -28,6 +29,15 @@ from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 
 _SEARCH_LIMIT_CAP = 25
+
+
+def _permalink_thread_ts(permalink: object) -> str | None:
+    """The thread a search hit sits in: Slack's permalink for a reply carries it
+    as a ``thread_ts`` query parameter; a root message has none."""
+    if not isinstance(permalink, str):
+        return None
+    values = parse_qs(urlparse(permalink).query).get("thread_ts")
+    return values[0] if values else None
 
 
 async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
@@ -63,8 +73,11 @@ async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
         channel = cast(dict[str, Any], m.get("channel") or {})
         if not dm_ok and channel.get("is_im"):
             continue
-        # A sealed channel's hits are withheld outside it, and drop out of the total.
-        if not read_policy.allows(str(channel.get("id", ""))):
+        # A sealed channel's hits -- or a sealed thread's, keyed channel_id:thread_ts
+        # -- are withheld outside it, and drop out of the total.
+        channel_id = str(channel.get("id", ""))
+        thread_ts = _permalink_thread_ts(m.get("permalink")) or str(m.get("ts", ""))
+        if not read_policy.allows(f"{channel_id}:{thread_ts}", channel_id):
             total = max(0, total - 1)
             continue
         matches.append(

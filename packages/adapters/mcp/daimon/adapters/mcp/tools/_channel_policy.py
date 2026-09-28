@@ -110,16 +110,26 @@ async def load_read_policy(
 ) -> ChannelReadPolicy:
     """Load the tenant policy and, if one was named, the caller's active turn origin.
 
-    An origin that is malformed, expired, another account's or another
-    responder's counts as no origin: the read is judged from outside.
+    The origin must belong to the caller's account and to the agent the token
+    executes as: ``agent_id`` for agent-session tokens, ``chat_agent_id`` for
+    ordinary chat. A token bound to neither can't claim an origin at all, so a
+    sealed read with it is judged from outside. An origin that is malformed,
+    expired, another account's or another responder's counts as none too.
     """
     policy = await load_channel_policy(runtime, auth)
-    if not policy.sealed_channel_ids or not origin_context_id or auth.platform is None:
-        return ChannelReadPolicy(policy=policy)
+    outside = ChannelReadPolicy(policy=policy)
+    executing_agent = auth.agent_id or auth.chat_agent_id
+    if (
+        not policy.sealed_channel_ids
+        or not origin_context_id
+        or auth.platform is None
+        or executing_agent is None
+    ):
+        return outside
     try:
         origin_id = uuid.UUID(origin_context_id)
     except ValueError:
-        return ChannelReadPolicy(policy=policy)
+        return outside
     async with runtime.session_factory() as session:
         origin = await get_active_origin(
             session,
@@ -129,12 +139,12 @@ async def load_read_policy(
             platform=auth.platform,
             now=datetime.now(UTC),
         )
-    if origin is None or (
-        auth.agent_id is not None
-        and auth.agent_id
-        != derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
+    if origin is None or executing_agent != derive_agent_uuid(
+        tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
     ):
-        return ChannelReadPolicy(policy=policy)
-    return ChannelReadPolicy(
-        policy=policy, origin_channel_ids=frozenset({origin.parent_channel_id, origin.thread_id})
-    )
+        return outside
+    inside = {origin.parent_channel_id, origin.thread_id}
+    if auth.platform == "slack":
+        # A Slack thread is sealed by its channel_id:thread_ts form.
+        inside.add(f"{origin.parent_channel_id}:{origin.thread_id}")
+    return ChannelReadPolicy(policy=policy, origin_channel_ids=frozenset(inside))
