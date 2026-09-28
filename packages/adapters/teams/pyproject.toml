@@ -10,14 +10,8 @@ dependencies = [
     "asyncpg>=0.29",
     "daimon-core",
     "fastapi>=0.115",
-    # Pinned below 2.1: 2.1.0 reworked the stream/activity surfaces this
-    # adapter is written against (`ActivitySender.create_stream` was removed).
-    # Relaxing the pin requires a verified port of the stream identity and
-    # close() semantics this package depends on. The tested surface is the
-    # locked set in uv.lock: apps 2.0.16 with the sibling packages
-    # (microsoft-teams-api, -cards, -common) at 2.1.0 — the siblings carry no
-    # ceiling of their own, so the lock is the contract, not the pin alone.
-    "microsoft-teams-apps>=2.0.16,<2.1",
+    "httpx>=0.27",
+    "microsoft-teams-apps>=2.1,<2.2",
     "sentry-sdk>=2.61",
     "sqlalchemy[asyncio]>=2",
     "structlog>=24",

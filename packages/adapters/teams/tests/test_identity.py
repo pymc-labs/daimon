@@ -1,156 +1,146 @@
-"""VerifiedTeamsTurnResolver: fail-closed identity mapping for personal chat.
-
-Every case drives the REAL resolver over a real ``MessageActivity`` model —
-only ``ctx.send`` is recorded, and the tenant row comes from the test DB.
-"""
+"""parse_inbound and resolve_tenant: fail-closed identity for channels and 1:1 chats."""
 
 from __future__ import annotations
 
 import uuid
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from daimon.adapters.teams.identity import (
-    DENIED_MESSAGE,
-    INPUT_TOO_LONG_MESSAGE,
+    DENIED,
+    GROUP_CHAT_UNSUPPORTED,
+    INPUT_TOO_LONG,
     MAX_INBOUND_MESSAGE_BYTES,
-    PERSONAL_CHAT_ONLY_MESSAGE,
-    VerifiedTeamsTurnResolver,
+    TEXT_ONLY,
+    Refusal,
+    TeamsInbound,
+    parse_inbound,
+    resolve_tenant,
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import set_provision_status
-from microsoft_teams.api import MessageActivity  # pyright: ignore[reportMissingTypeStubs]
+from microsoft_teams.api import MessageActivity
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .conftest import AAD_OBJECT_ID, ENTRA_TENANT_ID, make_message_activity
+from .conftest import (
+    AAD_OBJECT_ID,
+    CHANNEL_ID,
+    CONVERSATION_ID,
+    ENTRA_TENANT_ID,
+    SERVICE_URL,
+    THREAD_ID,
+    make_channel_activity,
+    make_message_activity,
+)
+
+TENANT_UUID = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 
 
-def _ctx(payload: dict[str, object]) -> tuple[Any, list[str]]:
-    sent: list[str] = []
-
-    async def _send(text: str) -> None:
-        sent.append(text)
-
-    ctx = SimpleNamespace(activity=MessageActivity.model_validate(payload), send=_send)
-    return ctx, sent
+def _parse(payload: dict[str, object]) -> TeamsInbound | Refusal:
+    activity = MessageActivity.model_validate(payload)
+    return parse_inbound(activity, configured_tenant=ENTRA_TENANT_ID, service_url=SERVICE_URL)
 
 
-def _resolver(
-    db_factory: async_sessionmaker[AsyncSession], *, tenant_id: str = ENTRA_TENANT_ID
-) -> VerifiedTeamsTurnResolver:
-    return VerifiedTeamsTurnResolver(sessionmaker=db_factory, entra_tenant_id=tenant_id)
+def test_personal_message_is_a_dm_keyed_on_the_chat() -> None:
+    inbound = _parse(make_message_activity(text="  hello there  "))
+    assert inbound == TeamsInbound(
+        kind="dm",
+        entra_tenant_id=ENTRA_TENANT_ID,
+        user_id=AAD_OBJECT_ID,
+        conversation_id=CONVERSATION_ID,
+        channel_id=CONVERSATION_ID,
+        activity_id="activity-1",
+        text="hello there",
+        service_url=SERVICE_URL,
+    )
 
 
-@pytest.fixture
-async def provisioned(db_session_factory: async_sessionmaker[AsyncSession]) -> uuid.UUID:
-    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
-    return derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+def test_channel_mention_keys_on_the_thread_and_strips_the_bot_mention() -> None:
+    inbound = _parse(make_channel_activity(text="fit a model"))
+    assert isinstance(inbound, TeamsInbound)
+    assert inbound.kind == "channel"
+    assert inbound.conversation_id == THREAD_ID
+    assert inbound.channel_id == CHANNEL_ID
+    assert inbound.text == "fit a model"
 
 
-@pytest.mark.asyncio
-async def test_valid_personal_activity_maps_to_authorized_turn(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    provisioned: uuid.UUID,
-) -> None:
-    ctx, sent = _ctx(make_message_activity(text="  hello there  "))
-    authorized = await _resolver(db_session_factory)(ctx)
-    assert authorized is not None
-    assert sent == []
-    assert authorized.tenant_id == provisioned
-    assert authorized.external_user_id == AAD_OBJECT_ID
-    assert authorized.conversation_id
-    assert authorized.activity_id == "activity-1"
-    assert authorized.message == "hello there"
+def test_channel_root_post_becomes_its_own_thread() -> None:
+    inbound = _parse(make_channel_activity(conversation_id=CHANNEL_ID, activity_id="1700000000009"))
+    assert isinstance(inbound, TeamsInbound)
+    assert inbound.conversation_id == f"{CHANNEL_ID};messageid=1700000000009"
+    assert inbound.channel_id == CHANNEL_ID
 
 
-@pytest.mark.asyncio
-async def test_group_conversation_gets_personal_only_notice(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    provisioned: uuid.UUID,
-) -> None:
-    ctx, sent = _ctx(make_message_activity(conversation_type="groupChat"))
-    assert await _resolver(db_session_factory)(ctx) is None
-    assert sent == [PERSONAL_CHAT_ONLY_MESSAGE]
+def test_channel_message_without_a_bot_mention_is_ignored_silently() -> None:
+    assert _parse(make_channel_activity(mention_bot=False)) == Refusal(None)
 
 
-@pytest.mark.asyncio
-async def test_contradictory_group_flag_fails_closed(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    provisioned: uuid.UUID,
-) -> None:
-    ctx, sent = _ctx(make_message_activity(is_group=True))
-    assert await _resolver(db_session_factory)(ctx) is None
-    assert sent == [DENIED_MESSAGE]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "payload_kwargs",
+    "overrides",
     [
-        {"tenant_id": str(uuid.UUID(int=3))},
-        {"channel_tenant_id": str(uuid.UUID(int=3))},
+        {"conversation_type": "groupChat"},
+        {"conversation_type": "personal", "is_group": True},
+    ],
+)
+def test_group_chats_are_refused(overrides: dict[str, Any]) -> None:
+    assert _parse(make_message_activity(**overrides)) == Refusal(GROUP_CHAT_UNSUPPORTED)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"tenant_id": str(uuid.UUID(int=99))},
+        {"channel_tenant_id": str(uuid.UUID(int=99))},
+        {"channel_tenant_id": None},
         {"aad_object_id": None},
         {"aad_object_id": "not-a-uuid"},
         {"channel_id": "webchat"},
-        {"text": "   "},
-    ],
-    ids=[
-        "wrong_conversation_tenant",
-        "wrong_channel_data_tenant",
-        "missing_aad_object_id",
-        "malformed_aad_object_id",
-        "wrong_channel",
-        "empty_text",
     ],
 )
-async def test_unverifiable_fields_deny(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    provisioned: uuid.UUID,
-    payload_kwargs: dict[str, object],
-) -> None:
-    ctx, sent = _ctx(make_message_activity(**payload_kwargs))
-    assert await _resolver(db_session_factory)(ctx) is None
-    assert sent == [DENIED_MESSAGE]
+def test_unverified_senders_are_denied(overrides: dict[str, Any]) -> None:
+    assert _parse(make_message_activity(**overrides)) == Refusal(DENIED)
+
+
+def test_tenant_comparison_ignores_case() -> None:
+    inbound = _parse(make_message_activity(tenant_id=ENTRA_TENANT_ID.upper()))
+    assert isinstance(inbound, TeamsInbound)
+
+
+def test_a_bare_mention_asks_for_text() -> None:
+    assert _parse(make_channel_activity(text="")) == Refusal(TEXT_ONLY)
+
+
+def test_oversize_input_is_refused() -> None:
+    text = "x" * (MAX_INBOUND_MESSAGE_BYTES + 1)
+    assert _parse(make_message_activity(text=text)) == Refusal(INPUT_TOO_LONG)
 
 
 @pytest.mark.asyncio
-async def test_oversized_text_gets_length_notice(
+async def test_resolve_tenant_accepts_a_live_tenant_for_dms_and_channels(
     db_session_factory: async_sessionmaker[AsyncSession],
-    provisioned: uuid.UUID,
 ) -> None:
-    ctx, sent = _ctx(make_message_activity(text="x" * (MAX_INBOUND_MESSAGE_BYTES + 1)))
-    assert await _resolver(db_session_factory)(ctx) is None
-    assert sent == [INPUT_TOO_LONG_MESSAGE]
+    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    for payload in (make_message_activity(), make_channel_activity()):
+        inbound = _parse(payload)
+        assert isinstance(inbound, TeamsInbound)
+        assert await resolve_tenant(db_session_factory, inbound) == TENANT_UUID
 
 
 @pytest.mark.asyncio
-async def test_unprovisioned_tenant_denies(
-    db_session_factory: async_sessionmaker[AsyncSession],
+@pytest.mark.parametrize("state", ["missing", "pending", "archived"])
+async def test_resolve_tenant_denies_a_tenant_that_is_not_live(
+    db_session_factory: async_sessionmaker[AsyncSession], state: str
 ) -> None:
-    ctx, sent = _ctx(make_message_activity())
-    assert await _resolver(db_session_factory)(ctx) is None
-    assert sent == [DENIED_MESSAGE]
-
-
-@pytest.mark.asyncio
-async def test_pending_tenant_denies(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    provisioned: uuid.UUID,
-) -> None:
-    await set_provision_status(db_session_factory, tenant_id=provisioned, status="pending")
-    ctx, sent = _ctx(make_message_activity())
-    assert await _resolver(db_session_factory)(ctx) is None
-    assert sent == [DENIED_MESSAGE]
-
-
-@pytest.mark.asyncio
-async def test_archived_tenant_denies(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    provisioned: uuid.UUID,
-) -> None:
-    await set_provision_status(db_session_factory, tenant_id=provisioned, archive=True)
-    ctx, sent = _ctx(make_message_activity())
-    assert await _resolver(db_session_factory)(ctx) is None
-    assert sent == [DENIED_MESSAGE]
+    if state != "missing":
+        await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
+        await set_provision_status(
+            db_session_factory,
+            tenant_id=TENANT_UUID,
+            status="pending" if state == "pending" else None,
+            archive=state == "archived",
+        )
+    for payload in (make_message_activity(), make_channel_activity()):
+        inbound = _parse(payload)
+        assert isinstance(inbound, TeamsInbound)
+        assert await resolve_tenant(db_session_factory, inbound) is None

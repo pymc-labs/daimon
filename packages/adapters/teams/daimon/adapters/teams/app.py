@@ -1,37 +1,63 @@
-"""Personal-chat turn dispatch for the Teams adapter.
+"""Teams turn orchestration: queueing, the turn body, commands and Cancel.
 
-``VerifiedTeamsTurnResolver`` verifies and resolves the inbound activity;
-the dispatcher owns what happens next. ``DirectCoreTurnDispatcher`` runs
-the turn in this process as an ``asyncio.create_task`` background task
-through core's admit → bind → ``run_prepared_turn`` pipeline — the same
-orchestration shape the Slack adapter uses.
+Mirrors `SlackApp`. One turn per conversation thread at a time; messages that
+arrive meanwhile queue silently (Teams bots cannot react) and run after it as
+one turn per author. A per-tenant cap sheds load, and no turn starts until the
+boot sweep has retired the previous process's turns.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import uuid
 from collections import OrderedDict
-from collections.abc import Coroutine
-from dataclasses import dataclass, field
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
-from functools import partial
-from typing import Any
+from typing import Any, Literal
 
+import anthropic
 import structlog
-from daimon.adapters.teams.lifecycle import FAILURE_MESSAGE
-from daimon.adapters.teams.turn_lifecycle import TeamsTurnLifecycle
-from daimon.core.config import TeamsSettings
+from daimon.adapters.teams import card
+from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
+from daimon.adapters.teams.identity import (
+    DENIED,
+    Refusal,
+    TeamsInbound,
+    canonical_uuid,
+    parse_inbound,
+    resolve_tenant,
+)
+from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender, TeamsTurnLifecycle
+from daimon.adapters.teams.provisioning import provision_configured_tenant
+from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.continuity.messages import (
+    render_current_work_must_finish,
+    render_fresh_start,
+    render_preparation_failed,
+    render_replacement_summary,
+    render_responder_changed_without_handoff,
+    render_unexpected_loss,
+)
+from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.observability import capture_exception_with_scope
+from daimon.core.stores.identity import find_platform_principal
+from daimon.core.stores.thread_session_lineage import request_fresh_start
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
+    get_live_thread_session,
     mark_turn_active,
     update_watermark,
 )
+from daimon.core.stores.turn_card_intents import (
+    create_turn_card_intent,
+    record_turn_card_message,
+    retire_turn_card_intent,
+)
 from daimon.core.turn import turn_deadline
-from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
-from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.errors import (
     SessionAgentMismatch,
     SessionBusyError,
@@ -41,310 +67,472 @@ from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
-from microsoft_teams.api import MessageActivity  # pyright: ignore[reportMissingTypeStubs]
-from microsoft_teams.apps.routing import (  # pyright: ignore[reportMissingTypeStubs]
-    ActivityContext,
+from microsoft_teams.api import (
+    AdaptiveCardActionMessageResponse,
+    AdaptiveCardInvokeActivity,
+    AdaptiveCardInvokeResponse,
+    MessageActivity,
+    MessageActivityInput,
 )
+from microsoft_teams.apps import ActivityContext
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-log = structlog.get_logger(__name__)
+log = structlog.get_logger()
 
-# In-process duplicate-activity suppression. The Bot Framework retries a
-# delivery when the endpoint is slow to answer; each retry carries the same
-# activity id, so a bounded per-process set is enough to drop them. This is
-# deliberately not durable: a replay that lands after a restart starts a
-# second turn, the same trade the rest of the adapter's restart semantics make.
+NEW_COMMAND = "new"
 _SEEN_ACTIVITY_CAP = 10_000
-
-_CONFIG_MISSING_MESSAGE = (
-    "No {missing} configured for this conversation. "
-    "Ask an administrator to finish setup before messaging again."
+_RECOVERY_RETRY_DELAY_S = 1.0
+_RECOVERY_MAX_RETRY_DELAY_S = 30.0
+_FAILED = "Sorry, something went wrong handling that. Please try again."
+_SHED = "Too many chats are in flight right now. Try again in a moment."
+_BALANCE_DEPLETED = "This deployment's credit is depleted. Ask the operator to top it up."
+_CAP_REACHED = "Monthly usage cap reached. Ask the operator to adjust it."
+_RESOLVER_MISS = (
+    "The configured agent or environment no longer exists. Ask the operator to restore it."
 )
-_RESOLVER_MISS_MESSAGE = (
-    "The configured agent or environment no longer exists. "
-    "Ask an administrator to configure a replacement."
-)
-_BALANCE_DEPLETED_MESSAGE = (
-    "This deployment's credit is depleted. An administrator can top it up to keep going."
-)
-_CAP_EXCEEDED_MESSAGE = "The monthly usage cap for this deployment has been reached."
-_PREPARATION_FAILED_MESSAGE = (
-    "A pending configuration change could not be applied, so no turn ran. "
-    "It will be retried at your next message."
-)
-_SESSION_BUSY_MESSAGE = (
-    "The previous turn in this conversation is still finishing. Please try again once it completes."
-)
-_RESPONDER_CHANGED_MESSAGE = (
-    "The agent answering this conversation changed, so this turn did not run. "
-    "Please send your message again."
-)
+_CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
+_CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
+_CANCELLING = "Cancelling…"
+# Everything a turn can raise that is not a bug in this adapter.
+_TURN_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
+_DENIAL_EVENTS = {"balance_depleted": "turn.skipped.over_balance", "cap": "turn.skipped.over_cap"}
+
+LifecycleFactory = Callable[[asyncio.Event, str | None], TeamsTurnLifecycle]
 
 
-@dataclass(frozen=True)
-class AuthorizedTeamsActivity:
-    """Verified personal-chat facts — the only payload crossing the seam.
-
-    ``external_user_id`` is the sender's Entra (AAD) object id; ``message``
-    is the user's text, already normalized and length-bounded by the
-    resolver. Message content is never persisted by the adapter.
-    """
-
-    tenant_id: uuid.UUID
-    external_user_id: str
-    conversation_id: str
-    activity_id: str
-    message: str
+def _compose_queued(items: list[TeamsInbound]) -> TeamsInbound:
+    """One author's queued messages as one turn, replying where the last one came from."""
+    return dataclasses.replace(items[-1], text="\n\n".join(item.text for item in items))
 
 
-@dataclass
-class DirectCoreTurnDispatcher:
-    """Dispatcher: admit → bind → run against core in a background task.
+class TeamsApp:
+    """Handlers the SDK app routes to, plus the turn state they share."""
 
-    Mirrors ``SlackApp._spawn`` + ``_run_thread_turn``: each accepted
-    activity becomes a tracked ``asyncio.Task`` running the full turn body;
-    the SDK handler returns as soon as the task is spawned.
-    """
-
-    settings: TeamsSettings
-    turn_deps: TurnDeps
-    sessionmaker: async_sessionmaker[AsyncSession]
-    _tasks: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]])
-    _seen_activities: OrderedDict[str, None] = field(default_factory=OrderedDict[str, None])
-
-    _inflight: dict[uuid.UUID, int] = field(default_factory=dict[uuid.UUID, int])
+    def __init__(self, *, runtime: TeamsRuntime, sender: TeamsSender) -> None:
+        teams = runtime.settings.teams
+        if teams is None:
+            raise ValueError("TeamsApp requires Teams settings")
+        self.runtime = runtime
+        self._teams = teams
+        self._sender = sender
+        self._processing: set[str] = set()
+        self._pending: dict[str, list[TeamsInbound]] = {}
+        self._inflight: dict[uuid.UUID, int] = {}
+        # cancel_key (the card intent id) -> (cancel Event, author's Entra id).
+        self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
+        self._tasks: set[asyncio.Task[None]] = set()
+        # Bot Framework retries a slow delivery with the same activity id.
+        # Not durable: a retry landing after a restart runs a second turn.
+        self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._recovery: asyncio.Task[None] | None = None
+        self.draining = False
 
     @property
     def in_flight(self) -> int:
         return len(self._tasks)
 
-    async def dispatch(
-        self,
-        ctx: ActivityContext[MessageActivity],
-        activity: AuthorizedTeamsActivity,
-    ) -> None:
-        if activity.activity_id in self._seen_activities:
-            log.info("teams.activity.duplicate", activity_id=activity.activity_id)
-            return
-        self._seen_activities[activity.activity_id] = None
-        while len(self._seen_activities) > _SEEN_ACTIVITY_CAP:
-            self._seen_activities.popitem(last=False)
-        # Reserve capacity in one synchronous read-check-increment span.
-        count = self._inflight.get(activity.tenant_id, 0)
-        if not should_admit_turn(
-            current_in_flight=count, cap=self.settings.max_concurrent_turns_per_tenant
-        ):
-            await ctx.send("Too many chats are in progress. Please try again in a moment.")
-            return
-        self._inflight[activity.tenant_id] = count + 1
-        self._spawn(self._run_turn(ctx, activity), tenant_id=activity.tenant_id)
-
-    def _spawn(
-        self, coro: Coroutine[Any, Any, None], *, tenant_id: uuid.UUID
-    ) -> asyncio.Task[None]:
-        """Strong-reference a background task (``SlackApp._spawn`` model)."""
-        task = asyncio.create_task(coro, name="teams.turn")
+    def _spawn(self, coro: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+        task = asyncio.create_task(coro, name=name)
         self._tasks.add(task)
-        task.add_done_callback(partial(self._turn_done, tenant_id=tenant_id))
+        task.add_done_callback(self._task_done)
         return task
 
-    def _turn_done(self, task: asyncio.Task[None], *, tenant_id: uuid.UUID) -> None:
+    def _task_done(self, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)
-        try:
-            if task.cancelled():
-                return
-            exc = task.exception()
-            if exc is not None:
-                log.error("teams.turn.crashed", exc_info=exc)
-        finally:
-            # A done callback also releases tasks cancelled before their
-            # coroutine starts, when a coroutine-level finally cannot run.
-            remaining = self._inflight[tenant_id] - 1
-            if remaining:
-                self._inflight[tenant_id] = remaining
-            else:
-                del self._inflight[tenant_id]
+        if not task.cancelled() and task.exception() is not None:
+            log.error("teams.task_failed", task_name=task.get_name(), exc_info=task.exception())
 
-    async def drain(self, timeout: float = 30.0) -> None:
-        """Let in-flight turns finish, then cancel stragglers (lifespan shutdown)."""
-        if not self._tasks:
+    def start(self) -> asyncio.Task[None]:
+        """Start the boot sweep (turns wait for it) and tenant provisioning."""
+        if self._recovery is None:
+            self._recovery = asyncio.create_task(self._recover(), name="teams.boot-sweep")
+            self._spawn(self._provision(), name="teams.provision")
+        return self._recovery
+
+    async def _recover(self) -> None:
+        delay = _RECOVERY_RETRY_DELAY_S
+        while True:
+            try:
+                await retire_orphaned_turns(
+                    anthropic=self.runtime.anthropic,
+                    sessionmaker=self.runtime.sessionmaker,
+                    sender=self._sender,
+                    now=datetime.now(UTC),
+                )
+                return
+            except Exception:
+                # Admission waits on this sweep: retry rather than wedge turns.
+                log.exception("teams.turn.orphan_recovery_failed", retry_delay_s=delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, _RECOVERY_MAX_RETRY_DELAY_S)
+
+    async def _provision(self) -> None:
+        settings = self.runtime.settings
+        public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
+        await provision_configured_tenant(
+            anthropic=self.runtime.anthropic,
+            sessionmaker=self.runtime.sessionmaker,
+            defaults_root=settings.defaults_root,
+            deployment_default=self.runtime.deployment_default,
+            public_url=public_url,
+            entra_tenant_id=self._teams.tenant_id,
+            signup_credit=settings.billing.signup_credit,
+        )
+
+    async def drain(self, timeout: float) -> None:
+        """Stop admitting, give turns and the sweep `timeout`, then cancel the rest.
+
+        A cancelled turn keeps its marker and card intent, so the next boot's
+        sweep edits its card to interrupted.
+        """
+        self.draining = True
+        tasks = set(self._tasks)
+        if self._recovery is not None and not self._recovery.done():
+            tasks.add(self._recovery)
+        if not tasks:
             return
-        _done, pending = await asyncio.wait(self._tasks, timeout=timeout)
+        _done, pending = await asyncio.wait(tasks, timeout=timeout)
         for task in pending:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
-    async def _run_turn(
-        self,
-        ctx: ActivityContext[MessageActivity],
-        activity: AuthorizedTeamsActivity,
-    ) -> None:
-        """Turn body: admission → progress message → bind → marker → turn → watermark.
+    def _first_delivery(self, conversation_id: str, activity_id: str) -> bool:
+        key = (conversation_id, activity_id)
+        if key in self._seen:
+            return False
+        self._seen[key] = None
+        while len(self._seen) > _SEEN_ACTIVITY_CAP:
+            self._seen.popitem(last=False)
+        return True
 
-        A trimmed ``SlackApp._run_thread_turn``: personal chat has no thread
-        history to replay and no continuations to flush, so the body is the
-        core pipeline plus the orphan marker/watermark bookkeeping.
-        """
+    async def handle_message(self, ctx: ActivityContext[MessageActivity]) -> None:
+        """SDK message handler: verify, then hand off. Returns before any turn work."""
+        activity = ctx.activity
+        if self.draining or not self._first_delivery(activity.conversation.id, activity.id):
+            return
+        parsed = parse_inbound(
+            activity,
+            configured_tenant=self._teams.tenant_id,
+            service_url=ctx.conversation_ref.service_url,
+        )
+        if isinstance(parsed, Refusal):
+            if parsed.text is not None:
+                with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                    await ctx.reply(parsed.text)
+            return
+        self._spawn(self._handle(parsed), name="teams.turn")
+
+    async def _say(self, inbound: TeamsInbound, text: str) -> None:
+        await self._sender.send(
+            inbound.conversation_id,
+            MessageActivityInput(text=text),
+            service_url=inbound.service_url,
+        )
+
+    async def _handle(self, inbound: TeamsInbound) -> None:
+        if self._recovery is not None:
+            await asyncio.shield(self._recovery)
+        tenant_id = await resolve_tenant(self.runtime.sessionmaker, inbound)
+        if tenant_id is None:
+            await self._say(inbound, DENIED)
+            return
+        if inbound.kind == "dm" and inbound.text.strip().lower() == NEW_COMMAND:
+            await self._fresh_start(inbound, tenant_id)
+            return
+        await self._orchestrate(inbound, tenant_id)
+
+    async def _fresh_start(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        """Mark the live session for replacement; the next message starts clean."""
+        async with self.runtime.sessionmaker.begin() as session:
+            principal = await find_platform_principal(
+                session, tenant_id=tenant_id, platform="teams", external_id=inbound.user_id
+            )
+            live = None
+            if principal is not None:
+                live = await get_live_thread_session(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="teams",
+                    thread_id=inbound.conversation_id,
+                    account_id=principal.account_id,
+                )
+            if live is not None:
+                await request_fresh_start(session, id=live.id, at=datetime.now(UTC))
+        await self._say(inbound, render_fresh_start("the agent"))
+
+    async def _orchestrate(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        key = inbound.conversation_id
+        if key in self._processing:
+            self._pending.setdefault(key, []).append(inbound)
+            return
+        cap = self._teams.max_concurrent_turns_per_tenant
+        count = self._inflight.get(tenant_id, 0)
+        if not should_admit_turn(current_in_flight=count, cap=cap):
+            log.info(
+                "turn.skipped.concurrency_shed", tenant_id=str(tenant_id), in_flight=count, cap=cap
+            )
+            await self._say(inbound, _SHED)
+            return
+        self._inflight[tenant_id] = count + 1
+        self._processing.add(key)
+        try:
+            await self._run_turn_guarded(inbound, tenant_id)
+            while queued := self._pending.pop(key, []):
+                by_author: dict[str, list[TeamsInbound]] = {}
+                for item in queued:
+                    by_author.setdefault(item.user_id, []).append(item)
+                for items in by_author.values():
+                    await self._run_turn_guarded(_compose_queued(items), tenant_id)
+        finally:
+            self._processing.discard(key)
+            remaining = self._inflight.get(tenant_id, 1) - 1
+            if remaining > 0:
+                self._inflight[tenant_id] = remaining
+            else:
+                self._inflight.pop(tenant_id, None)
+            for item in self._pending.pop(key, []):
+                with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                    await self._say(item, _FAILED)
+
+    async def _run_turn_guarded(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        """Error boundary for failures before the status card exists."""
+        try:
+            await self._run_turn(inbound, tenant_id)
+        except _TURN_ERRORS as exc:
+            log.error("teams.turn.failed", conversation_id=inbound.conversation_id, exc_info=exc)
+            capture_exception_with_scope(exc)
+            with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                await self._say(inbound, _FAILED)
+
+    async def _run_turn(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        """Turn body: admit → card → bind → marker → run → watermark. Mirrors Slack's."""
+        deps = self.runtime.turn_deps
         try:
             admission = await admit(
-                self.turn_deps,
-                tenant_id=activity.tenant_id,
+                deps,
+                tenant_id=tenant_id,
                 platform="teams",
-                external_user_id=activity.external_user_id,
-                channel_id=activity.conversation_id,
-                thread_id=activity.conversation_id,
+                external_user_id=inbound.user_id,
+                channel_id=inbound.channel_id,
+                thread_id=inbound.conversation_id,
                 now=datetime.now(UTC),
             )
         except MissingTurnConfigError as err:
             log.info("teams.missing_config", missing=list(err.missing))
-            await ctx.send(_CONFIG_MISSING_MESSAGE.format(missing=" or ".join(err.missing)))
+            missing = " or ".join(err.missing)
+            await self._say(inbound, f"No {missing} configured here. Ask the operator to set one.")
             return
         except MAResolverMissError as err:
             log.warning("teams.resolver.miss", kind=err.kind, daimon_tag=err.daimon_tag)
-            await ctx.send(_RESOLVER_MISS_MESSAGE)
+            await self._say(inbound, _RESOLVER_MISS)
             return
         except AdmissionDenied as err:
-            log.info("teams.turn.denied", reason=err.reason)
-            await ctx.send(
-                _BALANCE_DEPLETED_MESSAGE
-                if err.reason == "balance_depleted"
-                else _CAP_EXCEEDED_MESSAGE
+            log.info(_DENIAL_EVENTS[err.reason], tenant_id=str(tenant_id))
+            await self._say(
+                inbound, _BALANCE_DEPLETED if err.reason == "balance_depleted" else _CAP_REACHED
             )
             return
 
-        cancel = asyncio.Event()
-        lifecycle = TeamsTurnLifecycle(stream=ctx.stream)
-        # Post the progress message BEFORE bind_session — MA sessions.create
-        # can hold for minutes and the user must see something first.
-        await lifecycle.post_initial()
-
-        # The marker names the progress message so a boot sweep can edit it
-        # if this process dies mid-turn. A Teams message is addressed by
-        # (service_url, conversation_id, message_id): the conversation id is
-        # the row's thread_id, and the service_url — the region-sharded
-        # endpoint the conversation lives on — rides the marker's channel
-        # column the same way Slack's channel id does.
-        service_url = ctx.conversation_ref.service_url
-        marker_mapping_ids: set[uuid.UUID] = set()
-        lifecycle_holder: list[TeamsTurnLifecycle] = [lifecycle]
-        cancelled = False
-
-        try:
-            deadline = turn_deadline(now=datetime.now(UTC))
-            try:
-                prepared = await bind_session(
-                    self.turn_deps,
-                    admission,
-                    tenant_id=activity.tenant_id,
-                    platform="teams",
-                    external_user_id=activity.external_user_id,
-                    thread_id=activity.conversation_id,
-                    session_account_id=admission.account_id,
-                    reuse_existing=True,
-                    deadline=deadline,
-                )
-            except SessionPreparationFailed:
-                await lifecycle.close_with_text(_PREPARATION_FAILED_MESSAGE)
-                return
-            except SessionBusyError:
-                await lifecycle.close_with_text(_SESSION_BUSY_MESSAGE)
-                return
-            except SessionAgentMismatch:
-                await lifecycle.close_with_text(_RESPONDER_CHANGED_MESSAGE)
-                return
-
-            if prepared.mapping_id is not None and lifecycle.message_id is not None:
-                async with self.sessionmaker() as marker_session:
-                    await mark_turn_active(
-                        marker_session,
-                        id=prepared.mapping_id,
-                        active_turn_message_id=lifecycle.message_id,
-                        active_turn_channel_id=service_url,
-                        now=datetime.now(UTC),
-                    )
-                    await marker_session.commit()
-                marker_mapping_ids.add(prepared.mapping_id)
-
-            def _recovery_lifecycle(fresh_cancel: asyncio.Event) -> TurnLifecycle:
-                # The first attempt's terminal-failure render is held while
-                # recovery runs, so the stream was never closed — adopting it
-                # keeps the recovered turn's progress and terminal card on the
-                # SAME Teams message id (Slack's adopt_status_ts parity), and
-                # the marker written above stays valid for the orphan sweep.
-                adopted = TeamsTurnLifecycle(stream=ctx.stream, message_id=lifecycle.message_id)
-                lifecycle_holder[0] = adopted
-                return adopted
-
-            async def _reseed_user_message() -> str:
-                return activity.message
-
-            outcome = await run_prepared_turn(
-                self.turn_deps,
-                prepared,
-                tenant_id=activity.tenant_id,
+        agent = admission.agent
+        # Committed before the post so a lost response still leaves a record.
+        async with self.runtime.sessionmaker() as session:
+            intent = await create_turn_card_intent(
+                session,
+                tenant_id=tenant_id,
                 platform="teams",
-                thread_id=activity.conversation_id,
-                external_user_id=activity.external_user_id,
-                user_message=activity.message,
-                lifecycle=lifecycle,
-                cancel=cancel,
-                reseed_user_message=_reseed_user_message,
-                recovery_lifecycle=_recovery_lifecycle,
+                thread_id=inbound.conversation_id,
+                turn_token=uuid.uuid4(),
+                channel_id=inbound.conversation_id,
+            )
+            await session.commit()
+        cancel_key = intent.id.hex
+
+        def new_lifecycle(cancel: asyncio.Event, adopt: str | None) -> TeamsTurnLifecycle:
+            self._cancel_registry[cancel_key] = (cancel, inbound.user_id)
+            return TeamsTurnLifecycle(
+                sender=self._sender,
+                conversation_id=inbound.conversation_id,
+                service_url=inbound.service_url,
+                cancel_key=cancel_key,
+                agent_name=agent.name,
+                model_id=agent.model.id,
+                adopt_message_id=adopt,
+            )
+
+        lifecycle = new_lifecycle(asyncio.Event(), None)
+        cancel = self._cancel_registry[cancel_key][0]
+        holder: list[TeamsTurnLifecycle] = [lifecycle]
+        markers: set[uuid.UUID] = set()
+        try:
+            # Posted before bind: session creation can take minutes.
+            await lifecycle.post_initial()
+            try:
+                # A gate: no untracked turn runs behind a visible card.
+                async with self.runtime.sessionmaker() as session:
+                    recorded = await record_turn_card_message(
+                        session, id=intent.id, message_id=lifecycle.message_id or ""
+                    )
+                    await session.commit()
+                if not recorded:
+                    raise DaimonError("Teams card intent could not record its message id")
+                await self._bind_and_run(
+                    inbound, tenant_id, admission, cancel, holder, markers, new_lifecycle
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # The card exists: collapse it rather than post a second message.
+                log.error(
+                    "teams.turn.failed", conversation_id=inbound.conversation_id, exc_info=exc
+                )
+                capture_exception_with_scope(exc)
+                await holder[0].close_with_notice(_FAILED)
+        finally:
+            self._cancel_registry.pop(cancel_key, None)
+            task = asyncio.current_task()
+            if task is None or task.cancelling() == 0:
+                await self._settle(intent.id, holder[0], markers)
+
+    async def _bind_and_run(
+        self,
+        inbound: TeamsInbound,
+        tenant_id: uuid.UUID,
+        admission: Admission,
+        cancel: asyncio.Event,
+        holder: list[TeamsTurnLifecycle],
+        markers: set[uuid.UUID],
+        new_lifecycle: LifecycleFactory,
+    ) -> None:
+        deps = self.runtime.turn_deps
+        lifecycle = holder[0]
+        deadline = turn_deadline(now=datetime.now(UTC))
+        try:
+            prepared = await bind_session(
+                deps,
+                admission,
+                tenant_id=tenant_id,
+                platform="teams",
+                external_user_id=inbound.user_id,
+                thread_id=inbound.conversation_id,
+                session_account_id=admission.account_id,
+                reuse_existing=True,
                 deadline=deadline,
             )
-            if outcome.mapping_id is not None:
-                marker_mapping_ids.add(outcome.mapping_id)
+        except SessionPreparationFailed:
+            await lifecycle.close_with_notice(render_preparation_failed(admission.agent.name))
+            return
+        except SessionBusyError:
+            text = render_current_work_must_finish(admission.agent.name, handoff=True)
+            await lifecycle.close_with_notice(text)
+            return
+        except SessionAgentMismatch as error:
+            owner = "the previous agent"
+            with contextlib.suppress(anthropic.APIStatusError):
+                owner = (
+                    await self.runtime.anthropic.beta.agents.retrieve(error.source_agent_id)
+                ).name
+            await lifecycle.close_with_notice(
+                render_responder_changed_without_handoff(
+                    new_responder=admission.agent.name, owner=owner, channel="this chat"
+                )
+            )
+            return
 
-            final_lifecycle = lifecycle_holder[0]
-            if outcome.mapping_id is not None and final_lifecycle.final_message_id is not None:
-                async with self.sessionmaker() as watermark_session:
-                    await update_watermark(
-                        watermark_session,
-                        id=outcome.mapping_id,
-                        watermark_message_id=final_lifecycle.final_message_id,
+        summary: str | None = None
+        if prepared.continuity.state == "replaced" and prepared.continuity.transfer_kind:
+            summary = render_replacement_summary(prepared.continuity.transfer_kind, lost=[])
+            lifecycle.answer_prefix = summary
+        if prepared.mapping_id is not None and lifecycle.message_id is not None:
+            async with self.runtime.sessionmaker() as session:
+                await mark_turn_active(
+                    session,
+                    id=prepared.mapping_id,
+                    active_turn_message_id=lifecycle.message_id,
+                    active_turn_channel_id=inbound.conversation_id,
+                    now=datetime.now(UTC),
+                )
+                await session.commit()
+            markers.add(prepared.mapping_id)
+
+        def recovery_lifecycle(fresh_cancel: asyncio.Event) -> TurnLifecycle:
+            # Keep rendering into the card the person is already watching.
+            adopted = new_lifecycle(fresh_cancel, lifecycle.message_id)
+            adopted.answer_prefix = lifecycle.answer_prefix
+            holder[0] = adopted
+            return adopted
+
+        async def reseed() -> str:
+            return inbound.text
+
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant_id,
+            platform="teams",
+            thread_id=inbound.conversation_id,
+            external_user_id=inbound.user_id,
+            user_message=inbound.text,
+            lifecycle=lifecycle,
+            cancel=cancel,
+            reseed_user_message=reseed,
+            recovery_lifecycle=recovery_lifecycle,
+            deadline=deadline,
+        )
+        if outcome.mapping_id is not None:
+            markers.add(outcome.mapping_id)
+        final = holder[0]
+        if outcome.continuity.state == "replaced_after_loss":
+            kind: Literal["transcript", "history"] = (
+                "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
+            )
+            await self._say(inbound, render_unexpected_loss(kind))
+        if summary is not None and not final.answer_prefix_applied:
+            await self._say(inbound, summary)
+        if outcome.mapping_id is not None and final.final_message_id is not None:
+            async with self.runtime.sessionmaker() as session:
+                await update_watermark(
+                    session, id=outcome.mapping_id, watermark_message_id=final.final_message_id
+                )
+                await session.commit()
+        if prepared.continuity.pending:
+            await self._say(
+                inbound, render_current_work_must_finish(admission.agent.name, handoff=False)
+            )
+
+    async def _settle(
+        self, intent_id: uuid.UUID, lifecycle: TeamsTurnLifecycle, markers: set[uuid.UUID]
+    ) -> None:
+        """Retire the intent of a closed card and clear the turn markers.
+
+        A card still showing a live turn keeps its intent so the next boot's
+        sweep marks it interrupted. Store failures are logged, never raised:
+        the next boot's sweep is the backstop.
+        """
+        try:
+            async with self.runtime.sessionmaker() as session:
+                if lifecycle.card_closed:
+                    await retire_turn_card_intent(
+                        session, id=intent_id, expected_message_id=lifecycle.message_id
                     )
-                    await watermark_session.commit()
-        except asyncio.CancelledError:
-            # Classify by WHO cancelled, not by the exception type. Only a
-            # cancel() request on THIS dispatcher task — drain() reaping
-            # stragglers at shutdown (http_service lifespan) — means the
-            # process is going away: the card stays frozen mid-render and
-            # the marker MUST survive so the next boot's sweep can edit it.
-            # A CancelledError that merely propagated out of a dependency
-            # (a timeout, an inner task, a library) while this task's
-            # cancellation count is zero is an ordinary failure in a
-            # still-running process — render the failure card and let the
-            # marker clear below; nothing else ever will.
-            task = asyncio.current_task()
-            if task is not None and task.cancelling() > 0:
-                cancelled = True
-                log.info("teams.turn.cancelled", conversation_id=activity.conversation_id)
-                raise
-            log.warning("teams.turn.failed", exc_info=True)
-            with contextlib.suppress(Exception):
-                await lifecycle.close_with_text(FAILURE_MESSAGE)
-            raise
-        except Exception:
-            # Anything past post_initial must not leave the progress message
-            # spinning forever — collapse it to a failure notice, then let the
-            # task-level logger record the crash.
-            log.warning("teams.turn.failed", exc_info=True)
-            with contextlib.suppress(Exception):
-                await lifecycle.close_with_text(FAILURE_MESSAGE)
-            raise
-        finally:
-            # Clear the marker only for a turn that reached its own end:
-            # completion and ordinary failure already rendered a terminal
-            # card, so nothing remains for the sweep. A task cancelled by
-            # drain() — flag above, or a cancel() still pending delivery —
-            # keeps its marker so the next boot's list_orphaned_turns can
-            # find the row and edit the frozen card to interrupted.
-            task = asyncio.current_task()
-            if not cancelled and (task is None or task.cancelling() == 0):
-                for marker_id in marker_mapping_ids:
-                    with contextlib.suppress(SQLAlchemyError):
-                        async with self.sessionmaker() as clear_session:
-                            await clear_active_turn(clear_session, id=marker_id)
-                            await clear_session.commit()
+                for marker_id in markers:
+                    await clear_active_turn(session, id=marker_id)
+                await session.commit()
+        except SQLAlchemyError:
+            log.exception("teams.turn.settle_failed", intent_id=str(intent_id))
+
+    async def handle_card_action(
+        self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
+    ) -> AdaptiveCardInvokeResponse:
+        """Cancel button: only the turn's author may stop it."""
+        action = ctx.activity.value.action
+        if action.verb != card.CANCEL_VERB:
+            return AdaptiveCardActionMessageResponse(value=_CANCEL_TURN_ENDED)
+        entry = self._cancel_registry.get(str(action.data.get("turn") or ""))
+        if entry is None:
+            return AdaptiveCardActionMessageResponse(value=_CANCEL_TURN_ENDED)
+        cancel, author = entry
+        if canonical_uuid(ctx.activity.from_.aad_object_id) != author:
+            return AdaptiveCardActionMessageResponse(value=_CANCEL_NOT_AUTHOR)
+        cancel.set()
+        return AdaptiveCardActionMessageResponse(value=_CANCELLING)

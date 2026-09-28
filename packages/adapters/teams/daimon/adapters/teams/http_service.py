@@ -2,28 +2,21 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 import structlog
-from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
+from daimon.adapters.teams.app import TeamsApp
+from daimon.adapters.teams.feedback import record_feedback
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import TeamsSettings
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from microsoft_teams.api import MessageActivity  # pyright: ignore[reportMissingTypeStubs]
-from microsoft_teams.apps import App, FastAPIAdapter  # pyright: ignore[reportMissingTypeStubs]
-from microsoft_teams.apps.routing import (  # pyright: ignore[reportMissingTypeStubs]
-    ActivityContext,
-)
-from microsoft_teams.common import (  # pyright: ignore[reportMissingTypeStubs]
-    Client,
-    ClientOptions,
-)
+from microsoft_teams.api import MessageSubmitActionInvokeActivity
+from microsoft_teams.apps import ActivityContext, App, FastAPIAdapter
+from microsoft_teams.common import Client, ClientOptions
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 MAX_TEAMS_HTTP_BODY_BYTES = 64 * 1024
@@ -87,7 +80,6 @@ class _RequestBodyLimitMiddleware:
 @dataclass
 class _Readiness:
     initialized: bool = False
-    sweep_task: asyncio.Task[None] | None = None
 
 
 @dataclass(frozen=True)
@@ -103,21 +95,13 @@ class TeamsHttpService:
     teams_app: App
     http_adapter: FastAPIAdapter
     runtime: TeamsRuntime
+    turns: TeamsApp
     _readiness: _Readiness
 
     @property
     def ready(self) -> bool:
         """Whether SDK initialization completed inside the active lifespan."""
         return self._readiness.initialized
-
-    @property
-    def boot_sweep_task(self) -> asyncio.Task[None] | None:
-        """The orphan-retirement task spawned at lifespan start, if started.
-
-        Exposed so tests can serialize it against other work on a shared
-        connection — production never awaits it.
-        """
-        return self._readiness.sweep_task
 
 
 def create_teams_http_service(
@@ -139,46 +123,21 @@ def create_teams_http_service(
     leaves it None; tests use it to intercept Bot Framework calls.
     """
     readiness = _Readiness()
-    teams_app_holder: dict[str, App] = {}
+    holder: dict[str, tuple[App, TeamsApp]] = {}
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        teams_app = teams_app_holder["app"]
+        teams_app, turns = holder["app"]
         await teams_app.initialize()
+        # Spawned, not awaited: a slow Teams API or MA reconcile must not
+        # delay readiness. Turns wait for the sweep on their own.
+        turns.start()
         readiness.initialized = True
-        # Orphan-turn retirement, spawned rather than awaited so a slow Teams
-        # API cannot delay message acceptance — the Slack listener's posture.
-        # A crash is logged, never raised; the service must outlive its sweep.
-        sweep_task = asyncio.create_task(
-            retire_orphaned_turns(
-                sessionmaker=runtime.sessionmaker,
-                sender=teams_app.activity_sender,
-                bot_id=teams_app.id or settings.client_id,
-                now=datetime.now(UTC),
-            ),
-            name="teams.boot-sweep",
-        )
-
-        def _on_sweep_done(task: asyncio.Task[None]) -> None:
-            if not task.cancelled() and task.exception() is not None:
-                log.error("teams.boot_sweep_crashed", exc_info=task.exception())
-
-        sweep_task.add_done_callback(_on_sweep_done)
-        readiness.sweep_task = sweep_task
         try:
             yield
         finally:
             readiness.initialized = False
-            # The sweep is idempotent — a still-running one is cancelled so
-            # shutdown cannot outlive the sessions it was given.
-            if not sweep_task.done():
-                sweep_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, TimeoutError):
-                    await asyncio.wait_for(sweep_task, timeout=5.0)
-            # Give in-flight turns a bounded window to finish, then drop them —
-            # a killed render loop is exactly the case the next boot's sweep
-            # exists for, so stragglers are cancelled rather than awaited.
-            await runtime.dispatcher.drain(timeout=15.0)
+            await turns.drain(timeout=15.0)
             await teams_app.stop()
 
     async def _healthz() -> dict[str, str]:
@@ -216,17 +175,25 @@ def create_teams_http_service(
         # in local development and tests.
     )
 
-    async def handle_message(ctx: ActivityContext[MessageActivity]) -> None:
-        authorized = await runtime.resolver(ctx)
-        if authorized is not None:
-            await runtime.dispatcher.dispatch(ctx, authorized)
+    turns = TeamsApp(runtime=runtime, sender=teams_app)
 
-    teams_app.on_message(handle_message)
-    teams_app_holder["app"] = teams_app
+    async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]) -> None:
+        try:
+            await record_feedback(
+                runtime.sessionmaker, ctx.activity, configured_tenant=settings.tenant_id
+            )
+        except SQLAlchemyError:
+            log.exception("teams.feedback.failed")
+
+    teams_app.on_message(turns.handle_message)
+    teams_app.on_card_action_execute(turns.handle_card_action)
+    teams_app.on_message_submit_feedback(handle_feedback)
+    holder["app"] = (teams_app, turns)
     return TeamsHttpService(
         app=fastapi_app,
         teams_app=teams_app,
         http_adapter=http_adapter,
         runtime=runtime,
+        turns=turns,
         _readiness=readiness,
     )

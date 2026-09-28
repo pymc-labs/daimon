@@ -2,28 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import dataclasses
 import json
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from decimal import Decimal
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.adapters.teams.app import AuthorizedTeamsActivity, DirectCoreTurnDispatcher
 from daimon.adapters.teams.runtime import TeamsRuntime, build_turn_deps
 from daimon.core.config import TeamsSettings
-from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.thread_sessions import mark_turn_active
 from daimon.testing import (
     build_fake_anthropic,
     ma_session,
@@ -35,25 +30,31 @@ from daimon.testing.db import db_engine as db_engine
 from daimon.testing.db import db_schema as db_schema
 from daimon.testing.db import db_session as db_session
 from daimon.testing.db import db_session_factory as db_session_factory
-from microsoft_teams.api import (  # pyright: ignore[reportMissingTypeStubs]
-    MessageActivityInput,
-    SentActivity,
-)
-from microsoft_teams.common import Client, ClientOptions  # pyright: ignore[reportMissingTypeStubs]
-from microsoft_teams.common.http.client import (  # pyright: ignore[reportMissingTypeStubs]
-    MiddlewareContext,
-)
+from microsoft_teams.api import MessageActivityInput, SentActivity
+from microsoft_teams.common import Client, ClientOptions
+from microsoft_teams.common.http.client import MiddlewareContext
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-# Synthetic UUIDs; no real directory or user identifiers are used.
-# The seeded daimon tenant folds to this fixture via
-# derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID).
+# Synthetic identifiers only.
 ENTRA_TENANT_ID = str(uuid.UUID(int=1))
+AAD_OBJECT_ID = str(uuid.UUID(int=2))
+OTHER_AAD_OBJECT_ID = str(uuid.UUID(int=3))
 BOT_CLIENT_ID = "bot-client-id"
+BOT_ACCOUNT_ID = f"28:{BOT_CLIENT_ID}"
 SERVICE_URL = "https://smba.trafficmanager.net/test"
 CONVERSATION_ID = "a:conversation-1"
-AAD_OBJECT_ID = str(uuid.UUID(int=2))
+CHANNEL_ID = "19:channel-1@thread.tacv2"
+THREAD_ID = f"{CHANNEL_ID};messageid=1700000000001"
+
+
+def teams_settings(*, enabled: bool = True) -> TeamsSettings:
+    return TeamsSettings(
+        client_id=BOT_CLIENT_ID,
+        client_secret=SecretStr("test-secret"),
+        tenant_id=ENTRA_TENANT_ID,
+        enabled=enabled,
+    )
 
 
 def make_message_activity(
@@ -67,12 +68,12 @@ def make_message_activity(
     aad_object_id: str | None = AAD_OBJECT_ID,
     channel_id: str = "msteams",
     is_group: bool | None = None,
+    mention_bot: bool = False,
     service_url: str = SERVICE_URL,
 ) -> dict[str, object]:
-    """A realistic inbound Bot Framework ``message`` activity JSON payload.
+    """An inbound Bot Framework `message` activity, camelCase as Teams posts it.
 
-    camelCase keys match what the Teams channel actually POSTs; the SDK's
-    CustomBaseModel alias generator folds them onto the snake_case model.
+    `mention_bot` prefixes an `<at>` mention of the bot, as a channel post has.
     """
     conversation: dict[str, object] = {
         "id": conversation_id,
@@ -87,6 +88,20 @@ def make_message_activity(
     channel_data: dict[str, object] = {}
     if channel_tenant_id is not None:
         channel_data["tenant"] = {"id": channel_tenant_id}
+    if conversation_type == "channel":
+        channel_data["channel"] = {"id": conversation_id.split(";", 1)[0]}
+        channel_data["team"] = {"id": "19:team@thread.tacv2"}
+    entities: list[dict[str, object]] = []
+    if mention_bot:
+        mention = "<at>daimon</at>"
+        text = f"{mention} {text}"
+        entities.append(
+            {
+                "type": "mention",
+                "text": mention,
+                "mentioned": {"id": BOT_ACCOUNT_ID, "name": "daimon"},
+            }
+        )
     return {
         "type": "message",
         "id": activity_id,
@@ -94,10 +109,21 @@ def make_message_activity(
         "serviceUrl": service_url,
         "from": from_,
         "conversation": conversation,
-        "recipient": {"id": f"28:{BOT_CLIENT_ID}"},
+        "recipient": {"id": BOT_ACCOUNT_ID},
         "text": text,
+        "entities": entities,
         "channelData": channel_data,
     }
+
+
+def make_channel_activity(**kwargs: Any) -> dict[str, object]:
+    """A channel-thread reply that @mentions the bot."""
+    params: dict[str, Any] = {
+        "conversation_id": THREAD_ID,
+        "conversation_type": "channel",
+        "mention_bot": True,
+    }
+    return make_message_activity(**(params | kwargs))
 
 
 @dataclasses.dataclass
@@ -111,26 +137,21 @@ class SentRequest:
 
 @dataclasses.dataclass
 class TeamsApiFake:
-    """SDK ``Middleware`` that fabricates every outbound Bot Framework response.
+    """SDK middleware that fabricates every outbound Bot Framework response.
 
-    Registered on a ``microsoft_teams.common.Client`` and passed to
-    ``create_teams_http_service(client=...)``: the SDK clones the client into
-    its ApiClient and ActivitySender, so the same fake sees activity creates,
-    updates, and any other call — no transport survives to the network.
-
-    ``next_message_id`` is what POST /activities responses hand back; the
-    dispatch test asserts progress and terminal updates then target that id.
+    Passed to `create_teams_http_service(client=...)`; nothing reaches the
+    network. POST /activities answers with `m-<n>`; PUT echoes the id.
     """
 
-    next_message_id: str = "m-1"
-    requests: list[SentRequest] = dataclasses.field(default_factory=list)
+    requests: list[SentRequest] = dataclasses.field(default_factory=list[SentRequest])
+    posted: int = 0
 
     async def send(
         self,
         context: MiddlewareContext,
         next: Callable[[], Awaitable[httpx.Response]],
     ) -> httpx.Response:
-        del next  # never dispatched — nothing leaves the test process
+        del next
         body: dict[str, object] = {}
         if isinstance(context.json, dict):
             body = context.json
@@ -141,15 +162,14 @@ class TeamsApiFake:
                 body = {}
         self.requests.append(SentRequest(method=context.method, url=context.url, body=body))
         request = httpx.Request(context.method, context.url)
-        update_match = re.match(
+        update = re.match(
             r"/v3/conversations/[^/]+/activities/([^/]+)$", httpx.URL(context.url).path
         )
-        # PUT .../activities/{id} must echo the activity id back.
-        if context.method == "PUT" and update_match:
-            return httpx.Response(200, json={"id": update_match.group(1)}, request=request)
-        # Bot Framework answers activity creates/replies with the new resource id.
+        if context.method == "PUT" and update:
+            return httpx.Response(200, json={"id": update.group(1)}, request=request)
         if context.method == "POST" and re.search(r"/conversations/[^/]+/activities$", context.url):
-            return httpx.Response(200, json={"id": self.next_message_id}, request=request)
+            self.posted += 1
+            return httpx.Response(200, json={"id": f"m-{self.posted}"}, request=request)
         return httpx.Response(200, json={}, request=request)
 
     @property
@@ -158,207 +178,97 @@ class TeamsApiFake:
 
 
 def build_teams_client(fake: TeamsApiFake) -> Client:
-    """An SDK ``Client`` carrying the fake middleware; passed to the service."""
     client = Client(ClientOptions())
     client.use(fake)
     return client
+
+
+@dataclasses.dataclass
+class FakeSender:
+    """A `TeamsSender` recording every send. Indices in `fail_on` raise."""
+
+    sent: list[tuple[str, MessageActivityInput, str | None]] = dataclasses.field(
+        default_factory=list[tuple[str, MessageActivityInput, str | None]]
+    )
+    fail_on: set[int] = dataclasses.field(default_factory=set[int])
+
+    async def send(
+        self, conversation_id: str, activity: MessageActivityInput, *, service_url: str | None
+    ) -> SentActivity:
+        index = len(self.sent)
+        self.sent.append((conversation_id, activity.model_copy(deep=True), service_url))
+        if index in self.fail_on:
+            raise httpx.ConnectError("unreachable")
+        return SentActivity(id=activity.id or f"m-{index + 1}", activity_params=activity)
+
+    @property
+    def activities(self) -> list[MessageActivityInput]:
+        return [activity for _, activity, _ in self.sent]
 
 
 def build_teams_runtime(
     db_factory: async_sessionmaker[AsyncSession],
     *,
     anthropic: AsyncAnthropic | None = None,
-    deployment_default: DeploymentDefault | None = None,
 ) -> TeamsRuntime:
-    """A `TeamsRuntime` over the test DB and a fake MA transport.
-
-    Mirrors slack tests' ``make_orchestrate_app`` recipe: a MagicMock
-    settings with empty crypto keys, a real ``build_turn_deps`` bundle so
-    ``admit`` → ``bind_session`` → ``run_prepared_turn`` runs for real
-    against ``make_agent_env_echo_handler``, and the seeded-defaults
-    deployment default so tenant-scope config resolves the same tags.
-    """
+    """A runtime over the test DB and a fake MA transport, with real turn deps."""
     settings = MagicMock()
-    settings.teams = TeamsSettings(
-        client_id=BOT_CLIENT_ID,
-        client_secret=SecretStr("test-secret"),
-        tenant_id=ENTRA_TENANT_ID,
-    )
+    settings.teams = teams_settings()
     settings.crypto.keys = ()
     settings.mcp.public_url = None
     settings.defaults_root = MagicMock()
     settings.billing.markup = Decimal("1.0")
-
-    anthropic_client = (
-        anthropic if anthropic is not None else build_fake_anthropic(make_agent_env_echo_handler())
-    )
-    resolved_default = (
-        deployment_default
-        if deployment_default is not None
-        else DeploymentDefault(agent_name="daimon", environment_name="default")
-    )
+    settings.billing.signup_credit = Decimal("0")
+    client = anthropic or build_fake_anthropic(make_agent_env_echo_handler())
+    deployment_default = DeploymentDefault(agent_name="daimon", environment_name="default")
     resolver_cache = new_resolver_cache()
-    turn_deps = build_turn_deps(
-        settings,
-        anthropic_client,
-        db_factory,
-        deployment_default=resolved_default,
-        resolver_cache=resolver_cache,
-        billing_config=None,
-    )
     return TeamsRuntime(
         settings=settings,
-        anthropic=anthropic_client,
+        anthropic=client,
         sessionmaker=db_factory,
         billing_config=None,
         resolver_cache=resolver_cache,
-        turn_deps=turn_deps,
-        resolver=AsyncMock(return_value=None),  # deny by default; tests build their own
-        dispatcher=AsyncMock(),  # tests that exercise dispatch build their own
-        deployment_default=resolved_default,
+        turn_deps=build_turn_deps(
+            settings,
+            client,
+            db_factory,
+            deployment_default=deployment_default,
+            resolver_cache=resolver_cache,
+            billing_config=None,
+        ),
+        deployment_default=deployment_default,
     )
 
 
-class FakeStream:
-    """A minimal ``StreamerProtocol`` for dispatching ``_run_turn`` directly.
-
-    ``update`` feeds a ``SentActivity`` carrying ``message_id`` back through
-    the registered ``on_chunk`` handler — the same identity feedback the
-    SDK's real streamer gives ``TeamsTurnLifecycle`` — and ``close()``
-    resolves with that same id as the message the terminal card landed on.
-    """
-
-    def __init__(self, message_id: str = "m-1") -> None:
-        self.message_id = message_id
-        self.updates: list[str] = []
-        self.emitted: list[Any] = []
-        self.canceled = False
-        self._closed = False
-        self._on_chunk: Callable[[SentActivity], Awaitable[None]] | None = None
-        self._on_close: Callable[[SentActivity], Awaitable[None]] | None = None
-
-    @property
-    def closed(self) -> bool:
-        return self._closed
-
-    @property
-    def count(self) -> int:
-        return len(self.updates) + len(self.emitted)
-
-    @property
-    def sequence(self) -> int:
-        return self.count
-
-    def on_chunk(self, handler: Callable[[SentActivity], Awaitable[None]]) -> None:
-        self._on_chunk = handler
-
-    def on_close(self, handler: Callable[[SentActivity], Awaitable[None]]) -> None:
-        self._on_close = handler
-
-    def _sent(self) -> SentActivity:
-        return SentActivity(id=self.message_id, activity_params=MessageActivityInput(text=""))
-
-    def update(self, text: str) -> None:
-        self.updates.append(text)
-        if self._on_chunk is not None:
-            asyncio.get_running_loop().create_task(self._on_chunk(self._sent()))
-
-    def emit(self, activity: Any) -> None:
-        self.emitted.append(activity)
-
-    def clear_text(self) -> None:
-        return None
-
-    async def close(self) -> SentActivity:
-        self._closed = True
-        sent = self._sent()
-        if self._on_close is not None:
-            await self._on_close(sent)
-        return sent
-
-
-@dataclasses.dataclass
-class FakeTurnContext:
-    """The three ``ActivityContext`` members ``_run_turn`` reads, faked.
-
-    ``stream`` is the render target; ``send`` records admission-bailout
-    replies; ``conversation_ref.service_url`` is what the orphan marker
-    stores in ``active_turn_channel_id``.
-    """
-
-    stream: FakeStream
-    service_url: str = SERVICE_URL
-    sent: list[str] = dataclasses.field(default_factory=list)
-
-    @property
-    def conversation_ref(self) -> Any:
-        return SimpleNamespace(service_url=self.service_url)
-
-    async def send(self, text: str) -> None:
-        self.sent.append(text)
-
-
-def make_dispatch_target(
-    db_factory: async_sessionmaker[AsyncSession],
-) -> tuple[DirectCoreTurnDispatcher, FakeTurnContext, AuthorizedTeamsActivity]:
-    """A real ``DirectCoreTurnDispatcher`` over the test DB, plus the faked
-    inbound context and verified activity its ``dispatch`` accepts."""
-    runtime = build_teams_runtime(db_factory)
-    dispatcher = DirectCoreTurnDispatcher(
-        settings=runtime.settings.teams, turn_deps=runtime.turn_deps, sessionmaker=db_factory
-    )
-    ctx = FakeTurnContext(stream=FakeStream())
-    activity = AuthorizedTeamsActivity(
-        tenant_id=derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID),
-        external_user_id=AAD_OBJECT_ID,
-        conversation_id=CONVERSATION_ID,
-        activity_id="activity-1",
-        message="hello daimon",
-    )
-    return dispatcher, ctx, activity
-
-
-@contextlib.contextmanager
-def patched_turn_pipeline(marked_ids: list[uuid.UUID]) -> Iterator[None]:
-    """The seams test_dispatch patches, plus a ``mark_turn_active`` spy.
-
-    ``admit``'s resolvers and MA ``create_session`` are mocked so the turn
-    binds a real ``thread_sessions`` row without touching the network; the
-    spy records which mapping row carried the orphan marker so a test can
-    read that row back after the turn's own path finishes with it.
-    """
+@contextmanager
+def patched_admission() -> Iterator[None]:
+    """Admission resolves a fake agent and binding creates a fake MA session."""
     with (
-        patch(
-            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
-        ) as mock_resolve_agent,
-        patch(
-            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
-        ) as mock_resolve_env,
-        patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
-        ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
-        patch(
-            "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
-        ) as mock_create_session,
-        patch("daimon.adapters.teams.app.mark_turn_active", new_callable=AsyncMock) as mock_mark,
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as agent,
+        patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock) as env,
+        patch("daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock) as balance,
+        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as cap,
+        patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as create,
     ):
-        mock_resolve_agent.return_value = "agent_test_id"
-        mock_resolve_env.return_value = "env_test_id"
-        mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
-        mock_create_session.return_value = ma_session(
+        agent.return_value = "agent_test_id"
+        env.return_value = "env_test_id"
+        balance.return_value = False
+        cap.return_value = False
+        create.return_value = ma_session(
             id="sess-teams-1",
             agent=ma_session_agent(id="agent_test_id"),
             environment_id="env_test_id",
         )
-
-        async def _spy_mark(*args: Any, **kwargs: Any) -> None:
-            marked_ids.append(kwargs["id"])
-            await mark_turn_active(*args, **kwargs)
-
-        mock_mark.side_effect = _spy_mark
         yield
+
+
+@pytest.fixture(autouse=True)
+def no_boot_provisioning() -> Iterator[AsyncMock]:
+    """Boot provisioning reconciles against MA; service tests skip it."""
+    with patch(
+        "daimon.adapters.teams.app.provision_configured_tenant", new_callable=AsyncMock
+    ) as provision:
+        yield provision
 
 
 @pytest.fixture
@@ -368,28 +278,14 @@ def teams_api_fake() -> TeamsApiFake:
 
 @pytest.fixture
 def entra_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Allow unauthenticated ingress for the duration of one test.
-
-    The SDK's own DANGEROUSLY_ALLOW_UNAUTHENTICATED_REQUESTS env var is read
-    at ``App`` construction — set it before ``create_teams_http_service``.
-    """
+    """Allow unauthenticated ingress; the SDK reads this at `App` construction."""
     monkeypatch.setenv("DANGEROUSLY_ALLOW_UNAUTHENTICATED_REQUESTS", "true")
 
 
 @pytest.fixture
 def stub_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Short-circuit outbound bot-token acquisition (MSAL) in tests.
-
-    ``App._get_bot_token`` delegates to ``TokenManager.get_bot_token``; with
-    real client-secret credentials that goes to login.microsoftonline.com
-    through MSAL, which no local fake can see. Patching the bound lookup is
-    the narrowest seam — the alternative is a static ``token`` AppOption,
-    which ``create_teams_http_service`` deliberately does not expose because
-    production always carries client-secret credentials.
-    """
-    from microsoft_teams.apps.token_manager import (  # pyright: ignore[reportMissingTypeStubs]
-        TokenManager,
-    )
+    """Skip MSAL bot-token acquisition, which no local fake can intercept."""
+    from microsoft_teams.apps.token_manager import TokenManager
 
     async def _fake_token(self: TokenManager) -> object:
         return "test-bot-token"

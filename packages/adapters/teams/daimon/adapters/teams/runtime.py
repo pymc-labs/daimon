@@ -7,8 +7,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from anthropic import AsyncAnthropic
-from daimon.adapters.teams.app import DirectCoreTurnDispatcher
-from daimon.adapters.teams.identity import VerifiedTeamsTurnResolver
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -31,8 +29,6 @@ class TeamsRuntime:
     billing_config: BillingConfig | None
     resolver_cache: ResolverCache
     turn_deps: TurnDeps
-    resolver: VerifiedTeamsTurnResolver
-    dispatcher: DirectCoreTurnDispatcher
     # Bottom tier of the channel→tenant→deployment config cascade.
     deployment_default: DeploymentDefault = field(default_factory=DeploymentDefault)
 
@@ -82,13 +78,8 @@ def build_turn_deps(
 
 @asynccontextmanager
 async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
-    """Build the Teams runtime: DB, MA client, turn deps, resolver, dispatcher.
-
-    The dispatcher runs turns in-process against core — the same
-    background-task orchestration the Slack adapter uses.
-    """
-    teams_settings = settings.teams
-    if teams_settings is None:
+    """Build the Teams runtime: DB, MA client and turn deps."""
+    if settings.teams is None:
         raise ValueError("Teams runtime requires configured Teams settings")
     engine = build_engine(str(settings.database.url))
     sessionmaker = build_session_factory(engine)
@@ -108,15 +99,6 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
             resolver_cache=resolver_cache,
             billing_config=billing_config,
         )
-        resolver = VerifiedTeamsTurnResolver(
-            sessionmaker=sessionmaker,
-            entra_tenant_id=teams_settings.tenant_id,
-        )
-        dispatcher = DirectCoreTurnDispatcher(
-            settings=teams_settings,
-            turn_deps=turn_deps,
-            sessionmaker=sessionmaker,
-        )
         try:
             yield TeamsRuntime(
                 settings=settings,
@@ -125,8 +107,6 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
                 billing_config=billing_config,
                 resolver_cache=resolver_cache,
                 turn_deps=turn_deps,
-                resolver=resolver,
-                dispatcher=dispatcher,
                 deployment_default=deployment_default,
             )
         finally:

@@ -1,225 +1,133 @@
-"""Presentation and stream-identity tests — no DB, no network.
-
-``FakeStream`` records what a real ``HttpStream`` would have put on the
-wire; ``sent_message_id`` and the lifecycle's capture path are what keep
-progress and terminal content on one Teams message id.
-"""
+"""TeamsTurnLifecycle: one status card edited in place, then replaced by the answer."""
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
-
 import pytest
-from daimon.adapters.teams.lifecycle import (
-    MAX_TEAMS_CARD_TEXT_BYTES,
-    TRUNCATION_MARKER,
-    WORKING_MESSAGE,
-    bounded_text,
-    terminal_card,
-)
-from daimon.adapters.teams.turn_lifecycle import (
-    SDK_PLACEHOLDER_MESSAGE_ID,
-    TeamsTurnLifecycle,
-    sent_message_id,
-)
+from daimon.adapters.teams import card
+from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
+from daimon.core.errors import TurnError
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-from microsoft_teams.api import (  # pyright: ignore[reportMissingTypeStubs]
-    MessageActivityInput,
-    SentActivity,
-)
+
+from .conftest import CONVERSATION_ID, SERVICE_URL, FakeSender
 
 
-class FakeStream:
-    """A ``StreamerProtocol``-shaped fake recording the wire-level sequence.
+class Clock:
+    def __init__(self) -> None:
+        self.now = 100.0
 
-    The first ``update``/``emit`` resolves the send asynchronously — like
-    ``HttpStream._flush`` — so ``post_initial``'s first-chunk wait completes
-    without the 15s timeout path.
-    """
-
-    def __init__(self, *, chunk_id: str | None = "m-1") -> None:
-        self.chunk_id = chunk_id
-        self.updates: list[str] = []
-        self.emitted: list[Any] = []
-        self.cleared = 0
-        self.close_calls = 0
-        self._chunk_handlers: list[Any] = []
-        self._chunk_sent = False
-        self._canceled = False
-
-    @property
-    def canceled(self) -> bool:
-        return self._canceled
-
-    def on_chunk(self, handler: Any) -> None:
-        self._chunk_handlers.append(handler)
-
-    def _schedule_chunk(self) -> None:
-        if self._chunk_sent:
-            return
-        self._chunk_sent = True
-        asyncio.get_running_loop().create_task(self._fire_chunk())
-
-    async def _fire_chunk(self) -> None:
-        await asyncio.sleep(0)
-        sent = SentActivity(
-            id=self.chunk_id or SDK_PLACEHOLDER_MESSAGE_ID,
-            activity_params=MessageActivityInput(id=self.chunk_id),
-        )
-        for handler in self._chunk_handlers:
-            await handler(sent)
-
-    def emit(self, activity: Any) -> None:
-        self.emitted.append(activity)
-        self._schedule_chunk()
-
-    def update(self, text: str) -> None:
-        self.updates.append(text)
-        self._schedule_chunk()
-
-    def clear_text(self) -> None:
-        self.cleared += 1
-
-    async def close(self) -> SentActivity | None:
-        self.close_calls += 1
-        sent = SentActivity(
-            id=self.chunk_id or SDK_PLACEHOLDER_MESSAGE_ID,
-            activity_params=MessageActivityInput(id=self.chunk_id),
-        )
-        return sent
+    def __call__(self) -> float:
+        return self.now
 
 
-def _sent(id_: str | None, params_id: str | None = None) -> SentActivity:
-    return SentActivity(id=id_, activity_params=MessageActivityInput(id=params_id))
+def _lifecycle(sender: FakeSender, clock: Clock) -> TeamsTurnLifecycle:
+    return TeamsTurnLifecycle(
+        sender=sender,
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        agent_name="daimon",
+        model_id="claude-test",
+        clock=clock,
+    )
 
 
-class TestBoundedText:
-    def test_short_text_passes_through(self) -> None:
-        assert bounded_text("hello") == "hello"
-
-    def test_oversize_text_is_clipped_within_budget(self) -> None:
-        text = "x" * (MAX_TEAMS_CARD_TEXT_BYTES + 500)
-        out = bounded_text(text)
-        assert len(out.encode("utf-8")) <= MAX_TEAMS_CARD_TEXT_BYTES
-        assert out.endswith(TRUNCATION_MARKER)
-
-    def test_multibyte_boundary_is_never_split(self) -> None:
-        # '€' is 3 bytes in UTF-8 — a byte-level cut mid-character would
-        # produce mojibake; bounded_text must walk back to a boundary.
-        euro = "€"
-        prefix_len = MAX_TEAMS_CARD_TEXT_BYTES - len(TRUNCATION_MARKER.encode()) - 1
-        text = "x" * prefix_len + euro + "tail" * 1000
-        out = bounded_text(text)
-        assert len(out.encode("utf-8")) <= MAX_TEAMS_CARD_TEXT_BYTES
-        assert out.endswith(TRUNCATION_MARKER)
-        assert "�" not in out
+def _answer(text: str) -> TurnState:
+    return TurnState(content=[TextBlock(kind="text", text=text)])
 
 
-class TestTerminalCard:
-    def test_card_wraps_text_and_carries_fallback(self) -> None:
-        activity = terminal_card("the answer")
-        assert activity.attachments, "terminal_card must attach a card"
-        assert activity.type == "message"
-
-    def test_card_content_is_bounded(self) -> None:
-        activity = terminal_card("y" * (MAX_TEAMS_CARD_TEXT_BYTES * 2))
-        dumped = activity.model_dump_json()
-        # JSON-escaped form of the marker — the literal \n\n never appears raw.
-        assert TRUNCATION_MARKER.strip() in dumped
+def _card_json(sender: FakeSender, index: int) -> str:
+    return sender.activities[index].model_dump_json(by_alias=True)
 
 
-class TestSentMessageId:
-    def test_real_id_wins(self) -> None:
-        assert sent_message_id(_sent("m-9")) == "m-9"
+@pytest.mark.asyncio
+async def test_initial_card_carries_the_cancel_key_and_later_renders_edit_it() -> None:
+    sender, clock = FakeSender(), Clock()
+    lifecycle = _lifecycle(sender, clock)
+    await lifecycle.post_initial()
+    assert lifecycle.message_id == "m-1"
+    assert sender.sent[0][0] == CONVERSATION_ID and sender.sent[0][2] == SERVICE_URL
+    assert sender.activities[0].id is None
+    assert card.CANCEL_VERB in _card_json(sender, 0) and "key-1" in _card_json(sender, 0)
 
-    def test_placeholder_falls_back_to_activity_params(self) -> None:
-        sent = _sent(SDK_PLACEHOLDER_MESSAGE_ID, params_id="m-real")
-        assert sent_message_id(sent) == "m-real"
-
-    def test_placeholder_everywhere_returns_none(self) -> None:
-        assert sent_message_id(_sent(SDK_PLACEHOLDER_MESSAGE_ID)) is None
-        assert sent_message_id(None) is None
-        assert sent_message_id(_sent("  ")) is None
+    clock.now += 1
+    await lifecycle.on_render(TurnState())
+    assert len(sender.sent) == 1, "renders inside the debounce window are skipped"
+    clock.now += 5
+    await lifecycle.on_render(TurnState())
+    assert len(sender.sent) == 2 and sender.activities[1].id == "m-1"
 
 
-class TestTeamsTurnLifecycle:
-    @pytest.mark.asyncio
-    async def test_progress_then_terminal_on_one_stream(self) -> None:
-        stream = FakeStream()
-        lifecycle = TeamsTurnLifecycle(stream=stream)
+@pytest.mark.asyncio
+async def test_answer_replaces_the_card_with_footer_and_feedback() -> None:
+    sender, clock = FakeSender(), Clock()
+    lifecycle = _lifecycle(sender, clock)
+    await lifecycle.post_initial()
+    lifecycle.answer_prefix = "Picked up where we left off."
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
-        await lifecycle.post_initial()
-        state = TurnState(
-            content=[
-                ToolUseBlock(kind="tool_use", id="tu-1", type="agent.tool_use", name="t", input={}),
-                TextBlock(kind="text", text="partial"),
-            ]
-        )
-        await lifecycle.on_render(state)
-        await lifecycle.on_terminal_success(
-            TurnState(content=[TextBlock(kind="text", text="done answer")])
-        )
+    final = sender.activities[-1]
+    assert final.id == "m-1"
+    assert final.text is not None
+    assert final.text.startswith("Picked up where we left off.\n\nThe posterior mean is 3.")
+    assert "daimon · " in final.text
+    assert final.channel_data is not None and final.channel_data.feedback_loop is not None
+    assert lifecycle.answer_prefix_applied
+    assert lifecycle.card_closed and lifecycle.final_message_id == "m-1"
 
-        assert stream.updates[0] == WORKING_MESSAGE
-        assert stream.updates[1].startswith(WORKING_MESSAGE)
-        assert "1 tool call" in stream.updates[1]
-        assert stream.cleared == 1, "terminal render clears accumulated progress"
-        assert stream.close_calls == 1
-        assert lifecycle.message_id == "m-1"
-        assert lifecycle.final_message_id == "m-1"
 
-    @pytest.mark.asyncio
-    async def test_empty_final_response_renders_done(self) -> None:
-        stream = FakeStream()
-        lifecycle = TeamsTurnLifecycle(stream=stream)
-        await lifecycle.post_initial()
-        await lifecycle.on_terminal_success(TurnState(content=[]))
-        assert stream.close_calls == 1
+@pytest.mark.asyncio
+async def test_a_long_answer_overflows_into_new_messages_with_the_footer_last() -> None:
+    sender, clock = FakeSender(), Clock()
+    lifecycle = _lifecycle(sender, clock)
+    await lifecycle.post_initial()
+    paragraph = "word " * 1000
+    await lifecycle.on_terminal_success(_answer("\n\n".join([paragraph] * 4)))
 
-    @pytest.mark.asyncio
-    async def test_terminal_failure_renders_failure_card(self) -> None:
-        stream = FakeStream()
-        lifecycle = TeamsTurnLifecycle(stream=stream)
-        await lifecycle.post_initial()
-        await lifecycle.on_terminal_failure(TurnState(content=[]), RuntimeError("boom"))
-        assert stream.close_calls == 1
+    chunks = sender.activities[1:]
+    assert len(chunks) >= 2
+    assert chunks[0].id == "m-1" and all(c.id is None for c in chunks[1:])
+    assert all(c.channel_data is None or c.channel_data.feedback_loop is None for c in chunks[:-1])
+    assert chunks[-1].channel_data is not None and chunks[-1].channel_data.feedback_loop
+    assert lifecycle.final_message_id == f"m-{len(sender.sent)}"
 
-    @pytest.mark.asyncio
-    async def test_adopted_stream_preserves_message_id(self) -> None:
-        """Recovery adoption: a second lifecycle on the same stream starts
-        with the first message id — the marker stays valid."""
-        stream = FakeStream()
-        adopted = TeamsTurnLifecycle(stream=stream, message_id="m-1")
-        await adopted.on_terminal_success(
-            TurnState(content=[TextBlock(kind="text", text="recovered")])
-        )
-        assert adopted.message_id == "m-1"
-        assert adopted.final_message_id == "m-1"
 
-    @pytest.mark.asyncio
-    async def test_close_failure_is_absorbed(self) -> None:
-        class BoomStream(FakeStream):
-            async def close(self) -> SentActivity | None:
-                raise RuntimeError("service 500")
+@pytest.mark.asyncio
+async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark() -> None:
+    sender, clock = FakeSender(fail_on={1}), Clock()
+    lifecycle = _lifecycle(sender, clock)
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(_answer("never seen"))
 
-        lifecycle = TeamsTurnLifecycle(stream=BoomStream())
-        await lifecycle.post_initial()
-        # Must not raise — a render failure cannot mask the turn's outcome.
-        await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="x")]))
+    assert sender.activities[-1].id == "m-1"
+    assert "Something went wrong posting the answer" in _card_json(sender, -1)
+    assert lifecycle.card_closed and lifecycle.final_message_id is None
 
-    @pytest.mark.asyncio
-    async def test_post_initial_without_first_chunk_proceeds_unmarked(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A stream that never reports a chunk leaves message_id None —
-        the dispatcher then writes no marker rather than a false one."""
-        monkeypatch.setattr("daimon.adapters.teams.turn_lifecycle.FIRST_CHUNK_TIMEOUT_S", 0.05)
 
-        class SilentStream(FakeStream):
-            def _schedule_chunk(self) -> None:
-                return None
+@pytest.mark.asyncio
+async def test_no_answer_reads_as_cancelled_or_done() -> None:
+    sender, clock = FakeSender(), Clock()
+    lifecycle = _lifecycle(sender, clock)
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(TurnState())
+    assert card.CANCELLED_NOTICE in _card_json(sender, -1)
 
-        lifecycle = TeamsTurnLifecycle(stream=SilentStream())
-        await lifecycle.post_initial()
-        assert lifecycle.message_id is None
+    sender, clock = FakeSender(), Clock()
+    lifecycle = _lifecycle(sender, clock)
+    await lifecycle.post_initial()
+    tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
+    await lifecycle.on_terminal_success(TurnState(content=[tool]))
+    assert "✅ daimon" in _card_json(sender, -1)
+
+
+@pytest.mark.asyncio
+async def test_failure_closes_the_card_with_the_reason_once() -> None:
+    sender, clock = FakeSender(), Clock()
+    lifecycle = _lifecycle(sender, clock)
+    await lifecycle.post_initial()
+    state = TurnState(error=TurnError(kind="upstream", message="overloaded"))
+    await lifecycle.on_terminal_failure(state, RuntimeError("x"))
+    await lifecycle.close_with_notice("second notice is ignored")
+
+    assert len(sender.sent) == 2
+    assert "❌ overloaded" in _card_json(sender, 1)
+    assert lifecycle.card_closed
