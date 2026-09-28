@@ -10,7 +10,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0029_sys047_access_policies"
-down_revision: str | None = "0028_tenant_funding_mode"
+down_revision: str | None = "0028_sys074_routine_catch_up"
 branch_labels: str | None = None
 depends_on: str | None = None
 
