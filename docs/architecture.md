@@ -139,7 +139,8 @@ adapter passes; no role means non-admin. The MCP turn tools (`ask`,
 and routine fires have no live platform role, so they use the account's
 stored role, refreshed on every chat turn. The operator path
 (`platform_user_id` unset: CLI and internal tokens) is not a platform member
-and skips the policy, as it skips billing. Ids are the platform's own (Discord snowflakes, Slack ids):
+and skips the policy, as it skips billing. Ids are the platform's own (Discord snowflakes, Slack ids, Teams Entra object and
+conversation ids):
 
 | Field | Empty means | Enforced by |
 | --- | --- | --- |

@@ -76,6 +76,7 @@ from daimon.core.teams_threads import conversation_of
 from daimon.core.turn import turn_deadline
 from daimon.core.turn.admission import Admission, AdmissionDenied, MissingTurnConfigError, admit
 from daimon.core.turn.errors import (
+    AdmissionDenialReason,
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
@@ -113,6 +114,9 @@ _BALANCE_DEPLETED = (
     "chat with me."
 )
 _CAP_REACHED = "Monthly usage cap reached for this organisation. Ask an admin to adjust it."
+_NOT_INVITED = (
+    "You aren't on this organisation's list of people who can start a turn. An admin can add you."
+)
 _RESOLVER_MISS = (
     "The configured agent or environment no longer exists. Pick another with `setup` in a "
     "1:1 chat with me, or ask an admin to restore it."
@@ -123,7 +127,11 @@ _CANCELLING = "Cancelling…"
 # Everything a turn can raise that is not a bug in this adapter.
 _TURN_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
 _BIND_REFUSALS = (SessionPreparationFailed, SessionBusyError, SessionAgentMismatch)
-_DENIAL_EVENTS = {"balance_depleted": "turn.skipped.over_balance", "cap": "turn.skipped.over_cap"}
+_DENIALS: dict[AdmissionDenialReason, tuple[str, str]] = {
+    "balance_depleted": ("turn.skipped.over_balance", _BALANCE_DEPLETED),
+    "cap_exceeded": ("turn.skipped.over_cap", _CAP_REACHED),
+    "invoker_not_allowed": ("turn.skipped.invoker_not_allowed", _NOT_INVITED),
+}
 
 LifecycleFactory = Callable[[asyncio.Event, str | None], TeamsTurnLifecycle]
 # Builds a continuation turn's handoff notice from what the bind carried across.
@@ -165,8 +173,9 @@ def _admission_refusal(
     if isinstance(err, MAResolverMissError):
         log.warning("teams.resolver.miss", kind=err.kind, daimon_tag=err.daimon_tag)
         return _RESOLVER_MISS
-    log.info(_DENIAL_EVENTS[err.reason], tenant_id=str(tenant_id))
-    return _BALANCE_DEPLETED if err.reason == "balance_depleted" else _CAP_REACHED
+    event, copy = _DENIALS[err.reason]
+    log.info(event, tenant_id=str(tenant_id))
+    return copy
 
 
 class TeamsApp:
@@ -434,6 +443,7 @@ class TeamsApp:
                 thread_id=inbound.thread_id,
                 role=self._role(inbound),
                 now=datetime.now(UTC),
+                is_dm=inbound.kind == "dm",
             )
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
             await self._say(inbound, _admission_refusal(err, tenant_id))

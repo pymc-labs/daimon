@@ -21,7 +21,7 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
-from daimon.core.turn.errors import SessionAgentMismatch, SessionBusyError
+from daimon.core.turn.errors import AdmissionDenialReason, SessionAgentMismatch, SessionBusyError
 from daimon.testing.factories import make_account
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent
@@ -157,8 +157,16 @@ async def test_a_newer_message_supersedes_the_queued_work(
     assert await _status(db_session_factory, keys[0]) == ("skipped", "skip_superseded")
 
 
+@pytest.mark.parametrize(
+    ("reason", "copy"),
+    [
+        ("balance_depleted", app_module._BALANCE_DEPLETED),
+        ("cap_exceeded", app_module._CAP_REACHED),
+        ("invoker_not_allowed", app_module._NOT_INVITED),
+    ],
+)
 async def test_a_refused_continuation_raises_after_telling_the_person(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession], reason: AdmissionDenialReason, copy: str
 ) -> None:
     sender = FakeSender()
     teams = TeamsApp(
@@ -167,10 +175,10 @@ async def test_a_refused_continuation_raises_after_telling_the_person(
         commands={"new": fresh_start},
         bot_token=bot_token,
     )
-    denied = AsyncMock(side_effect=AdmissionDenied(reason="balance_depleted"))
+    denied = AsyncMock(side_effect=AdmissionDenied(reason=reason))
     with patch.object(app_module, "admit", denied), pytest.raises(AdmissionDenied):
         await teams._run_turn(make_inbound("w"), TENANT, reraise=True)
-    assert [a.text for a in sender.activities] == [app_module._BALANCE_DEPLETED]
+    assert [a.text for a in sender.activities] == [copy]
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
