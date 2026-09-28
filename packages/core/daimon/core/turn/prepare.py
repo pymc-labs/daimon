@@ -320,6 +320,8 @@ def bind_recorder(
     06-05's dead-session recovery cycle can re-invoke it against the NEW
     session id after a recreate, rather than reusing a stale binding.
     """
+    if (observation := current_outcome.get()) is not None:
+        observation.model_by_session[ma_session_id] = model_id
     pricing = MODEL_PRICING.get(model_id)
     if pricing is None:
         # The turn still runs and still records usage; only the debit is zero.

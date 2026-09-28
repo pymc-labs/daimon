@@ -80,7 +80,7 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage, ma_session
 from pydantic import HttpUrl, SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 _NOW = dt.datetime(2026, 4, 1, 12, 0, 0, tzinfo=dt.UTC)
 _SESSION_ID = "ses_test"
@@ -427,7 +427,9 @@ async def test_run_turn_calls_usage_record_for_span_model_request_end() -> None:
     assert call.kwargs["event"].id == "evt_span_1"
 
 
-async def test_run_turn_without_usage_record_factory_completes_unbilled() -> None:
+async def test_run_turn_without_usage_record_factory_completes_unbilled(
+    db_session: AsyncSession, db_engine: AsyncEngine
+) -> None:
     """No usage_record_factory -> BillingExempt(reason="headless-unrecorded"):
     the turn still completes and returns its tail, and no span event is ever
     metered (there is no recorder to invoke)."""
@@ -452,6 +454,9 @@ async def test_run_turn_without_usage_record_factory_completes_unbilled() -> Non
             stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
         ),
     ]
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    sm = async_sessionmaker(db_engine)
     client = _build_client(events)
 
     tail = await run_turn(
@@ -459,10 +464,25 @@ async def test_run_turn_without_usage_record_factory_completes_unbilled() -> Non
         agent_id="agent_x",
         environment_id="env_x",
         trigger_message="hi",
+        tenant_id=tenant.id,
+        session_factory=sm,
         # usage_record_factory intentionally omitted
     )
 
     assert tail == "ok", "an unbilled turn still drains normally and returns its tail"
+
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
+    async with sm() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert len(rows) == 1
+    assert rows[0].billing_posture == "exempt"
+    assert rows[0].model_calls == 1
+    assert rows[0].input_tokens == 10 and rows[0].output_tokens == 5
+    assert rows[0].model_ids == [_MODEL_ID]
+    assert rows[0].cost_usd is not None and rows[0].cost_usd > 0
 
 
 async def test_run_turn_reconnects_through_a_clean_close_and_returns_post_reconnect_tail() -> None:

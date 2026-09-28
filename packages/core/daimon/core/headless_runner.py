@@ -313,6 +313,7 @@ async def run_turn_impl(
 
     if (observation := current_outcome.get()) is not None:
         observation.session_id = session.id
+        observation.model_by_session[session.id] = session.agent.model.id
 
     usage_record: Callable[..., Awaitable[None]] | None = None
     if usage_record_factory is not None:

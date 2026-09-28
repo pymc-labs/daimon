@@ -10,11 +10,16 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from importlib.metadata import version
 
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
+from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
+    BetaManagedAgentsSpanModelUsage,
+)
 from daimon.core.context_prompt import TurnContext
+from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.stores.turn_outcomes import OutcomeRecord, record
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
@@ -51,6 +56,14 @@ async def drain_outcomes() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+@dataclass(frozen=True)
+class UsageSample:
+    usage: BetaManagedAgentsSpanModelUsage
+    model_id: str | None
+    cost: Decimal | None
+    metered: bool
+
+
 @dataclass
 class TurnObservation:
     sessionmaker: async_sessionmaker[AsyncSession]
@@ -78,10 +91,27 @@ class TurnObservation:
         finally:
             current_outcome.reset(token)
 
-    def note_usage(self, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
+    model_by_session: dict[str, str] = field(default_factory=lambda: dict[str, str]())
+    _samples: dict[tuple[str, str], UsageSample] = field(
+        default_factory=lambda: dict[tuple[str, str], UsageSample]()
+    )
+
+    def note_usage(
+        self, event: BetaManagedAgentsSpanModelRequestEndEvent, *, metered: bool = False
+    ) -> None:
         if self.session_id is not None:
             key = (self.session_id, event.id)
+            if key in self._usage:
+                return
             self._usage[key] = {"session_id": key[0], "event_id": key[1]}
+            model_id = self.model_by_session.get(self.session_id)
+            cost = cost_of(event.model_usage, MODEL_PRICING.get(model_id or ""))
+            self._samples[key] = UsageSample(
+                event.model_usage,
+                model_id,
+                Decimal(str(cost)) if cost is not None else None,
+                metered,
+            )
 
     def finish(
         self,
@@ -101,6 +131,18 @@ class TurnObservation:
             or termination_reason(error or (state.error if state else None))
         )
         terminal_error = error or (state.error if state else None)
+        samples = list(self._samples.values())
+        unpriced_calls = sum(sample.cost is None for sample in samples)
+        postures = {sample.metered for sample in samples}
+        posture = (
+            "none"
+            if not postures
+            else "mixed"
+            if len(postures) > 1
+            else "metered"
+            if True in postures
+            else "exempt"
+        )
         row = OutcomeRecord(
             id=self.id,
             tenant_id=self.tenant_id,
@@ -119,6 +161,21 @@ class TurnObservation:
             error_class=type(terminal_error).__name__ if terminal_error else None,
             release=_RELEASE,
             usage_refs=list(self._usage.values()),
+            input_tokens=sum(sample.usage.input_tokens for sample in samples),
+            output_tokens=sum(sample.usage.output_tokens for sample in samples),
+            cache_read_input_tokens=sum(sample.usage.cache_read_input_tokens for sample in samples),
+            cache_creation_input_tokens=sum(
+                sample.usage.cache_creation_input_tokens for sample in samples
+            ),
+            model_calls=len(samples),
+            model_ids=sorted(
+                {sample.model_id for sample in samples if sample.model_id is not None}
+            ),
+            cost_usd=None
+            if unpriced_calls
+            else sum((sample.cost or Decimal(0) for sample in samples), Decimal(0)),
+            unpriced_calls=unpriced_calls,
+            billing_posture=posture,
         )
         if len(_PENDING) >= _MAX_PENDING:
             log.warning("turn.outcome_queue_full", turn_id=str(self.id))

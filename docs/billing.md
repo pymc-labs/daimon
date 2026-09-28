@@ -351,3 +351,35 @@ Refused turns have no usage references. The best-effort outcome writer never
 changes a balance, cap, price or ledger debit, and a missing diagnostic row does
 not mean no model work was billed. See the turn-outcome contract in
 [architecture](architecture.md#durable-turn-outcomes).
+
+
+## Per-turn usage telemetry
+
+`daimon usage turns TENANT_UUID --days 7 --json` lists content-free turn
+measurements. Add `--channel CHANNEL_ID` or `--origin routine` to filter;
+`--summary` groups by platform, channel and origin. The command reads the local
+database and makes no upstream API calls. `--limit` bounds the individual-turn
+listing (1–1000); summaries cover the whole selected date range.
+
+Each measurement shares its UUID and atomic database row with the terminal
+outcome. It includes model-call count, input/output tokens, cache read/write
+tokens, model IDs, and estimated provider cost using the existing static pricing
+table. Replayed span IDs are counted once per session; recovery attempts are
+summed into the same logical turn. Both billed and exempt turns are measured.
+`billing_posture` describes the observed billing path (`metered`, `exempt`,
+`mixed`, or `none`), not confirmation that a debit committed. The ledger remains
+authoritative for charges; telemetry changes no prices, debits, caps or gates.
+
+Unknown or unavailable session models produce null cost and an `unpriced_calls`
+count. Historical outcome rows retain null metrics; new refusals with no model
+calls record zero. A summary's `cost_usd` is null if any constituent turn has
+unknown cost; `known_cost_usd` is the subtotal of fully priced turns, and
+`measured_turns` distinguishes measured rows from history. Token totals include
+only measured rows. Existing-session CLI runs without model metadata can report
+tokens with unknown cost. Separately metered tool models and auxiliary API calls
+are not included in these model-span totals.
+
+Telemetry inherits the outcome writer's bounded best-effort delivery: database
+outages, saturation or abrupt process termination can lose rows. It is operational
+measurement, not an accounting reconciliation source. No prompts, answers, tool
+arguments, output text or error messages are persisted here.

@@ -1960,3 +1960,14 @@ class TurnOutcome(Base):
     error_class: Mapped[str | None] = mapped_column(Text)
     release: Mapped[str] = mapped_column(Text, nullable=False)
     usage_refs: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+
+    # SYS-066: NULL distinguishes historical outcomes from measured zero usage.
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    cache_read_input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    cache_creation_input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    model_calls: Mapped[int | None] = mapped_column(Integer)
+    model_ids: Mapped[list[str] | None] = mapped_column(JSONB)
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    unpriced_calls: Mapped[int | None] = mapped_column(Integer)
+    billing_posture: Mapped[str | None] = mapped_column(Text)

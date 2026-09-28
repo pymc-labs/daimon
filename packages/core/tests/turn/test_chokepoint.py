@@ -270,6 +270,11 @@ async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
     assert row.channel_id == "chan-1" and row.thread_id == "thread-e2e"
     assert row.agent_id == admission.agent.id and row.session_id == outcome.ma_session_id
     assert row.usage_refs == [{"session_id": outcome.ma_session_id, "event_id": "evt_span"}]
+    assert row.model_calls == 1
+    assert (row.input_tokens, row.output_tokens) == (10, 20)
+    assert row.model_ids == [admission.agent.model.id]
+    assert row.cost_usd is not None and row.cost_usd > 0
+    assert row.billing_posture == "metered"
     assert "NEVER STORE THIS SECRET" not in str(row)
 
 
