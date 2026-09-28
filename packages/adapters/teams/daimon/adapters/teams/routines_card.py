@@ -124,9 +124,7 @@ def create_form(
     agent_names: Sequence[str], values: Mapping[str, str], error: str | None = None
 ) -> AdaptiveCard:
     """The New routine form, refilled with `values` and topped by `error` on a retry."""
-    body: list[CardElement] = []
-    if error:
-        body.append(error_text(error))
+    body: list[CardElement] = [error_text(error)] if error else []
     body += [
         ChoiceSetInput(
             id="agent",

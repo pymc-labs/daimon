@@ -48,11 +48,9 @@ def build_turn_deps(
     resolver_cache: ResolverCache,
     billing_config: BillingConfig | None,
 ) -> TurnDeps:
-    """Derive the frozen `TurnDeps` bundle from `settings`.
+    """Derive `TurnDeps` from `settings`.
 
-    Mirrors the Slack adapter's ``build_turn_deps`` — duplicated here, not
-    imported, because adapters must not import each other (import-linter
-    independence contract).
+    Duplicated from the Slack adapter: adapters never import one another.
     """
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
     fernet = build_multifernet(crypto_keys) if crypto_keys else None

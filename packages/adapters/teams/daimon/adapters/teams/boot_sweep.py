@@ -1,18 +1,13 @@
 """Boot-time retirement of Teams turns the previous process left running.
 
-A turn's render loop dies with its process while Managed Agents keeps
-running (and billing) the turn. Before this process admits a turn it edits
-every card it knows about to the interrupted notice, clears the turn
-markers, interrupts the orphaned MA sessions, and retires the card intents.
-No late answer is delivered.
-
-Teams bots cannot read a conversation back, so unlike Slack there is no
-history lookup for an intent whose post never returned an id: it is retired
-with a log line and its card, if Teams accepted the post, stays frozen.
-
-Sends go to the SDK's default service URL; the inbound one is not stored.
-Same single-process assumption as the Slack sweep: a marker set by a live
-sibling looks like a crash's leftover. Gate on an owner id before scaling out.
+Managed Agents keeps running (and billing) a turn whose render loop died with
+its process. Before admitting a turn, this edits every known card to the
+interrupted notice, clears the turn markers, interrupts the orphaned MA
+sessions and retires the card intents. No late answer is delivered. Teams bots
+cannot read a conversation back, so an intent whose post never returned an id
+is retired with a log line, its card (if any) left frozen. Sends use the SDK's
+default service URL. Single-process, like Slack's sweep: a live sibling's
+marker looks like a crash's leftover, so gate on an owner id before scaling out.
 """
 
 from __future__ import annotations
@@ -69,11 +64,10 @@ async def retire_orphaned_turns(
         conversation_id = row.active_turn_channel_id or row.thread_id
         await _interrupt_card(sender, conversation_id=conversation_id, message_id=message_id)
         edited.add(message_id)
-        async with sessionmaker() as session:
+        async with sessionmaker.begin() as session:
             cleared = await clear_active_turn_if_message_id(
                 session, id=row.id, expected_message_id=message_id
             )
-            await session.commit()
         if cleared:
             await interrupt_orphaned_session(anthropic, session_id=row.ma_session_id)
         started = row.active_turn_started_at
@@ -93,8 +87,7 @@ async def retire_orphaned_turns(
                 conversation_id=intent.channel_id or intent.thread_id,
                 message_id=intent.message_id,
             )
-        async with sessionmaker() as session:
+        async with sessionmaker.begin() as session:
             await retire_turn_card_intent(
                 session, id=intent.id, expected_message_id=intent.message_id
             )
-            await session.commit()

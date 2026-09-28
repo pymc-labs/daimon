@@ -1,9 +1,6 @@
-"""``python -m daimon.adapters.teams`` entrypoint.
+"""``python -m daimon.adapters.teams``: settings gate, logging, Sentry, runtime, uvicorn.
 
-Boots the FastAPI/Teams SDK service: settings gate → logging → Sentry →
-runtime → uvicorn on ``settings.teams.port``. SIGINT/SIGTERM land on
-uvicorn's handler, which runs the lifespan shutdown — in-flight turns get a
-bounded drain, then the SDK app stops. Mirrors slack/__main__.py's shape.
+SIGINT/SIGTERM run the lifespan shutdown: a bounded turn drain, then the SDK app stops.
 """
 
 from __future__ import annotations

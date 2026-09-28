@@ -1,13 +1,10 @@
 """`TurnLifecycle` for Teams: one status card, edited in place, then the answer.
 
-Same shape as the Slack lifecycle. The card is posted before session setup,
-edited at most every five seconds on the render tick, and replaced by the
-first answer chunk. Overflow chunks follow as new messages; the last carries
-the usage footer and Teams' feedback buttons. Teams streaming is not used: it
-only works in personal chats and stops after two minutes.
-
-Cancel clicks are routed by `cancel_key` (the card intent id), which the
-card carries from its first render, so no message id is needed to route.
+Like Slack's: the card is posted before session setup, edited at most every
+five seconds, and replaced by the first answer chunk; overflow chunks follow,
+the last with the usage footer and feedback buttons. Teams streaming is unused:
+it works only in personal chats and stops after two minutes. Cancel clicks
+route by `cancel_key` (the card intent id), carried from the first render.
 """
 
 from __future__ import annotations
