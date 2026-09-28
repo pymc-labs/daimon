@@ -44,9 +44,11 @@ log = structlog.get_logger()
 _DEBOUNCE_S = 5.0
 _SEALED_RESPONSE_MIN_CHARS = 500  # Same substantive-answer threshold as Slack.
 _DELIVERY_FAILED = "⚠️ Something went wrong posting the answer."
-# Everything an SDK send can raise: HTTPStatusError for a non-2xx answer,
-# the rest of httpx.HTTPError for transport failures.
-TEAMS_SEND_ERRORS = (httpx.HTTPError, asyncio.TimeoutError)
+# Everything an SDK send can raise: httpx.HTTPError for the Bot Framework
+# call, OSError for timeouts and MSAL's transport, ValueError when the SDK
+# cannot get a bot token.
+TEAMS_SEND_ERRORS = (httpx.HTTPError, OSError, ValueError)
+SEND_TIMEOUT_S = 30.0
 
 
 class TeamsSender(Protocol):
@@ -55,6 +57,21 @@ class TeamsSender(Protocol):
     async def send(
         self, conversation_id: str, activity: MessageActivityInput, *, service_url: str | None
     ) -> SentActivity: ...
+
+
+class TimedSender:
+    """Bounds every send: neither the SDK's HTTP client nor MSAL sets a timeout."""
+
+    def __init__(self, inner: TeamsSender, *, timeout: float = SEND_TIMEOUT_S) -> None:
+        self._inner = inner
+        self._timeout = timeout
+
+    async def send(
+        self, conversation_id: str, activity: MessageActivityInput, *, service_url: str | None
+    ) -> SentActivity:
+        return await asyncio.wait_for(
+            self._inner.send(conversation_id, activity, service_url=service_url), self._timeout
+        )
 
 
 class TeamsTurnLifecycle:

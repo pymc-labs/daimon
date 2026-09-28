@@ -29,7 +29,13 @@ from daimon.adapters.teams.identity import (
     parse_inbound,
     resolve_tenant,
 )
-from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender, TeamsTurnLifecycle
+from daimon.adapters.teams.lifecycle import (
+    SEND_TIMEOUT_S,
+    TEAMS_SEND_ERRORS,
+    TeamsSender,
+    TeamsTurnLifecycle,
+    TimedSender,
+)
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.continuity.messages import (
@@ -114,7 +120,7 @@ class TeamsApp:
             raise ValueError("TeamsApp requires Teams settings")
         self.runtime = runtime
         self._teams = teams
-        self._sender = sender
+        self._sender = TimedSender(sender)
         self._processing: set[str] = set()
         self._pending: dict[str, list[TeamsInbound]] = {}
         self._inflight: dict[uuid.UUID, int] = {}
@@ -219,7 +225,7 @@ class TeamsApp:
         if isinstance(parsed, Refusal):
             if parsed.text is not None:
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                    await ctx.reply(parsed.text)
+                    await asyncio.wait_for(ctx.reply(parsed.text), SEND_TIMEOUT_S)
             return
         self._spawn(self._handle(parsed), name="teams.turn")
 

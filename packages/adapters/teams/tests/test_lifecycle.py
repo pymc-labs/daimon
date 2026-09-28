@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from daimon.adapters.teams import card
-from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
+from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsTurnLifecycle, TimedSender
 from daimon.core.errors import TurnError
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from microsoft_teams.api import MessageActivityInput, SentActivity
 
 from .conftest import CONVERSATION_ID, SERVICE_URL, FakeSender
 
@@ -131,3 +134,19 @@ async def test_failure_closes_the_card_with_the_reason_once() -> None:
     assert len(sender.sent) == 2
     assert "❌ overloaded" in _card_json(sender, 1)
     assert lifecycle.card_closed
+
+
+class _HungSender:
+    async def send(
+        self, conversation_id: str, activity: MessageActivityInput, *, service_url: str | None
+    ) -> SentActivity:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.asyncio
+async def test_a_hung_send_times_out_as_a_send_error() -> None:
+    """A half-open socket must not hold a turn, its slots or the boot sweep forever."""
+    sender = TimedSender(_HungSender(), timeout=0.01)
+    with pytest.raises(TEAMS_SEND_ERRORS):
+        await sender.send(CONVERSATION_ID, MessageActivityInput(text="hi"), service_url=None)
