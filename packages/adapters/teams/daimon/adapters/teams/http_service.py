@@ -7,10 +7,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import structlog
-from daimon.adapters.teams import card
+from daimon.adapters.teams import card, routines_card
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import fresh_start
 from daimon.adapters.teams.feedback import record_feedback
+from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import TeamsSettings
 from fastapi import FastAPI
@@ -177,7 +178,12 @@ def create_teams_http_service(
         # in local development and tests.
     )
 
-    turns = TeamsApp(runtime=runtime, sender=teams_app, commands={"new": fresh_start})
+    routines = RoutinesPanel(runtime)
+    turns = TeamsApp(
+        runtime=runtime,
+        sender=teams_app,
+        commands={"new": fresh_start, "routines": routines.command},
+    )
 
     async def handle_feedback(ctx: ActivityContext[MessageSubmitActionInvokeActivity]) -> None:
         try:
@@ -189,6 +195,9 @@ def create_teams_http_service(
 
     teams_app.on_message(turns.handle_message)
     teams_app.on_card_action_execute(card.CANCEL_VERB, turns.handle_cancel)
+    teams_app.on_card_action_execute(routines_card.VERB, routines.on_action)
+    teams_app.on_dialog_open(routines_card.CREATE_DIALOG, routines.on_dialog_open)
+    teams_app.on_dialog_submit(routines_card.CREATE_DIALOG, routines.on_dialog_submit)
     teams_app.on_message_submit_feedback(handle_feedback)
     holder["app"] = (teams_app, turns)
     return TeamsHttpService(
