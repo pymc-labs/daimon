@@ -1707,6 +1707,7 @@ class DaimonBot(commands.Bot):
                 requester_id=int(row.requester_external_user_id),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
+                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=_send_embed,
                 edit=_edit_message,
                 delete=_delete_message,
@@ -1817,6 +1818,7 @@ class DaimonBot(commands.Bot):
                 requester_id=int(row.requester_external_user_id),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
+                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=_send_embed,
                 edit=_edit_message,
                 delete=_delete_message,
@@ -2151,6 +2153,7 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 trigger_message=message,
+                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=_send_embed,
                 edit=_edit_message,
                 delete=_delete_message,
@@ -2515,6 +2518,7 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 trigger_message=message,
+                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=_send_embed,
                 edit=_edit_message,
                 delete=_delete_message,

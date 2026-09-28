@@ -854,6 +854,14 @@ class Settings(BaseSettings):
             "members. Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object."
         ),
     )
+    table_rendering: dict[uuid.UUID, bool] = Field(
+        default_factory=dict[uuid.UUID, bool],
+        description=(
+            "Per-tenant table rendering opt-in, keyed by tenant UUID. True renders "
+            "final Markdown tables as PNG on Discord and native tables on Slack. "
+            "Missing/false preserves plain text. Set DAIMON_TABLE_RENDERING to a JSON object."
+        ),
+    )
     database: DatabaseSettings
     anthropic: AnthropicSettings
     privacy_policy_url: HttpUrl = Field(

@@ -65,6 +65,14 @@ rejected). Default is members (live membership required). Set mode=disabled to d
 DMs, or mode=allowlist with recipient_ids to restrict delivery to listed members.
 Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object.
 
+### `DAIMON_TABLE_RENDERING`
+
+`dict[UUID, bool]` · optional · default `{}`
+
+Per-tenant table rendering opt-in, keyed by tenant UUID. True renders final Markdown
+tables as PNG on Discord and native tables on Slack. Missing/false preserves plain text.
+Set DAIMON_TABLE_RENDERING to a JSON object.
+
 ### `DAIMON_PRIVACY_POLICY_URL`
 
 `HttpUrl` · optional · default `https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md`

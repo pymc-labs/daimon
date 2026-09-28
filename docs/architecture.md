@@ -460,3 +460,29 @@ Uncommitted workspace files are not transferred on this restricted replacement.
 
 Memory content is managed directly by the MA memory store. This safeguard does not
 add per-memory author/origin records or rollback tooling.
+### Platform table rendering
+
+Enable per tenant with `DAIMON_TABLE_RENDERING`, a JSON map of tenant UUIDs to
+booleans. Missing/false preserves current plain-text delivery. UUID keys are
+validated at startup. Core `tables.render_tables` parses pipe-delimited Markdown tables outside fenced
+code and accepts an optional async platform hook. Without a hook the input is
+returned unchanged. Both adapter helpers also default to disabled. Hook failures
+and oversized tables retain their raw text. Rejected Discord attachment edits
+and Slack table blocks are logged and retried as the original Markdown; Slack
+keeps already-delivered chunks in place and retries only the rejected table.
+The shared bound is 20 columns, 100 rows including the header, and 10000 cell
+characters; at most ten tables render per answer.
+
+Discord renders final-answer tables off-thread as PNG attachments using bundled
+Inter fonts (including wizard submissions and their recovery turns), navy headers, light alternating rows, and horizontal rules. Wide
+cells wrap without truncation, all-numeric body columns align right even without
+an explicit `---:` marker, and a pixel budget
+prevents excessive allocations. Tables containing glyphs absent from the selected
+font, including CJK text, remain unchanged Markdown so no values are lost. Table markers preserve their position in the
+surrounding answer text. Slack final replies use native wrapped table blocks,
+with each table in a separate message so table budgets stay bounded and prose
+order is preserved. Feedback stays on the final delivery and continuity notices
+can be inserted before a leading table. See the [Slack table block reference](https://docs.slack.dev/reference/block-kit/blocks/table-block/).
+
+Streaming status previews and MCP `send_message` remain plain text. Tables inside
+code fences remain literal examples. Other adapters need no renderer changes.
