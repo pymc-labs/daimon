@@ -22,13 +22,22 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
+    _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
     _require_guild_id,  # pyright: ignore[reportPrivateUsage]
+    _resolve_member,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
+from daimon.adapters.mcp.tools.discord._visibility import (
+    _check_send_permission,  # pyright: ignore[reportPrivateUsage]
+    _check_thread_view,  # pyright: ignore[reportPrivateUsage]
+    _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.slack._client import (
+    _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
     slack_web_client,
 )
+from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
 from daimon.core.access_policy import is_write_protected
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -102,15 +111,25 @@ def _compute_next_fire_at(cron_expr: str, tz: str) -> datetime:
 async def _resolve_discord_destination(
     runtime: McpRuntime, auth: AuthIdentity, *, kind: str, destination_id: str
 ) -> tuple[str | None, str | None]:
-    """(parent_channel_id, category_id) of a channel or thread in the caller's guild."""
+    """(parent_channel_id, category_id) of a channel or thread in the caller's
+    guild that the CALLER may post in.
+
+    A routine posts on its creator's behalf, so its destination passes the
+    exact checks the `send_message` tool applies to a caller: the member is
+    resolved with roles hydrated, a thread's parent is cached, a thread must
+    be viewable (a private one needs membership or manage_threads), and the
+    caller needs view + send there.
+    """
     guild_id = _require_guild_id(auth)
+    caller = _require_discord_identity(auth)
     try:
         async with rest_client(_require_bot_token(runtime)) as client:
+            _, member = await _resolve_member(client, guild_id, caller)
             channel = await client.fetch_channel(int(destination_id))
             if isinstance(channel, discord.Thread):
                 if kind != "thread":
                     raise ToolError(f"{destination_id} is a thread: use destination_kind=thread")
-                parent = channel.parent or await client.fetch_channel(channel.parent_id)
+                parent = await _ensure_thread_parent_cached(channel)
                 category = getattr(parent, "category_id", None)
                 placement = (str(channel.parent_id), str(category) if category else None)
             elif isinstance(channel, discord.TextChannel):
@@ -122,6 +141,15 @@ async def _resolve_discord_destination(
                 raise ToolError(f"{destination_id} is not a text channel or thread")
             if str(channel.guild.id) != guild_id:
                 raise ToolError(f"{destination_id} is not in this server")
+            try:
+                if isinstance(channel, discord.Thread):
+                    await _check_thread_view(client, channel, member, caller)
+                _check_send_permission(channel, member)
+            except ToolError as err:
+                raise ToolError(
+                    f"you cannot post in {destination_id} ({err}), so a routine cannot deliver "
+                    "there for you. Nothing was saved."
+                ) from err
             return placement
     except (discord.NotFound, discord.Forbidden) as err:
         raise ToolError(
@@ -145,6 +173,18 @@ async def _resolve_slack_destination(
             raise ToolError(
                 f"daimon is not in {channel_id}; invite it to the channel first. Nothing was saved."
             )
+        # The routine posts on the caller's behalf: the caller must have the
+        # same access the channel tools require of them (private channel or
+        # guest → membership).
+        try:
+            await check_channel_access(
+                client, channel=channel, user_id=_require_slack_identity(auth)
+            )
+        except ToolError as err:
+            raise ToolError(
+                f"you cannot post in {channel_id} ({err}), so a routine cannot deliver there "
+                "for you. Nothing was saved."
+            ) from err
         if kind == "thread":
             replies = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id, ts=thread_ts, limit=1

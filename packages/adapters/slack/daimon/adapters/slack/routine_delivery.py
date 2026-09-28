@@ -28,10 +28,12 @@ from daimon.core.access_policy import TenantAccessPolicy, is_write_protected
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
+    DeliveryTarget,
     clear_creator,
     delivery_target,
     render_fallback_dm,
     render_fallback_post,
+    slack_creator_may_post,
 )
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.tenants import get_tenant
@@ -81,6 +83,71 @@ async def _dm_fallback(
     return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
 
+async def _is_member(client: AsyncWebClient, *, channel_id: str, user_id: str) -> bool:
+    cursor: str | None = None
+    while True:
+        resp = await client.conversations_members(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+            channel=channel_id, limit=200, cursor=cursor
+        )
+        if user_id in cast("list[str]", resp["members"]):
+            return True
+        metadata = cast("dict[str, object]", resp.get("response_metadata") or {})  # pyright: ignore[reportUnknownMemberType]
+        cursor = str(metadata.get("next_cursor") or "") or None
+        if cursor is None:
+            return False
+
+
+async def _destination_refusal(
+    client: AsyncWebClient, row: RoutineRow, target: DeliveryTarget
+) -> str | None:
+    """Why the destination cannot take this post now, or None.
+
+    Re-checked at every post, because access and threads change after the
+    routine is saved: the channel must still exist, the creator must still be
+    allowed to post there (the channel tools' rule: private channel or guest
+    → membership), and a stored thread must still exist — Slack accepts a
+    missing `thread_ts` and posts at the channel root, so the ordinary
+    `send_message` checks `conversations.replies` first, and so does this.
+    """
+    creator = row.created_by_user_id
+    if creator is None:
+        return "creator_cannot_post"
+    try:
+        info = await client.conversations_info(channel=target.channel_id)  # pyright: ignore[reportUnknownMemberType]
+        channel = cast("dict[str, object]", info["channel"])
+        if channel.get("is_archived"):
+            return "destination_unavailable"
+        user_info = await client.users_info(user=creator)  # pyright: ignore[reportUnknownMemberType]
+        user = cast("dict[str, object]", user_info["user"])
+        is_guest = bool(user.get("is_restricted") or user.get("is_ultra_restricted"))
+        is_private = bool(channel.get("is_private"))
+        is_member = (
+            await _is_member(client, channel_id=target.channel_id, user_id=creator)
+            if is_private or is_guest
+            else False
+        )
+        if not slack_creator_may_post(
+            is_im_or_mpim=bool(channel.get("is_im") or channel.get("is_mpim")),
+            is_private=is_private,
+            is_guest=is_guest,
+            is_member=is_member,
+        ):
+            return "creator_cannot_post"
+        if target.thread_ts is not None:
+            replies = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
+                channel=target.channel_id, ts=target.thread_ts, limit=1
+            )
+            messages = cast("list[object]", replies.get("messages") or [])  # pyright: ignore[reportUnknownMemberType]
+            if not messages:
+                return "destination_unavailable"
+    except SlackApiError as err:
+        error = str(cast("dict[str, object]", err.response.data).get("error", ""))  # pyright: ignore[reportUnknownMemberType]
+        if error in _UNUSABLE_DESTINATION or error == "message_not_found":
+            return "destination_unavailable"
+        raise
+    return None
+
+
 def make_slack_routine_poster(
     runtime: SlackRuntime,
 ) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
@@ -111,6 +178,12 @@ def make_slack_routine_poster(
             log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
             return await _dm_fallback(
                 client, row, "protected_channel", team_id=tenant.external_id, policy=dm_policy
+            )
+        refusal = await _destination_refusal(client, row, target)
+        if refusal is not None:
+            log.info("routine.delivery_refused", routine_id=str(row.id), reason=refusal)
+            return await _dm_fallback(
+                client, row, refusal, team_id=tenant.external_id, policy=dm_policy
             )
         text = escape_mrkdwn_preserving_mentions(render_fallback_post(row))
         try:

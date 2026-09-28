@@ -68,7 +68,11 @@ Discord id is a number; a Slack channel is `C…`, a Slack thread
 `<channel>:<ts>`), that the channel exists in the caller's own server or
 workspace with daimon able to post there (on Slack, daimon must be a member;
 a thread must exist), that the kind matches (a Discord thread is not a
-channel), and that the tenant's access policy does not protect it — checked
+channel), that **the caller themselves may post there** — the same checks
+`send_message` applies to a caller (Discord: view and send, send in threads,
+membership of a private thread unless they manage threads; Slack: membership
+of a private channel, or of any channel for a guest) — and that the tenant's
+access policy does not protect it — checked
 with the parent channel and category resolved from the platform. Changing the
 destination drops a result still pending for the old one. The adapter checks
 all of it again at post time.
@@ -231,6 +235,15 @@ to their wake poller. Each poll claims `pending` rows for its platform
   thread under one, or a Discord channel in a protected category is refused
   as `protected_channel`. A Discord thread whose parent is not in the bot's
   cache has its parent fetched first; if that fails, nothing is posted there.
+- **Only where the creator could post.** A routine posts on its creator's
+  behalf, so the poster re-checks, every time, the same caller rules as at
+  save time: a Discord creator who has lost view/send (or left the guild, or
+  is not in a private thread) or a Slack creator who is not in a private
+  channel gets the result by their own DM (`dm_fallback:creator_cannot_post`)
+  and nothing is posted to the destination. A stored Slack thread is looked
+  up with `conversations.replies` before posting, as `send_message` does —
+  Slack would otherwise post a reply to a deleted thread at the channel root —
+  and a missing one is `destination_unavailable`.
 - **Only the routine's own, live workspace.** Discord refuses a channel
   outside the tenant's guild; Slack builds its client from the tenant's own
   team. Either way that, like a channel that no longer exists or that Slack

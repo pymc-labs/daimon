@@ -58,6 +58,8 @@ __all__ = [
     "render_fallback_dm",
     "DirectPost",
     "clear_creator",
+    "discord_creator_may_post",
+    "slack_creator_may_post",
     "creator_refusal_for",
     "placement_unknown_is_unsafe",
     "delivery_refusal",
@@ -88,6 +90,7 @@ _THREAD_SEPARATOR: Final[str] = ":"
 
 SkipReason = Literal[
     "protected_channel",
+    "creator_cannot_post",
     "invoker_not_allowed",
     "access_policy_unreadable",
     "destination_unavailable",
@@ -246,6 +249,7 @@ def render_fallback_post(row: RoutineRow) -> str:
 
 _DM_REASONS: Final[dict[str, str]] = {
     "protected_channel": "its destination is a protected channel daimon does not post in",
+    "creator_cannot_post": "you can no longer post in its destination",
     "destination_unavailable": "its destination could not be reached (missing, moved, or "
     "outside this workspace)",
 }
@@ -335,6 +339,50 @@ async def clear_creator(
         policy, creator_platform_user_id=row.created_by_user_id, creator_is_admin=is_admin
     )
     return refusal if refusal is not None else policy
+
+
+def discord_creator_may_post(
+    *,
+    administrator: bool,
+    view_channel: bool,
+    send_messages: bool,
+    is_thread: bool,
+    send_messages_in_threads: bool,
+    is_private_thread: bool,
+    manage_threads: bool,
+    is_thread_member: bool,
+) -> bool:
+    """Whether a routine's creator may post where the routine delivers.
+
+    A routine posts on its creator's behalf, so it may only post where the
+    creator could: the rule the `send_message` tool applies to a caller
+    (view + send; in a thread, view + send in threads), plus a private thread
+    needs membership or manage_threads, as reading one does. Administrators may
+    always post. Pure: the adapter supplies the facts it resolved.
+    """
+    if administrator:
+        return True
+    if not view_channel:
+        return False
+    if not is_thread:
+        return send_messages
+    # In a thread Discord checks send_messages_in_threads, not send_messages.
+    if not send_messages_in_threads:
+        return False
+    return not is_private_thread or manage_threads or is_thread_member
+
+
+def slack_creator_may_post(
+    *, is_im_or_mpim: bool, is_private: bool, is_guest: bool, is_member: bool
+) -> bool:
+    """Slack's channel-access rule for the routine's creator, as the channel
+    tools apply it to a caller: never a DM; a private channel, or any channel
+    for a guest, needs membership; a public channel is open to full members."""
+    if is_im_or_mpim:
+        return False
+    if is_private or is_guest:
+        return is_member
+    return True
 
 
 def placement_unknown_is_unsafe(

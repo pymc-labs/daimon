@@ -46,6 +46,11 @@ def _poster(
         return_value={"user": {"id": "U1", "team_id": "T_ROUTINES", "deleted": False}}
     )
     client.conversations_open = AsyncMock(return_value={"channel": {"id": "D_CREATOR"}})
+    client.conversations_info = AsyncMock(
+        side_effect=lambda channel: {"channel": {"id": channel, "is_private": False}}
+    )
+    client.conversations_members = AsyncMock(return_value={"members": ["U1"]})
+    client.conversations_replies = AsyncMock(return_value={"messages": [{"ts": "1717.5"}]})
 
     async def fake_resolve(runtime: object, *, team_id: str) -> object:
         assert team_id == "T_ROUTINES", "the client is built for the routine's own workspace"
@@ -72,6 +77,7 @@ async def test_posts_into_a_thread_without_broadcasting(
     assert outcome.status == "delivered"
     kwargs = client.chat_postMessage.await_args.kwargs
     assert (kwargs["channel"], kwargs["thread_ts"]) == ("C1", "1717.5")
+    client.conversations_replies.assert_awaited_once_with(channel="C1", ts="1717.5", limit=1)
     assert "<!channel>" not in kwargs["text"], "a routine never broadcasts"
     assert "<@U7>" in kwargs["text"], "mentions of people survive"
 
@@ -215,3 +221,54 @@ async def test_a_creator_who_is_not_cleared_gets_nothing_not_even_a_dm(
     assert (outcome.status, outcome.note) == ("skipped", note)
     client.chat_postMessage.assert_not_awaited()
     client.conversations_open.assert_not_awaited()
+
+
+async def test_a_private_channel_the_creator_is_not_in_gets_their_dm_not_a_post(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review regression (round 3): daimon is in the private channel, the
+    creator is not — the routine must not post there for them."""
+    row = await _routine(db_session, kind="channel", destination_id="C_PRIV")
+    post, client = _poster(db_session_factory, monkeypatch)
+    client.conversations_info = AsyncMock(
+        return_value={"channel": {"id": "C_PRIV", "is_private": True}}
+    )
+    client.conversations_members = AsyncMock(return_value={"members": ["U_SOMEONE_ELSE"]})
+
+    outcome = await post(row)
+
+    assert outcome.note == "dm_fallback:creator_cannot_post"
+    (call,) = client.chat_postMessage.await_args_list
+    assert call.kwargs["channel"] == "D_CREATOR", "only the creator's own DM, never C_PRIV"
+
+
+@pytest.mark.parametrize("deleted_as", ["error", "empty"])
+async def test_a_deleted_thread_is_not_posted_at_the_channel_root(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    deleted_as: str,
+) -> None:
+    """Review regression (round 3): chat.postMessage accepts a missing
+    thread_ts and posts at the channel root; the thread is checked first."""
+    from slack_sdk.errors import SlackApiError
+    from slack_sdk.web.async_slack_response import AsyncSlackResponse
+
+    row = await _routine(db_session, kind="thread", destination_id="C1:1717.5")
+    post, client = _poster(db_session_factory, monkeypatch)
+    if deleted_as == "error":
+        response = MagicMock(spec=AsyncSlackResponse)
+        response.data = {"ok": False, "error": "thread_not_found"}
+        client.conversations_replies = AsyncMock(
+            side_effect=SlackApiError("thread_not_found", response)
+        )
+    else:
+        client.conversations_replies = AsyncMock(return_value={"messages": []})
+
+    outcome = await post(row)
+
+    assert outcome.note == "dm_fallback:destination_unavailable"
+    channels = [c.kwargs["channel"] for c in client.chat_postMessage.await_args_list]
+    assert channels == ["D_CREATOR"], "nothing posted to C1"

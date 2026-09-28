@@ -442,3 +442,63 @@ def test_placement_unknown_is_unsafe(
     policy: TenantAccessPolicy, platform: str, kind: str, unsafe: bool
 ) -> None:
     assert placement_unknown_is_unsafe(policy, platform=platform, kind=kind) is unsafe
+
+
+_BASE = {
+    "administrator": False,
+    "view_channel": True,
+    "send_messages": True,
+    "is_thread": False,
+    "send_messages_in_threads": True,
+    "is_private_thread": False,
+    "manage_threads": False,
+    "is_thread_member": False,
+}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "allowed"),
+    [
+        ({}, True),
+        ({"view_channel": False}, False),
+        ({"send_messages": False}, False),
+        ({"send_messages": False, "administrator": True}, True),
+        ({"is_thread": True}, True),
+        ({"is_thread": True, "send_messages_in_threads": False}, False),
+        ({"is_thread": True, "send_messages": False}, True),  # threads use in-threads
+        ({"is_thread": True, "is_private_thread": True}, False),
+        ({"is_thread": True, "is_private_thread": True, "is_thread_member": True}, True),
+        ({"is_thread": True, "is_private_thread": True, "manage_threads": True}, True),
+    ],
+)
+def test_discord_creator_may_post(overrides: dict[str, bool], allowed: bool) -> None:
+    from daimon.core.routine_delivery import discord_creator_may_post
+
+    assert discord_creator_may_post(**{**_BASE, **overrides}) is allowed
+
+
+@pytest.mark.parametrize(
+    ("is_im_or_mpim", "is_private", "is_guest", "is_member", "allowed"),
+    [
+        (False, False, False, False, True),
+        (False, True, False, False, False),
+        (False, True, False, True, True),
+        (False, False, True, False, False),
+        (False, False, True, True, True),
+        (True, False, False, True, False),
+    ],
+)
+def test_slack_creator_may_post(
+    is_im_or_mpim: bool, is_private: bool, is_guest: bool, is_member: bool, allowed: bool
+) -> None:
+    from daimon.core.routine_delivery import slack_creator_may_post
+
+    assert (
+        slack_creator_may_post(
+            is_im_or_mpim=is_im_or_mpim,
+            is_private=is_private,
+            is_guest=is_guest,
+            is_member=is_member,
+        )
+        is allowed
+    )

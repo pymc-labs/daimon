@@ -19,10 +19,38 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _GUILD = 424242
 
 
-def _text_channel(*, guild_id: int = _GUILD, category_id: int | None = None) -> MagicMock:
+_MEMBER = SimpleNamespace(guild_permissions=SimpleNamespace(administrator=False))
+
+
+def _perms(*, view: bool = True, send: bool = True, manage_threads: bool = False) -> object:
+    return SimpleNamespace(
+        view_channel=view,
+        send_messages=send,
+        send_messages_in_threads=send,
+        manage_threads=manage_threads,
+    )
+
+
+def _guild(*, guild_id: int = _GUILD, member: object | None = _MEMBER) -> object:
+    async def fetch_member(user_id: int) -> object:
+        raise discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Member")
+
+    return SimpleNamespace(
+        id=guild_id, get_member=lambda user_id: member, fetch_member=fetch_member
+    )
+
+
+def _text_channel(
+    *,
+    guild_id: int = _GUILD,
+    category_id: int | None = None,
+    perms: object | None = None,
+    member: object | None = _MEMBER,
+) -> MagicMock:
     channel = MagicMock(spec=discord.TextChannel)
-    channel.guild = SimpleNamespace(id=guild_id)
+    channel.guild = _guild(guild_id=guild_id, member=member)
     channel.category_id = category_id
+    channel.permissions_for = MagicMock(return_value=perms if perms is not None else _perms())
     channel.send = AsyncMock()
     return channel
 
@@ -97,11 +125,22 @@ def _poster(
     )
 
 
-def _uncached_thread(*, parent_id: int = 444) -> MagicMock:
+def _uncached_thread(
+    *, parent_id: int = 444, private: bool = False, creator_in_thread: bool = False
+) -> MagicMock:
     thread = MagicMock(spec=discord.Thread)
-    thread.guild = SimpleNamespace(id=_GUILD)
+    thread.guild = _guild()
     thread.parent = None  # not in the bot's cache
     thread.parent_id = parent_id
+    thread.type = (
+        discord.ChannelType.private_thread if private else discord.ChannelType.public_thread
+    )
+    if creator_in_thread:
+        thread.fetch_member = AsyncMock(return_value=object())
+    else:
+        thread.fetch_member = AsyncMock(
+            side_effect=discord.NotFound(MagicMock(status=404, reason="Not Found"), "no")
+        )
     thread.send = AsyncMock()
     return thread
 
@@ -299,3 +338,55 @@ async def test_a_creator_who_is_not_cleared_gets_nothing_not_even_a_dm(
     assert (outcome.status, outcome.note) == ("skipped", note)
     assert dms.sent == [], "no direct message for an uncleared creator"
     channel.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("channel", "channels_extra"),
+    [
+        # the creator lost send_messages in the channel
+        (lambda: _text_channel(perms=_perms(send=False)), {}),
+        # the creator left the guild
+        (lambda: _text_channel(member=None), {}),
+    ],
+)
+async def test_a_channel_the_creator_cannot_post_in_gets_their_dm_not_a_post(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    channel: Any,
+    channels_extra: dict[int, object],
+) -> None:
+    """Review regression (round 3): the poster checked the bot's access only."""
+    row = await _routine(db_session)
+    target = channel()
+    dms = _Dms()
+
+    outcome = await _poster(db_session_factory, {555: target, **channels_extra}, dms=dms)(row)
+
+    assert outcome.note == "dm_fallback:creator_cannot_post"
+    target.send.assert_not_awaited()
+
+
+async def test_a_private_thread_the_creator_is_not_in_gets_their_dm_not_a_post(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    row = await _routine(db_session)
+    thread = _uncached_thread(private=True, creator_in_thread=False)
+    parent = _text_channel()
+
+    outcome = await _poster(db_session_factory, {555: thread, 444: parent})(row)
+
+    assert outcome.note == "dm_fallback:creator_cannot_post"
+    thread.send.assert_not_awaited()
+
+
+async def test_a_private_thread_the_creator_is_in_is_posted_to(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    row = await _routine(db_session)
+    thread = _uncached_thread(private=True, creator_in_thread=True)
+    parent = _text_channel()
+
+    outcome = await _poster(db_session_factory, {555: thread, 444: parent})(row)
+
+    assert outcome.status == "delivered" and outcome.note is None
+    thread.send.assert_awaited_once()
