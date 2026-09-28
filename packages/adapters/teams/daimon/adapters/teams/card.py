@@ -12,6 +12,8 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Literal
 
+from daimon.adapters.teams.split import TEAMS_LIMIT
+from daimon.core.turn.notices import TerminationNotice, fit_notice
 from microsoft_teams.api import MessageActivityInput
 from microsoft_teams.cards import ActionSet, AdaptiveCard, CardElement, ExecuteAction, TextBlock
 
@@ -111,6 +113,21 @@ def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActi
         )
     )
     return _card(body, fallback=f"{title} …")
+
+
+def termination_text(notice: TerminationNotice, *, footer: str) -> str:
+    """The notice as the ❌ card's text, under the Teams limit, request id kept.
+
+    One paragraph per line: a card TextBlock drops single line breaks.
+    """
+    lines = [f"❌ {notice.headline}: {notice.cause}"]
+    if (work := notice.work_line()) is not None:
+        lines.append(work)
+    lines += [notice.survived, f"Next: {notice.next_step}"]
+    rid = [f"Request id: {notice.request_id}"] if notice.request_id is not None else []
+    # `fit_notice` joins the tail with one newline; the leading one makes it a paragraph.
+    tail = "\n" + "\n\n".join([*rid, footer])
+    return fit_notice(["\n\n".join(lines)], tail=tail, limit=TEAMS_LIMIT)
 
 
 def notice_card(text: str) -> MessageActivityInput:

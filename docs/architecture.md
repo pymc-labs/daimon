@@ -272,7 +272,8 @@ string.
 and how much had finished, what survived, the next step, and a request id. The
 copy lives in core; Discord and Slack draw it in `on_terminal_failure` as the
 body of the red card, with the headline as the footer reason, and log the
-request id with the underlying error so it is the handle for the detail. No
+request id with the underlying error so it is the handle for the detail;
+Teams draws it as plain text on the ❌ card. No
 lifecycle hook carries it -- the reason rides on the state every lifecycle
 already receives -- so the CLI, headless routines and any new adapter keep
 their existing failure path, and `TerminationNotice.plain_text()` is the

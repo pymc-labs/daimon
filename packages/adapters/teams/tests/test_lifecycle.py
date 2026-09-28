@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
+from collections.abc import Callable
 
 import pytest
 from daimon.adapters.teams import card
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsTurnLifecycle, TimedSender
-from daimon.adapters.teams.split import split_answer
+from daimon.adapters.teams.split import TEAMS_LIMIT, split_answer
 from daimon.core.errors import TurnError
+from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from daimon.core.turn.termination import TerminationReason
 from microsoft_teams.api import MessageActivityInput, SentActivity
 
 from .conftest import CONVERSATION_ID, SERVICE_URL, FakeSender
@@ -24,7 +28,12 @@ class Clock:
         return self.now
 
 
-async def _posted(sender: FakeSender, clock: Clock | None = None) -> TeamsTurnLifecycle:
+async def _posted(
+    sender: FakeSender,
+    clock: Clock | None = None,
+    *,
+    request_id: Callable[[], str] = lambda: "rid-1",
+) -> TeamsTurnLifecycle:
     """A lifecycle whose status card is already posted."""
     lifecycle = TeamsTurnLifecycle(
         sender=sender,
@@ -34,6 +43,7 @@ async def _posted(sender: FakeSender, clock: Clock | None = None) -> TeamsTurnLi
         agent_name="daimon",
         model_id="claude-test",
         clock=clock or Clock(),
+        request_id=request_id,
     )
     await lifecycle.post_initial()
     return lifecycle
@@ -116,16 +126,45 @@ async def test_no_answer_reads_as_cancelled_or_done() -> None:
     assert "✅ daimon" in _card_json(sender, -1)
 
 
-async def test_failure_closes_the_card_with_the_reason_once() -> None:
+def _card_text(sender: FakeSender, index: int) -> str:
+    return json.loads(_card_json(sender, index))["attachments"][0]["content"]["body"][0]["text"]
+
+
+async def test_failure_closes_the_card_with_the_termination_notice_once() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
-    state = TurnState(error=TurnError(kind="upstream", message="overloaded"))
-    await lifecycle.on_terminal_failure(state, RuntimeError("x"))
+    error = TurnError(kind="upstream", message="overloaded")
+    await lifecycle.on_terminal_failure(TurnState(error=error), error)
     await lifecycle.close_with_notice("second notice is ignored")
 
-    assert len(sender.sent) == 2
-    assert "❌ overloaded" in _card_json(sender, 1)
+    assert len(sender.sent) == 2, "the card closes once"
+    text = _card_text(sender, 1)
+    assert text.startswith("❌ Agent service error: "), "the notice replaces the raw error"
+    assert "\n\nRequest id: rid-1\n\ndaimon · " in text, "one paragraph per line, rid kept"
     assert lifecycle.card_closed
+
+
+async def test_a_notice_that_fails_to_build_falls_back_to_the_raw_error() -> None:
+    def broken() -> str:
+        raise RuntimeError("no id")
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender, request_id=broken)
+    error = TurnError(kind="upstream", message="overloaded")
+    await lifecycle.on_terminal_failure(TurnState(error=error), error)
+
+    assert _card_text(sender, 1).startswith("❌ overloaded · daimon"), "the card still closes"
+
+
+def test_an_oversized_notice_fits_the_teams_limit_and_keeps_the_request_id() -> None:
+    notice = render_termination_notice(TerminationReason.UPSTREAM, request_id="rid-1")
+    assert notice is not None
+    huge = dataclasses.replace(notice, cause="x" * 10_000)
+
+    text = card.termination_text(huge, footer="daimon · 1s")
+
+    assert len(text) <= TEAMS_LIMIT, "Teams rejects an oversized message"
+    assert text.endswith("…\n\nRequest id: rid-1\n\ndaimon · 1s"), "clipped before the tail"
 
 
 class _HungSender:
