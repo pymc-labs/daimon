@@ -178,21 +178,20 @@ class TeamsTurnLifecycle:
             return
         self._terminal = True
         try:
-            self._message_id = await self._send(card.notice_card(text), message_id=self._message_id)
-            self.final_message_id = self._message_id
-            self.card_closed = True
+            await self._close(text)
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.notice_failed", exc_info=True)
 
+    async def _close(self, text: str) -> None:
+        """Replace the card with a final notice."""
+        self._message_id = await self._send(card.notice_card(text), message_id=self._message_id)
+        self.final_message_id = self._message_id
+        self.card_closed = True
+
     def _answer_text(self, state: TurnState) -> str:
-        parts = [
-            text
-            for _, text in extract_sealed_responses(
-                state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS
-            )
-        ]
-        final = extract_final_response(state.content)
-        if final:
+        sealed = extract_sealed_responses(state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS)
+        parts = [text for _, text in sealed]
+        if final := extract_final_response(state.content):
             parts.append(final)
         return "\n\n".join(parts)
 
@@ -214,11 +213,7 @@ class TeamsTurnLifecycle:
                 text = f"✅ {footer}" if tool_only else card.CANCELLED_NOTICE
                 if tool_only and degraded is not None:
                     text = f"{degraded}\n\n{text}"
-                self._message_id = await self._send(
-                    card.notice_card(text), message_id=self._message_id
-                )
-                self.final_message_id = self._message_id
-                self.card_closed = True
+                await self._close(text)
                 return
             if self.answer_prefix is not None:
                 answer = f"{self.answer_prefix}\n\n{answer}"
