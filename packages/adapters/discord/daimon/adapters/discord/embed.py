@@ -18,6 +18,7 @@ from daimon.adapters.discord.theme import (
     COLOR_THINKING,
     COLOR_TOOL_RUNNING,
 )
+from daimon.core.turn.notices import TerminationNotice, fit_notice
 
 # ---------------------------------------------------------------------------
 # Phase enum
@@ -86,6 +87,8 @@ class EmbedState:
     usage_out: int = 0
     cost_str: str | None = None
     text_preview: str | None = None
+    notice: str = ""
+    """Rendered termination notice; the ERROR card's body."""
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +155,9 @@ _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 _TRAIL_MAX = 5
 
 _TEXT_PREVIEW_MAX_CHARS = 250
+
+# Discord caps an embed description at 4,096 characters.
+_NOTICE_MAX_CHARS = 4000
 
 
 def _escape_markdown(text: str) -> str:
@@ -235,12 +241,16 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         if state.cost_str is not None:
             parts.append(state.cost_str)
         summary = " · ".join(parts)
+        description = ""
         if state.phase is TurnPhase.ERROR:
             reason = state.trail[-1].text if state.trail else "error"
             footer = f"{_EMOJI_CROSS} {reason} · {summary}"
+            description = state.notice
         else:
             footer = summary
-        return EmbedData(phase=state.phase, title="", description="", color=color, footer=footer)
+        return EmbedData(
+            phase=state.phase, title="", description=description, color=color, footer=footer
+        )
 
     # In-progress turns show the title + elapsed + activity trail; no footer yet.
     lines: list[str] = []
@@ -281,3 +291,17 @@ def to_preview_embed_data(state: EmbedState) -> EmbedData | None:
         color=_PHASE_COLOR[state.phase],
         footer=None,
     )
+
+
+def format_termination_notice(notice: TerminationNotice) -> str:
+    """Draw the core notice as the ERROR card's body, in Discord markdown.
+
+    The headline is not repeated here: it is already the footer's reason.
+    """
+    lines = [_escape_markdown(notice.cause)]
+    if (work := notice.work_line(lambda name: f"`{name.replace('`', '')}`")) is not None:
+        lines.append(work)
+    lines.append(notice.survived)
+    lines.append(f"**Next:** {notice.next_step}")
+    tail = f"`rid: {notice.request_id}`" if notice.request_id is not None else None
+    return fit_notice(lines, tail=tail, limit=_NOTICE_MAX_CHARS)

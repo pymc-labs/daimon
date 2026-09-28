@@ -51,21 +51,26 @@ import asyncio
 import dataclasses
 import time
 import types
-from typing import Any
+from typing import Any, NoReturn
 
 import aiohttp
+import daimon.adapters.slack.lifecycle as lifecycle_module
 import pytest
+import structlog
 import yarl
 from daimon.adapters.slack import lifecycle as lifecycle_mod
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import (
+    McpServerFailure,
     TextBlock,
     ToolUseBlock,
     TurnState,
     UsageTotals,
 )
+from daimon.core.turn.termination import TerminationReason
 from daimon.testing import ma_model_usage
 from slack_sdk.errors import SlackApiError
 
@@ -754,6 +759,119 @@ async def test_terminal_success_empty_content_shows_turn_cancelled(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        TerminationReason.CONNECTION_LOST,
+        TerminationReason.UPSTREAM,
+        TerminationReason.INTERRUPTED,
+        TerminationReason.INTERRUPT_TIMEOUT,
+        TerminationReason.REQUIRES_ACTION,
+        TerminationReason.CEILING,
+        TerminationReason.MCP_DEGRADED_EMPTY,
+    ],
+    ids=str,
+)
+async def test_terminal_failure_card_carries_the_termination_notice(
+    fake_slack_web_client: Any, reason: TerminationReason
+) -> None:
+    """The error card explains the reason: a notice section above the ❌ summary."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    state = TurnState(
+        termination=reason,
+        content=[
+            ToolUseBlock(
+                kind="tool_use", id="tu_1", type="agent.tool_use", name="fit_model", input={}
+            )
+        ],
+    )
+
+    await lc.on_terminal_failure(state, RuntimeError("x" * 300))
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    notice = render_termination_notice(reason, state=state)
+    assert notice is not None
+    section, context = blocks[0], blocks[-1]
+    assert section["type"] == "section"
+    assert notice.cause in section["text"]["text"]
+    assert notice.next_step in section["text"]["text"], "the next step is not truncated away"
+    assert "`fit_model`" in section["text"]["text"], "work in flight is named"
+    assert "`rid: " in section["text"]["text"]
+    assert context["elements"][0]["text"].startswith(f"❌ {notice.headline} · ")
+    assert "xxx" not in _block_text(blocks), "raw error stays in the logs"
+
+
+async def test_terminal_failure_notice_fits_slack_limits_with_many_long_names(
+    fake_slack_web_client: Any,
+) -> None:
+    """45 failed servers and 45 running tools, every name 100 characters: the
+    section stays under Slack's 3,000-character limit and the top-level text
+    carries the notice instead of a bare phase name."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    state = TurnState(
+        termination=TerminationReason.MCP_DEGRADED_EMPTY,
+        mcp_failures=tuple(
+            McpServerFailure(
+                server_name=f"{i:02d}" + "s" * 98,
+                error_type="mcp_connection_failed_error",
+                message="down",
+                retry_status="exhausted",
+            )
+            for i in range(45)
+        ),
+        content=[
+            ToolUseBlock(
+                kind="tool_use",
+                id=f"tu_{i}",
+                type="agent.tool_use",
+                name=f"{i:02d}" + "t" * 98,
+                input={},
+            )
+            for i in range(45)
+        ],
+    )
+
+    await lc.on_terminal_failure(state, RuntimeError("x"))
+
+    calls = fake_slack_web_client.mock.requests.get(("POST", _UPDATE_URL), [])
+    body = calls[-1].kwargs["json"]
+    section = body["blocks"][0]["text"]["text"]
+    assert len(section) <= 3000
+    assert "and 42 more" in section and "and 40 more" in section
+    assert "`rid: " in section
+    assert body["text"].startswith("Tool connection failed: "), "fallback text is the notice"
+    assert len(body["text"]) <= 3000
+
+
+async def test_a_notice_that_fails_to_build_still_draws_the_error_card(
+    fake_slack_web_client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _broken(*_args: object, **_kwargs: object) -> NoReturn:
+        raise RuntimeError("renderer broke")
+
+    monkeypatch.setattr(lifecycle_module, "render_termination_notice", _broken)
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+
+    await lc.on_terminal_failure(TurnState(), RuntimeError("upstream timeout"))
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    assert [b["type"] for b in blocks] == ["context"], "no notice section, no repair notice"
+    assert blocks[0]["elements"][0]["text"].startswith("❌ upstream timeout · ")
+
+
+async def test_the_card_reuses_the_rid_bound_for_the_turn(fake_slack_web_client: Any) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+
+    with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
+        await lc.on_terminal_failure(TurnState(), RuntimeError("x"))
+
+    assert "`rid: 01BOUNDRID`" in _block_text(_last_update_blocks(fake_slack_web_client))
+
+
 async def test_terminal_failure_does_not_raise(fake_slack_web_client: Any) -> None:
     """on_terminal_failure updates/posts error state and does NOT raise."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
@@ -768,9 +886,11 @@ async def test_terminal_failure_does_not_raise(fake_slack_web_client: Any) -> No
 
     blocks = _last_update_blocks(fake_slack_web_client)
     text = _block_text(blocks)
-    assert "❌" in text and "upstream blew up" in text, (
-        "terminal failure must render the ❌ error footer with the failure reason"
+    assert "❌ Something went wrong" in text, (
+        "terminal failure must render the ❌ error footer with the notice headline"
     )
+    assert "`rid: " in text, "the notice carries a request id to find the logged error"
+    assert "upstream blew up" not in text, "raw exception text stays in the logs"
     assert not _has_actions_block(blocks), "error terminal must drop the cancel button"
 
 

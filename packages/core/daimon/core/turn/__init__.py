@@ -18,6 +18,7 @@ from daimon.core.turn.ceiling import (
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.notices import TerminationNotice, render_termination_notice
 from daimon.core.turn.posture import (
     AutoApprove,
     Billed,
@@ -92,6 +93,8 @@ __all__ = [
     # how a turn ended
     "TerminationReason",
     "termination_reason",
+    "TerminationNotice",
+    "render_termination_notice",
     # reducers
     "apply",
     # driver

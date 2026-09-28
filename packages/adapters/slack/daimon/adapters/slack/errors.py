@@ -12,6 +12,7 @@ import contextlib
 from typing import Any, cast
 
 import anthropic
+import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.errors import DaimonError, SpecError, StoreError
@@ -25,6 +26,16 @@ from ulid import ULID
 def generate_request_id() -> str:
     """Generate a ULID for request tracing."""
     return str(ULID())
+
+
+def bound_request_id() -> str:
+    """The `rid` bound in this turn's log context, or a fresh one.
+
+    Reusing it means the id on a failed turn's card finds every log line of
+    that turn, not only the failure line.
+    """
+    rid = structlog.contextvars.get_contextvars().get("rid")
+    return rid if isinstance(rid, str) and rid else generate_request_id()
 
 
 def render_error(exc: Exception, *, request_id: str) -> str:

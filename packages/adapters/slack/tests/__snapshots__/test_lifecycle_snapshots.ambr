@@ -79,16 +79,33 @@
       dict({
         'blocks': list([
           dict({
+            'text': dict({
+              'text': '''
+                The turn ended unexpectedly.
+                The conversation and its workspace are kept.
+                *Next:* Send your message again. If it keeps happening, share the request id with an admin.
+                `rid: 01TESTREQUESTID0000000000`
+              ''',
+              'type': 'mrkdwn',
+            }),
+            'type': 'section',
+          }),
+          dict({
             'elements': list([
               dict({
-                'text': '❌ upstream timeout · Atlas · 12s · 500 in / 80 out · $0.003',
+                'text': '❌ Something went wrong · Atlas · 12s · 500 in / 80 out · $0.003',
                 'type': 'mrkdwn',
               }),
             ]),
             'type': 'context',
           }),
         ]),
-        'text': 'error …',
+        'text': '''
+          Something went wrong: The turn ended unexpectedly.
+          The conversation and its workspace are kept.
+          Send your message again. If it keeps happening, share the request id with an admin.
+          Request id: 01TESTREQUESTID0000000000
+        ''',
       }),
     ]),
   })

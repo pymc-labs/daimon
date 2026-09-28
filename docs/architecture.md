@@ -209,13 +209,25 @@ fires, so a lifecycle and the caller's `RunOutcome.termination` always agree.
 Refusals raise before any state exists; `termination_reason(err)` maps the
 exception the adapter caught to its member, and never raises: anything it does
 not recognise is `unknown`. Two members have no exception behind them and are
-set by the caller: `admission_concurrency_shed` when `should_admit_turn`
-refuses, and `recovery_failed` when replacing a lost session raises out of
-`run_prepared_turn`. A session MA reports terminated without any terminal
+set outside the mapper: `admission_concurrency_shed` by callers when
+`should_admit_turn` refuses, and `recovery_failed` by `run_prepared_turn` on
+the terminal hook when replacing a lost session raises (the exception it
+re-raises maps to `unknown`). A session MA reports terminated without any terminal
 event for this turn is `session_terminated`, never `completed`.
 `TurnError.kind` is unchanged, and
 every `TurnKind` value is also a `TerminationReason` value with the same
 string.
+
+`packages/core/daimon/core/turn/notices.py` turns a reason into a
+`TerminationNotice`: a short headline, the cause, the tool work still running
+and how much had finished, what survived, the next step, and a request id. The
+copy lives in core; Discord and Slack draw it in `on_terminal_failure` as the
+body of the red card, with the headline as the footer reason, and log the
+request id with the underlying error so it is the handle for the detail. No
+lifecycle hook carries it -- the reason rides on the state every lifecycle
+already receives -- so the CLI, headless routines and any new adapter keep
+their existing failure path, and `TerminationNotice.plain_text()` is the
+fallback wording for a surface without markup.
 
 ## Tenancy and isolation
 

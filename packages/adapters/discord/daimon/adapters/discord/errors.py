@@ -7,6 +7,7 @@ bold labels, and ULID request ID suffix for cross-referencing with logs.
 from __future__ import annotations
 
 import anthropic
+import structlog
 from daimon.core.continuity.messages import render_responder_changed_without_handoff
 from daimon.core.errors import (
     DaimonError,
@@ -23,6 +24,16 @@ import discord
 def generate_request_id() -> str:
     """Generate a ULID for request tracing."""
     return str(ULID())
+
+
+def bound_request_id() -> str:
+    """The `rid` this turn's handler bound for its logs, or a fresh one.
+
+    Reusing it means the id on a failed turn's card finds every log line of
+    that turn, not only the failure line.
+    """
+    rid = structlog.contextvars.get_contextvars().get("rid")
+    return rid if isinstance(rid, str) and rid else generate_request_id()
 
 
 def render_error(

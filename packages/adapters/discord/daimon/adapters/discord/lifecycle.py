@@ -30,20 +30,24 @@ from daimon.adapters.discord.embed import (
     EmbedEvent,
     EmbedState,
     TurnPhase,
+    format_termination_notice,
     to_embed_data,
     to_preview_embed_data,
     update,
 )
+from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
+from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
     extract_final_response,
     extract_sealed_responses,
 )
+from daimon.core.turn.termination import termination_reason
 
 import discord
 
@@ -132,11 +136,13 @@ class DiscordTurnLifecycle:
         delete: DeleteFn | None = None,
         unprompted: bool = False,
         on_first_post: Callable[[discord.Message], Awaitable[None]] | None = None,
+        request_id: Callable[[], str] = bound_request_id,
     ) -> None:
         self._requester_id = requester_id
         self._trigger_message = trigger_message
         self._notify_on_completion = notify_on_completion
         self._send = send
+        self._request_id = request_id
         self._edit = edit
         self._delete = delete
         # Nobody asked for an unprompted turn, so it stays invisible until it
@@ -450,9 +456,28 @@ class DiscordTurnLifecycle:
             log.warning("turn.terminal_failure", error=str(err), unprompted=True)
             return
         self._apply_usage(state)
-        self._state = update(self._state, EmbedEvent(kind="error", label=str(err)[:100]))
+        label = str(err)[:100]
+        body = ""
+        reason = request_id = None
+        # The notice is words on top of the red card, never a reason not to
+        # draw it: if building it fails, the card falls back to the raw label.
+        try:
+            reason = state.termination or termination_reason(err)
+            request_id = self._request_id()
+            notice = render_termination_notice(reason, state=state, request_id=request_id)
+            if notice is not None:
+                label, body = notice.headline, format_termination_notice(notice)
+        except Exception:
+            log.warning("turn.terminal_notice_failed", exc_info=True)
+        self._state = update(self._state, EmbedEvent(kind="error", label=label))
+        self._state = dataclasses.replace(self._state, notice=body)
         await self._flush_terminal()
-        log.warning("turn.terminal_failure", error=str(err))
+        log.warning(
+            "turn.terminal_failure",
+            error=str(err),
+            reason=str(reason) if reason is not None else None,
+            request_id=request_id,
+        )
 
     async def on_render(self, state: TurnState) -> None:
         # Sole delivery path (D-11). Sealed answers first, then the embed
