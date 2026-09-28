@@ -5,6 +5,7 @@ wake queue (`daimon.core.continuity.wakes`). The adapter supplies the I/O as
 callables: running the receiving agent's turn, posting a notice, and when a
 person last spoke in the thread. A claim this process takes is settled or
 released by it on every handled path; one it dies holding is left to the lease.
+Notices go out only where the access policy lets the agent post.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.stores.domain import ChatPlatform, TaskContinuationRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
+from daimon.core.turn.protection import protection_state
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -59,6 +61,30 @@ async def _settle(
         now=datetime.now(UTC),
         skip_reason=skip_reason,
     )
+
+
+async def _notify(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    post_notice: PostNotice,
+    row: TaskContinuationRow,
+    text: str,
+    *,
+    reason: str,
+) -> None:
+    # Posted outside any gated turn (wake poller, saved input), so the may-post
+    # decision is asked right before each post; the row settles either way.
+    state = await protection_state(
+        sessionmaker,
+        tenant_id=row.tenant_id,
+        channel_id=row.parent_channel_id,
+        thread_id=row.thread_id,
+    )
+    if not state.may_post:
+        log.info(
+            "continuation.notice_withheld", row_id=str(row.id), reason=reason, state=state.value
+        )
+        return
+    await post_notice(text)
 
 
 async def dispatch_pending_continuations(
@@ -136,7 +162,7 @@ async def dispatch_pending_continuations(
             reason = decision.action if decision.action != "dispatch" else "missing_seed"
             await _settle(sessionmaker, claim, reason)
             if decision.message is not None:
-                await post_notice(decision.message)
+                await _notify(sessionmaker, post_notice, row, decision.message, reason=reason)
             continue
         if not await start_wake(sessionmaker, claim, now=datetime.now(UTC)):
             continue  # Another dispatcher took the row over while this one decided.
@@ -147,7 +173,7 @@ async def dispatch_pending_continuations(
         except ResponderChanged as exc:
             # A timer whose thread another agent answers now; the turn never started.
             await _settle(sessionmaker, claim, "skip_target_changed")
-            await post_notice(exc.message)
+            await _notify(sessionmaker, post_notice, row, exc.message, reason="skip_target_changed")
         except AdmissionDenied as exc:
             # Held to the same gates as a mention, and not retried.
             await _settle(sessionmaker, claim, f"admission_denied:{exc.reason}")

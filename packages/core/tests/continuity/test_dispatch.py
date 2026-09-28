@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from anthropic import AsyncAnthropic
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.continuity.continuation import (
     ContinuationRequest,
     ResponderChanged,
@@ -15,6 +16,7 @@ from daimon.core.continuity.continuation import (
 )
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.wakes import WAKE_RETRY_DELAY, enqueue_wake
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
@@ -24,6 +26,7 @@ from daimon.core.turn_origin import build_handoff_notice
 from daimon.testing.factories import make_account, make_tenant, make_thread_session
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TARGET = "agt_stats"
@@ -89,7 +92,9 @@ async def _dispatch(
     *,
     run: Exception | None = None,
     latest: datetime | None = None,
+    target_tenant: uuid.UUID | None = None,
 ) -> tuple[list[str], list[str]]:
+    """`target_tenant` owns the target agent: another tenant's means it is gone."""
     seeds: list[str] = []
     notices: list[str] = []
 
@@ -106,7 +111,7 @@ async def _dispatch(
 
     await dispatch_pending_continuations(
         factory,
-        _anthropic(caller[0]),
+        _anthropic(target_tenant or caller[0]),
         tenant_id=caller[0],
         platform="teams",
         thread_id=_THREAD,
@@ -244,6 +249,39 @@ async def test_a_changed_timer_responder_posts_the_notice_and_settles(
     _, notices = await _dispatch(db_session_factory, caller, run=changed)
     assert notices == [changed.message], "the thread is told the timer did not run"
     assert await _status(db_session_factory, key) == ("skipped", "skip_target_changed")
+
+
+@pytest.mark.parametrize("path", ["responder_changed", "target_gone"])
+@pytest.mark.parametrize("target", ["protected", "unknown", "open"])
+async def test_notices_reach_only_a_thread_the_agent_may_post_in(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    caller: tuple[uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    target: str,
+) -> None:
+    """SYS-048: a protected thread, or one whose protection can't be read, gets
+    no skip or responder-changed notice; the row settles either way."""
+    if target == "protected":
+        policy = TenantAccessPolicy(protected_channel_ids=("19:abc@thread.tacv2",))
+        async with db_session_factory.begin() as session:
+            await set_access_policy(session, tenant_id=caller[0], policy=policy)
+    if target == "unknown":
+
+        async def _policy_read_fails(*_args: object, **_kwargs: object) -> object:
+            raise OperationalError("SELECT", {}, Exception("pool gone"))
+
+        monkeypatch.setattr("daimon.core.turn.protection.load_access_policy", _policy_read_fails)
+    key = await _queue(
+        db_session_factory, caller, "w", reason="timer", available_at=datetime.now(UTC)
+    )
+    if path == "responder_changed":
+        run = ResponderChanged(target_name="stats-bot", current_name="daimon")
+        _, notices = await _dispatch(db_session_factory, caller, run=run)
+    else:
+        _, notices = await _dispatch(db_session_factory, caller, target_tenant=uuid.uuid4())
+    assert await _status(db_session_factory, key) == ("skipped", "skip_target_changed")
+    assert bool(notices) is (target == "open"), f"{target} thread: notices {notices}"
 
 
 @pytest.mark.parametrize(
