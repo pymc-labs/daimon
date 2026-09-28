@@ -96,6 +96,9 @@ class PrincipalLinkRow(BaseModel):
     linked_at: datetime
 
 
+FundingMode = Literal["prepaid", "operator_funded"]
+
+
 class TenantRow(BaseModel):
     """Canonical per-tenant identity + lifecycle row. Returned by stores.tenants.get_tenant.
 
@@ -109,6 +112,7 @@ class TenantRow(BaseModel):
     platform: str  # "discord" | "cli"
     external_id: str  # = folded workspace_id
     provision_status: str  # "ready" | "pending" | "failed"
+    funding_mode: FundingMode = "prepaid"
     last_reconcile_error: str | None = None
     archived_at: datetime | None = None
     registered_at: datetime

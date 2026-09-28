@@ -148,3 +148,42 @@ async def test_is_over_balance_stripe_independent_trial_credit_guild_can_turn(
     assert result is False, (
         "trial-credit-only guild must be allowed (balance > 0) — gate is Stripe-independent"
     )
+
+
+async def test_funding_policy_is_per_tenant_and_alerts_without_refusing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.tenants import get_tenant, set_funding_mode
+    from structlog.testing import capture_logs
+
+    funded = await make_tenant(db_session)
+    prepaid = await make_tenant(db_session)
+    original = await get_tenant(db_session, prepaid.id)
+    assert original is not None and original.funding_mode == "prepaid"
+    await set_funding_mode(db_session, tenant_id=funded.id, funding_mode="operator_funded")
+    with capture_logs() as logs:
+        assert not await tenant_balance.is_over_balance(
+            sessionmaker=db_session_factory, tenant_id=funded.id
+        )
+    assert any(
+        e["event"] == "billing.operator_funded_balance_alert" and e["tenant_id"] == str(funded.id)
+        for e in logs
+    )
+    assert await tenant_balance.is_over_balance(
+        sessionmaker=db_session_factory, tenant_id=prepaid.id
+    )
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=funded.id,
+        delta_usd=Decimal("-1"),
+        reason="turn_debit",
+        idempotency_key="funded-turn",
+    )
+    assert not await tenant_balance.is_over_balance(
+        sessionmaker=db_session_factory, tenant_id=funded.id
+    )
+    await set_funding_mode(db_session, tenant_id=funded.id, funding_mode="prepaid")
+    assert await tenant_balance.is_over_balance(
+        sessionmaker=db_session_factory, tenant_id=funded.id
+    )

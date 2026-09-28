@@ -42,6 +42,9 @@ class Tenant(Base):
     __tablename__ = "tenants"
     __table_args__ = (
         UniqueConstraint("platform", "external_id", name="uq_tenants_platform_external_id"),
+        CheckConstraint(
+            "funding_mode IN ('prepaid', 'operator_funded')", name="ck_tenants_funding_mode"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -53,6 +56,9 @@ class Tenant(Base):
     external_id: Mapped[str] = mapped_column(Text, nullable=False)
     provision_status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'ready'")
+    )
+    funding_mode: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'prepaid'")
     )
     last_reconcile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

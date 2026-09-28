@@ -18,10 +18,11 @@ from daimon.core.stores.tenants import (
     delete_tenant,
     get_tenant_dependent_counts,
     list_tenants_by_platform,
+    set_funding_mode,
 )
 from rich.console import Console
 
-tenants_app = typer.Typer(help="Tenants: list and delete.")
+tenants_app = typer.Typer(help="Tenants: list, funding policy and delete.")
 
 
 _VALID_PLATFORMS = ("discord", "cli", "slack")
@@ -66,7 +67,14 @@ async def tenants_list(
     emit_rows(
         console,
         rows,
-        columns=("platform", "external_id", "provision_status", "registered_at", "archived_at"),
+        columns=(
+            "platform",
+            "external_id",
+            "funding_mode",
+            "provision_status",
+            "registered_at",
+            "archived_at",
+        ),
         as_json=as_json,
     )
 
@@ -146,3 +154,30 @@ async def tenants_delete(
         await delete_tenant(session, tenant_id=tenant_id)
 
     console.print(f"[green]✓ deleted tenant {platform}:{external_id}[/green]")
+
+
+@tenants_app.command("funding-mode")
+def tenants_funding_mode_command(platform: str, external_id: str, mode: str) -> None:
+    """Set a tenant to prepaid or operator_funded; retain usage and caps."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _with_runtime() -> None:
+        async with build_runtime(settings) as rt:
+            await tenants_funding_mode(
+                rt=rt, console=console, platform=platform, external_id=external_id, mode=mode
+            )
+
+    run_cli(_with_runtime(), console=console)
+
+
+async def tenants_funding_mode(
+    *, rt: CliRuntime, console: Console, platform: str, external_id: str, mode: str
+) -> None:
+    validated_platform = _validate_platform(platform)
+    if mode not in ("prepaid", "operator_funded"):
+        raise typer.BadParameter("mode must be prepaid or operator_funded")
+    tenant_id = derive_tenant_uuid(platform=validated_platform, workspace_id=external_id)
+    async with rt.sessionmaker() as session, session.begin():
+        row = await set_funding_mode(session, tenant_id=tenant_id, funding_mode=mode)
+    console.print(f"{platform}:{external_id} funding mode: {row.funding_mode}")

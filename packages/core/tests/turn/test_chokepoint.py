@@ -26,6 +26,8 @@ from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenant_ledger, usage_events
+from daimon.core.stores.domain import FundingMode
+from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.deps import TurnDeps
@@ -147,16 +149,22 @@ def _recovery_lifecycle(_cancel: asyncio.Event) -> RecordingLifecycle:
     return RecordingLifecycle()
 
 
+@pytest.mark.parametrize("funding_mode", ["prepaid", "operator_funded"])
 async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    funding_mode: FundingMode,
 ) -> None:
     tenant = await make_tenant(db_session)
     await make_tenant_config(
         db_session, tenant=tenant, agent_name="daimon", environment_name="default"
     )
-    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    if funding_mode == "prepaid":
+        await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    else:
+        await set_funding_mode(db_session, tenant_id=tenant.id, funding_mode=funding_mode)
+        assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == 0
     await db_session.commit()
 
     session_bodies: list[dict[str, object]] = []

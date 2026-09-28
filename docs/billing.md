@@ -3,12 +3,38 @@
 One deployment runs on one Anthropic API key, and any number of Discord
 servers and Slack workspaces can install against it. The credit model is what
 makes that safe: every model call is priced in USD and debited from the
-tenant that caused it, and a turn cannot start unless that tenant has credit
-left.
+tenant that caused it. By default, a turn cannot start unless that tenant has
+credit left. Operators can explicitly fund individual tenants themselves.
 
 Metering and the balance gate work out of the box with no configuration.
 Stripe top-ups and the per-person monthly cap need setup — see
 [settings](#settings-that-turn-things-on) below.
+
+## Tenant funding mode
+
+Every tenant defaults to `prepaid`, including existing tenants after migration.
+Set one tenant's mode from the operator CLI:
+
+```bash
+daimon tenants funding-mode discord GUILD_ID operator_funded
+daimon tenants funding-mode slack TEAM_ID prepaid
+daimon tenants list --json
+```
+
+`operator_funded` permits turns at zero or negative balance. The provider bill
+belongs to the operator. Each depleted-balance admission emits the structured
+warning `billing.operator_funded_balance_alert` with `tenant_id` and
+`balance_usd`; route this event through your log alerting system. There is no
+chat notification or deduplication of these warnings.
+
+Usage events, ledger debits, markup and configured monthly caps still apply.
+The balance can become negative and remains visible as a spend signal. Funding
+mode does not enable or disable caps: they retain the billing configuration
+requirements described below. The policy applies to chat, MCP tools and routine
+admission through the shared balance gate. Other tenants stay prepaid.
+
+Switching back to `prepaid` immediately restores the positive-balance gate;
+it does not reset the ledger or add credit. Inspect the balance before switching.
 
 ## The unit of metering is a model call, not a turn
 
@@ -92,10 +118,11 @@ live in `packages/core/daimon/core/turn/admission.py`; the gate order there is
 load-bearing and documented as such.
 
 **Balance** — `is_over_balance` in
-`packages/core/daimon/core/tenant_balance.py` sums the tenant's ledger and
+`packages/core/daimon/core/tenant_balance.py` sums the tenant's ledger and (for prepaid tenants)
 denies unless the balance is strictly positive. It is independent of any
 payment configuration: a deployment with no Stripe setup still refuses a
-tenant whose trial credit is spent.
+prepaid tenant whose trial credit is spent. Operator-funded tenants instead
+emit the balance alert described above.
 
 **Cap** — `is_over_cap` in `packages/core/daimon/core/billing.py` compares the
 person's spend in the current calendar month, UTC, against their effective

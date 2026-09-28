@@ -22,7 +22,7 @@ from daimon.core._models import (
     UsageEvent,
 )
 from daimon.core.errors import StoreError
-from daimon.core.stores.domain import Platform, TenantDependentCounts, TenantRow
+from daimon.core.stores.domain import FundingMode, Platform, TenantDependentCounts, TenantRow
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -217,3 +217,24 @@ async def get_tenant_dependent_counts(
         tenant_config=tenant_config,
         channel_config=channel_config,
     )
+
+
+async def set_funding_mode(
+    session: AsyncSession, *, tenant_id: uuid.UUID, funding_mode: FundingMode
+) -> TenantRow:
+    """Set one tenant's funding policy without changing its ledger or caps."""
+    if funding_mode not in ("prepaid", "operator_funded"):
+        raise StoreError("funding_mode must be prepaid or operator_funded")
+    row = (
+        await session.execute(
+            update(Tenant)
+            .where(Tenant.id == tenant_id)
+            .values(funding_mode=funding_mode)
+            .returning(Tenant)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise StoreError(f"tenant {tenant_id} not found")
+    await session.flush()
+    return TenantRow.model_validate(row)
