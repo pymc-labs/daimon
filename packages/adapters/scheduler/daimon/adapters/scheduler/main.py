@@ -60,7 +60,13 @@ from daimon.core.ma_resolver import (
 from daimon.core.observability import init_sentry
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.pricing import MODEL_PRICING
-from daimon.core.routine_delivery import agent_posted_to, delivery_target, render_routine_controls
+from daimon.core.routine_delivery import (
+    DirectPost,
+    agent_posted_to,
+    delivery_target,
+    placement_unknown_is_unsafe,
+    render_routine_controls,
+)
 from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
@@ -201,7 +207,7 @@ async def _build_fire(
             # stops running headless turns through routines they created. The
             # stored role is the only admin signal a fire has. Unreadable
             # policy fails closed.
-            destination_allowed = True
+            direct_post: DirectPost = "allowed"
             try:
                 policy = await load_access_policy(s, tenant_id=row.tenant_id)
             except AccessPolicyUnreadable:
@@ -211,10 +217,17 @@ async def _build_fire(
                 # is never offered to the agent as a place to post (SYS-048's
                 # guard is not on send_message yet). The poster re-checks with
                 # the parent channel and category it resolves.
+                # The scheduler cannot resolve a Discord thread's parent or
+                # a channel's category, so when the policy protects either,
+                # the agent is not invited to post directly at all.
                 target = delivery_target(row, platform=platform)
-                destination_allowed = target is None or not is_write_protected(
-                    policy, channel_id=target.channel_id
-                )
+                if target is not None:
+                    if is_write_protected(policy, channel_id=target.channel_id):
+                        direct_post = "protected"
+                    elif placement_unknown_is_unsafe(
+                        policy, platform=platform, kind=row.destination_kind
+                    ):
+                        direct_post = "unverified"
                 account = await get_account(s, account_id)
                 is_admin = account is not None and account.role is Role.ADMIN
                 allowed = is_invoker_allowed(
@@ -317,9 +330,7 @@ async def _build_fire(
         trigger_message = row.trigger_message
         if row.destination_kind is not None:
             trigger_message = (
-                render_routine_controls(
-                    row, platform=platform, destination_allowed=destination_allowed
-                )
+                render_routine_controls(row, platform=platform, direct_post=direct_post)
                 + "\n"
                 + row.trigger_message
             )

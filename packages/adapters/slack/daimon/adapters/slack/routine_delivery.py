@@ -10,8 +10,9 @@ routine can mention people but never broadcast (`<!channel>`, `<!here>`).
 When the destination cannot be used — protected, or Slack refuses the post —
 the result goes to the routine's creator by direct message instead, if the
 tenant's direct-message policy allows them and they are still an active human
-member of the workspace (the same rule as the direct-message tool). A creator
-no longer allowed to invoke the agent gets nothing.
+member of the workspace (the same rule as the direct-message tool). The creator
+is checked before any of this: an unreadable policy or a creator no longer
+allowed to invoke the agent gets nothing — no post and no direct message.
 """
 
 from __future__ import annotations
@@ -23,11 +24,11 @@ import structlog
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.access_policy import TenantAccessPolicy, is_write_protected
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
-    DM_FALLBACK_REASONS,
     DeliveryOutcome,
-    check_delivery,
+    clear_creator,
     delivery_target,
     render_fallback_dm,
     render_fallback_post,
@@ -94,19 +95,23 @@ def make_slack_routine_poster(
         dm_policy = runtime.settings.direct_message_policies.get(
             row.tenant_id, DirectMessagePolicy()
         )
+        # Creator first, before resolving or sending anything: a creator who
+        # may no longer invoke the agent, or an unreadable policy, gets
+        # nothing — no destination post and no direct message.
+        cleared = await clear_creator(runtime.sessionmaker, row, platform="slack")
+        if not isinstance(cleared, TenantAccessPolicy):
+            log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
+            return DeliveryOutcome(status="skipped", note=cleared)
         target = delivery_target(row, platform="slack")
         if target is None:
             return await _dm_fallback(
                 client, row, "destination_unavailable", team_id=tenant.external_id, policy=dm_policy
             )
-        refusal = await check_delivery(runtime.sessionmaker, row, platform="slack", target=target)
-        if refusal is not None:
-            log.info("routine.delivery_refused", routine_id=str(row.id), reason=refusal)
-            if refusal in DM_FALLBACK_REASONS:
-                return await _dm_fallback(
-                    client, row, refusal, team_id=tenant.external_id, policy=dm_policy
-                )
-            return DeliveryOutcome(status="skipped", note=refusal)
+        if is_write_protected(cleared, channel_id=target.channel_id):
+            log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
+            return await _dm_fallback(
+                client, row, "protected_channel", team_id=tenant.external_id, policy=dm_policy
+            )
         text = escape_mrkdwn_preserving_mentions(render_fallback_post(row))
         try:
             if target.thread_ts is not None:

@@ -8,10 +8,12 @@ category is what category protection is checked against; if it cannot be
 resolved, nothing is posted there (fail closed). The tenant's access policy
 then decides with the parent channel and category in hand.
 
-When the destination cannot be used — protected, gone, or outside the guild —
-the result goes to the routine's creator by direct message instead, if the
-tenant's direct-message policy allows them, so it never silently goes
-nowhere. A creator no longer allowed to invoke the agent gets nothing.
+The creator is checked first, before anything is resolved or sent: if the
+policy cannot be read, or the creator may no longer invoke the agent, nothing
+is sent anywhere. Only a cleared result may then fall back: when the
+destination cannot be used — protected, gone, or outside the guild — it goes
+to the creator by direct message instead, if the tenant's direct-message
+policy allows them, so it never silently goes nowhere.
 Mentions are disabled on every post: the text is the agent's, and a routine
 must not ping anyone on its own.
 """
@@ -21,11 +23,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 import structlog
+from daimon.core.access_policy import TenantAccessPolicy, is_write_protected
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
-    DM_FALLBACK_REASONS,
     DeliveryOutcome,
-    check_delivery,
+    clear_creator,
     delivery_target,
     render_fallback_dm,
     render_fallback_post,
@@ -117,6 +119,14 @@ def make_discord_routine_poster(
             tenant = await get_tenant(session, row.tenant_id)
         if tenant is None or tenant.archived_at is not None:
             return DeliveryOutcome(status="skipped", note="tenant_archived")
+        # Creator first, before resolving or sending anything: a creator who
+        # may no longer invoke the agent, or an unreadable policy, gets
+        # nothing — no destination post and no direct message.
+        cleared = await clear_creator(sessionmaker, row, platform="discord")
+        if not isinstance(cleared, TenantAccessPolicy):
+            log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
+            return DeliveryOutcome(status="skipped", note=cleared)
+        policy = cleared
         target = delivery_target(row, platform="discord")
         if target is None or not target.channel_id.isdigit():
             return await _dm_fallback(row, "destination_unavailable", tenant.external_id)
@@ -130,19 +140,14 @@ def make_discord_routine_poster(
             # another guild.
             return await _dm_fallback(row, "destination_unavailable", tenant.external_id)
         parent_channel_id, category_id, _guild_id = placement
-        refusal = await check_delivery(
-            sessionmaker,
-            row,
-            platform="discord",
-            target=target,
+        if is_write_protected(
+            policy,
+            channel_id=target.channel_id,
             parent_channel_id=parent_channel_id,
             category_id=category_id,
-        )
-        if refusal is not None:
-            log.info("routine.delivery_refused", routine_id=str(row.id), reason=refusal)
-            if refusal in DM_FALLBACK_REASONS:
-                return await _dm_fallback(row, refusal, tenant.external_id)
-            return DeliveryOutcome(status="skipped", note=refusal)
+        ):
+            log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
+            return await _dm_fallback(row, "protected_channel", tenant.external_id)
         assert isinstance(channel, discord.Thread | discord.TextChannel)
         await channel.send(
             content=render_fallback_post(row)[:_DISCORD_MAX_CHARS],

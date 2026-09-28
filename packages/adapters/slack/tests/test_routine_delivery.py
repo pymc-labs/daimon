@@ -161,3 +161,57 @@ async def test_no_dm_for_a_creator_the_dm_policy_excludes(
 
     assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
     client.chat_postMessage.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("destination_id", "kind", "policy", "unreadable", "note"),
+    [
+        (
+            "C_ANN",
+            "channel",
+            TenantAccessPolicy(protected_channel_ids=("C_ANN",), invoker_user_ids=("OTHER",)),
+            False,
+            "invoker_not_allowed",
+        ),
+        (
+            "C1",
+            "thread",
+            TenantAccessPolicy(invoker_user_ids=("OTHER",)),
+            False,
+            "invoker_not_allowed",
+        ),
+        ("C1", "thread", None, True, "access_policy_unreadable"),
+    ],
+)
+async def test_a_creator_who_is_not_cleared_gets_nothing_not_even_a_dm(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    destination_id: str,
+    kind: str,
+    policy: TenantAccessPolicy | None,
+    unreadable: bool,
+    note: str,
+) -> None:
+    """Review regression (round 2): protected/unavailable (a malformed thread
+    here) must not become a DM for a creator the policy no longer clears."""
+    import daimon.core.routine_delivery as delivery_mod
+    from daimon.core.stores.access_policy import AccessPolicyUnreadable
+
+    row = await _routine(db_session, kind=kind, destination_id=destination_id)
+    if policy is not None:
+        await set_access_policy(db_session, tenant_id=row.tenant_id, policy=policy)
+        await db_session.commit()
+    if unreadable:
+
+        async def unreadable_policy(*args: object, **kwargs: object) -> TenantAccessPolicy:
+            raise AccessPolicyUnreadable(tenant_id=row.tenant_id)
+
+        monkeypatch.setattr(delivery_mod, "load_access_policy", unreadable_policy)
+    post, client = _poster(db_session_factory, monkeypatch)
+
+    outcome = await post(row)
+
+    assert (outcome.status, outcome.note) == ("skipped", note)
+    client.chat_postMessage.assert_not_awaited()
+    client.conversations_open.assert_not_awaited()

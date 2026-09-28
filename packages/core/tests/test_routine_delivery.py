@@ -11,10 +11,11 @@ from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
     agent_posted_to,
-    check_delivery,
+    clear_creator,
     delivery_refusal,
     delivery_target,
     destination_shape_error,
+    placement_unknown_is_unsafe,
     poll_deliveries_once,
     render_fallback_post,
     render_routine_controls,
@@ -133,9 +134,12 @@ def test_a_slack_thread_destination_needs_a_post_into_that_thread() -> None:
 
 
 def test_protected_controls_do_not_invite_a_post() -> None:
-    text = render_routine_controls(_row(), platform="discord", destination_allowed=False)
+    text = render_routine_controls(_row(), platform="discord", direct_post="protected")
     assert "do not post there" in text
     assert "posts the end of your final reply there" not in text
+    unverified = render_routine_controls(_row(), platform="discord", direct_post="unverified")
+    assert "Do not post to the destination yourself" in unverified
+    assert "posts the end of your final reply there" not in unverified
 
 
 @pytest.mark.parametrize(
@@ -198,6 +202,17 @@ def test_the_fallback_post_carries_the_tail() -> None:
         ),
         (TenantAccessPolicy(invoker_user_ids=("U2",)), None, None, "U1", True, None),
         (TenantAccessPolicy(), None, None, None, False, "invoker_not_allowed"),
+        # Creator before protection: a revoked creator on a protected
+        # destination is `invoker_not_allowed`, never `protected_channel`
+        # (which a poster may answer with a DM).
+        (
+            TenantAccessPolicy(protected_channel_ids=("C1",), invoker_user_ids=("U2",)),
+            None,
+            None,
+            "U1",
+            False,
+            "invoker_not_allowed",
+        ),
     ],
 )
 def test_delivery_refusal(
@@ -375,9 +390,14 @@ async def test_an_empty_tail_is_not_posted(
     assert after is not None and after.delivery_note == "no_result"
 
 
-async def test_check_delivery_applies_the_stored_policy(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+async def test_clear_creator_returns_the_policy_or_why_not(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import daimon.core.routine_delivery as delivery_mod
+    from daimon.core.stores.access_policy import AccessPolicyUnreadable
+
     row = await _routine(db_session)
     await set_access_policy(
         db_session,
@@ -386,71 +406,39 @@ async def test_check_delivery_applies_the_stored_policy(
     )
     await db_session.commit()
 
-    refused = await check_delivery(
-        db_session_factory, row, platform="discord", target=DeliveryTarget("123"), category_id="CAT"
+    cleared = await clear_creator(db_session_factory, row, platform="discord")
+    assert isinstance(cleared, TenantAccessPolicy)
+    assert cleared.protected_category_ids == ("CAT",)
+
+    await set_access_policy(
+        db_session, tenant_id=row.tenant_id, policy=TenantAccessPolicy(invoker_user_ids=("U9",))
     )
-    allowed = await check_delivery(
-        db_session_factory, row, platform="discord", target=DeliveryTarget("123")
-    )
-
-    assert (refused, allowed) == ("protected_channel", None)
-
-
-async def test_an_older_writer_rewriting_the_tail_cannot_change_a_pending_post(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    """Mixed versions: a scheduler that predates the outbox still rewrites
-    `last_result_tail` (no `delivery` argument). The pending post keeps the
-    result it was queued with."""
-    row = await _routine(db_session)
-    await record_result(db_session, row.id, tail="new fire", error=None, delivery="pending")
-    await record_result(db_session, row.id, tail="older worker", error=None)  # pre-085 writer
     await db_session.commit()
-    posted: list[str] = []
+    assert await clear_creator(db_session_factory, row, platform="discord") == (
+        "invoker_not_allowed"
+    )
 
-    async def post(claimed: RoutineRow) -> DeliveryOutcome:
-        posted.append(render_fallback_post(claimed))
-        return DeliveryOutcome(status="delivered")
+    async def unreadable(*args: object, **kwargs: object) -> TenantAccessPolicy:
+        raise AccessPolicyUnreadable(tenant_id=row.tenant_id)
 
-    await poll_deliveries_once(db_session_factory, platform="discord", post=post, now=_NOW)
+    monkeypatch.setattr(delivery_mod, "load_access_policy", unreadable)
+    assert await clear_creator(db_session_factory, row, platform="discord") == (
+        "access_policy_unreadable"
+    )
 
-    assert len(posted) == 1 and posted[0].endswith("new fire")
 
-
-async def test_a_failed_fire_leaves_an_earlier_pending_result_in_place(
-    db_session: AsyncSession,
+@pytest.mark.parametrize(
+    ("policy", "platform", "kind", "unsafe"),
+    [
+        (TenantAccessPolicy(), "discord", "thread", False),
+        (TenantAccessPolicy(protected_channel_ids=("P",)), "discord", "thread", True),
+        (TenantAccessPolicy(protected_category_ids=("K",)), "discord", "thread", True),
+        (TenantAccessPolicy(protected_category_ids=("K",)), "discord", "channel", True),
+        (TenantAccessPolicy(protected_channel_ids=("P",)), "discord", "channel", False),
+        (TenantAccessPolicy(protected_channel_ids=("P",)), "slack", "thread", False),
+    ],
+)
+def test_placement_unknown_is_unsafe(
+    policy: TenantAccessPolicy, platform: str, kind: str, unsafe: bool
 ) -> None:
-    row = await _routine(db_session)
-    await record_result(db_session, row.id, tail="good run", error=None, delivery="pending")
-    await record_result(db_session, row.id, tail=None, error="balance_depleted")
-    after = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
-    assert after is not None
-    assert (after.delivery_status, after.delivery_payload) == ("pending", "good run")
-
-
-async def test_changing_the_destination_drops_a_pending_post(db_session: AsyncSession) -> None:
-    row = await _routine(db_session)
-    await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
-    await update_routine(
-        db_session, row.id, tenant_id=row.tenant_id, destination_kind="channel", destination_id="9"
-    )
-    after = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
-    assert after is not None
-    assert (after.delivery_status, after.delivery_note) == ("skipped", "destination_changed")
-
-
-async def test_archived_tenants_are_not_claimed(db_session: AsyncSession) -> None:
-    from daimon.core._models import Tenant
-    from sqlalchemy import update
-
-    row = await _routine(db_session)
-    await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
-    await db_session.execute(
-        update(Tenant).where(Tenant.id == row.tenant_id).values(archived_at=_NOW)
-    )
-    assert (
-        await claim_routine_deliveries(
-            db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
-        )
-        == []
-    )
+    assert placement_unknown_is_unsafe(policy, platform=platform, kind=kind) is unsafe

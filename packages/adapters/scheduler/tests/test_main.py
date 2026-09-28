@@ -945,11 +945,16 @@ async def _fire_with_fake_turn(
     *,
     destination: tuple[str, str] | None,
     agent_posts_to: str | None,
+    policy: object | None = None,
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.turn.state import ToolUseBlock, TurnState
 
     now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
+    if policy is not None:
+        from daimon.core.stores.access_policy import set_access_policy
+
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)  # type: ignore[arg-type]
     await tenant_ledger.insert_entry(
         db_session,
         tenant_id=tenant.id,
@@ -1095,29 +1100,73 @@ async def test_fire_does_not_invite_a_post_into_a_destination_protected_since(
     """Eval regression: the controls must not tell the agent to post into a
     channel the access policy now protects (send_message has no guard yet)."""
     from daimon.core.access_policy import TenantAccessPolicy
-    from daimon.core.stores.access_policy import set_access_policy
 
-    real_make_tenant = make_tenant
-
-    async def make_protected_tenant(session: AsyncSession, **kwargs: object) -> object:
-        tenant = await real_make_tenant(session, **kwargs)  # type: ignore[arg-type]
-        await set_access_policy(
-            session,
-            tenant_id=tenant.id,
-            policy=TenantAccessPolicy(protected_channel_ids=("111222333",)),
-        )
-        return tenant
-
-    monkeypatch.setattr(f"{__name__}.make_tenant", make_protected_tenant)
     after, seen = await _fire_with_fake_turn(
         db_session,
         db_session_factory,
         monkeypatch,
         destination=("channel", "111222333"),
         agent_posts_to=None,
+        policy=TenantAccessPolicy(protected_channel_ids=("111222333",)),
     )
 
     trigger = str(seen["trigger_message"])
     assert "do not post there" in trigger
     assert "posts the end of your final reply there" not in trigger
     assert after.delivery_status == "pending", "the poster still routes it (DM fallback)"
+
+
+@pytest.mark.parametrize(
+    ("kind", "policy_kwargs"),
+    [
+        # A thread under a channel protected since: the scheduler cannot see
+        # the thread's parent, so it must not invite a direct post.
+        ("thread", {"protected_channel_ids": ("444",)}),
+        ("thread", {"protected_category_ids": ("77",)}),
+        # A channel in a category protected since.
+        ("channel", {"protected_category_ids": ("77",)}),
+    ],
+)
+async def test_fire_does_not_invite_a_post_when_placement_cannot_be_checked(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    policy_kwargs: dict[str, tuple[str, ...]],
+) -> None:
+    """Review regression (round 2): fire-time protection only checked the id,
+    so a thread under a protected parent/category was still offered."""
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=(kind, "111222333"),
+        agent_posts_to=None,
+        policy=TenantAccessPolicy(**policy_kwargs),
+    )
+
+    trigger = str(seen["trigger_message"])
+    assert "Do not post to the destination yourself" in trigger
+    assert "posts the end of your final reply there" not in trigger
+    assert after.delivery_status == "pending", "the poster resolves placement and delivers"
+
+
+async def test_fire_still_invites_a_post_when_nothing_relevant_is_protected(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    _after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to=None,
+        policy=TenantAccessPolicy(protected_channel_ids=("999",)),
+    )
+
+    assert "posts the end of your final reply there" in str(seen["trigger_message"])

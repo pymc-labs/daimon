@@ -183,6 +183,13 @@ watching and that daimon posts the end of the final reply to the destination
 unless the agent posts there itself. If the destination has become a
 protected channel since the routine was made, the controls say so and tell
 the agent not to post there (the result goes to the creator instead). The
+scheduler has no Discord client, so it cannot see a thread's parent channel
+or a channel's category: on Discord, whenever the policy protects a parent
+channel or a category that could apply, the controls tell the agent not to
+post to the destination itself at all, and the poster — which does resolve
+placement — delivers or falls back. These are instructions, not a guard:
+`send_message` itself does not yet check protected channels (that guard is
+SYS-048's), so the controls err on the side of not inviting a post. The
 controls grant nothing else. A routine without a destination sends its
 trigger message byte-for-byte as before.
 
@@ -212,15 +219,18 @@ to their wake poller. Each poll claims `pending` rows for its platform
   it died. A poster that raises is settled `skipped/post_failed`, not retried.
 - **The newest result only.** A new fire replaces whatever is still in the
   outbox, so a backlog never posts a run of stale results.
+- **Creator first.** Before resolving or sending anything, the poster reads
+  the tenant access policy and checks the creator: if the policy cannot be
+  read (`skipped/access_policy_unreadable`) or the creator may no longer
+  invoke the agent (`skipped/invoker_not_allowed`; admins always pass),
+  nothing is sent anywhere — not to the destination and not by direct
+  message. Everything below applies only to a cleared result.
 - **Policy, at post time.** The adapter resolves where the destination
   actually is and applies the tenant access policy
   (`packages/core/daimon/core/access_policy.py`): a protected channel, a
   thread under one, or a Discord channel in a protected category is refused
   as `protected_channel`. A Discord thread whose parent is not in the bot's
   cache has its parent fetched first; if that fails, nothing is posted there.
-  A creator no longer on the invoker allowlist gets nothing
-  (`skipped/invoker_not_allowed`; admins always pass), and an unreadable
-  policy posts nothing (`skipped/access_policy_unreadable`).
 - **Only the routine's own, live workspace.** Discord refuses a channel
   outside the tenant's guild; Slack builds its client from the tenant's own
   team. Either way that, like a channel that no longer exists or that Slack

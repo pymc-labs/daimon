@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.stores.access_policy import set_access_policy
@@ -244,3 +245,57 @@ async def test_a_missing_channel_is_skipped(
     outcome = await _poster(db_session_factory, gone, dms=_Dms(fail=True))(row)
 
     assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
+
+
+async def _unreadable_policy(monkeypatch: Any, tenant_id: object) -> None:
+    import daimon.core.routine_delivery as delivery_mod
+    from daimon.core.stores.access_policy import AccessPolicyUnreadable
+
+    async def unreadable(*args: object, **kwargs: object) -> TenantAccessPolicy:
+        raise AccessPolicyUnreadable(tenant_id=tenant_id)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(delivery_mod, "load_access_policy", unreadable)
+
+
+@pytest.mark.parametrize(
+    ("destination", "policy", "unreadable", "note"),
+    [
+        # protected + revoked creator
+        (
+            "protected",
+            TenantAccessPolicy(protected_channel_ids=("555",), invoker_user_ids=("OTHER",)),
+            False,
+            "invoker_not_allowed",
+        ),
+        # missing channel + revoked creator
+        ("missing", TenantAccessPolicy(invoker_user_ids=("OTHER",)), False, "invoker_not_allowed"),
+        # missing channel + unreadable policy
+        ("missing", None, True, "access_policy_unreadable"),
+    ],
+)
+async def test_a_creator_who_is_not_cleared_gets_nothing_not_even_a_dm(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    destination: str,
+    policy: TenantAccessPolicy | None,
+    unreadable: bool,
+    note: str,
+) -> None:
+    """Review regression (round 2): protection/unavailability used to be read
+    as permission to DM a creator the invoker policy no longer allows."""
+    row = await _routine(db_session)
+    if policy is not None:
+        await set_access_policy(db_session, tenant_id=row.tenant_id, policy=policy)
+        await db_session.commit()
+    if unreadable:
+        await _unreadable_policy(monkeypatch, row.tenant_id)
+    channel = _text_channel()
+    dms = _Dms()
+    channels: dict[int, object] = {555: channel} if destination == "protected" else {}
+
+    outcome = await _poster(db_session_factory, channels, dms=dms)(row)
+
+    assert (outcome.status, outcome.note) == ("skipped", note)
+    assert dms.sent == [], "no direct message for an uncleared creator"
+    channel.send.assert_not_awaited()

@@ -53,11 +53,13 @@ __all__ = [
     "DeliveryOutcome",
     "DeliveryTarget",
     "RoutinePoster",
-    "DM_FALLBACK_REASONS",
     "agent_posted_to",
     "destination_shape_error",
     "render_fallback_dm",
-    "check_delivery",
+    "DirectPost",
+    "clear_creator",
+    "creator_refusal_for",
+    "placement_unknown_is_unsafe",
     "delivery_refusal",
     "delivery_target",
     "poll_deliveries_once",
@@ -120,8 +122,11 @@ def delivery_target(row: RoutineRow, *, platform: str) -> DeliveryTarget | None:
     return DeliveryTarget(channel_id=row.destination_id)
 
 
+DirectPost = Literal["allowed", "protected", "unverified"]
+
+
 def render_routine_controls(
-    row: RoutineRow, *, platform: str, destination_allowed: bool = True
+    row: RoutineRow, *, platform: str, direct_post: DirectPost = "allowed"
 ) -> str:
     """Host-supplied facts that open a routine fire with a destination.
 
@@ -145,16 +150,24 @@ def render_routine_controls(
             },
         }
     }
-    if destination_allowed:
+    if direct_post == "allowed":
         delivery = (
             "If you do not post it to the destination yourself with send_message, daimon "
             "posts the end of your final reply there for you."
         )
-    else:
+    elif direct_post == "protected":
         # Protected since the routine was made: never invite a write there.
         delivery = (
             "The destination is now a protected channel: do not post there. daimon sends "
             "the end of your final reply to the routine's creator instead."
+        )
+    else:
+        # Its parent channel or category could not be checked here: never
+        # invite a direct write; the poster checks placement and delivers.
+        delivery = (
+            "Do not post to the destination yourself. daimon delivers the end of your "
+            "final reply for you, to the destination if the workspace policy allows it "
+            "and otherwise to the routine's creator."
         )
     return (
         "<turn_controls>\n"
@@ -248,12 +261,6 @@ def render_fallback_dm(row: RoutineRow, reason: str) -> str:
     )
 
 
-#: Refusals where the result still reaches the creator by direct message. An
-#: invoker who is no longer allowed gets nothing, and an unreadable policy
-#: fails closed.
-DM_FALLBACK_REASONS: Final[frozenset[str]] = frozenset(_DM_REASONS)
-
-
 def delivery_refusal(
     policy: TenantAccessPolicy,
     *,
@@ -265,10 +272,17 @@ def delivery_refusal(
 ) -> SkipReason | None:
     """Why this post must not happen, or `None` to post.
 
-    Pure. The same two rules chat writes and routine fires follow: the agent
-    never writes into a protected channel (or a thread or category under one),
-    and a routine only speaks for a creator who may still invoke the agent.
+    Pure. Creator first: a routine only speaks for a creator who may still
+    invoke the agent, and a refusal here means nothing is sent anywhere — not
+    to the destination and not by direct message. Only then the destination:
+    the agent never writes into a protected channel (or a thread or category
+    under one), which a caller may answer with the direct-message fallback.
     """
+    creator_refusal = creator_refusal_for(
+        policy, creator_platform_user_id=creator_platform_user_id, creator_is_admin=creator_is_admin
+    )
+    if creator_refusal is not None:
+        return creator_refusal
     if is_write_protected(
         policy,
         channel_id=target.channel_id,
@@ -276,6 +290,13 @@ def delivery_refusal(
         category_id=category_id,
     ):
         return "protected_channel"
+    return None
+
+
+def creator_refusal_for(
+    policy: TenantAccessPolicy, *, creator_platform_user_id: str | None, creator_is_admin: bool
+) -> SkipReason | None:
+    """`invoker_not_allowed` unless the routine's creator may still invoke."""
     if creator_platform_user_id is None or not is_invoker_allowed(
         policy, external_user_id=creator_platform_user_id, is_admin=creator_is_admin
     ):
@@ -283,17 +304,17 @@ def delivery_refusal(
     return None
 
 
-async def check_delivery(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    row: RoutineRow,
-    *,
-    platform: str,
-    target: DeliveryTarget,
-    parent_channel_id: str | None = None,
-    category_id: str | None = None,
-) -> SkipReason | None:
-    """`delivery_refusal` with the tenant's policy and the creator's role
-    loaded. An unreadable policy refuses (fails closed, like admission)."""
+async def clear_creator(
+    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, *, platform: str
+) -> TenantAccessPolicy | SkipReason:
+    """The tenant's policy if the routine may send anything at all, else why not.
+
+    The gate every poster passes BEFORE resolving the destination or sending
+    anything (destination post or direct-message fallback): the policy must be
+    readable (fails closed, like admission) and the creator must still be
+    allowed to invoke the agent. Protection and availability are decided only
+    after this, and only choose where a cleared result goes.
+    """
     async with sessionmaker() as session:
         try:
             policy = await load_access_policy(session, tenant_id=row.tenant_id)
@@ -310,14 +331,29 @@ async def check_delivery(
             if principal is not None:
                 account = await get_account(session, principal.account_id)
                 is_admin = account is not None and account.role is Role.ADMIN
-    return delivery_refusal(
-        policy,
-        target=target,
-        creator_platform_user_id=row.created_by_user_id,
-        creator_is_admin=is_admin,
-        parent_channel_id=parent_channel_id,
-        category_id=category_id,
+    refusal = creator_refusal_for(
+        policy, creator_platform_user_id=row.created_by_user_id, creator_is_admin=is_admin
     )
+    return refusal if refusal is not None else policy
+
+
+def placement_unknown_is_unsafe(
+    policy: TenantAccessPolicy, *, platform: str, kind: str | None
+) -> bool:
+    """Whether a destination whose parent/category is unknown must be treated
+    as protected.
+
+    Used where the placement cannot be resolved (the scheduler has no platform
+    client): a Discord thread may sit under a protected channel or category,
+    and a Discord channel may sit in a protected category. Slack has no
+    categories, and a Slack thread's channel is its destination id, so a
+    Slack destination is always fully known.
+    """
+    if platform != "discord":
+        return False
+    if kind == "thread":
+        return bool(policy.protected_channel_ids or policy.protected_category_ids)
+    return bool(policy.protected_category_ids)
 
 
 @dataclass(frozen=True)
