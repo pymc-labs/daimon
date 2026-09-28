@@ -20,6 +20,7 @@ from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
+from daimon.core.turn.errors import SessionAgentMismatch, SessionBusyError
 from daimon.testing.factories import make_account
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent
@@ -34,6 +35,7 @@ from .conftest import (
     bot_token,
     build_teams_runtime,
     make_inbound,
+    patched_admission,
 )
 
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
@@ -160,6 +162,36 @@ async def test_a_refused_continuation_raises_after_telling_the_person(
     with patch.object(app_module, "admit", denied), pytest.raises(AdmissionDenied):
         await teams._run_turn(make_inbound("w"), TENANT, reraise=True)
     assert [a.text for a in sender.activities] == [app_module._BALANCE_DEPLETED]
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+@pytest.mark.parametrize(
+    "error",
+    [
+        SessionBusyError(pending_reasons=("agent",), retry_after=datetime.now(UTC)),
+        SessionAgentMismatch(
+            mapping_id=uuid.uuid4(), session_id="s", source_agent_id="a", destination_agent_id="b"
+        ),
+    ],
+    ids=["busy", "mismatch"],
+)
+async def test_a_refused_bind_reaches_the_dispatcher_without_a_failure_report(
+    db_session_factory: async_sessionmaker[AsyncSession], error: Exception
+) -> None:
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+    )
+    with (
+        patched_admission(),
+        patch.object(app_module, "bind_session", AsyncMock(side_effect=error)),
+        patch.object(app_module, "capture_exception_with_scope") as sentry,
+        pytest.raises(type(error)),
+    ):
+        await teams._run_turn(make_inbound("w"), TENANT, reraise=True)
+    sentry.assert_not_called()
 
 
 async def test_a_saved_input_runs_its_work_now_or_once_the_busy_turn_ends(

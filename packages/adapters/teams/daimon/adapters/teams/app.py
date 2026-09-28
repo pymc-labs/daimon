@@ -118,6 +118,7 @@ _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left t
 _CANCELLING = "Cancelling…"
 # Everything a turn can raise that is not a bug in this adapter.
 _TURN_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
+_BIND_REFUSALS = (SessionPreparationFailed, SessionBusyError, SessionAgentMismatch)
 _DENIAL_EVENTS = {"balance_depleted": "turn.skipped.over_balance", "cap": "turn.skipped.over_cap"}
 
 LifecycleFactory = Callable[[asyncio.Event, str | None], TeamsTurnLifecycle]
@@ -472,6 +473,8 @@ class TeamsApp:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if reraise and isinstance(exc, _BIND_REFUSALS):
+                    raise  # Already told the person; the dispatcher settles it.
                 # The card exists: collapse it rather than post a second message.
                 log.error(
                     "teams.turn.failed", conversation_id=inbound.conversation_id, exc_info=exc
@@ -487,6 +490,20 @@ class TeamsApp:
             # A closed card shows its outcome; the sweep must never overwrite it.
             if closed or task is None or task.cancelling() == 0:
                 await asyncio.shield(self._settle(intent.id, lifecycle.message_id, closed, markers))
+
+    async def _refusal(
+        self, error: SessionPreparationFailed | SessionBusyError | SessionAgentMismatch, name: str
+    ) -> str:
+        if isinstance(error, SessionPreparationFailed):
+            return render_preparation_failed(name)
+        if isinstance(error, SessionBusyError):
+            return render_current_work_must_finish(name, handoff=True)
+        owner = "the previous agent"
+        with contextlib.suppress(anthropic.APIStatusError):
+            owner = (await self.runtime.anthropic.beta.agents.retrieve(error.source_agent_id)).name
+        return render_responder_changed_without_handoff(
+            new_responder=name, owner=owner, channel="this chat"
+        )
 
     async def _bind_and_run(
         self,
@@ -516,27 +533,10 @@ class TeamsApp:
                 reuse_existing=True,
                 deadline=deadline,
             )
-        except (SessionPreparationFailed, SessionBusyError) as error:
-            name = admission.agent.name
-            await lifecycle.close_with_notice(
-                render_preparation_failed(name)
-                if isinstance(error, SessionPreparationFailed)
-                else render_current_work_must_finish(name, handoff=True)
-            )
+        except _BIND_REFUSALS as error:
+            await lifecycle.close_with_notice(await self._refusal(error, admission.agent.name))
             if reraise:
                 raise
-            return
-        except SessionAgentMismatch as error:
-            owner = "the previous agent"
-            with contextlib.suppress(anthropic.APIStatusError):
-                owner = (
-                    await self.runtime.anthropic.beta.agents.retrieve(error.source_agent_id)
-                ).name
-            await lifecycle.close_with_notice(
-                render_responder_changed_without_handoff(
-                    new_responder=admission.agent.name, owner=owner, channel="this chat"
-                )
-            )
             return
 
         summary: str | None = None
