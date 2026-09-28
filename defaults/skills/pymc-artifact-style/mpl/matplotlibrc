@@ -3,9 +3,10 @@
 # the rc that applies to every plot when `import pymclabsplot` runs first. Kept in
 # sync with the global ~/.matplotlib/stylelib/pymclabs.mplstyle.
 #
-# Brand palette
-#   navy #0C1F40  periwinkle #9FAAE2  aqua #B4E7DD  peach #F6AE72  soft-white #F7F7F7
-# Variants: navy L#798496 D#08142A | peri L#CAD0EF D#676E93 | aqua L#D6F2EC D#759690 | peach L#FAD2B1 D#A0714A
+# Website palette (pymc-labs.com MarketingLayout.BTaXrrww.css, fetched 2026-09-28)
+#   fills: navy #0C1F40  navy-deep #07142A  periwinkle #9FAAE2  aqua #B4E7DD
+#          peach #F6AE72  violet #C8B4E7  soft-white #F7F7F7
+#   text accents (readable on white): teal #0C9E82  indigo #5462C4  dark-orange #C4720A
 #
 # fill_between's default edge cannot be set here; `import pymclabsplot.plotstyle`
 # defaults its edgecolor to 'none'.
@@ -16,19 +17,19 @@ font.sans-serif:   Inter, Fira Sans, DejaVu Sans
 font.size:         8.0
 mathtext.fontset:  dejavusans
 
-#### COLOR CYCLE — brand bases then variants
-axes.prop_cycle: cycler('color', ['0C1F40', 'F6AE72', '9FAAE2', '759690', '798496', 'E0886A', '676E93', 'B4E7DD'])
+#### COLOR CYCLE — website colors, strong first, pale last
+axes.prop_cycle: cycler('color', ['0C1F40', '0C9E82', 'F6AE72', '5462C4', '9FAAE2', 'C4720A', 'C8B4E7', 'B4E7DD'])
 
-#### FOREGROUND — near-black furniture (#333333), navy title
-text.color:         333333
-axes.edgecolor:     333333
-axes.labelcolor:    333333
-xtick.color:        333333
-ytick.color:        333333
+#### FOREGROUND — navy text and furniture, as on the website
+text.color:         0C1F40
+axes.edgecolor:     0C1F40
+axes.labelcolor:    0C1F40
+xtick.color:        0C1F40
+ytick.color:        0C1F40
 axes.linewidth:     0.8
-#### TITLE — navy, bold, tick-label size, left-aligned
+#### TITLE — navy, semibold (website headline weight 600), tick-label size, left-aligned
 axes.titlecolor:    0C1F40
-axes.titleweight:   bold
+axes.titleweight:   semibold
 axes.titlesize:     medium
 axes.titlelocation: left
 
@@ -55,7 +56,7 @@ boxplot.flierprops.linewidth:   0.8
 #### LEGEND / GRID
 legend.frameon:   False
 legend.fontsize:  7
-grid.color:       333333
+grid.color:       0C1F40
 grid.alpha:       0.12
 grid.linewidth:   0.6
 

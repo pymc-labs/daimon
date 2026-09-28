@@ -1,6 +1,6 @@
 """PyMC Labs matplotlib style helpers.
 
-The global look (brand palette + variants, Inter font, thin white marker edges,
+The global look (website palette, Inter font, thin white marker edges,
 text-column-width default figure) lives in ``pymclabsreport/matplotlibrc`` (and the
 selectable ``pymclabs`` style). One thing matplotlibrc cannot express is
 ``fill_between``'s default edge: passing ``color=`` makes the filled band's edge
@@ -18,26 +18,27 @@ import functools
 
 import matplotlib.axes as _maxes
 
-# Brand palette + variants (hex), mirroring the matplotlibrc header.
+# Website palette (hex), mirroring the matplotlibrc header. Source:
+# pymc-labs.com MarketingLayout.BTaXrrww.css + inline styles, fetched 2026-09-28.
 PALETTE = {
     "navy": "#0C1F40",
+    "navy_deep": "#07142A",
     "periwinkle": "#9FAAE2",
     "aqua": "#B4E7DD",
     "peach": "#F6AE72",
+    "violet": "#C8B4E7",
     "soft_white": "#F7F7F7",
 }
-PALETTE_LIGHT = {
-    "navy": "#798496",
-    "periwinkle": "#CAD0EF",
-    "aqua": "#D6F2EC",
-    "peach": "#FAD2B1",
+# Text accents: the site's readable-on-white colors for text, labels and
+# annotations. The pale fills above are for areas and bands, not small text.
+PALETTE_TEXT = {
+    "teal": "#0C9E82",
+    "indigo": "#5462C4",
+    "dark_orange": "#C4720A",
 }
-PALETTE_DARK = {
-    "navy": "#08142A",
-    "periwinkle": "#676E93",
-    "aqua": "#759690",
-    "peach": "#A0714A",
-}
+# Series order of the matplotlibrc color cycle: strong colors first, pale last.
+CYCLE = ["#0C1F40", "#0C9E82", "#F6AE72", "#5462C4",
+         "#9FAAE2", "#C4720A", "#C8B4E7", "#B4E7DD"]
 
 
 def _patch_fill_between():
@@ -66,20 +67,17 @@ def demo(path="pymclabs_style_demo.png"):
     import matplotlib.pyplot as plt
     import numpy as np
 
-    keys = ["navy", "periwinkle", "aqua", "peach"]
+    rows = [("fills", PALETTE), ("text", PALETTE_TEXT)]
     fig, (a0, a1) = plt.subplots(1, 2, figsize=(9.6, 3.0))
-    for r, (lab, pal) in enumerate(
-        [("base", PALETTE), ("light", PALETTE_LIGHT), ("dark", PALETTE_DARK)]
-    ):
-        for c, k in enumerate(keys):
-            a0.add_patch(plt.Rectangle((c, -r), 0.92, 0.92, color=pal[k]))
-        a0.text(-0.15, -r + 0.46, lab, ha="right", va="center", fontsize=8)
-    for c, k in enumerate(keys):
-        a0.text(c + 0.46, 1.12, k, ha="center", fontsize=8)
-    a0.set_xlim(-1.3, 4)
-    a0.set_ylim(-2.2, 1.5)
+    for r, (lab, pal) in enumerate(rows):
+        for c, (k, v) in enumerate(pal.items()):
+            a0.add_patch(plt.Rectangle((c, -1.5 * r), 0.92, 0.92, color=v))
+            a0.text(c + 0.46, -1.5 * r - 0.08, k, ha="center", va="top", fontsize=6)
+        a0.text(-0.15, -1.5 * r + 0.46, lab, ha="right", va="center", fontsize=8)
+    a0.set_xlim(-1.3, 7.2)
+    a0.set_ylim(-2.0, 1.2)
     a0.axis("off")
-    a0.set_title("palette  (base / light / dark)")
+    a0.set_title("palette  (fills / text accents)")
 
     x = np.linspace(0, 10, 60)
     for i in range(6):

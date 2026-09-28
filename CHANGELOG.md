@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The seeded `pymc-artifact-style` skill now follows the live pymc-labs.com
+  palette and type (re-derived from the site CSS on 2026-09-28): it adds the
+  site's readable text accents (teal, indigo, dark orange) and navy-header,
+  uses Inter 600/500 headings with the site's tracking, bundles Inter Medium,
+  and drops the legacy Archivo and Fira Mono fonts, cover art, old logos and
+  the non-website chart variants.
 - GitHub App installation-token mint rate limits during bound skill resync now
   defer the durable queue job using GitHub's retry deadline; permission 403s
   remain permanent. See `docs/github-push-resync.md` for the covered request
