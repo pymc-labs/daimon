@@ -74,11 +74,10 @@ async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
         if not dm_ok and channel.get("is_im"):
             continue
         # A sealed channel's hits -- or a sealed thread's, keyed channel_id:thread_ts
-        # -- are withheld outside it, and drop out of the total.
+        # -- are withheld outside it.
         channel_id = str(channel.get("id", ""))
         thread_ts = _permalink_thread_ts(m.get("permalink")) or str(m.get("ts", ""))
         if not read_policy.allows(f"{channel_id}:{thread_ts}", channel_id):
-            total = max(0, total - 1)
             continue
         matches.append(
             SlackSearchMatch(
@@ -90,4 +89,9 @@ async def _slack_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
                 permalink=str(m["permalink"]) if m.get("permalink") else None,
             )
         )
+    if read_policy.policy.sealed_channel_ids:
+        # Slack's total counts every page, sealed hits included, so it would
+        # answer "does the sealed channel mention X?". Report only what is
+        # shown, as Discord does for unscoped searches.
+        total = len(matches)
     return SlackSearchResult(matches=matches, total=total)

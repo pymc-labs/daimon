@@ -331,7 +331,7 @@ async def test_search_withholds_sealed_channel_hits_outside_the_channel(
             runtime, auth, content="q", limit=10, read_policy=read_policy
         )
     assert [x.text for x in result.matches] == expected_texts, "sealed hits follow the origin"
-    assert result.total == expected_total, "a withheld hit must not be counted"
+    assert result.total == expected_total, "the total is only what is shown"
 
 
 @pytest.mark.asyncio
@@ -370,3 +370,33 @@ async def test_search_withholds_hits_from_a_thread_sealed_on_its_own(
         )
     assert [x.text for x in result.matches] == ["open hit"], "the sealed thread is withheld"
     assert result.total == 1, "withheld hits must not be counted"
+
+
+@pytest.mark.asyncio
+async def test_search_total_does_not_count_sealed_hits_beyond_the_page(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """40 sealed matches, a page of 1, searched from outside: Slack's total (40)
+    would still answer 'does the sealed channel mention this?'. The total must
+    not exceed what is shown."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    auth = _auth()
+    await _seed_user_token(runtime, committing_sessionmaker)
+    await _seed_turn_context(committing_sessionmaker, auth, channel_id="C_OPEN")
+    read_policy = ChannelReadPolicy(policy=TenantAccessPolicy(sealed_channel_ids=("C_VAULT",)))
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _SEARCH_MESSAGES,
+            payload={
+                "ok": True,
+                "messages": {
+                    "paging": {"count": 1, "total": 40, "page": 1, "pages": 40},
+                    "matches": [{"channel": {"id": "C_VAULT"}, "ts": "1.0", "text": "sealed"}],
+                },
+            },
+        )
+        result = await _slack_search_messages_impl(
+            runtime, auth, content="word in:#vault", limit=1, read_policy=read_policy
+        )
+    assert result.matches == [], "the sealed hit is withheld"
+    assert result.total == 0, "the total must not reveal sealed matches on other pages"

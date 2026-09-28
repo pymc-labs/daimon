@@ -42,6 +42,7 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_platform_principal, make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
 from yarl import URL
@@ -59,6 +60,12 @@ _discord_spec = importlib.util.spec_from_file_location(
 assert _discord_spec is not None and _discord_spec.loader is not None
 _payloads = importlib.util.module_from_spec(_discord_spec)
 _discord_spec.loader.exec_module(_payloads)
+_search_spec = importlib.util.spec_from_file_location(
+    "_tools_test_discord_search_payloads", Path(__file__).parent / "test_discord_search.py"
+)
+assert _search_spec is not None and _search_spec.loader is not None
+_search = importlib.util.module_from_spec(_search_spec)
+_search_spec.loader.exec_module(_search)
 
 _SECRET = b"a" * 32
 _GUILD = "111"
@@ -512,3 +519,164 @@ async def test_slack_get_message_withholds_a_reply_inside_a_sealed_thread(
 
     assert payload.get("isError") and "sealed" in _text(payload), f"got {payload!r}"
     assert "secret reply" not in _text(payload)
+
+
+# --- Discord search -----------------------------------------------------------
+
+
+def _discord_search_handler(search_hits: list[int]) -> Any:
+    """Channel 222 (sealed in the tests), 333 open, thread 999 under 222."""
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _payloads._guild_payload(guild_id=_GUILD)  # pyright: ignore[reportPrivateUsage]
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_payloads._everyone_role(_GUILD, _VIEW_AND_SEND)]  # pyright: ignore[reportPrivateUsage]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _payloads._member_payload(_CALLER)  # pyright: ignore[reportPrivateUsage]
+        if route.path == "/guilds/{guild_id}/channels":
+            return [
+                _payloads._text_channel_payload(channel_id=c, guild_id=_GUILD)  # pyright: ignore[reportPrivateUsage]
+                for c in (_SEALED, _OTHER)
+            ]
+        if route.path == "/channels/{channel_id}":
+            if str(route.channel_id) == "999":
+                return _search._thread_payload(thread_id="999", parent_id=_SEALED)  # pyright: ignore[reportPrivateUsage]
+            return _payloads._text_channel_payload(  # pyright: ignore[reportPrivateUsage]
+                channel_id=str(route.channel_id), guild_id=_GUILD
+            )
+        if route.path == "/guilds/{guild_id}/messages/search":
+            search_hits.append(1)
+            return _search._search_response(  # pyright: ignore[reportPrivateUsage]
+                messages=[
+                    [
+                        _search._search_hit_payload(
+                            message_id="1", channel_id=_SEALED, content="in sealed"
+                        )
+                    ],  # pyright: ignore[reportPrivateUsage]
+                    [
+                        _search._search_hit_payload(
+                            message_id="2", channel_id="999", content="in sealed thread"
+                        )
+                    ],  # pyright: ignore[reportPrivateUsage]
+                    [
+                        _search._search_hit_payload(
+                            message_id="3", channel_id=_OTHER, content="in open"
+                        )
+                    ],  # pyright: ignore[reportPrivateUsage]
+                ],
+                total_results=3,
+                threads=[_search._thread_payload(thread_id="999", parent_id=_SEALED)],  # pyright: ignore[reportPrivateUsage]
+            )
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("origin_channel", "expected"),
+    [(None, ["in open"]), (_SEALED, ["in sealed", "in sealed thread", "in open"])],
+    ids=["outside", "inside"],
+)
+async def test_discord_unscoped_search_withholds_sealed_hits_outside(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    origin_channel: str | None,
+    expected: list[str],
+) -> None:
+    token, origin_id = await _caller(
+        db_session,
+        platform="discord",
+        workspace_id=_GUILD,
+        user_id=_CALLER,
+        policy=TenantAccessPolicy(sealed_channel_ids=(_SEALED,)),
+        origin_channel_id=origin_channel,
+    )
+    patch_discord_http(monkeypatch, _discord_search_handler([]))
+    arguments: dict[str, object] = {"content": "x"}
+    if origin_id is not None:
+        arguments["origin_context_id"] = origin_id
+
+    result = await call_mcp_tool(
+        _app(sessionmaker), token=token, name="search_messages", arguments=arguments
+    )
+
+    payload = result.get("result", result)
+    structured = payload.get("structuredContent") or {}  # type: ignore[union-attr]
+    structured = structured.get("result", structured)
+    assert [r["content"] for r in structured["rows"]] == expected, f"got {payload!r}"
+    assert structured["total_results"] == len(expected), "an unscoped total counts only shown rows"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", [_SEALED, "999"], ids=["sealed-channel", "thread-under-sealed"])
+async def test_discord_scoped_search_into_a_sealed_channel_is_refused_before_searching(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    scope: str,
+) -> None:
+    token, _ = await _caller(
+        db_session,
+        platform="discord",
+        workspace_id=_GUILD,
+        user_id=_CALLER,
+        policy=TenantAccessPolicy(sealed_channel_ids=(_SEALED,)),
+    )
+    search_hits: list[int] = []
+    patch_discord_http(monkeypatch, _discord_search_handler(search_hits))
+
+    payload = await _call(
+        _app(sessionmaker), token, "search_messages", {"content": "x", "channel_ids": [scope]}
+    )
+
+    assert payload.get("isError") and "sealed" in _text(payload), f"got {payload!r}"
+    assert search_hits == [], "the search route must not be hit"
+
+
+# --- unreadable policy ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("read_channel", {"channel_id": _OTHER}),
+        ("read_thread", {"thread_id": "999"}),
+        ("get_message", {"channel_id": _OTHER, "message_id": "1"}),
+        ("list_threads", {"channel_id": _OTHER}),
+        ("search_messages", {"content": "x"}),
+    ],
+)
+async def test_every_read_is_refused_when_the_policy_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tool: str,
+    arguments: dict[str, object],
+) -> None:
+    token, _ = await _caller(
+        db_session,
+        platform="discord",
+        workspace_id=_GUILD,
+        user_id=_CALLER,
+        policy=TenantAccessPolicy(),
+    )
+    await db_session.execute(
+        text("UPDATE tenant_access_policies SET policy = 'null'::jsonb"),
+    )
+    await db_session.commit()
+    discord_calls: list[str] = []
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        discord_calls.append(route.path)
+        raise AssertionError("an unreadable policy must refuse before any Discord call")
+
+    patch_discord_http(monkeypatch, handler)
+
+    payload = await _call(_app(sessionmaker), token, tool, arguments)
+
+    assert payload.get("isError") and "could not be read" in _text(payload), f"got {payload!r}"
+    assert discord_calls == []

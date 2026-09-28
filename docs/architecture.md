@@ -182,7 +182,14 @@ The origin must also belong to the agent the token executes as (`agent_id`,
 or `chat_agent_id` for ordinary chat); a token bound to neither can't claim
 one. A single thread can be sealed on its own: a Discord thread by its id, a
 Slack thread as `channel_id:thread_ts`. Such a thread, its messages and (on
-Discord) its name in `list_threads` are withheld from outside turns.
+Discord) its name in `list_threads` are withheld from outside turns. (The
+CLI's Slack id validation doesn't accept the `channel_id:thread_ts` form yet,
+so a Slack thread seal is written to the row directly.) Once anything is
+sealed, search reports only the hits it shows as its total, on both
+platforms, so the count can't reveal sealed matches. An origin is any active
+one of the same account and responder, not only the current turn's: a member
+who copies an origin id out of a sealed-channel turn can read that channel
+from elsewhere until it expires -- someone who could read it anyway.
 Outside reads are refused after the platform's own caller check, and search
 drops sealed hits. Operators edit the policy with the CLI:
 
