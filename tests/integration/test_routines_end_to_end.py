@@ -213,7 +213,7 @@ def _build_fake_anthropic_factory(
     create_mock = AsyncMock(
         return_value=SimpleNamespace(
             id="ses_test",
-            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5")),
+            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
         )
     )
     send_mock = AsyncMock(return_value=None)
@@ -535,7 +535,7 @@ def _build_archived_agent_factory(
     create_mock = AsyncMock(
         return_value=SimpleNamespace(
             id="ses_test",
-            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5")),
+            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
         )
     )
 
@@ -778,7 +778,7 @@ def _build_two_tenant_fake_anthropic_factory(
     create_mock = AsyncMock(
         return_value=SimpleNamespace(
             id="ses_test",
-            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5")),
+            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
         )
     )
 

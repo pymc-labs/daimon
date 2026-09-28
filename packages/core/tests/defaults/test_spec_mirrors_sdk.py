@@ -34,7 +34,8 @@ def test_agent_spec_mirrors_sdk() -> None:
     # consumed by the sync subsystem; isolated is a daimon-side authoring
     # property excluded via Field(exclude=True) — see AgentSpec's docstring).
     # Excluded from the mirror comparison.
-    sibling = {"skills", "skill_repos", "isolated"}
+    # Context fragments are encoded into system at the SDK boundary.
+    sibling = {"skills", "skill_repos", "isolated", "context_fragments"}
     assert spec_fields - sibling == sdk_fields - exempt - sibling, (
         "AgentSpec drifted from the SDK. "
         f"spec-minus-sibling={spec_fields - sibling}, "
