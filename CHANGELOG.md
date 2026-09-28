@@ -45,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Routine dispatch runs independently of scheduler ticks, with bounded in-flight tasks, per-routine `skip`/`run-once` catch-up policies, and visible skipped-slot ranges.
 - Tenants can opt into accepted/done reactions and a fresh final reply that pings
   only the requester on Discord and Slack with `completion_pings`; defaults stay unchanged.
+- `daimon tenants access-policy get|set PLATFORM EXTERNAL_ID` shows and edits a
+  tenant's access policy (invoker allowlist, protected channels and
+  categories, sealed channels, DM memory); `--clear` puts the tenant back on
+  the open default. IDs are validated per platform before writing, and concurrent
+  edits preserve fields changed by other CLI commands.
 - Tenant access policy: a tenant can limit who may start a turn to a list of
   platform user ids (admins are always allowed). Discord and Slack refuse
   anyone else at admission with a notice, and so do the MCP and hub turn
