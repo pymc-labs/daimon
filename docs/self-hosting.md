@@ -312,3 +312,59 @@ nonempty targets, missing confirmation and corrupt dumps. It uses no deployment
 credentials. Also rehearse your real recovery set in an isolated environment:
 this small drill does not establish your production recovery time or prove that
 external stores, keys and MA mappings are complete.
+
+### Agent environment encryption
+
+Agent environment values in `agent_files.content` are encrypted when
+`DAIMON_CRYPTO__KEYS` is configured, using the same MultiFernet key ring as other
+credentials. Names and attribution remain readable. Keyless deployments keep
+plaintext storage and log `agent_env.encryption_disabled` when the session
+factory starts; initialization and environment writes continue to work.
+
+Stop old application readers and writers before upgrading through
+`0028_agent_env_encryption`, since old readers cannot decode encrypted values.
+With keys configured, the migration encrypts existing rows in one transaction;
+without keys it adds storage metadata but leaves every value unchanged. The
+migration uses a five-second lock timeout, so a
+busy database fails the migration instead of waiting indefinitely. Retry during
+a maintenance window. It requires an online database connection.
+
+The separate `agent_files.encoding` column defaults to `plain` for legacy rows
+and keyless writes. Encrypted rows are tagged `fernet_v1`; each write updates the
+value and tag atomically. No text prefix is reserved: even literal values starting
+with `enc:v1:` or resembling valid Fernet tokens round-trip unchanged. Store APIs
+always accept plaintext user values. Migration retries encrypt only `plain` rows
+and preserve existing `fernet_v1` ciphertext without double encryption.
+
+A database trigger treats inserts and updates from old writers as `plain`, even
+when they replace an encrypted row. New writers and the migration set the local
+transaction marker `daimon.agent_env_writer = 'v1'` while writing explicit encoding
+metadata, then clear it. This keeps old upsert/CAS writes readable by new code and
+allows rollback during a mixed-writer window; it does not make old readers able
+to decrypt new ciphertext. Stop old readers before keyed migration as described
+above. Downgrade removes the trigger and its function after decrypting rows.
+New code reads legacy `plain` rows, logs a warning containing only row identifiers
+when encryption is enabled, and encrypts them on the next write. Wrong keys or
+corrupt rows tagged `fernet_v1` fail closed. Wrong-key and corrupt-ciphertext errors
+identify the tenant, agent and key name and point at `DAIMON_CRYPTO__KEYS`, never
+the value.
+The migration logs `agent_env.migration_keyless_noop` when keys are absent; keyed
+rewrites log their action and row count. Do not remove keys while
+encrypted values remain. When enabling keys after a keyless migration, rewrite
+existing values through the application or re-run this migration's data upgrade
+under maintenance; setting keys alone does not rewrite existing rows.
+
+For rollback, stop application readers and writers and run the migration's
+Alembic downgrade with the original keys available before starting old code.
+When this revision is the head, use `alembic downgrade -1`. The downgrade restores
+plaintext in the same transaction and refuses to decrypt encrypted rows without
+valid keys. It removes the encoding column only after successful decryption;
+keyless plaintext-only downgrades leave the values unchanged.
+
+To rotate keys, prepend a new key and retain older keys for reads. Rewriting a
+decrypted environment value encrypts it with the first key. Do not retire old
+keys until all stored credentials have been re-encrypted. Old backups, WAL, and
+dead tuples can still contain plaintext. Normal VACUUM makes dead tuple space
+reusable; it is not a secure erasure guarantee. Apply secret-retention controls
+to backups and storage. Application encryption protects database-only access;
+access to both the database and the key ring permits decryption.

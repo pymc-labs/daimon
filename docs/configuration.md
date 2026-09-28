@@ -514,9 +514,10 @@ deployments without any encrypted credentials boot without crypto config.
 
 `tuple[SecretStr, ...]` · optional · default unset · secret
 
-Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. The first key
-encrypts new values; older keys remain valid for decrypting existing ciphertext during
-rotation.
+Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. Agent
+environment values encrypt when keys are configured; without keys they remain plaintext.
+The first key encrypts new values; older keys remain valid for decrypting existing
+ciphertext during rotation.
 
 ## Credentials
 

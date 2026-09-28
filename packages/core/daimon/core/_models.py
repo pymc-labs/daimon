@@ -841,10 +841,13 @@ class TenantLedger(Base):
 
 
 class AgentFile(Base):
-    """Per-(tenant, agent, key) text blob storage."""
+    """Per-(tenant, agent, key) encrypted environment value storage."""
 
     __tablename__ = "agent_files"
-    __table_args__ = (PrimaryKeyConstraint("tenant_id", "agent_id", "key", name="pk_agent_files"),)
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "key", name="pk_agent_files"),
+        CheckConstraint("encoding IN ('plain', 'fernet_v1')", name="ck_agent_files_encoding"),
+    )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -854,6 +857,7 @@ class AgentFile(Base):
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     key: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    encoding: Mapped[str] = mapped_column(Text, nullable=False, server_default="plain")
     # Attribution, not authorization: who first created the key and who last
     # replaced its value. No FK to accounts.id, matching CredentialRequest's
     # rationale — these rows are erased by the platform-user-scoped helper,

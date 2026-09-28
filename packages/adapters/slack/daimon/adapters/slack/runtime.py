@@ -103,7 +103,9 @@ def build_turn_deps(
 @asynccontextmanager
 async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
     engine = build_engine(str(settings.database.url))
-    sm = build_session_factory(engine)
+    sm = build_session_factory(
+        engine, crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys)
+    )
     deployment_default = parse_deployment_default(settings.defaults_root)
     # Shared, process-lifetime resolver cache (D-12) — Slack adopts Discord's
     # <=300s TTL semantics instead of building a fresh cache per turn.

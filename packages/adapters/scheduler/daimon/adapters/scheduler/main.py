@@ -449,7 +449,9 @@ async def run(
     _validate_mcp_settings(settings)
 
     engine = _engine_override or build_engine(str(settings.database.url))
-    sm = build_session_factory(engine)
+    sm = build_session_factory(
+        engine, crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys)
+    )
 
     client = (
         await _anthropic_factory(settings)

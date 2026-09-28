@@ -85,8 +85,8 @@ async def test_put_agent_file_upserts_and_bumps_updated_at_when_key_exists(
         populate_existing=True,
     )
     assert ground_truth is not None, "row must exist after upsert"
-    assert second.content == ground_truth.content, (
-        "put_agent_file return must reflect the DB row, not a stale identity-map snapshot"
+    assert second.content != ground_truth.content, (
+        "the stored value must be ciphertext while the returned value is plaintext"
     )
     assert second.updated_at == ground_truth.updated_at, (
         "put_agent_file return must reflect the DB row for updated_at"

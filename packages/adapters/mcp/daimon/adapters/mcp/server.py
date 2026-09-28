@@ -174,7 +174,9 @@ def create_mcp_app(
     effective_sessionmaker = sessionmaker
     if effective_sessionmaker is None:
         engine = build_engine(str(effective_settings.database.url))
-        effective_sessionmaker = build_session_factory(engine)
+        effective_sessionmaker = build_session_factory(
+            engine, crypto_keys=tuple(k.get_secret_value() for k in effective_settings.crypto.keys)
+        )
 
     effective_auth = auth
     if effective_auth is None:
