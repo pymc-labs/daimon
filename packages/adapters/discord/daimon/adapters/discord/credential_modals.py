@@ -58,9 +58,9 @@ claims more than the write it is reporting.
 
 Whatever the outcome, the spent request records it
 (`set_credential_request_outcome`), and every write that actually landed
-also queues the one turn it owes (`build_input_continuation` ->
-`record_continuation`) in the same transaction as that record — so a value
-can never land without its follow-up, nor a follow-up without its value.
+also queues the one turn it owes (`record_input_continuation`) in the same
+transaction as that record — so a value can never land without its
+follow-up, nor a follow-up without its value.
 The follow-up turn is never awaited here: `_dispatch_origin_thread` spawns
 it on the bot, because a billed turn must not sit inside a Discord
 interaction.
@@ -112,7 +112,7 @@ from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
-from daimon.core.continuity.continuation import build_input_continuation
+from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import (
     ConfigurationChange,
     render_env_import_rejected,
@@ -160,8 +160,6 @@ from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
-from daimon.core.stores.task_continuations import record_continuation
-from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
 
@@ -240,45 +238,6 @@ def _env_card_text(
     )
 
 
-async def _queue_input_continuation(
-    session: AsyncSession, row: CredentialRequestRow, *, carries_work: bool
-) -> bool:
-    """Queue the turn this spent request owes, inside the caller's transaction.
-
-    The continuation row commits with the write it belongs to: a value that
-    landed without its follow-up queued leaves the person waiting for a turn
-    nobody will run, and a follow-up queued without its value resumes work
-    the agent still cannot do.
-
-    `carries_work=False` records the row for the trail alone —
-    `decide_continuation` skips a continuation whose `requested_work` is
-    None without spending a turn — which is what a partial write owes: the
-    value did not become usable, so the work waiting on it must not resume.
-
-    Returns False for a row that can address no continuation at all (no
-    origin thread, or no frozen target); `build_input_continuation` reports
-    that by returning None, and a legacy card is exactly that case.
-    """
-    request = build_input_continuation(row, platform="discord")
-    if request is None:
-        return False
-    await record_continuation(
-        session,
-        tenant_id=request.tenant_id,
-        platform=request.platform,
-        parent_channel_id=request.parent_channel_id,
-        thread_id=request.thread_id,
-        requester_account_id=request.requester_account_id,
-        requester_external_user_id=request.requester_external_user_id,
-        target_ma_agent_id=request.target_ma_agent_id,
-        target_name=request.target_name,
-        reason=request.reason,
-        idempotency_key=request.idempotency_key,
-        requested_work=request.requested_work if carries_work else None,
-    )
-    return True
-
-
 async def _settle_spent_request(
     runtime: DiscordRuntime,
     *,
@@ -297,7 +256,9 @@ async def _settle_spent_request(
         await credential_requests.set_credential_request_outcome(
             session, token=row.token, outcome=outcome
         )
-        return await _queue_input_continuation(session, row, carries_work=carries_work)
+        return await record_input_continuation(
+            session, row, platform="discord", carries_work=carries_work
+        )
 
 
 async def _record_refused_outcome(runtime: DiscordRuntime, row: CredentialRequestRow) -> None:
@@ -514,8 +475,8 @@ class EnvCredentialModal(discord.ui.Modal):
                         state = "superseded"
                         outcome = "stale_replacement"
                     else:
-                        is_continuation_queued = await _queue_input_continuation(
-                            session, consumed_row, carries_work=True
+                        is_continuation_queued = await record_input_continuation(
+                            session, consumed_row, platform="discord"
                         )
                 await credential_requests.set_credential_request_outcome(
                     session, token=consumed_row.token, outcome=outcome
@@ -719,8 +680,8 @@ class EnvFileModal(discord.ui.Modal):
                     except _KeyAlreadySet as appeared:
                         collisions = (appeared.entry,)
                 if not collisions:
-                    is_continuation_queued = await _queue_input_continuation(
-                        session, consumed_row, carries_work=True
+                    is_continuation_queued = await record_input_continuation(
+                        session, consumed_row, platform="discord"
                     )
                 await credential_requests.set_credential_request_outcome(
                     session,

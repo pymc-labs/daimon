@@ -61,6 +61,7 @@ __all__ = [
     "claim_continuation",
     "decide_continuation",
     "record_continuation",
+    "record_input_continuation",
     "sanitize_requested_work",
     "settle_continuation",
 ]
@@ -205,6 +206,41 @@ async def record_continuation(
             idempotency_key=request.idempotency_key,
             requested_work=request.requested_work,
         )
+
+
+async def record_input_continuation(
+    session: AsyncSession,
+    row: CredentialRequestRow,
+    *,
+    platform: ChatPlatform,
+    carries_work: bool = True,
+) -> bool:
+    """Queue the turn a spent private-input request owes, in the caller's transaction.
+
+    The continuation commits with the write it belongs to, so a value never
+    lands without its follow-up nor a follow-up without its value. False when
+    the row can address no continuation (`build_input_continuation` is None).
+    `carries_work=False` records the row for the trail alone: a partial write
+    must not resume work, and `decide_continuation` skips a row with no work.
+    """
+    request = build_input_continuation(row, platform=platform)
+    if request is None:
+        return False
+    await _record_continuation_row(
+        session,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        parent_channel_id=request.parent_channel_id,
+        thread_id=request.thread_id,
+        requester_account_id=request.requester_account_id,
+        requester_external_user_id=request.requester_external_user_id,
+        target_ma_agent_id=request.target_ma_agent_id,
+        target_name=request.target_name,
+        reason=request.reason,
+        idempotency_key=request.idempotency_key,
+        requested_work=request.requested_work if carries_work else None,
+    )
+    return True
 
 
 async def claim_continuation(
