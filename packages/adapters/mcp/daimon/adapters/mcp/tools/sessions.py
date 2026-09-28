@@ -20,8 +20,8 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pagination import Page
+from daimon.adapters.mcp.tools._session_access import session_belongs_to_caller
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
@@ -90,8 +90,7 @@ def _session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIden
     metadata and cannot be attributed, and a transcript is not something to
     hand over on a maybe.
     """
-    stamped = session.metadata.get(MA_METADATA_KEY_ACCOUNT) if session.metadata else None
-    return stamped is not None and stamped == str(auth.account_id)
+    return session_belongs_to_caller(session, auth)
 
 
 async def _verify_caller_owns_session(

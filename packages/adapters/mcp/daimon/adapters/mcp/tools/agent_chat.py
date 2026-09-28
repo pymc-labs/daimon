@@ -72,12 +72,13 @@ from daimon.adapters.mcp.tools._ctx import (
     _check_admission,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._pagination import Page
+from daimon.adapters.mcp.tools._session_access import session_belongs_to_caller
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
 from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_ISOLATED
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
@@ -255,7 +256,7 @@ def _owned_by_caller(session: BetaManagedAgentsSession, auth: AuthIdentity) -> b
     ``create_session`` / ``create_isolated_session`` tag every session with
     ``daimon_account``; an untagged session belongs to no caller.
     """
-    return session.metadata.get(MA_METADATA_KEY_ACCOUNT) == str(auth.account_id)
+    return session_belongs_to_caller(session, auth)
 
 
 async def _resolve_ma_agent(

@@ -96,6 +96,7 @@ from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import credential_requests as credential_requests_store
+from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import github_credentials as github_credentials_store
 from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
@@ -136,6 +137,7 @@ class PurgeReport(BaseModel):
     agent_github_binding: int = 0
     slack_user_tokens: int = 0
     slack_turn_contexts: int = 0
+    direct_message_conversations: int = 0
     credential_requests: int = 0
     wizard_sessions: int = 0
     message_feedback: int = 0
@@ -156,6 +158,9 @@ class PurgeReport(BaseModel):
             agent_github_binding=self.agent_github_binding + other.agent_github_binding,
             slack_user_tokens=self.slack_user_tokens + other.slack_user_tokens,
             slack_turn_contexts=self.slack_turn_contexts + other.slack_turn_contexts,
+            direct_message_conversations=(
+                self.direct_message_conversations + other.direct_message_conversations
+            ),
             credential_requests=self.credential_requests + other.credential_requests,
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
             message_feedback=self.message_feedback + other.message_feedback,
@@ -475,6 +480,9 @@ async def purge_account(
         user_cfg_count = await accounts_store.delete_user_config_for_account(
             session, account_id=account_id
         )
+        direct_message_count = await direct_messages_store.delete_conversations_for_account(
+            session, account_id=account_id
+        )
         account_count = await accounts_store.delete_account(session, account_id=account_id)
         db_report = report.merge(
             PurgeReport(
@@ -484,6 +492,7 @@ async def purge_account(
                 user_configs=user_cfg_count,
                 accounts=account_count,
                 slack_turn_contexts=slack_turn_contexts_count,
+                direct_message_conversations=direct_message_count,
             )
         )
 

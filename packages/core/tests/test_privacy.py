@@ -737,6 +737,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "agent_github_binding": "agent_github_binding",
         "slack_user_tokens": "slack_user_tokens",
         "slack_turn_contexts": "slack_turn_contexts",
+        "direct_message_conversations": "direct_message_conversations",
         "credential_requests": "credential_requests",
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
@@ -786,6 +787,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "wizard_session": "account_id FK -> accounts.id",
         "message_feedback": "account_id FK -> accounts.id",
         "support_escalations": "account_id FK -> accounts.id",
+        "direct_message_conversations": "account_id FK -> accounts.id",
     }
     # Intentional exclusions, each justified inline.
     allowlist: frozenset[str] = frozenset(

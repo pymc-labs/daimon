@@ -192,6 +192,8 @@ async def create_ma_session(
         extra_resources=extra_resources,
         memory_read_only=admission.memory_read_only,
         tool_safety=deps.tool_safety,
+        slack_turn_context_id=admission.slack_turn_context_id,
+        private_dm_id=admission.private_dm_id,
     )
 
     has_repo = any(

@@ -47,6 +47,8 @@ class AuthIdentity:
     # True when the minted JWT carries is_admin=True.
     # Derived by the adapter from Discord owner/manage_guild/administrator or CLI context.
     is_admin: bool = False
+    # Signed execution grant; never supplied as a tool parameter.
+    slack_turn_context_id: uuid.UUID | None = None
 
 
 def resolve_role(role_str: str | None) -> Role:

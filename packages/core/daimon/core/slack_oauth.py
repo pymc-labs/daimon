@@ -29,6 +29,7 @@ SLACK_BOT_SCOPES: tuple[str, ...] = (
     "chat:write",
     "im:write",  # agent-initiated direct messages to verified workspace members
     "commands",
+    "im:history",  # opt-in private message events
     "users:read",
     "channels:history",
     "groups:history",

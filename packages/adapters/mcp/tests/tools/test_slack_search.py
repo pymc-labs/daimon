@@ -72,6 +72,7 @@ def _auth(**overrides: object) -> AuthIdentity:
         "platform": "slack",
         "external_id": "T_TEST",
         "platform_user_id": "U_CALLER",
+        "slack_turn_context_id": uuid.uuid4(),
     }
     base.update(overrides)
     return AuthIdentity(**base)  # type: ignore[arg-type]  # test kwargs are shape-correct
@@ -152,6 +153,7 @@ async def _seed_turn_context(
             account_id=auth.account_id,
             channel_id=channel_id,
             thread_ts="1.0",
+            id=auth.slack_turn_context_id,
             started_at=datetime.now(tz=UTC),
         )
         await session.commit()

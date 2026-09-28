@@ -56,6 +56,9 @@ class Admission:
     # Turn from a sealed channel (or a thread under one), or from a DM when the
     # tenant asks for it: memory mounts must be read-only.
     memory_read_only: bool = False
+    # Only private Slack orchestration assigns this signed, execution-specific grant.
+    slack_turn_context_id: uuid.UUID | None = None
+    private_dm_id: str | None = None
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 

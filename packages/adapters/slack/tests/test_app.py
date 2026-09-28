@@ -5854,3 +5854,39 @@ async def test_thread_turn_boundary_persists_one_terminal_outcome(db_session, db
     assert rows[0].reason == TerminationReason.UPSTREAM
     assert rows[0].platform == "slack" and rows[0].channel_id == "channel"
     assert rows[0].thread_id == "thread"
+
+
+@pytest.mark.parametrize("draining", [False, True])
+async def test_direct_messages_ack_first_and_respect_drain(monkeypatch, draining):
+    app = _make_app()
+    app.draining = draining
+    socket = _FakeSocketClient()
+
+    async def handle(runtime, event, *, team_id):
+        socket.call_log.append("dm")
+
+    monkeypatch.setattr("daimon.adapters.slack.app.handle_direct_message", handle)
+    request = _make_events_api_request(
+        event_type="message", channel="D42", extra_event={"channel_type": "im"}
+    )
+    await app.on_request(socket, request)
+    await asyncio.gather(*list(app._bg_tasks))
+    assert socket.call_log == (
+        ["send_socket_mode_response"] if draining else ["send_socket_mode_response", "dm"]
+    )
+
+
+async def test_dm_slash_command_dispatches_after_ack(monkeypatch):
+    app = _make_app()
+    socket = _FakeSocketClient()
+
+    async def handle(runtime, payload):
+        socket.call_log.append("dm-command")
+
+    monkeypatch.setattr("daimon.adapters.slack.app.handle_dm_command", handle)
+    request = SocketModeRequest(
+        type="slash_commands", envelope_id="dm-envelope", payload={"command": "/dm"}
+    )
+    await app.on_request(socket, request)
+    await asyncio.gather(*list(app._bg_tasks))
+    assert socket.call_log == ["send_socket_mode_response", "dm-command"]

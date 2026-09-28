@@ -566,7 +566,6 @@ Streaming status previews and MCP `send_message` remain plain text. Tables insid
 code fences remain literal examples. Other adapters need no renderer changes.
 
 
-
 ### Durable turn outcomes
 
 `turn_outcomes` stores one content-free terminal record per logical turn. A UUID
@@ -676,3 +675,47 @@ resets it; TRUNCATE is never allowed. This guards accidental application mutatio
 not a malicious database administrator or SQL caller able to set arbitrary GUCs.
 Existing privacy panels do not yet deliver a full audit export: operators include
 the CLI JSON export in the requested bundle.
+
+### Opt-in DM conversations
+
+DM conversations are disabled unless the tenant's separate `direct_message_policies`
+row enables them. Admins use `/dm enable` or `/dm disable`; the invoker allowlist
+still applies through `admit(is_dm=True)` on every move and every private turn.
+Discord uses a live guild-member lookup and Slack checks the current workspace
+membership and role. No stored admin role grants access.
+
+`/dm` in a server/channel moves recent text context into a new private scope. This
+selects the workspace explicitly; unselected DMs remain ignored. The scope uses a
+normal thread-agent binding, config cascade and per-account session mapping. Each
+new selection resets the scope, so a physical Discord DM shared across servers
+never contributes the previous server's private history. The live membership check
+is bound to that scope to prevent a concurrent selection from changing its authority.
+The context is escaped with the existing handoff builder and includes a source link.
+
+Turns use the shared billing/session/recovery pipeline. Row claims prevent overlapping
+or duplicate DM deliveries. The route retains bounded source context and private
+history; privacy preview and deletion include it. Memory restrictions inherited from
+a sealed source remain attached to its DM conversation, and current DM policy is
+checked on each admission. Session preparation enforces the selected memory mount access.
+Slack private turns register their physical DM destination under a random execution
+ID carried in a signed JWT in an isolated MA vault. The read guard resolves only
+that exact row for the authenticated tenant/account and removes it on completion
+or cancellation. Concurrent routine, headless, channel, MCP agent-chat and hub
+credentials have no execution grant and cannot inherit account activity.
+Each Slack DM turn starts a fresh MA session and vault; bounded source/private
+history preserves conversation context, but ephemeral workspace files and personal
+OAuth credentials stored only in the shared vault are not transferred. Old execution
+tokens cease granting DM reads when their row is removed; expired rows fail closed.
+Both platforms stamp private MA sessions with `daimon_private_dm`. Generic session,
+agent-chat and hub lists, transcript reads and mutation/cost tools default-deny
+these sessions even to the same account or an admin. Only a verified credential
+whose execution ID matches the stamp can access one. Discord retains session
+reuse but carries no transcript-browsing grant, so its private sessions are hidden
+from all MCP session tools. Ordinary unmarked sessions keep their ownership rules.
+Discord session reuse and ordinary shared vaults are unchanged.
+The provenance thread ID remains the private scope ID, matching session mapping.
+
+The first version delivers text replies after completion. Attachments, streaming
+cards, cancellation controls, and moving Slack thread replies are deferred; Slack's
+slash command carries recent channel messages. Run `/dm` again to reset or select
+another channel. Disabling DMs prevents new turns, without cancelling a running turn.
