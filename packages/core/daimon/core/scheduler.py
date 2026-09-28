@@ -31,7 +31,7 @@ FireFn = Callable[[RoutineRow], Awaitable[None]]
 
 
 class RoutineDispatcher:
-    """Own bounded in-flight tasks across ticks; the scheduler owns shutdown."""
+    """Own a bounded batch of running and queued fires across ticks."""
 
     def __init__(
         self, max_concurrent_fires: int, *, clock: Callable[[], datetime] | None = None
@@ -54,7 +54,10 @@ class RoutineDispatcher:
 
     @property
     def available(self) -> int:
-        return max(0, self.max_concurrent_fires - len(self.in_flight_ids))
+        # Preserve the predecessor's 20-row claim batch even when some fires
+        # must wait for the semaphore. Already-eligible slots must not age out
+        # merely because the concurrency limit is smaller than the batch.
+        return max(0, max(20, self.max_concurrent_fires) - len(self.in_flight_ids))
 
     def start(
         self, routine_id: uuid.UUID, work: Coroutine[object, object, None], *, updated_at: datetime
@@ -112,7 +115,7 @@ async def run_one_tick(
     Reuse the returned dispatcher across ticks and close it on shutdown.
     Set wait_for_completion=True for a one-shot batch. Active routines are
     excluded and their intervening slots are recorded as skipped.
-    Capacity-limited claims keep the pending queue in PostgreSQL.
+    Retain a bounded claimed batch, including work waiting for the semaphore.
     """
     one_shot = wait_for_completion
     loop = asyncio.get_running_loop()
@@ -134,7 +137,7 @@ async def run_one_tick(
                 session,
                 now=now,
                 max_age=max_age,
-                limit=20 if one_shot else min(20, dispatcher.available),
+                limit=min(20, dispatcher.available),
                 exclude_ids=active_ids,
             )
         except Exception:
@@ -179,9 +182,6 @@ async def run_one_tick(
             async with sem:
                 try:
                     await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
-                except asyncio.CancelledError:
-                    await _record_fire_error(sm, row.id, "scheduler_shutdown")
-                    raise
                 except TimeoutError as err:
                     # Capture to Sentry, then keep the existing swallow —
                     # sibling tasks continue and record_result still runs.
@@ -190,6 +190,10 @@ async def run_one_tick(
                 except Exception as err:
                     capture_exception_with_scope(err)
                     await _record_fire_error(sm, row.id, f"{type(err).__name__}: {err}"[:500])
+        except asyncio.CancelledError:
+            # Includes cancellation while waiting for a dispatch slot.
+            await _record_fire_error(sm, row.id, "scheduler_shutdown")
+            raise
         finally:
             try:
                 async with sm() as session, session.begin():

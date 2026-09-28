@@ -82,21 +82,25 @@ Each tick, 30 seconds apart by default:
 
 1. `advance_stale` rolls forward orphaned `NULL` claim keys, stale slots with
    policy `skip`, and slots that became due while their routine was still running.
-2. `claim_due_fireable` selects at most 20 due rows, bounded by available
-   dispatch capacity, with `FOR UPDATE SKIP LOCKED`. It excludes in-flight
+2. `claim_due_fireable` selects at most 20 due rows with `FOR UPDATE SKIP LOCKED`.
+   Across ticks the dispatcher owns at most `max(20, max_concurrent_fires)`
+   claimed rows, including tasks waiting for the semaphore. It excludes in-flight
    routine ids, nulls each claimed `next_fire_at`, stamps `last_fired_at`, then
    computes the next future slot in the same transaction.
 3. Claimed rows pass the monthly cap check and start independent tasks owned by
    a persistent `RoutineDispatcher`. The tick returns without awaiting those
    turns. Its semaphore and in-flight registry span ticks, so a slow routine
    cannot hold up a later tick or overlap another run of itself.
-4. Housekeeping runs, then the loop sleeps interruptibly. Pending work remains
-   in PostgreSQL when dispatch capacity is full; there is no unbounded task queue.
+4. Housekeeping runs, then the loop sleeps interruptibly. Claimed work keeps its
+   eligibility while waiting for a dispatch slot, preserving the previous batch
+   behavior even when a slow sibling runs past the freshness window. Additional
+   unclaimed work remains in PostgreSQL when the bounded batch is full.
 
 The per-routine catch-up policy controls downtime recovery:
 
 - **`skip` (default):** preserve the existing freshness window. A slot fires
-  only inside `[now - max_age_s, now]`; older slots roll forward without firing.
+  only if claimed inside `[now - max_age_s, now]`; older unclaimed slots roll
+  forward without firing. Waiting for the semaphore does not expire a claim.
 - **`run-once`:** claim an overdue slot regardless of age, fire once, then move
   `next_fire_at` beyond now. Missed slots coalesce into that single run; they
   are never replayed one by one.
@@ -163,8 +167,11 @@ bookkeeping, agent resolution, recording the result. Its default is derived
 from `TURN_CEILING_S` plus a margin rather than hardcoded, precisely so it
 cannot be set below the ceiling it is meant to backstop. Each fire has its own
 timeout; the continuous scheduler keeps ticking while a fire approaches that
-bound. If all dispatch slots are occupied, other routines wait in the database
-and follow their configured catch-up policy when capacity becomes available.
+bound. If all dispatch slots are occupied, already-claimed routines wait for
+the semaphore without losing eligibility. Once the bounded batch is full,
+additional routines remain in the database and follow their catch-up policy
+when claim capacity becomes available. Shutdown cancels and joins both running
+and queued work, recording `scheduler_shutdown` for cancelled tasks.
 
 ## Who may do what
 

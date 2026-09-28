@@ -196,16 +196,16 @@ async def test_capacity_remains_bounded_across_ticks_and_shutdown_joins_fires(
         assert fired == [first.id]
         async with db_session_factory() as session:
             row = await get_routine(session, pending.id, tenant_id=pending.tenant_id)
-        assert row is not None and row.last_fired_at is None
+        assert row is not None and row.last_fired_at == NOW
         await dispatcher.close()
         assert not dispatcher.in_flight_ids
         async with db_session_factory() as session:
             stopped = await get_routine(session, first.id, tenant_id=first.tenant_id)
         assert stopped is not None and stopped.last_error == "scheduler_shutdown"
-        release.set()
-        await tick()
-        await dispatcher.drain()
-        assert fired == [first.id, pending.id]
+        async with db_session_factory() as session:
+            cancelled = await get_routine(session, pending.id, tenant_id=pending.tenant_id)
+        assert cancelled is not None and cancelled.last_error == "scheduler_shutdown"
+        assert fired == [first.id]
     finally:
         release.set()
         await dispatcher.close()
@@ -280,6 +280,97 @@ async def test_tick_returns_dispatcher_without_waiting_for_a_fire(
     try:
         await asyncio.wait_for(started.wait(), timeout=10)
         assert len(dispatcher.in_flight_ids) == 1
+    finally:
+        release.set()
+        await dispatcher.close()
+
+
+async def test_default_skip_claimed_batch_survives_wait_past_freshness_window(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    first = await seed(db_session, due=NOW - timedelta(minutes=2))
+    queued = await seed(db_session, due=NOW - timedelta(minutes=1))
+    finished_clock = NOW
+    dispatcher = RoutineDispatcher(1, clock=lambda: finished_clock)
+    started, release = asyncio.Event(), asyncio.Event()
+    fired = []
+
+    async def fire(row: RoutineRow) -> None:
+        fired.append(row.id)
+        if len(fired) == 1:
+            started.set()
+            await release.wait()
+
+    async def tick(now: datetime) -> None:
+        await run_one_tick(
+            now=now,
+            sm=db_session_factory,
+            caps=NoCaps(),
+            fire=fire,
+            max_age=timedelta(minutes=15),
+            max_concurrent_fires=1,
+            dispatch_timeout_s=60,
+            dispatcher=dispatcher,
+        )
+
+    try:
+        await tick(NOW)
+        await asyncio.wait_for(started.wait(), timeout=10)
+        assert len(fired) == 1
+        assert dispatcher.in_flight_ids == {first.id, queued.id}
+        # Baseline claimed both fresh slots before waiting for the semaphore.
+        # Tick repeatedly past max_age: the second claimed fire must survive.
+        finished_clock = NOW + timedelta(minutes=16)
+        await tick(finished_clock)
+        await tick(finished_clock + timedelta(minutes=1))
+        assert len(fired) == 1
+        release.set()
+        await asyncio.wait_for(dispatcher.drain(), timeout=10)
+        assert set(fired) == {first.id, queued.id}
+        assert len(fired) == 2
+        async with db_session_factory() as session:
+            row = await get_routine(session, queued.id, tenant_id=queued.tenant_id)
+        assert row is not None and row.last_fired_at == NOW
+    finally:
+        release.set()
+        await dispatcher.close()
+
+
+async def test_claimed_queue_stays_bounded_across_ticks(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rows = [await seed(db_session, due=NOW - timedelta(minutes=1)) for _ in range(21)]
+    dispatcher = RoutineDispatcher(1, clock=lambda: NOW)
+    release, started = asyncio.Event(), asyncio.Event()
+    fired = []
+
+    async def fire(row: RoutineRow) -> None:
+        fired.append(row.id)
+        started.set()
+        await release.wait()
+
+    try:
+        for _ in range(2):
+            await run_one_tick(
+                now=NOW,
+                sm=db_session_factory,
+                caps=NoCaps(),
+                fire=fire,
+                max_age=timedelta(minutes=15),
+                max_concurrent_fires=1,
+                dispatch_timeout_s=60,
+                dispatcher=dispatcher,
+            )
+        await asyncio.wait_for(started.wait(), timeout=10)
+        assert len(fired) == 1
+        assert len(dispatcher.in_flight_ids) == 20
+        assert dispatcher.available == 0
+        unclaimed = next(row for row in rows if row.id not in dispatcher.in_flight_ids)
+        async with db_session_factory() as session:
+            row = await get_routine(session, unclaimed.id, tenant_id=unclaimed.tenant_id)
+        assert row is not None and row.last_fired_at is None
     finally:
         release.set()
         await dispatcher.close()

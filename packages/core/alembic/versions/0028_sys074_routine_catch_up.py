@@ -7,7 +7,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0028_sys074_routine_catch_up"
-down_revision = "0027_turn_card_intents"
+down_revision = "0028_tenant_funding_mode"
 branch_labels = None
 depends_on = None
 
