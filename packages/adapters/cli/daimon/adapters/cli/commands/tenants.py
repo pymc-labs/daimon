@@ -40,11 +40,8 @@ tenants_app.add_typer(access_policy_app, name="access-policy")
 
 
 _VALID_PLATFORMS = ("discord", "cli", "slack", "teams")
-# Teams: Entra object ids for users, `19:…@thread.…` conversation ids for channels.
-_TEAMS_ID_PATTERNS = {
-    True: r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-    False: r"19:[^\s;]+@thread\.[a-z0-9]+",
-}
+_ENTRA_OBJECT_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_TEAMS_CHANNEL_ID = r"19:[^\s;]+@thread\.[a-z0-9]+"
 
 
 def _validate_platform(value: str) -> Platform:
@@ -354,7 +351,7 @@ async def tenants_access_policy_set(
                 pattern = (
                     r"[0-9]{15,21}"
                     if validated_platform == "discord"
-                    else _TEAMS_ID_PATTERNS[field == "invoker_user_ids"]
+                    else (_ENTRA_OBJECT_ID if field == "invoker_user_ids" else _TEAMS_CHANNEL_ID)
                     if validated_platform == "teams"
                     else r"[UW][A-Z0-9]+"
                     if field == "invoker_user_ids"
