@@ -263,6 +263,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Text daimon quotes from outside the request now arrives marked as data:
+  replayed thread and channel messages on Discord and Slack sit inside
+  `trust="untrusted"` envelopes, YouTube transcripts come back wrapped, and
+  the channel read and search tools mark their results. Every agent's
+  guidance block gains a paragraph saying such text is data, not
+  instructions; agents pick it up at their next reconcile or edit.
 - GitHub App installation tokens are minted for the one bound repository
   instead of every repository in the installation, and read-only when the
   binding was verified as a public repo or the token is used for skill sync.

@@ -181,6 +181,7 @@ source_modules = [
     "daimon.core.turn_card_intent_sweep",
     "daimon.core.turn_keys",
     "daimon.core.turn_origin",
+    "daimon.core.untrusted",
     "daimon.core.usage_recording",
     "daimon.core.usage_sweep",
     "daimon.core.wizard",

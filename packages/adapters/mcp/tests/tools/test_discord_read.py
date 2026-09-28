@@ -28,6 +28,7 @@ from daimon.core.config import (
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
+from daimon.core.untrusted import UNTRUSTED_NOTE
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
 
@@ -307,6 +308,9 @@ async def test_read_channel_happy_path_oldest_first(monkeypatch: pytest.MonkeyPa
     assert rows[1].id == "1002", "second row must be the newer message"
     assert rows[0].author_username == "caller", "row must carry author_username"
     assert rows[0].role == "user", "non-bot author must have role 'user'"
+    assert result.trust == "untrusted" and result.trust_note == UNTRUSTED_NOTE, (
+        "other people's messages come back marked as untrusted data"
+    )
 
 
 async def test_read_channel_full_page_returns_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -623,6 +627,7 @@ async def test_get_message_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert row.id == "1001"
     assert row.content == "fetched"
+    assert row.trust == "untrusted", "a single read-back message carries the marker"
 
 
 async def test_get_message_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -780,6 +785,7 @@ async def test_read_thread_happy_path_oldest_first(monkeypatch: pytest.MonkeyPat
     assert result.rows[2].id == "1003", "last row must be newest"
     assert result.next_before is None, "no cursor when page < limit"
     assert result.hint is None, "no hint when no more messages"
+    assert result.trust == "untrusted" and result.trust_note == UNTRUSTED_NOTE
 
 
 async def test_read_thread_full_page_returns_cursor(monkeypatch: pytest.MonkeyPatch) -> None:

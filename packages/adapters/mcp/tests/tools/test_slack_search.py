@@ -33,6 +33,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.slack_turn_contexts import create_slack_turn_context
 from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
+from daimon.core.untrusted import UNTRUSTED_NOTE
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
@@ -213,6 +214,7 @@ async def test_search_non_dm_destination_filters_dm_hits(
     assert [x.text for x in result.matches] == ["channel hit", "group dm hit"], (
         "a non-DM destination must drop 1:1 DM hits but keep channel and group-DM hits"
     )
+    assert result.trust == "untrusted" and result.trust_note == UNTRUSTED_NOTE
 
 
 @pytest.mark.asyncio

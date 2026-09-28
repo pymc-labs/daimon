@@ -16,12 +16,18 @@ from daimon.adapters.discord.vision import (
     is_vision_image_attachment,
 )
 from daimon.core.turn_keys import render_keys_element
+from daimon.core.untrusted import untrusted_block
 
 import discord
 
 # Number of parent-channel messages fetched when a channel mention creates a new thread.
 # Bot replies are included so the agent sees the full conversational context.
 CHANNEL_BACKFILL_LIMIT = 25
+
+# Replayed messages come from everyone in the conversation, not only the
+# person asking, so they ride in the shared untrusted envelope. Only the
+# `<user_query>` after it is the request.
+_HISTORY_SOURCE = {"source": "discord"}
 
 
 def _strip_bot_mention(
@@ -224,19 +230,19 @@ async def build_context_xml(
         "<context>",
         *_render_location(thread),
         render_keys_element(key_names),
-        "<thread_history>",
     ]
     lines = [line for line in lines if line]
-    for msg in messages:
-        lines.extend(
-            _render_message(
-                msg,
-                bot_user_id,
-                bot_display_name=bot_display_name,
-                omit_oversized_image_urls=omit_oversized_image_urls,
-            )
+    body = [
+        line
+        for msg in messages
+        for line in _render_message(
+            msg,
+            bot_user_id,
+            bot_display_name=bot_display_name,
+            omit_oversized_image_urls=omit_oversized_image_urls,
         )
-    lines.append("</thread_history>")
+    ]
+    lines.extend(untrusted_block("thread_history", body, _HISTORY_SOURCE))
     lines.append("</context>")
 
     # user_query sits outside <context>, separated by a blank line
@@ -322,19 +328,19 @@ async def build_delta_xml(
         "<context>",
         *_render_location(thread),
         render_keys_element(key_names),
-        "<thread_delta>",
     ]
     lines = [line for line in lines if line]
-    for msg in messages:
-        lines.extend(
-            _render_message(
-                msg,
-                bot_user_id,
-                bot_display_name=bot_display_name,
-                omit_oversized_image_urls=omit_oversized_image_urls,
-            )
+    body = [
+        line
+        for msg in messages
+        for line in _render_message(
+            msg,
+            bot_user_id,
+            bot_display_name=bot_display_name,
+            omit_oversized_image_urls=omit_oversized_image_urls,
         )
-    lines.append("</thread_delta>")
+    ]
+    lines.extend(untrusted_block("thread_delta", body, _HISTORY_SOURCE))
     lines.append("</context>")
 
     lines.append("")
@@ -394,19 +400,21 @@ async def build_channel_context_xml(
     lines: list[str] = [
         *_render_location(thread),
         render_keys_element(key_names),
-        f'<channel_context count="{len(messages)}">',
     ]
     lines = [line for line in lines if line]
-    for msg in messages:
-        lines.extend(
-            _render_message(
-                msg,
-                bot_user_id,
-                bot_display_name=bot_display_name,
-                omit_oversized_image_urls=omit_oversized_image_urls,
-            )
+    body = [
+        line
+        for msg in messages
+        for line in _render_message(
+            msg,
+            bot_user_id,
+            bot_display_name=bot_display_name,
+            omit_oversized_image_urls=omit_oversized_image_urls,
         )
-    lines.append("</channel_context>")
+    ]
+    lines.extend(
+        untrusted_block("channel_context", body, {"count": str(len(messages)), **_HISTORY_SOURCE})
+    )
 
     lines.append("")
     lines.append(
