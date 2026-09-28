@@ -75,6 +75,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Literal, Protocol, cast
 
+import structlog
 from anthropic.types import RawMessageStreamEvent
 from daimon.core.turn.state import TurnState
 
@@ -117,5 +118,7 @@ async def acknowledge(lifecycle: TurnLifecycle, phase: Acknowledgment) -> None:
     try:
         async with asyncio.timeout(3):
             await cast(Callable[[Acknowledgment], Awaitable[None]], hook)(phase)
-    except Exception:
-        return
+    except Exception as exc:
+        structlog.get_logger(__name__).debug(
+            "turn.acknowledgment_failed", phase=phase, error_type=type(exc).__name__
+        )

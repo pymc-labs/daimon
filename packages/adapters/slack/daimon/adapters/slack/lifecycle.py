@@ -198,12 +198,15 @@ class SlackTurnLifecycle:
         self._revealed_first_blocks: list[dict[str, Any]] | None = None
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
-        if self._trigger_ts is None or (phase == "done" and self.final_ts is None):
+        # Admission already adds eyes; only opted-in completion replaces it.
+        if not self._notify_on_completion or phase == "accepted":
+            return
+        if self._trigger_ts is None or self.final_ts is None:
             return
         await self._client.reactions_add(  # pyright: ignore[reportUnknownMemberType]
             channel=self._channel,
             timestamp=self._trigger_ts,
-            name="eyes" if phase == "accepted" else "white_check_mark",
+            name="white_check_mark",
         )
         if phase == "done":
             await self._client.reactions_remove(  # pyright: ignore[reportUnknownMemberType]

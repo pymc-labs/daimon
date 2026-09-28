@@ -299,7 +299,6 @@ async def run_turn(
         log.info("turn.billing_exempt", session_id=session_id, reason=billing.reason)
 
     async def _send_initial() -> None:
-        await acknowledge(lifecycle, "accepted")
         content: list[BetaManagedAgentsImageBlockParam | BetaManagedAgentsTextBlockParam] = [
             *(image_blocks or []),
             BetaManagedAgentsTextBlockParam(type="text", text=user_message),
@@ -319,6 +318,7 @@ async def run_turn(
             }
             batch.append(system_event)
         await anthropic.beta.sessions.events.send(session_id, events=batch)
+        await acknowledge(lifecycle, "accepted")
 
     pump_coro = _pump(
         anthropic=anthropic,

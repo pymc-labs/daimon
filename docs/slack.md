@@ -53,4 +53,5 @@ Existing Slack apps must update **Event Subscriptions → Subscribe to bot event
 Completion notifications can be enabled per tenant with `DAIMON_COMPLETION_PINGS`
 (see [architecture](architecture.md#completion-signals)). Enabled turns post their
 final answer as a fresh thread reply and mention only the requester. Trigger
-messages receive eyes/check reactions; reaction permission errors do not fail turns.
+messages replace admission eyes with a check on success; default tenants keep eyes.
+Reaction permission errors do not fail turns.

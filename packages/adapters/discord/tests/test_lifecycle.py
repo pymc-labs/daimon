@@ -1193,7 +1193,8 @@ async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
     assert edits[-1][1]["content"].startswith("Recovered files.")
 
 
-async def test_reactions_replace_accepted_after_success():
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_reactions_replace_accepted_after_success(enabled):
     calls = []
 
     class Trigger:
@@ -1217,8 +1218,32 @@ async def test_reactions_replace_accepted_after_success():
         agent_name="test",
         model_id="claude-sonnet-4-6",
         trigger_message=Trigger(),
+        notify_on_completion=enabled,
     )
     await lifecycle.on_acknowledgment("accepted")
     await lifecycle.on_terminal_success(_make_success_state())
     await lifecycle.on_acknowledgment("done")
-    assert calls == [("add", "👀"), ("add", "✅"), ("remove", "👀")]
+    assert calls == ([("add", "👀"), ("add", "✅"), ("remove", "👀")] if enabled else [])
+
+
+async def test_completion_preserves_original_card_id():
+    refs = iter([types.SimpleNamespace(id=1000), types.SimpleNamespace(id=1001)])
+
+    async def send(**kwargs):
+        return next(refs)
+
+    async def edit(ref, **kwargs):
+        pass
+
+    lifecycle = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        agent_name="test",
+        model_id="claude-sonnet-4-6",
+        requester_id=123,
+        notify_on_completion=True,
+    )
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(_make_success_state())
+    assert lifecycle.card_message_id == "1000"
+    assert lifecycle.final_message_id == "1001"

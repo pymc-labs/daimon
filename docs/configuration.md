@@ -49,12 +49,12 @@ section below is a nested block on this model, reached with the `__` delimiter.
 
 ### `DAIMON_COMPLETION_PINGS`
 
-`dict[str, bool]` · optional · default `{}`
+`dict[UUID, bool]` · optional · default `{}`
 
-Per-tenant completion notification policy, keyed by tenant UUID. True posts the final
-answer as a fresh reply mentioning only the requester on Discord and Slack.
-Missing/false preserves in-place delivery. Configure DAIMON_COMPLETION_PINGS as a JSON
-object.
+Per-tenant completion notification policy, keyed by tenant UUID. True enables
+accepted/done reactions and posts the final answer as a fresh reply mentioning only the
+requester on Discord and Slack. Missing/false preserves in-place delivery. Configure
+DAIMON_COMPLETION_PINGS as a JSON object.
 
 ### `DAIMON_PRIVACY_POLICY_URL`
 

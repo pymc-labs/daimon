@@ -1039,6 +1039,7 @@ async def test_driver_acknowledges_only_after_final_delivery():
                 assert len(self.terminal_success) == 1
             else:
                 assert not self.terminal_success
+                assert len(fa.beta.sessions.events.sent_events) == 1
             phases.append(phase)
 
     await run_turn(

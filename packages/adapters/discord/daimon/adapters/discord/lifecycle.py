@@ -161,6 +161,7 @@ class DiscordTurnLifecycle:
         # retracted. Adopting the ref means the recovered turn edits that embed
         # into the real answer, so a recovered turn looks like a normal one.
         self._message_ref: discord.Message | None = adopt_message_ref
+        self._card_message_ref: discord.Message | None = adopt_message_ref
         self._last_flush: float = 0.0
         self._terminal: bool = False
         self._cancel_view = cancel_view
@@ -180,7 +181,7 @@ class DiscordTurnLifecycle:
         self._revealed_first_chunk: str | None = None
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
-        if self._trigger_message is None or self._unprompted:
+        if not self._notify_on_completion or self._trigger_message is None or self._unprompted:
             return
         if phase == "done" and not self._was_answered:
             return
@@ -257,6 +258,7 @@ class DiscordTurnLifecycle:
                 embeds=self._build_embeds(now), view=self._cancel_view
             )
             self._message_ref = message
+            self._card_message_ref = message
             self._last_flush = now
             if self._on_first_post is not None:
                 # Persist the returned message ID before the turn proceeds. If
@@ -313,6 +315,7 @@ class DiscordTurnLifecycle:
         embed = build_discord_embed(data)
         if self._message_ref is None:
             self._message_ref = await self._send_message(embeds=[embed], view=None)
+            self._card_message_ref = self._message_ref
         else:
             await self._edit(self._message_ref, embeds=[embed], view=None)
 
@@ -482,6 +485,11 @@ class DiscordTurnLifecycle:
 
     async def on_interrupt_sent(self, source: InterruptSource) -> None:
         pass
+
+    @property
+    def card_message_id(self) -> str | None:
+        """Original status card ID, used to retire its durable intent."""
+        return str(self._card_message_ref.id) if self._card_message_ref is not None else None
 
     @property
     def final_message_id(self) -> str | None:

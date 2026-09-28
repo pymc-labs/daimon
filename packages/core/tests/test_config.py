@@ -707,3 +707,16 @@ def test_slack_display_name_rejects_invalid_names(name: str) -> None:
             app_token=SecretStr("xapp-test"),
             bot_display_name=name,
         )
+
+
+def test_completion_policy_validates_and_normalizes_uuid_keys(monkeypatch):
+    import uuid
+
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    tenant = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
+    monkeypatch.setenv("DAIMON_COMPLETION_PINGS", '{"AAAAAAAA-0000-0000-0000-000000000001": true}')
+    assert load_settings(_env_file=None).completion_pings == {tenant: True}
+    monkeypatch.setenv("DAIMON_COMPLETION_PINGS", '{"typo": true}')
+    with pytest.raises(ValidationError):
+        load_settings(_env_file=None)

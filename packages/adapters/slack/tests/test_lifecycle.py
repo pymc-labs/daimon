@@ -1281,18 +1281,23 @@ async def test_completion_ping_is_fresh_and_only_mentions_requester(fake_slack_w
     assert _last_update_blocks(fake)[0]["text"].startswith("Recovered files.")
 
 
-async def test_reactions_target_trigger_not_thread_root(fake_slack_web_client):
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_reactions_target_trigger_not_thread_root(fake_slack_web_client, enabled):
     import re
 
     fake = fake_slack_web_client
     fake.mock.post(re.compile(r"https://slack\.com/api/reactions\.remove.*"), payload={"ok": True})
-    lifecycle, _, _, _ = _make_lifecycle(fake, trigger_ts="1700000000.000999")
+    lifecycle, _, _, _ = _make_lifecycle(
+        fake, trigger_ts="1700000000.000999", notify_on_completion=enabled
+    )
+    # The app adds eyes at admission, before constructing the lifecycle.
+    await fake.client.reactions_add(channel="C_TEST", timestamp="1700000000.000999", name="eyes")
     await lifecycle.on_acknowledgment("accepted")
     await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
     await lifecycle.on_acknowledgment("done")
     urls = [str(url) for method, url in fake.mock.requests if "reactions." in str(url)]
-    assert len(urls) == 3
+    assert len(urls) == (3 if enabled else 1)
     assert all("timestamp=1700000000.000999" in url for url in urls)
     assert any("name=eyes" in url and "reactions.add" in url for url in urls)
-    assert any("name=white_check_mark" in url for url in urls)
-    assert any("reactions.remove" in url for url in urls)
+    assert any("name=white_check_mark" in url for url in urls) is enabled
+    assert any("reactions.remove" in url for url in urls) is enabled

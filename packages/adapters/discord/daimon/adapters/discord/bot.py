@@ -1651,9 +1651,7 @@ class DaimonBot(commands.Bot):
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
                 requester_id=int(row.requester_external_user_id),
-                notify_on_completion=self.runtime.settings.completion_pings.get(
-                    str(tenant_id), False
-                )
+                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 send=_send_embed,
                 edit=_edit_message,
@@ -1763,9 +1761,7 @@ class DaimonBot(commands.Bot):
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
                 requester_id=int(row.requester_external_user_id),
-                notify_on_completion=self.runtime.settings.completion_pings.get(
-                    str(tenant_id), False
-                )
+                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 send=_send_embed,
                 edit=_edit_message,
@@ -1838,7 +1834,7 @@ class DaimonBot(commands.Bot):
                 await retire_terminal_turn_card(
                     self.runtime.sessionmaker,
                     intent_id=turn_card_intent.id,
-                    expected_message_id=lifecycle_holder[0].final_message_id,
+                    expected_message_id=lifecycle_holder[0].card_message_id,
                     allow_prepared_without_message=not lifecycle_holder[0].first_post_attempted,
                 )
 
@@ -2091,9 +2087,7 @@ class DaimonBot(commands.Bot):
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
                 requester_id=message.author.id,
-                notify_on_completion=self.runtime.settings.completion_pings.get(
-                    str(tenant_id), False
-                )
+                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 trigger_message=message,
                 send=_send_embed,
@@ -2175,7 +2169,7 @@ class DaimonBot(commands.Bot):
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
-                expected_message_id=lifecycle.final_message_id,
+                expected_message_id=lifecycle.card_message_id,
                 no_post_confirmed=not lifecycle.first_post_attempted,
             )
             return
@@ -2193,7 +2187,7 @@ class DaimonBot(commands.Bot):
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
-                expected_message_id=lifecycle.final_message_id,
+                expected_message_id=lifecycle.card_message_id,
                 no_post_confirmed=not lifecycle.first_post_attempted,
             )
             return
@@ -2212,7 +2206,7 @@ class DaimonBot(commands.Bot):
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
-                expected_message_id=lifecycle.final_message_id,
+                expected_message_id=lifecycle.card_message_id,
                 no_post_confirmed=not lifecycle.first_post_attempted,
             )
             return
@@ -2457,9 +2451,7 @@ class DaimonBot(commands.Bot):
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
                 requester_id=message.author.id,
-                notify_on_completion=self.runtime.settings.completion_pings.get(
-                    str(tenant_id), False
-                )
+                notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 trigger_message=message,
                 send=_send_embed,
@@ -2554,7 +2546,7 @@ class DaimonBot(commands.Bot):
                 await retire_terminal_turn_card(
                     self.runtime.sessionmaker,
                     intent_id=turn_card_intent.id,
-                    expected_message_id=lifecycle_holder[0].final_message_id,
+                    expected_message_id=lifecycle_holder[0].card_message_id,
                     allow_prepared_without_message=not lifecycle_holder[0].first_post_attempted,
                 )
 
