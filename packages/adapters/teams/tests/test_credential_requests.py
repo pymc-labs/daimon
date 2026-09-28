@@ -14,15 +14,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-import httpx
 import pytest
 import structlog
 from cryptography.fernet import Fernet
 from daimon.adapters.teams import credential_requests as module
-from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
+from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.mcp_oauth.discovery import McpProbe
@@ -41,7 +39,6 @@ from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing import build_fake_anthropic, ma_agent
-from daimon.testing.asgi import asgi_lifespan
 from daimon.testing.factories import make_account
 from daimon.testing.ma import MARouter
 from pydantic import SecretStr
@@ -49,15 +46,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
-    BOT_ACCOUNT_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     SERVICE_URL,
     TeamsApiFake,
-    build_teams_client,
     build_teams_runtime,
-    teams_settings,
+    make_invoke,
+    post_activity,
+    running_service,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token")
@@ -68,8 +65,9 @@ MCP_URL = "https://mcp.example.com/mcp"
 
 
 @pytest.fixture
-async def account_id(db_session_factory: async_sessionmaker[AsyncSession]) -> uuid.UUID:
-    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
+async def account_id(
+    db_session_factory: async_sessionmaker[AsyncSession], provisioned_tenant: None
+) -> uuid.UUID:
     async with db_session_factory.begin() as session:
         tenant = await get_tenant(session, TENANT)
         assert tenant is not None
@@ -130,40 +128,14 @@ async def _request(
 async def _running(
     fake: TeamsApiFake, runtime: TeamsRuntime
 ) -> AsyncIterator[tuple[TeamsHttpService, AsyncMock]]:
-    settings = teams_settings()
-    service = create_teams_http_service(
-        settings=settings, runtime=runtime, client=build_teams_client(fake)
-    )
-    dispatch = AsyncMock()
-    service.turns.credentials._dispatch = dispatch  # pyright: ignore[reportPrivateUsage]
-    async with asgi_lifespan(service.app):
-        await service.turns.start()
+    async with running_service(runtime, fake) as service:
+        dispatch = AsyncMock()
+        service.turns.credentials._dispatch = dispatch  # pyright: ignore[reportPrivateUsage]
         yield service, dispatch
 
 
-async def _post(service: TeamsHttpService, payload: dict[str, object]) -> Any:
-    transport = httpx.ASGITransport(app=service.app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/api/messages", json=payload)
-    assert response.status_code == 200, response.text
-    return response.json() if response.content else None
-
-
-def _invoke(
-    name: str, data: dict[str, object], *, user: str = AAD_OBJECT_ID, chat: str = CONVERSATION_ID
-) -> dict[str, object]:
-    return {
-        "type": "invoke",
-        "name": name,
-        "id": f"invoke-{uuid.uuid4()}",
-        "channelId": "msteams",
-        "serviceUrl": SERVICE_URL,
-        "from": {"id": f"29:{user}", "aadObjectId": user},
-        "recipient": {"id": BOT_ACCOUNT_ID},
-        "conversation": {"id": chat, "conversationType": "personal", "tenantId": ENTRA_TENANT_ID},
-        "replyToId": "m-7",
-        "value": {"data": data},
-    }
+def _invoke(name: str, data: dict[str, object], **kw: Any) -> dict[str, object]:
+    return make_invoke(name, {"data": data}, **kw)
 
 
 def _open(token: str, **kw: Any) -> dict[str, object]:
@@ -188,10 +160,10 @@ async def test_only_the_requester_gets_the_password_form(
 ) -> None:
     row = await _request(db_session_factory, account_id)
     async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
-        form = await _post(service, _open(row.token))
-        stranger = await _post(service, _open(row.token, user=OTHER_AAD_OBJECT_ID))
-        elsewhere = await _post(service, _open(row.token, chat="a:other-chat"))
-        unknown = await _post(service, _open("nope"))
+        form = await post_activity(service, _open(row.token))
+        stranger = await post_activity(service, _open(row.token, user=OTHER_AAD_OBJECT_ID))
+        elsewhere = await post_activity(service, _open(row.token, chat="a:other-chat"))
+        unknown = await post_activity(service, _open("nope"))
 
     card = form["task"]["value"]["card"]["content"]
     field = next(item for item in card["body"] if item.get("id") == "secret")
@@ -207,10 +179,10 @@ async def test_a_late_click_marks_the_card_expired_only_for_the_requester(
     row = await _request(db_session_factory, account_id, expires_in=timedelta(seconds=-1))
     fake = TeamsApiFake()
     async with _running(fake, _runtime(db_session_factory)) as (service, _):
-        stranger = await _post(service, _open(row.token, user=OTHER_AAD_OBJECT_ID))
+        stranger = await post_activity(service, _open(row.token, user=OTHER_AAD_OBJECT_ID))
         await service.turns.drain(5)
         untouched = _edits(fake)
-        late = await _post(service, _open(row.token))
+        late = await post_activity(service, _open(row.token))
         await service.turns.drain(5)
 
     assert stranger["task"]["value"] == WRONG_REQUESTER_MESSAGE and not untouched
@@ -225,11 +197,11 @@ async def test_an_env_value_is_saved_once_and_resumes_the_work(
     fake = TeamsApiFake()
     with structlog.testing.capture_logs() as logs:
         async with _running(fake, _runtime(db_session_factory)) as (service, dispatch):
-            empty = await _post(service, _submit(row.token, secret="  "))
-            big = await _post(service, _submit(row.token, secret="x" * 5000))
-            saved = await _post(service, _submit(row.token))
+            empty = await post_activity(service, _submit(row.token, secret="  "))
+            big = await post_activity(service, _submit(row.token, secret="x" * 5000))
+            saved = await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
-            again = await _post(service, _submit(row.token, secret="other"))
+            again = await post_activity(service, _submit(row.token, secret="other"))
 
     assert "cannot be empty" in json.dumps(empty) and "too large" in json.dumps(big)
     assert "x" * 5000 not in json.dumps(big), "a rejected value is not echoed back"
@@ -264,7 +236,7 @@ async def test_a_member_cannot_replace_a_key_on_a_managed_agent(
     fake = TeamsApiFake()
     runtime = _runtime(db_session_factory, managed=True)
     async with _running(fake, runtime) as (service, dispatch):
-        await _post(service, _submit(row.token))
+        await post_activity(service, _submit(row.token))
         await service.turns.drain(5)
 
     async with db_session_factory() as session:
@@ -279,7 +251,7 @@ async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
 ) -> None:
     row = await _request(db_session_factory, account_id, kind="mcp")
     async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
-        unconfigured = await _post(service, _submit(row.token))
+        unconfigured = await post_activity(service, _submit(row.token))
     assert "not finished being set up" in unconfigured["task"]["value"]
 
     probe = AsyncMock(return_value=McpProbe(status_code=401, resource_metadata_url=None))
@@ -287,7 +259,7 @@ async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
     fake, store = TeamsApiFake(), AsyncMock()
     with patch.object(module, "add_external_mcp_credential", store):
         async with _running(fake, runtime) as (service, dispatch):
-            await _post(service, _submit(row.token))
+            await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
 
     store.assert_not_awaited()
@@ -305,7 +277,7 @@ async def test_an_mcp_token_is_stored_attached_and_resumes_the_work(
         patch.object(module, "attach_mcp_server_to_agent", attach),
     ):
         async with _running(fake, _runtime(db_session_factory, mcp=True)) as (service, dispatch):
-            await _post(service, _submit(row.token))
+            await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
 
     assert store.await_args is not None and store.await_args.kwargs["token"] == SECRET
@@ -320,8 +292,8 @@ async def test_an_oauth_click_hands_the_requester_a_private_sign_in_link(
     row = await _request(db_session_factory, account_id, kind="mcp_oauth")
     fake = TeamsApiFake()
     async with _running(fake, _runtime(db_session_factory, mcp=True)) as (service, _):
-        link = await _post(service, _open(row.token))
-        again = await _post(service, _open(row.token))
+        link = await post_activity(service, _open(row.token))
+        again = await post_activity(service, _open(row.token))
         await service.turns.drain(5)
 
     (button,) = link["task"]["value"]["card"]["content"]["actions"]

@@ -9,30 +9,26 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
+from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.identity import DENIED
 from daimon.core._models import ThreadSession
-from daimon.core.defaults.provisioning import provision_tenant
-from daimon.core.turn.state import TextBlock, TurnState
-from daimon.testing.asgi import asgi_lifespan
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
     CONVERSATION_ID,
-    ENTRA_TENANT_ID,
     THREAD_ID,
     TeamsApiFake,
-    build_teams_client,
     build_teams_runtime,
     make_channel_activity,
     make_message_activity,
-    patched_admission,
+    patched_turns,
+    post_activity,
+    running_service,
     teams_settings,
 )
 
@@ -46,39 +42,14 @@ async def _running(
     admins: tuple[str, ...] = (),
 ) -> AsyncIterator[tuple[TeamsHttpService, list[dict[str, Any]]]]:
     """A started service whose MA turn answers "Hello from Teams!"."""
-    settings = teams_settings(admins=admins)
-    service = create_teams_http_service(
-        settings=settings,
-        runtime=build_teams_runtime(db_factory, teams=settings),
-        client=build_teams_client(fake),
-    )
-    turns: list[dict[str, Any]] = []
-
-    async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
-        turns.append(kwargs)
-        state = TurnState(content=[TextBlock(kind="text", text="Hello from Teams!")])
-        await lifecycle.on_terminal_success(state)
-        return state
-
-    with (
-        patched_admission(),
-        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as run_turn,
-    ):
-        run_turn.side_effect = _fake_run_turn
-        async with asgi_lifespan(service.app):
-            # One shared test connection: let the boot sweep finish first.
-            await service.turns.start()
+    runtime = build_teams_runtime(db_factory, teams=teams_settings(admins=admins))
+    with patched_turns("Hello from Teams!") as turns:
+        async with running_service(runtime, fake) as service:
             yield service, turns
 
 
-async def _post(service: TeamsHttpService, payload: dict[str, object]) -> None:
-    transport = httpx.ASGITransport(app=service.app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/api/messages", json=payload)
-    assert response.status_code in (200, 201, 202), response.text
-
-
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provisioned_tenant")
 @pytest.mark.parametrize(
     ("payload", "conversation"),
     [(make_message_activity(), CONVERSATION_ID), (make_channel_activity(), THREAD_ID)],
@@ -89,9 +60,8 @@ async def test_message_runs_a_turn_and_the_answer_replaces_the_card(
     payload: dict[str, object],
     conversation: str,
 ) -> None:
-    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
-        await _post(service, payload)
+        await post_activity(service, payload)
         await service.turns.drain(timeout=30)
 
     assert len(turns) == 1
@@ -104,13 +74,13 @@ async def test_message_runs_a_turn_and_the_answer_replaces_the_card(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provisioned_tenant")
 async def test_duplicate_delivery_runs_one_turn(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
-        await _post(service, make_message_activity(activity_id="dup-1"))
-        await _post(service, make_message_activity(activity_id="dup-1"))
+        await post_activity(service, make_message_activity(activity_id="dup-1"))
+        await post_activity(service, make_message_activity(activity_id="dup-1"))
         await service.turns.drain(timeout=30)
     assert len(turns) == 1
 
@@ -120,22 +90,22 @@ async def test_unprovisioned_organisation_is_told_no_turn_runs(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
-        await _post(service, make_message_activity())
+        await post_activity(service, make_message_activity())
         await service.turns.drain(timeout=30)
     assert turns == []
     assert [r.body.get("text") for r in teams_api_fake.activity_requests] == [DENIED]
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provisioned_tenant")
 async def test_new_in_a_dm_asks_for_a_fresh_session(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
-        await _post(service, make_message_activity())
+        await post_activity(service, make_message_activity())
         await service.turns.drain(timeout=30)
         service.turns.draining = False
-        await _post(service, make_message_activity(text="new", activity_id="activity-2"))
+        await post_activity(service, make_message_activity(text="new", activity_id="activity-2"))
         await service.turns.drain(timeout=30)
 
     assert len(turns) == 1, "the command runs no turn"
@@ -150,6 +120,7 @@ async def test_new_in_a_dm_asks_for_a_fresh_session(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provisioned_tenant")
 @pytest.mark.parametrize(("admins", "role"), [((), "user"), ((AAD_OBJECT_ID,), "admin")])
 async def test_turn_carries_its_origin_and_the_senders_role(
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -157,9 +128,8 @@ async def test_turn_carries_its_origin_and_the_senders_role(
     admins: tuple[str, ...],
     role: str,
 ) -> None:
-    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     async with _running(db_session_factory, teams_api_fake, admins) as (service, turns):
-        await _post(service, make_message_activity())
+        await post_activity(service, make_message_activity())
         await service.turns.drain(timeout=30)
 
     message = turns[0]["user_message"]
@@ -168,12 +138,12 @@ async def test_turn_carries_its_origin_and_the_senders_role(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provisioned_tenant")
 async def test_command_in_a_channel_points_to_the_one_to_one_chat(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
-        await _post(service, make_channel_activity(text="new"))
+        await post_activity(service, make_channel_activity(text="new"))
         await service.turns.drain(timeout=30)
 
     assert turns == []

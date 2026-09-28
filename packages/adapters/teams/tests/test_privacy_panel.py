@@ -8,91 +8,49 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from typing import Any
+from contextlib import AbstractAsyncContextManager
 
-import httpx
 import pytest
-from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
+from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.privacy_panel import DELETING, NAME_MISMATCH, STALE
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
-from daimon.testing.asgi import asgi_lifespan
 from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
-    BOT_ACCOUNT_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
-    SERVICE_URL,
+    USER_NAME,
     TeamsApiFake,
-    build_teams_client,
     build_teams_runtime,
+    make_card_action,
     make_message_activity,
-    teams_settings,
+    post_activity,
+    running_service,
 )
 
-pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token")
+pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 POLICY_URL = "https://example.com/privacy"
-NAME = "Ada Lovelace"
+NAME = USER_NAME
 
 
-@pytest.fixture(autouse=True)
-async def provisioned_tenant(db_session_factory: async_sessionmaker[AsyncSession]) -> None:
-    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
-
-
-@asynccontextmanager
-async def _running(
+def _running(
     db_factory: async_sessionmaker[AsyncSession], fake: TeamsApiFake
-) -> AsyncIterator[TeamsHttpService]:
-    settings = teams_settings()
+) -> AbstractAsyncContextManager[TeamsHttpService]:
     runtime = build_teams_runtime(
-        db_factory, anthropic=build_fake_anthropic(make_fake_ma_handler()), teams=settings
+        db_factory, anthropic=build_fake_anthropic(make_fake_ma_handler())
     )
     runtime.settings.privacy_policy_url = POLICY_URL
-    service = create_teams_http_service(
-        settings=settings, runtime=runtime, client=build_teams_client(fake)
-    )
-    async with asgi_lifespan(service.app):
-        await service.turns.start()
-        yield service
-
-
-async def _post(service: TeamsHttpService, payload: dict[str, object]) -> Any:
-    transport = httpx.ASGITransport(app=service.app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/api/messages", json=payload)
-    assert response.status_code == 200, response.text
-    return response.json() if response.content else None
+    return running_service(runtime, fake)
 
 
 def _click(op: str, *, user: str = AAD_OBJECT_ID, **extra: str) -> dict[str, object]:
-    data: dict[str, object] = {"action": "privacy", "op": op} | extra
-    action = {"type": "Action.Execute", "verb": "privacy", "data": data}
-    return {
-        "type": "invoke",
-        "name": "adaptiveCard/action",
-        "id": f"invoke-{uuid.uuid4()}",
-        "channelId": "msteams",
-        "serviceUrl": SERVICE_URL,
-        "from": {"id": f"29:{user}", "aadObjectId": user, "name": NAME},
-        "recipient": {"id": BOT_ACCOUNT_ID, "name": "daimon"},
-        "conversation": {
-            "id": CONVERSATION_ID,
-            "conversationType": "personal",
-            "tenantId": ENTRA_TENANT_ID,
-        },
-        "replyToId": "m-7",
-        "value": {"action": action, "trigger": "manual"},
-    }
+    return make_card_action("privacy", op, user=user, **extra)
 
 
 async def _account(db_factory: async_sessionmaker[AsyncSession], user: str) -> uuid.UUID:
@@ -116,7 +74,7 @@ async def test_command_without_data_says_so_and_creates_nothing(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     async with _running(db_session_factory, teams_api_fake) as service:
-        await _post(service, make_message_activity(text="privacy"))
+        await post_activity(service, make_message_activity(text="privacy"))
         await service.turns.drain(timeout=30)
 
     assert "no data on file" in json.dumps(teams_api_fake.activity_requests[-1].body)
@@ -129,9 +87,9 @@ async def test_command_shows_holdings_and_export_summarises_them(
 ) -> None:
     await _account(db_session_factory, AAD_OBJECT_ID)
     async with _running(db_session_factory, teams_api_fake) as service:
-        await _post(service, make_message_activity(text="privacy"))
+        await post_activity(service, make_message_activity(text="privacy"))
         await service.turns.drain(timeout=30)
-        export = await _post(service, _click("export"))
+        export = await post_activity(service, _click("export"))
 
     panel = json.dumps(teams_api_fake.activity_requests[-1].body)
     assert "holds: 1 linked principal(s)" in panel, "the panel summarises what is held"
@@ -145,8 +103,8 @@ async def test_delete_asks_for_the_typed_name_and_refuses_a_mismatch(
 ) -> None:
     account_id = str(await _account(db_session_factory, AAD_OBJECT_ID))
     async with _running(db_session_factory, teams_api_fake) as service:
-        confirm = await _post(service, _click("delete"))
-        wrong = await _post(
+        confirm = await post_activity(service, _click("delete"))
+        wrong = await post_activity(
             service, _click("confirm_delete", account=account_id, confirm_name="ada")
         )
 
@@ -162,7 +120,7 @@ async def test_a_forwarded_confirmation_deletes_nothing(
     victim = str(await _account(db_session_factory, AAD_OBJECT_ID))
     await _account(db_session_factory, OTHER_AAD_OBJECT_ID)
     async with _running(db_session_factory, teams_api_fake) as service:
-        response = await _post(
+        response = await post_activity(
             service,
             _click("confirm_delete", user=OTHER_AAD_OBJECT_ID, account=victim, confirm_name=NAME),
         )
@@ -178,7 +136,7 @@ async def test_a_confirmed_delete_purges_and_edits_the_card_in_place(
 ) -> None:
     account_id = str(await _account(db_session_factory, AAD_OBJECT_ID))
     async with _running(db_session_factory, teams_api_fake) as service:
-        response = await _post(
+        response = await post_activity(
             service, _click("confirm_delete", account=account_id, confirm_name=NAME)
         )
         async with asyncio.timeout(10):
@@ -200,6 +158,6 @@ async def test_a_click_from_another_organisation_is_refused(
     click = _click("export")
     click["conversation"] = {"id": CONVERSATION_ID, "tenantId": str(uuid.UUID(int=99))}
     async with _running(db_session_factory, teams_api_fake) as service:
-        response = await _post(service, click)
+        response = await post_activity(service, click)
 
     assert response["value"] == DENIED, "an unverified clicker sees nothing"

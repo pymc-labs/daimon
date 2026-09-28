@@ -31,29 +31,13 @@ from .conftest import (
     ENTRA_TENANT_ID,
     SERVICE_URL,
     FakeSender,
+    bot_token,
     build_teams_runtime,
+    make_inbound,
 )
 
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 _TARGET = "agt_stats"
-
-
-async def _bot_token() -> str:
-    return "bot-token"
-
-
-def _inbound(text: str, setup_thread_id: str | None = None) -> TeamsInbound:
-    return TeamsInbound(
-        kind="dm",
-        entra_tenant_id=ENTRA_TENANT_ID,
-        user_id=AAD_OBJECT_ID,
-        conversation_id=CONVERSATION_ID,
-        channel_id=CONVERSATION_ID,
-        activity_id=str(uuid.uuid4()),
-        text=text,
-        service_url=SERVICE_URL,
-        setup_thread_id=setup_thread_id,
-    )
 
 
 async def _app(
@@ -74,7 +58,7 @@ async def _app(
     )
     runtime = build_teams_runtime(db, anthropic=build_fake_anthropic(router.dispatch))
     teams = TeamsApp(
-        runtime=runtime, sender=sender, commands={"new": fresh_start}, bot_token=_bot_token
+        runtime=runtime, sender=sender, commands={"new": fresh_start}, bot_token=bot_token
     )
     return teams, account.id
 
@@ -127,7 +111,9 @@ async def test_a_handoff_runs_after_the_turn_as_the_requester(
             keys.append(await _hand_off(db_session_factory, account_id, inbound.thread_id))
 
     with patch.object(TeamsApp, "_run_turn", _turn):
-        await teams._orchestrate(_inbound("hand this to stats-bot", setup), TENANT)
+        await teams._orchestrate(
+            make_inbound("hand this to stats-bot", setup_thread_id=setup), TENANT
+        )
 
     (_, _), (follow, kw) = calls
     assert (follow.text, follow.user_id, follow.conversation_id, follow.kind) == (
@@ -153,10 +139,10 @@ async def test_a_newer_message_supersedes_the_queued_work(
         ran.append(inbound.text)
         if len(ran) == 1:
             keys.append(await _hand_off(db_session_factory, account_id))
-            await teams._orchestrate(_inbound("actually, stop"), TENANT)
+            await teams._orchestrate(make_inbound("actually, stop"), TENANT)
 
     with patch.object(TeamsApp, "_run_turn", _turn):
-        await teams._orchestrate(_inbound("hand this to stats-bot"), TENANT)
+        await teams._orchestrate(make_inbound("hand this to stats-bot"), TENANT)
 
     assert ran == ["hand this to stats-bot", "actually, stop"], "the stale work never runs"
     assert await _status(db_session_factory, keys[0]) == ("skipped", "skip_superseded")
@@ -171,11 +157,11 @@ async def test_a_refused_continuation_raises_after_telling_the_person(
         runtime=build_teams_runtime(db_session_factory),
         sender=sender,
         commands={"new": fresh_start},
-        bot_token=_bot_token,
+        bot_token=bot_token,
     )
     denied = AsyncMock(side_effect=AdmissionDenied(reason="balance_depleted"))
     with patch.object(app_module, "admit", denied), pytest.raises(AdmissionDenied):
-        await teams._run_turn(_inbound("w"), TENANT, reraise=True)
+        await teams._run_turn(make_inbound("w"), TENANT, reraise=True)
     assert [a.text for a in sender.activities] == [app_module._BALANCE_DEPLETED]
 
 

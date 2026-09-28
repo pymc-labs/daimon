@@ -6,25 +6,30 @@ import dataclasses
 import json
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
+from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime, build_turn_deps
 from daimon.core.config import TeamsSettings
+from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.turn.state import TextBlock, TurnState
 from daimon.testing import (
     build_fake_anthropic,
     ma_session,
     ma_session_agent,
     make_agent_env_echo_handler,
 )
+from daimon.testing.asgi import asgi_lifespan
 from daimon.testing.db import db_clean as db_clean
 from daimon.testing.db import db_engine as db_engine
 from daimon.testing.db import db_schema as db_schema
@@ -46,6 +51,7 @@ SERVICE_URL = "https://smba.trafficmanager.net/test"
 CONVERSATION_ID = "a:conversation-1"
 CHANNEL_ID = "19:channel-1@thread.tacv2"
 THREAD_ID = f"{CHANNEL_ID};messageid=1700000000001"
+USER_NAME = "Ada Lovelace"
 
 
 def teams_settings(*, enabled: bool = True, admins: tuple[str, ...] = ()) -> TeamsSettings:
@@ -125,6 +131,57 @@ def make_channel_activity(**kwargs: Any) -> dict[str, object]:
         "mention_bot": True,
     }
     return make_message_activity(**(params | kwargs))
+
+
+def make_invoke(
+    name: str, value: dict[str, object], *, user: str = AAD_OBJECT_ID, chat: str = CONVERSATION_ID
+) -> dict[str, object]:
+    """An inbound invoke from a personal chat, sent from the card message `m-7`."""
+    return {
+        "type": "invoke",
+        "name": name,
+        "id": f"invoke-{uuid.uuid4()}",
+        "channelId": "msteams",
+        "serviceUrl": SERVICE_URL,
+        "from": {"id": f"29:{user}", "aadObjectId": user, "name": USER_NAME},
+        "recipient": {"id": BOT_ACCOUNT_ID, "name": "daimon"},
+        "conversation": {"id": chat, "conversationType": "personal", "tenantId": ENTRA_TENANT_ID},
+        "replyToId": "m-7",
+        "value": value,
+    }
+
+
+def make_card_action(
+    verb: str, op: str, *, user: str = AAD_OBJECT_ID, **data: object
+) -> dict[str, object]:
+    """A click on an `Action.Execute` button routed to `verb`."""
+    action = {"type": "Action.Execute", "verb": verb, "data": {"action": verb, "op": op} | data}
+    return make_invoke("adaptiveCard/action", {"action": action, "trigger": "manual"}, user=user)
+
+
+def make_inbound(
+    text: str = "hi",
+    *,
+    user: str = AAD_OBJECT_ID,
+    conversation: str = CONVERSATION_ID,
+    kind: Literal["dm", "channel"] = "dm",
+    setup_thread_id: str | None = None,
+) -> TeamsInbound:
+    return TeamsInbound(
+        kind=kind,
+        entra_tenant_id=ENTRA_TENANT_ID,
+        user_id=user,
+        conversation_id=conversation,
+        channel_id=conversation,
+        activity_id=str(uuid.uuid4()),
+        text=text,
+        service_url=SERVICE_URL,
+        setup_thread_id=setup_thread_id,
+    )
+
+
+async def bot_token() -> str:
+    return "bot-token"
 
 
 @dataclasses.dataclass
@@ -268,6 +325,51 @@ def patched_admission() -> Iterator[None]:
             environment_id="env_test_id",
         )
         yield
+
+
+@asynccontextmanager
+async def running_service(
+    runtime: TeamsRuntime, fake: TeamsApiFake
+) -> AsyncIterator[TeamsHttpService]:
+    """The real HTTP service over `runtime`, started, with `fake` as the Bot Framework."""
+    settings = runtime.settings.teams
+    assert settings is not None
+    service = create_teams_http_service(
+        settings=settings, runtime=runtime, client=build_teams_client(fake)
+    )
+    async with asgi_lifespan(service.app):
+        # One shared test connection: let the boot sweep finish first.
+        await service.turns.start()
+        yield service
+
+
+async def post_activity(service: TeamsHttpService, payload: dict[str, object]) -> Any:
+    """POST one activity to `/api/messages`; the invoke response body, if any."""
+    transport = httpx.ASGITransport(app=service.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/messages", json=payload)
+    assert response.status_code == 200, response.text
+    return response.json() if response.content else None
+
+
+@contextmanager
+def patched_turns(answer: str = "On it.") -> Iterator[list[dict[str, Any]]]:
+    """Admission patched and every MA turn answering `answer`; yields each turn's kwargs."""
+    turns: list[dict[str, Any]] = []
+
+    async def fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
+        turns.append(kwargs)
+        state = TurnState(content=[TextBlock(kind="text", text=answer)])
+        await lifecycle.on_terminal_success(state)
+        return state
+
+    with patched_admission(), patch("daimon.core.turn.run.run_turn", side_effect=fake_run_turn):
+        yield turns
+
+
+@pytest.fixture
+async def provisioned_tenant(db_session_factory: async_sessionmaker[AsyncSession]) -> None:
+    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
 
 
 @pytest.fixture(autouse=True)

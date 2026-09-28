@@ -1,9 +1,4 @@
-"""Adapter-boundary contract for the Teams package.
-
-The upstream boundary is enforced two ways — this static check (so a miss
-fails in this repo's own suite, not only in CI's import-linter job) and the
-import-linter independence contract in the root pyproject.
-"""
+"""Adapter independence for the Teams package, checked here as well as by import-linter."""
 
 from __future__ import annotations
 
@@ -40,8 +35,7 @@ def _module_sources() -> dict[str, str]:
 
 
 def test_no_module_imports_another_adapter() -> None:
-    """Adapter independence (import-linter contract): no daimon.adapters.X
-    import where X is a different adapter."""
+    """No module imports another adapter's package."""
     for name, source in _module_sources().items():
         tree = ast.parse(source)
         for node in ast.walk(tree):

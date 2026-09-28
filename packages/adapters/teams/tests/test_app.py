@@ -13,7 +13,6 @@ from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import fresh_start
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
@@ -23,35 +22,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
-    CONVERSATION_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
-    SERVICE_URL,
     FakeSender,
+    bot_token,
     build_teams_runtime,
+    make_inbound,
     patched_admission,
+    patched_turns,
 )
 
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
-
-
-def _inbound(
-    text: str = "hi", *, user: str = AAD_OBJECT_ID, conversation: str = CONVERSATION_ID
-) -> TeamsInbound:
-    return TeamsInbound(
-        kind="dm",
-        entra_tenant_id=ENTRA_TENANT_ID,
-        user_id=user,
-        conversation_id=conversation,
-        channel_id=conversation,
-        activity_id=str(uuid.uuid4()),
-        text=text,
-        service_url=SERVICE_URL,
-    )
-
-
-async def _bot_token() -> str:
-    return "bot-token"
 
 
 def _app(
@@ -62,7 +43,7 @@ def _app(
         update={"max_concurrent_turns_per_tenant": cap}
     )
     return TeamsApp(
-        runtime=runtime, sender=sender, commands={"new": fresh_start}, bot_token=_bot_token
+        runtime=runtime, sender=sender, commands={"new": fresh_start}, bot_token=bot_token
     )
 
 
@@ -80,11 +61,11 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
             await release.wait()
 
     with patch.object(TeamsApp, "_run_turn", _turn):
-        first = asyncio.create_task(teams._orchestrate(_inbound("one"), TENANT))
+        first = asyncio.create_task(teams._orchestrate(make_inbound("one"), TENANT))
         await asyncio.sleep(0)
-        await teams._orchestrate(_inbound("two"), TENANT)
-        await teams._orchestrate(_inbound("three"), TENANT)
-        await teams._orchestrate(_inbound("other", user=OTHER_AAD_OBJECT_ID), TENANT)
+        await teams._orchestrate(make_inbound("two"), TENANT)
+        await teams._orchestrate(make_inbound("three"), TENANT)
+        await teams._orchestrate(make_inbound("other", user=OTHER_AAD_OBJECT_ID), TENANT)
         assert len(ran) == 1, "queued messages wait for the running turn"
         release.set()
         await first
@@ -108,9 +89,9 @@ async def test_the_tenant_cap_sheds_a_new_thread(
         await release.wait()
 
     with patch.object(TeamsApp, "_run_turn", _turn):
-        first = asyncio.create_task(teams._orchestrate(_inbound(), TENANT))
+        first = asyncio.create_task(teams._orchestrate(make_inbound(), TENANT))
         await asyncio.sleep(0)
-        await teams._orchestrate(_inbound(conversation="a:conversation-2"), TENANT)
+        await teams._orchestrate(make_inbound(conversation="a:conversation-2"), TENANT)
         release.set()
         await first
 
@@ -147,20 +128,15 @@ async def _open_intents(db_factory: async_sessionmaker[AsyncSession]) -> list[Tu
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_finished_turn_retires_its_card_intent(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     sender = FakeSender()
     teams = _app(db_session_factory, sender)
 
-    async def _run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
-        state = TurnState(content=[TextBlock(kind="text", text="done")])
-        await lifecycle.on_terminal_success(state)
-        return state
-
-    with patched_admission(), patch("daimon.core.turn.run.run_turn", side_effect=_run_turn):
-        await teams._run_turn(_inbound(), TENANT)
+    with patched_turns("done"):
+        await teams._run_turn(make_inbound(), TENANT)
 
     assert "m-1" in {a.id for a in sender.activities[1:]}, "the answer edits the posted card"
     assert await _open_intents(db_session_factory) == [], "a closed card retires its intent"
@@ -168,10 +144,10 @@ async def test_a_finished_turn_retires_its_card_intent(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_turn_cut_off_by_shutdown_keeps_its_intent_for_the_boot_sweep(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     teams = _app(db_session_factory, FakeSender())
     started = asyncio.Event()
 
@@ -181,7 +157,7 @@ async def test_a_turn_cut_off_by_shutdown_keeps_its_intent_for_the_boot_sweep(
         raise AssertionError("unreachable")
 
     with patched_admission(), patch("daimon.core.turn.run.run_turn", side_effect=_run_turn):
-        task = asyncio.create_task(teams._run_turn(_inbound(), TENANT))
+        task = asyncio.create_task(teams._run_turn(make_inbound(), TENANT))
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -192,11 +168,11 @@ async def test_a_turn_cut_off_by_shutdown_keeps_its_intent_for_the_boot_sweep(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provisioned_tenant")
 async def test_shutdown_after_the_answer_still_retires_the_intent(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Cut off while overflow chunks send, the delivered answer must not become a restart notice."""
-    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     teams = _app(db_session_factory, FakeSender())
     answered = asyncio.Event()
 
@@ -207,7 +183,7 @@ async def test_shutdown_after_the_answer_still_retires_the_intent(
         raise AssertionError("unreachable")
 
     with patched_admission(), patch("daimon.core.turn.run.run_turn", side_effect=_run_turn):
-        task = asyncio.create_task(teams._run_turn(_inbound(), TENANT))
+        task = asyncio.create_task(teams._run_turn(make_inbound(), TENANT))
         await answered.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -224,6 +200,6 @@ async def test_a_denied_turn_says_why_without_a_card(
     teams = _app(db_session_factory, sender)
     denied = AsyncMock(side_effect=AdmissionDenied(reason="balance_depleted"))
     with patch.object(app_module, "admit", denied):
-        await teams._run_turn(_inbound(), TENANT)
+        await teams._run_turn(make_inbound(), TENANT)
     assert [a.text for a in sender.activities] == [app_module._BALANCE_DEPLETED]
     assert await _open_intents(db_session_factory) == [], "no card, so no intent"

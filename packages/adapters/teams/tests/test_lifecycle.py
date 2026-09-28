@@ -22,16 +22,19 @@ class Clock:
         return self.now
 
 
-def _lifecycle(sender: FakeSender, clock: Clock) -> TeamsTurnLifecycle:
-    return TeamsTurnLifecycle(
+async def _posted(sender: FakeSender, clock: Clock | None = None) -> TeamsTurnLifecycle:
+    """A lifecycle whose status card is already posted."""
+    lifecycle = TeamsTurnLifecycle(
         sender=sender,
         conversation_id=CONVERSATION_ID,
         service_url=SERVICE_URL,
         cancel_key="key-1",
         agent_name="daimon",
         model_id="claude-test",
-        clock=clock,
+        clock=clock or Clock(),
     )
+    await lifecycle.post_initial()
+    return lifecycle
 
 
 def _answer(text: str) -> TurnState:
@@ -45,8 +48,7 @@ def _card_json(sender: FakeSender, index: int) -> str:
 @pytest.mark.asyncio
 async def test_initial_card_carries_the_cancel_key_and_later_renders_edit_it() -> None:
     sender, clock = FakeSender(), Clock()
-    lifecycle = _lifecycle(sender, clock)
-    await lifecycle.post_initial()
+    lifecycle = await _posted(sender, clock)
     assert lifecycle.message_id == "m-1"
     assert sender.sent[0][0] == CONVERSATION_ID and sender.sent[0][2] == SERVICE_URL
     assert sender.activities[0].id is None
@@ -62,9 +64,8 @@ async def test_initial_card_carries_the_cancel_key_and_later_renders_edit_it() -
 
 @pytest.mark.asyncio
 async def test_answer_replaces_the_card_with_footer_and_feedback() -> None:
-    sender, clock = FakeSender(), Clock()
-    lifecycle = _lifecycle(sender, clock)
-    await lifecycle.post_initial()
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
     lifecycle.answer_prefix = "Picked up where we left off."
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
@@ -80,9 +81,8 @@ async def test_answer_replaces_the_card_with_footer_and_feedback() -> None:
 
 @pytest.mark.asyncio
 async def test_a_long_answer_overflows_into_new_messages_with_the_footer_last() -> None:
-    sender, clock = FakeSender(), Clock()
-    lifecycle = _lifecycle(sender, clock)
-    await lifecycle.post_initial()
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
     paragraph = "word " * 1000
     await lifecycle.on_terminal_success(_answer("\n\n".join([paragraph] * 4)))
 
@@ -96,9 +96,8 @@ async def test_a_long_answer_overflows_into_new_messages_with_the_footer_last() 
 
 @pytest.mark.asyncio
 async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark() -> None:
-    sender, clock = FakeSender(fail_on={1}), Clock()
-    lifecycle = _lifecycle(sender, clock)
-    await lifecycle.post_initial()
+    sender = FakeSender(fail_on={1})
+    lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(_answer("never seen"))
 
     assert sender.activities[-1].id == "m-1"
@@ -108,15 +107,13 @@ async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark()
 
 @pytest.mark.asyncio
 async def test_no_answer_reads_as_cancelled_or_done() -> None:
-    sender, clock = FakeSender(), Clock()
-    lifecycle = _lifecycle(sender, clock)
-    await lifecycle.post_initial()
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(TurnState())
     assert card.CANCELLED_NOTICE in _card_json(sender, -1)
 
-    sender, clock = FakeSender(), Clock()
-    lifecycle = _lifecycle(sender, clock)
-    await lifecycle.post_initial()
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
     tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
     await lifecycle.on_terminal_success(TurnState(content=[tool]))
     assert "✅ daimon" in _card_json(sender, -1)
@@ -124,9 +121,8 @@ async def test_no_answer_reads_as_cancelled_or_done() -> None:
 
 @pytest.mark.asyncio
 async def test_failure_closes_the_card_with_the_reason_once() -> None:
-    sender, clock = FakeSender(), Clock()
-    lifecycle = _lifecycle(sender, clock)
-    await lifecycle.post_initial()
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
     state = TurnState(error=TurnError(kind="upstream", message="overloaded"))
     await lifecycle.on_terminal_failure(state, RuntimeError("x"))
     await lifecycle.close_with_notice("second notice is ignored")

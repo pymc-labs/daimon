@@ -5,15 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 
-import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.memory import EMPTY
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.stores.agent_memory_stores import insert_memory_store
-from daimon.testing.asgi import asgi_lifespan
 from daimon.testing.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,
@@ -26,13 +22,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .conftest import (
     ENTRA_TENANT_ID,
     TeamsApiFake,
-    build_teams_client,
     build_teams_runtime,
     make_message_activity,
-    teams_settings,
+    post_activity,
+    running_service,
 )
 
-pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token")
+pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 
 
@@ -40,7 +36,6 @@ async def _anthropic(
     db_factory: async_sessionmaker[AsyncSession], memories: dict[str, str] | None
 ) -> AsyncAnthropic:
     """A fake MA with the `daimon` agent; `memories` seeds its store, None means no store."""
-    await provision_tenant(db_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     client = build_fake_anthropic(
         combine_handlers(
             make_fake_memory_store_handler(FakeMemoryStoreState()), make_fake_ma_handler()
@@ -72,21 +67,14 @@ async def _replies(
     texts: list[str],
 ) -> list[str]:
     """Send each text into the 1:1 chat; each reply card's JSON, in order."""
-    settings = teams_settings()
-    runtime = build_teams_runtime(db_factory, anthropic=anthropic, teams=settings)
-    service = create_teams_http_service(
-        settings=settings, runtime=runtime, client=build_teams_client(fake)
-    )
-    async with asgi_lifespan(service.app):
-        await service.turns.start()
-        transport = httpx.ASGITransport(app=service.app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            for n, text in enumerate(texts):
-                activity = make_message_activity(text=text, activity_id=f"a-{n}")
-                assert (await client.post("/api/messages", json=activity)).status_code == 200
-                async with asyncio.timeout(10):
-                    while len(fake.activity_requests) == n:
-                        await asyncio.sleep(0.01)
+    async with running_service(
+        build_teams_runtime(db_factory, anthropic=anthropic), fake
+    ) as service:
+        for n, text in enumerate(texts):
+            await post_activity(service, make_message_activity(text=text, activity_id=f"a-{n}"))
+            async with asyncio.timeout(10):
+                while len(fake.activity_requests) == n:
+                    await asyncio.sleep(0.01)
     return [json.dumps(r.body, ensure_ascii=False) for r in fake.activity_requests]
 
 

@@ -1,11 +1,4 @@
-"""Round-trip proofs for the two core Literal widenings.
-
-``Platform`` gains ``"teams"`` so identity/mapping rows can name the new
-adapter, and ``init_sentry``'s ``process`` Literal gains it so the adapter's
-process can report under its own name. Both are validated at runtime by
-Pydantic — dropping either Literal makes these tests fail with
-``ValidationError``, which is the self-falsification receipt for STATUS.
-"""
+"""Core's `Platform` and `init_sentry`'s `process` Literals accept "teams" at runtime."""
 
 from __future__ import annotations
 
@@ -21,12 +14,7 @@ from pydantic import TypeAdapter, ValidationError
 
 
 def _process_annotation() -> object:
-    """The ``process`` Literal off ``init_sentry``'s signature.
-
-    ``get_type_hints`` cannot resolve the full signature — ``Integration``
-    is a TYPE_CHECKING import — so only the parameter under test is
-    evaluated.
-    """
+    """`init_sentry`'s `process` Literal, evaluated alone (the rest of the signature can't be)."""
     annotation = inspect.signature(init_sentry).parameters["process"].annotation
     if isinstance(annotation, str):
         annotation = eval(annotation, {"Literal": Literal})
@@ -53,11 +41,7 @@ def test_teams_process_round_trips_through_init_sentry_annotation() -> None:
 
 
 def test_teams_process_round_trip_is_runtime_checked() -> None:
-    """The falsification hook: a value NOT in the Literal raises ValidationError.
-
-    If ``"teams"`` is reverted from the process Literal, the round-trip test
-    above fails identically — same adapter, same code path.
-    """
+    """A value outside the Literal raises, so the round trip above is a real check."""
     adapter: TypeAdapter[str] = TypeAdapter(_process_annotation())
     with pytest.raises(ValidationError):
         adapter.validate_python("definitely-not-a-process")

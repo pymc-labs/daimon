@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from daimon.adapters.teams import card
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.thread_sessions import get_thread_session_by_id, mark_turn_active
 from daimon.core.stores.turn_card_intents import (
@@ -41,10 +40,10 @@ async def _intent(session: AsyncSession, *, thread_id: str, message_id: str | No
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provisioned_tenant")
 async def test_markers_and_intents_are_interrupted_cleared_and_retired(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     row = await make_thread_session(db_session, platform="teams", thread_id=CONVERSATION_ID)
     await mark_turn_active(
         db_session,
