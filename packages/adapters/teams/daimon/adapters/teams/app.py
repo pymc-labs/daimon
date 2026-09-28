@@ -28,6 +28,7 @@ from daimon.adapters.teams.commands import (
     CommandHandler,
     parse_command,
 )
+from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
 from daimon.adapters.teams.identity import (
     DENIED,
     Refusal,
@@ -161,6 +162,12 @@ class TeamsApp:
         self._commands = commands
         self._bot_token = bot_token
         self.outputs = TeamsOutputDelivery(runtime=runtime, sender=self._sender, spawn=self._spawn)
+        self.credentials = TeamsCredentialRequests(
+            runtime=runtime,
+            sender=self._sender,
+            spawn=self._spawn,
+            dispatch=self.dispatch_after_input,
+        )
         self._processing: set[str] = set()
         self._pending: dict[str, list[TeamsInbound]] = {}
         self._inflight: dict[uuid.UUID, int] = {}
@@ -174,6 +181,8 @@ class TeamsApp:
         # When each busy conversation last got a message: a newer one supersedes
         # queued continuation work (Teams cannot list a conversation's history).
         self._last_message_at: dict[str, datetime] = {}
+        # Private-input dispatches that found their chat busy, by thread key.
+        self._deferred_dispatch: dict[str, tuple[uuid.UUID, str | None]] = {}
         self.draining = False
 
     @property
@@ -330,7 +339,7 @@ class TeamsApp:
         self._last_message_at[key] = datetime.now(UTC)
         try:
             await self._run_turn_guarded(inbound, tenant_id)
-            await self._dispatch_continuations(inbound, tenant_id)
+            await self._dispatch_continuations(inbound.thread_id, tenant_id, inbound.service_url)
             while queued := self._pending.pop(key, []):
                 by_author: dict[str, list[TeamsInbound]] = {}
                 for item in queued:
@@ -338,10 +347,11 @@ class TeamsApp:
                 for items in by_author.values():
                     composed = _compose_queued(items)
                     await self._run_turn_guarded(composed, tenant_id)
-                    await self._dispatch_continuations(composed, tenant_id)
+                    await self._dispatch_continuations(
+                        composed.thread_id, tenant_id, composed.service_url
+                    )
         finally:
-            self._processing.discard(key)
-            self._last_message_at.pop(key, None)
+            self._release(key)
             remaining = self._inflight.get(tenant_id, 1) - 1
             if remaining > 0:
                 self._inflight[tenant_id] = remaining
@@ -635,19 +645,61 @@ class TeamsApp:
                 inbound, render_current_work_must_finish(admission.agent.name, handoff=False)
             )
 
-    async def _dispatch_continuations(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
-        """Run what a handoff queued in this thread. The caller holds the chat's guard."""
-        key = inbound.conversation_id
+    def _release(self, key: str) -> None:
+        """Free a conversation; re-run private-input dispatches that found it busy."""
+        self._processing.discard(key)
+        self._last_message_at.pop(key, None)
+        for thread_id in [t for t in self._deferred_dispatch if conversation_of(t) == key]:
+            tenant_id, service_url = self._deferred_dispatch.pop(thread_id)
+            if not self.draining:
+                resume = self.dispatch_after_input(tenant_id, thread_id, service_url)
+                self._spawn(resume, name="teams.resume")
+
+    async def dispatch_after_input(
+        self, tenant_id: uuid.UUID, thread_id: str, service_url: str | None
+    ) -> None:
+        """Run what a saved private input queued here, from outside a turn.
+
+        Mirrors Slack's `dispatch_continuations_in_thread`: a busy conversation
+        is left to its turn's own tail dispatch, and re-run on release in case
+        that tail already passed. Messages queued meanwhile run afterwards.
+        """
+        if self.draining:
+            return
+        if self._recovery is not None:
+            await asyncio.shield(self._recovery)
+        conversation_id = conversation_of(thread_id)
+        if conversation_id in self._processing:
+            self._deferred_dispatch[thread_id] = (tenant_id, service_url)
+            return
+        self._processing.add(conversation_id)
+        try:
+            await self._dispatch_continuations(thread_id, tenant_id, service_url)
+        finally:
+            self._release(conversation_id)
+        by_author: dict[str, list[TeamsInbound]] = {}
+        for item in self._pending.pop(conversation_id, []):
+            by_author.setdefault(item.user_id, []).append(item)
+        for items in by_author.values():
+            await self._orchestrate(_compose_queued(items), tenant_id)
+
+    async def _dispatch_continuations(
+        self, thread_id: str, tenant_id: uuid.UUID, service_url: str | None
+    ) -> None:
+        """Run what a handoff or saved input queued in a thread. The caller holds its chat."""
+        key = conversation_of(thread_id)
 
         async def notify(text: str) -> None:
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                await self._say(inbound, text)
+                await self._sender.send(
+                    key, MessageActivityInput(text=text), service_url=service_url
+                )
 
         async def latest_message_at(_row: TaskContinuationRow) -> datetime | None:
             return self._last_message_at.get(key)
 
         async def run(row: TaskContinuationRow, seed: str) -> None:
-            await self._run_continuation(row, seed, tenant_id, inbound.service_url)
+            await self._run_continuation(row, seed, tenant_id, service_url)
 
         try:
             await dispatch_pending_continuations(
@@ -655,7 +707,7 @@ class TeamsApp:
                 self.runtime.anthropic,
                 tenant_id=tenant_id,
                 platform="teams",
-                thread_id=inbound.thread_id,
+                thread_id=thread_id,
                 run_follow_up=run,
                 post_notice=notify,
                 latest_user_message_at=latest_message_at,

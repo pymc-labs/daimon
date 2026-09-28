@@ -23,7 +23,6 @@ from daimon.core.github_app_auth import build_app_install_url
 from daimon.core.posted_controls import CardState, RefusalReason
 from daimon.core.posted_controls.teams_card import (
     build_adaptive_card,
-    card_conversation_id,
     card_for_request,
 )
 from daimon.core.stores.domain import CredentialRequestRow
@@ -153,7 +152,7 @@ async def _post_teams_credential_card_impl(  # pyright: ignore[reportUnusedFunct
     runtime: McpRuntime, auth: AuthIdentity, *, row: CredentialRequestRow
 ) -> str:
     """Post the `requested` card into the request's origin conversation. Returns its id."""
-    conversation_id = card_conversation_id(row.channel_id)
+    conversation_id = conversation_of(row.channel_id)
     client = await _authorize(runtime, auth, conversation_id)
     card = build_adaptive_card(card_for_request(row, state="requested"), token=row.token)
     try:
@@ -181,7 +180,7 @@ async def edit_teams_card_state(
     card = card_for_request(row, state=state, outcome=outcome, refusal=refusal)
     try:
         await client.update_card(
-            card_conversation_id(row.channel_id), row.posted_message_id, build_adaptive_card(card)
+            conversation_of(row.channel_id), row.posted_message_id, build_adaptive_card(card)
         )
     except (httpx.HTTPError, ValueError) as err:
         _log.warning(

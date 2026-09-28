@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -174,3 +175,30 @@ async def test_a_refused_continuation_raises_after_telling_the_person(
     with patch.object(app_module, "admit", denied), pytest.raises(AdmissionDenied):
         await teams._run_turn(_inbound("w"), TENANT, reraise=True)
     assert [a.text for a in sender.activities] == [app_module._BALANCE_DEPLETED]
+
+
+@pytest.mark.asyncio
+async def test_a_saved_input_runs_its_work_now_or_once_the_busy_turn_ends(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    teams, account_id = await _app(db_session_factory, FakeSender())
+    ran: list[str] = []
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID, **kw: Any) -> None:
+        ran.append(inbound.text)
+
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        idle = await _hand_off(db_session_factory, account_id)
+        await teams.dispatch_after_input(TENANT, CONVERSATION_ID, SERVICE_URL)
+        assert ran == ["finish the writeup"], "an idle conversation runs it at once"
+
+        busy = await _hand_off(db_session_factory, account_id)
+        teams._processing.add(CONVERSATION_ID)
+        await teams.dispatch_after_input(TENANT, CONVERSATION_ID, SERVICE_URL)
+        assert len(ran) == 1, "a busy conversation is not interrupted"
+        teams._release(CONVERSATION_ID)
+        await asyncio.gather(*teams._tasks)
+
+    assert len(ran) == 2, "the release re-runs the deferred dispatch"
+    assert await _status(db_session_factory, idle) == ("delivered", None)
+    assert await _status(db_session_factory, busy) == ("delivered", None)

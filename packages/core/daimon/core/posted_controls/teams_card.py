@@ -26,7 +26,6 @@ __all__ = [
     "ADAPTIVE_CARD_TYPE",
     "CREDENTIAL_DIALOG",
     "build_adaptive_card",
-    "card_conversation_id",
     "card_for_request",
 ]
 
@@ -36,15 +35,6 @@ CREDENTIAL_DIALOG: Final[str] = "credential_request"
 # The poster knows the requester's Entra id, not their name, so the footer
 # names the role; only the requester can open the form either way.
 _REQUESTER: Final[str] = "the person who asked"
-
-
-def card_conversation_id(thread_id: str) -> str:
-    """The conversation a request's card is posted to and edited in.
-
-    Every Teams card post and edit goes through here, so a thread key that
-    is not itself a conversation id has one place to be mapped.
-    """
-    return thread_id
 
 
 def card_for_request(

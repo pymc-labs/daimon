@@ -15,6 +15,7 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
+from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import TurnDeps
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,6 +35,8 @@ class TeamsRuntime:
     turn_deps: TurnDeps
     # Bottom tier of the channel→tenant→deployment config cascade.
     deployment_default: DeploymentDefault = field(default_factory=DeploymentDefault)
+    # Pre-save check of a pasted MCP token; production wires `probe_bearer_token`.
+    mcp_token_probe: McpTokenProbe | None = None
 
 
 def build_turn_deps(
@@ -115,6 +118,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
                 resolver_cache=resolver_cache,
                 turn_deps=turn_deps,
                 deployment_default=deployment_default,
+                mcp_token_probe=probe_bearer_token,
             )
         finally:
             await engine.dispose()
