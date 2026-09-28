@@ -30,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Agent keys, MCP tokens and MCP sign-ins are collected privately through
   Teams dialogs, and with tool safety on, attached-tool writes wait on an
   Approve/Deny card only the requester can answer. A turn that ends early
-  explains why with the termination notice.
+  explains why with the termination notice. Protected channels get no
+  replies, notices or tool posts.
   Builds on #220 by @jchu96. See `docs/teams.md`.
 - Record content-free turn outcomes across chat, headless, routines and MCP hub/agent-chat, including attributed admission refusals, with bounded best-effort persistence. MCP `ask` records its terminal reason; fire-and-forget `start_turn`/`continue_turn` record dispatch only (`unknown`), without a later terminal update. Pre-attribution and adapter readiness gates are outside coverage.
 - Routines can name an optional destination channel or thread

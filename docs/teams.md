@@ -30,6 +30,8 @@ principal is created on first contact.
 - **Channels.** Only messages that @mention the bot. Each root post is its own
   thread and session; replies that @mention it continue that thread.
 - **Group chats** get a short refusal.
+- **Protected channels** (tenant access policy; ids look like
+  `19:…@thread.tacv2`) and their threads get no reply, notice or tool post.
 
 A turn shows one status card, edited in place, with a Cancel button only the
 author can use. The answer replaces the card, split across messages when long,

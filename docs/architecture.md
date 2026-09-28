@@ -144,11 +144,12 @@ with only a log line, and the entries' error boundaries post only when the
 state is `unprotected`. The entries are Discord `on_message`, organic thread
 participation, wizard submit and continuation turns, and Slack
 `_handle_app_mention` (with a second check in `_orchestrate` after it claims
-the thread, and on its ephemeral shed notice). The continuation dispatchers on
-both platforms, which can post skip or responder-changed copy outside any
-turn (from the wake poller or a credential submission), ask the same decision
-right before each post and settle the row skipped without posting when it
-isn't `unprotected`.
+the thread, and on its ephemeral shed notice), and Teams `_handle` (plus the
+refusals `handle_message` posts). The continuation dispatchers (Teams uses
+core `continuity/dispatch.py`), which can post skip or responder-changed copy
+outside any turn (from the wake poller or a credential submission), ask the
+same decision right before each post and settle the row skipped without
+posting when it isn't `unprotected`.
 
 **Tenant access policy — `packages/core/daimon/core/access_policy.py`.** One
 `TenantAccessPolicy` per tenant, stored as JSON in `tenant_access_policies`
@@ -171,7 +172,7 @@ conversation ids):
 | Field | Empty means | Enforced by |
 | --- | --- | --- |
 | `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
-| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord and Slack write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
+| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord, Slack and Teams write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
 | `sealed_channel_ids` | nothing is sealed | the channel read tools (`read_channel`, `read_thread`, `get_message`, `list_threads`, `search_messages`) via `ChannelReadPolicy`, which the dispatcher in `tools/channels.py` loads per call; `admit()` also sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
 
