@@ -219,6 +219,7 @@ async def run_turn(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             billing_exempt=billing_exempt,
+            memory_read_only=origin == "routine",
         )
 
     try:

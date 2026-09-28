@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -1108,3 +1109,148 @@ async def test_a_caller_who_was_never_asked_carries_no_unsaved_work_answer(
     )
 
     assert seen == [None], "an unanswered question is None, which the transfer reads as 'capture'"
+
+
+@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize("fresh_start", [False, True])
+async def test_tightening_memory_access_never_runs_the_writable_session(
+    active: bool,
+    fresh_start: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    admission = _admission(account=account)
+    first = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    row = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert row is not None
+    if active:
+        async with db_session_factory.begin() as session:
+            await mark_turn_active(session, id=row.id, active_turn_message_id="in-flight", now=_NOW)
+
+    async def forbidden_checkpoint(**kwargs):
+        pytest.fail("a writable session must not execute a checkpoint after policy tightens")
+
+    if fresh_start:
+        async with db_session_factory.begin() as session:
+            await request_fresh_start(session, id=row.id, at=_NOW)
+    restricted = replace(admission, memory_read_only=True)
+    second = await _prepare(
+        deps, restricted, tenant=tenant, account=account, transfer=forbidden_checkpoint
+    )
+    if active:
+        assert isinstance(second, PreparationBusy)
+        assert second.pending_reasons == (() if fresh_start else ("memory_access",))
+        assert transport.creates == 1
+    else:
+        assert isinstance(second, PreparedTurn)
+        assert second.ma_session_id != first.ma_session_id
+        assert second.continuity.applied == (() if fresh_start else ("memory_access",))
+        current = await _live_row(db_session_factory, tenant=tenant, account=account)
+        assert current is not None and current.effective_config is not None
+        assert current.effective_config.memory_read_only
+        third = await _prepare(deps, restricted, tenant=tenant, account=account)
+        assert isinstance(third, PreparedTurn)
+        assert third.ma_session_id == second.ma_session_id
+
+
+@pytest.mark.parametrize(
+    ("sealed", "is_dm", "dm_read_only", "expected"),
+    [
+        (False, False, False, False),
+        (True, False, False, True),
+        (False, True, False, False),
+        (False, True, True, True),
+    ],
+    ids=["open-channel", "sealed-thread", "open-dm", "restricted-dm"],
+)
+async def test_admission_origin_controls_the_actual_memory_mount(
+    sealed: bool,
+    is_dm: bool,
+    dm_read_only: bool,
+    expected: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.turn.admission import admit
+    from daimon.testing.factories import make_ledger_entry, make_tenant_config
+    from daimon.testing.ma import resolved_agent_env_router
+
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            sealed_channel_ids=("channel-1",) if sealed else (),
+            dm_memory_read_only=dm_read_only,
+        ),
+    )
+    await db_session.commit()
+    agent = ma_agent(id=_AGENT_ID, name="daimon", tenant_id=tenant.id)
+    environment = ma_environment(id=_ENV_ID, name="default", tenant_id=tenant.id)
+    transport = _Transport()
+    _register(transport.state, agent)
+    deps = _deps(db_session_factory, transport)
+    admission_deps = replace(
+        deps, anthropic=build_fake_anthropic(resolved_agent_env_router(agent, environment).dispatch)
+    )
+    admission = await admit(
+        admission_deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="channel-1",
+        thread_id="thread-1",
+        is_dm=is_dm,
+        now=_NOW,
+    )
+    fresh = await create_fresh_session(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        session_account_id=admission.account_id,
+    )
+    assert fresh.snapshot.memory_store_id is not None
+    assert fresh.snapshot.memory_read_only is expected
+    observed = await deps.anthropic.beta.sessions.retrieve(fresh.ma_session_id)
+    memory = next(r for r in observed.resources if r.type == "memory_store")
+    assert memory.access == ("read_only" if expected else "read_write")
+
+
+async def test_restricted_turn_replaces_a_missing_legacy_session_safely(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    legacy = await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        account_id=account.id,
+        ma_session_id="ses_gone",
+    )
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    admission = replace(_admission(account=account), memory_read_only=True)
+    prepared = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(prepared, PreparedTurn)
+    assert prepared.ma_session_id != legacy.ma_session_id
+    row = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert row is not None and row.effective_config is not None
+    assert row.effective_config.memory_read_only

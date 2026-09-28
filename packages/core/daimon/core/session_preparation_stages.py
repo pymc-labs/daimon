@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import structlog
 from anthropic import APIStatusError, AsyncAnthropic
@@ -44,12 +44,13 @@ from daimon.core.stores.domain import (
     UnsavedWorkChoice,
 )
 from daimon.core.stores.thread_sessions import record_snapshot
-from daimon.core.turn.admission import Admission
-from daimon.core.turn.ceiling import TURN_CEILING_S
-from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.prepare import FreshSession
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.turn.admission import Admission
+    from daimon.core.turn.deps import TurnDeps
+    from daimon.core.turn.prepare import FreshSession
 
 log = structlog.get_logger(__name__)
 
@@ -159,6 +160,9 @@ def turn_is_active(row: ThreadSessionRow, *, now: dt.datetime) -> bool:
     """
     if row.active_turn_message_id is None or row.active_turn_started_at is None:
         return False
+    # Import lazily: turn.__init__ re-exports run, which imports these stages.
+    from daimon.core.turn.ceiling import TURN_CEILING_S
+
     return (now - row.active_turn_started_at).total_seconds() < TURN_CEILING_S
 
 
@@ -233,6 +237,7 @@ async def desired_snapshot_for(
     agent_uuid: uuid.UUID,
     account_id: uuid.UUID,
     recorded: SessionSnapshot | None,
+    memory_read_only: bool = False,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would freeze.
 
@@ -280,6 +285,7 @@ async def desired_snapshot_for(
         repo_url=None if binding is None else f"https://github.com/{binding.repo_url}",
         repo_branch=None if binding is None else binding.default_branch,
         memory_store_id=memory_store_id,
+        memory_read_only=memory_read_only,
         vault_id=None if recorded is None else recorded.vault_id,
         env_file_id=None if recorded is None else recorded.env_file_id,
         repo_mount_path=None if recorded is None else recorded.repo_mount_path,

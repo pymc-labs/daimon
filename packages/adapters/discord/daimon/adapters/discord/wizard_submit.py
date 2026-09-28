@@ -400,6 +400,7 @@ async def run_wizard_submit_turn(
                 platform="discord",
                 external_user_id=str(interaction.user.id),
                 channel_id=parent_channel_id,
+                thread_id=thread_id,
                 now=datetime.now(UTC),
                 role=Role.ADMIN if is_admin else Role.USER,
             )

@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explain it: what happened, which tools were still running, what was kept,
   what to do next, and a request id to find the error in the logs. The raw,
   truncated error text no longer appears in the card.
+
+- Memory mounts are read-only for sealed-channel turns, routines, and DMs when
+  the tenant policy requests it. Session reuse enforces policy changes before
+  another turn runs, including wizard submissions in sealed threads.
+
 - Core selects chat, routine, relay and handoff prompt fragments per invocation.
   Agent specs can replace or extend each fragment; default chat is unchanged.
 - Per-tenant operator-funded mode replaces depleted-balance refusals with structured alerts while preserving usage metering and configured caps. Configure it with `daimon tenants funding-mode`.

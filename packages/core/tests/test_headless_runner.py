@@ -1443,3 +1443,32 @@ async def test_run_turn_creates_a_fresh_session_per_fire_and_never_reuses_one() 
         "each routine fire must open its own MA session -- a reused session "
         "would let a prior turn's events reach the next fire's replay fold"
     )
+
+
+@pytest.mark.parametrize("origin", ["chat", "routine", "relay", "handoff"])
+async def test_memory_access_per_headless_origin(
+    origin, db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.stores.agent_memory_stores import insert_memory_store
+    from daimon.testing.factories import make_tenant
+
+    tenant = await make_tenant(db_session)
+    agent_id = uuid.uuid4()
+    await insert_memory_store(
+        db_session, tenant_id=tenant.id, agent_id=agent_id, memory_store_id="memstore_origin"
+    )
+    await db_session.commit()
+    bodies: list[dict[str, Any]] = []
+    client = _build_client(_idle_events(), session_create_capture=bodies)
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="hi",
+        tenant_id=tenant.id,
+        agent_uuid=agent_id,
+        session_factory=db_session_factory,
+        origin=origin,
+    )
+    memory = next(r for r in bodies[0]["resources"] if r["type"] == "memory_store")
+    assert memory["access"] == ("read_only" if origin == "routine" else "read_write")

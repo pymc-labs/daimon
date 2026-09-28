@@ -445,3 +445,18 @@ still require live tenant membership. The tool sends at most 19000 characters
 as plain text in bounded chunks and returns every platform message ID. Partial
 failures state the number already sent; callers should not retry the whole text
 blindly. Attachments and cross-tenant delivery are outside this tool's scope.
+### Memory write policy
+
+Session memory mounts are read-only for sealed channels (including their threads),
+for DMs when the tenant access policy sets `dm_memory_read_only`, and for routines.
+Other chat turns retain writable memory. Admission carries the trusted decision;
+the mount mode is recorded in the session snapshot and checked before reuse.
+Tightening access replaces an idle writable session, including a legacy session
+whose mount can no longer be inspected. An active session refuses the restricted
+turn instead of deferring enforcement. Replacement
+when tightening memory access skips the old session's checkpoint, since that would execute
+with its previous permissions; platform history supplies the new turn's context.
+Uncommitted workspace files are not transferred on this restricted replacement.
+
+Memory content is managed directly by the MA memory store. This safeguard does not
+add per-memory author/origin records or rollback tooling.
