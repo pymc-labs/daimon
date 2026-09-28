@@ -468,7 +468,9 @@ async def test_a_turn_deadline_while_a_card_is_up_leaves_no_decide_task_behind()
     assert final.error is not None and final.error.kind == "ceiling"
     assert retired == [True]
     assert not [t for t in asyncio.all_tasks() if t.get_name() == "turn.decide_blocked"]
-    assert all(e["result"] != "allow" for e in _confirmations(fa))
+    assert [(e["tool_use_id"], e["result"]) for e in _confirmations(fa)] == [
+        ("tu_write", "deny")
+    ], "a ceiling breach refuses the pending call instead of leaving the session paused"
 
 
 async def test_trusted_daimon_server_is_not_gated_and_an_untrusted_one_is() -> None:
@@ -488,3 +490,43 @@ async def test_trusted_daimon_server_is_not_gated_and_an_untrusted_one_is() -> N
 
     (sent,) = _confirmations(fa)
     assert sent["result"] == "deny", "without a verified endpoint the reserved name earns nothing"
+
+
+async def test_a_blocked_call_nobody_saw_is_refused_without_a_card() -> None:
+    """Eval regression: a pause naming an id whose tool_use never reached the
+    folded state used to post a blank "unknown" card a person could approve."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(
+                make_status_idle(
+                    event_id="sevt_pause",
+                    stop_reason=make_requires_action(event_ids=["tu_unseen"]),
+                )
+            ),
+            YieldEvent(make_status_idle(event_id="sevt_end", stop_reason=make_end_turn())),
+        ]
+    ]
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="go",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=PolicyApproval(
+            decide=interactive_decider(_ON, requester_platform_user_id="U1", confirm=card)
+        ),
+    )
+
+    assert prompts == [], "no card for a call nobody can see"
+    (sent,) = _confirmations(fa)
+    assert (sent["tool_use_id"], sent["result"]) == ("tu_unseen", "deny")
+    assert "could not see" in str(sent["deny_message"])

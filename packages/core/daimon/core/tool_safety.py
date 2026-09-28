@@ -36,6 +36,7 @@ and keep their own copy and I/O.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Final, Literal
 
@@ -88,13 +89,12 @@ DAIMON_SERVER_NAME: Final[str] = "daimon-mcp"
 ANY_KEY: Final[str] = "*"
 
 # Leading verbs that name a read. Deliberately short: a verb that is sometimes
-# a write ("run_", "sync_", "export_") stays out, so it falls to the
-# fail-closed `write` default instead.
+# a write ("run_", "sync_", "export_", and "query_", which on a SQL server can
+# be anything) stays out, so it falls to the fail-closed `write` default.
 _READ_VERBS: Final[tuple[str, ...]] = (
     "get",
     "list",
     "search",
-    "query",
     "read",
     "fetch",
     "find",
@@ -109,33 +109,77 @@ _READ_VERBS: Final[tuple[str, ...]] = (
     "download",
 )
 
-# Leading verbs that name a write. Only consulted to stop a write verb's
-# object from reading as a server prefix ("delete_list" is not "list").
-_WRITE_VERBS: Final[frozenset[str]] = frozenset(
+# Words that make a name a write wherever they appear: a write verb anywhere
+# ("get_or_create", "fetch_and_delete", "list_delete") or a conjunction that
+# chains a second action onto a read ("search_and_replace").
+_WRITE_WORDS: Final[frozenset[str]] = frozenset(
     {
         "add",
+        "append",
+        "approve",
         "archive",
+        "assign",
         "cancel",
+        "clear",
         "close",
         "create",
         "delete",
+        "destroy",
+        "drop",
         "edit",
+        "grant",
         "insert",
+        "invite",
+        "kill",
         "merge",
+        "modify",
         "move",
         "patch",
         "post",
         "publish",
+        "purge",
         "put",
         "remove",
         "rename",
+        "replace",
+        "reset",
+        "revoke",
         "send",
         "set",
+        "share",
         "update",
+        "upload",
         "upsert",
         "write",
+        # Chaining words: a read that goes on to do something else.
+        "and",
+        "or",
+        "then",
     }
 )
+
+# Prefix words that are themselves actions, so a read verb after them is the
+# object of the action, not the tool's verb ("run_query", "call_get_page").
+_ACTION_PREFIXES: Final[frozenset[str]] = frozenset(
+    {
+        "apply",
+        "call",
+        "do",
+        "exec",
+        "execute",
+        "export",
+        "import",
+        "invoke",
+        "perform",
+        "run",
+        "submit",
+        "sync",
+        "trigger",
+    }
+)
+
+_WORD_SPLIT: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]+")
+_CAMEL_BOUNDARY: Final[re.Pattern[str]] = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
 class ToolAnnotations(BaseModel):
@@ -178,8 +222,8 @@ class ToolSafetyPolicy(BaseModel):
         description=(
             'Override the read/write class, e.g. {"linear/get_team": "read", "notion": '
             '"write"}. Keys are a server name or server/tool. Unlisted tools are classified '
-            "from their name (get_, list_, search_ ... are reads) and anything unknown is a "
-            "write."
+            "from their name: a plain get_, list_, search_ ... is a read; a compound name "
+            "(get_or_create, search_and_replace, run_query) and anything unknown is a write."
         ),
     )
     denied: tuple[str, ...] = Field(
@@ -240,13 +284,22 @@ def _listed(keys: tuple[str, ...], *, server_name: str, tool_name: str) -> bool:
 
 
 def _name_says_read(tool_name: str) -> bool:
-    words = tool_name.lower().replace("-", "_").replace(".", "_").split("_")
+    """True only for a name that plainly reads: its leading verb is a read
+    verb, and nothing else in it writes or chains another action.
+
+    The leading verb is the first word, or the second after a prefix that is
+    not itself an action (a server prefixing its own name, "notion_get_page").
+    Everything else — compound names, action prefixes, unknown verbs — is a
+    write.
+    """
+    spaced = _CAMEL_BOUNDARY.sub("_", tool_name).lower()
+    words = [word for word in _WORD_SPLIT.split(spaced) if word]
+    if not words or any(word in _WRITE_WORDS for word in words):
+        return False
     if words[0] in _READ_VERBS:
         return True
-    if words[0] in _WRITE_VERBS:
+    if words[0] in _ACTION_PREFIXES:
         return False
-    # A server may prefix its own name ("notion_get_page"): a read verb as the
-    # second word counts when the first word is not itself a verb.
     return len(words) > 1 and words[1] in _READ_VERBS
 
 
@@ -260,8 +313,8 @@ def classify_tool(
     """Return whether `server_name`'s `tool_name` reads or writes.
 
     Order: operator override (tool key, then server key); `read_only_hint`;
-    `destructive_hint`; a read verb as the tool name's first word, or as its
-    second word after a non-verb prefix; otherwise `write`.
+    `destructive_hint`; a plainly-read name (`_name_says_read`); otherwise
+    `write`.
     """
     override = _keyed(policy.effects, server_name=server_name, tool_name=tool_name)
     if override is not None:

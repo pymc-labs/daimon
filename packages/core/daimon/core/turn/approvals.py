@@ -46,9 +46,24 @@ from daimon.core.turn.state import ToolUseBlock, TurnState
 log = structlog.get_logger(__name__)
 
 #: Stand-in for a blocked id whose `tool_use` event never reached the folded
-#: state. Unknown server and tool: `decide_tool_call` classifies it a write,
-#: so it is asked about or refused, never waved through.
+#: state (a replay window that missed it). Nobody has seen its server, tool
+#: or input, so both deciders refuse it outright — a card for it would ask a
+#: person to approve something they cannot see.
 _UNKNOWN_TOOL = "unknown"
+
+_UNSEEN_MESSAGE = (
+    "Refused: daimon could not see this call's server, tool or input, so nobody could "
+    "approve it. It did not run. If it is still needed, call the tool again."
+)
+
+
+def _is_unseen(call: ToolCall) -> bool:
+    return call.server_name == _UNKNOWN_TOOL and call.tool_name == _UNKNOWN_TOOL
+
+
+def _unseen_refusal(call: ToolCall) -> ToolConfirmationResult:
+    log.warning("tool_safety.unseen_call_refused", tool_use_id=call.tool_use_id)
+    return ToolConfirmationResult(allow=False, deny_message=_UNSEEN_MESSAGE)
 
 
 def pending_confirmation_ids(
@@ -170,6 +185,8 @@ def unattended_decider(
     unless the operator allowed them there."""
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
+        if _is_unseen(call):
+            return _unseen_refusal(call)
         verdict = decide_tool_call(policy, call, attended=False, trusted_servers=trusted_servers)
         log.info(
             "tool_safety.decided",
@@ -201,6 +218,8 @@ def interactive_decider(
     """
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
+        if _is_unseen(call):
+            return _unseen_refusal(call)
         verdict = decide_tool_call(policy, call, attended=True, trusted_servers=trusted_servers)
         log.info(
             "tool_safety.decided",

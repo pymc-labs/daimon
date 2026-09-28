@@ -771,8 +771,9 @@ is replaced. Off keeps every tool auto-approved.
 `dict[str, 'read' | 'write']` · optional · default `{}`
 
 Override the read/write class, e.g. {"linear/get_team": "read", "notion": "write"}. Keys
-are a server name or server/tool. Unlisted tools are classified from their name (get_,
-list_, search_ ... are reads) and anything unknown is a write.
+are a server name or server/tool. Unlisted tools are classified from their name: a plain
+get_, list_, search_ ... is a read; a compound name (get_or_create, search_and_replace,
+run_query) and anything unknown is a write.
 
 ### `DAIMON_TOOL_SAFETY__DENIED`
 

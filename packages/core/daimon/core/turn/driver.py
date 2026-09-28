@@ -124,6 +124,22 @@ async def _decide_blocked(
             return build_decision_events(zip(fresh, results, strict=True))
 
 
+async def _refuse_blocked(
+    anthropic: AsyncAnthropic, session_id: str, fresh: list[str], *, message: str
+) -> None:
+    """Send `deny` for every id in `fresh`, best effort.
+
+    The session is on a `requires_action` idle, so the send is accepted and
+    the session does not stay paused on calls nobody will answer.
+    """
+    refusals = build_decision_events(
+        (tool_use_id, ToolConfirmationResult(allow=False, deny_message=message))
+        for tool_use_id in fresh
+    )
+    with contextlib.suppress(_anthropic.APIError):
+        await anthropic.beta.sessions.events.send(session_id, events=refusals)
+
+
 async def _decide_or_refuse_on_cancel(
     tool_confirmation: AutoApprove | PolicyApproval,
     state: TurnState,
@@ -137,8 +153,7 @@ async def _decide_or_refuse_on_cancel(
 
     The one place blocked calls are decided, for the live stream and the
     replay/eventless path alike. A cancel — before the decision, or landing
-    in the same tick as it — refuses every fresh id instead (the session is on
-    a `requires_action` idle, so the send is accepted) and raises
+    in the same tick as it — refuses every fresh id instead and raises
     `_InterruptInConsume` for the normal interrupt path: a stop request never
     lets an `allow` out.
 
@@ -146,7 +161,9 @@ async def _decide_or_refuse_on_cancel(
     the wait — a decision, a cancel, or this coroutine itself being cancelled
     by the turn ceiling or a caller — the `finally` cancels and joins both, so
     a card hook never outlives the turn; the hooks retire their cards on that
-    cancellation.
+    cancellation. An outside cancellation also refuses the pending ids
+    (shielded, so the refusal lands even though this task is being torn down)
+    before it propagates.
     """
     decide_task = asyncio.create_task(
         _decide_blocked(tool_confirmation, state, fresh), name="turn.decide_blocked"
@@ -156,23 +173,26 @@ async def _decide_or_refuse_on_cancel(
         await asyncio.wait({decide_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
         if decide_task.done() and not cancel.is_set():
             return decide_task.result()
+    except asyncio.CancelledError:
+        with _suppress_task_exc():
+            await asyncio.shield(
+                _refuse_blocked(
+                    anthropic,
+                    session_id,
+                    fresh,
+                    message="This turn ran out of time; the call did not run.",
+                )
+            )
+        raise
     finally:
         for task in (decide_task, cancel_task):
             if not task.done():
                 task.cancel()
             with _suppress_task_exc():
                 await task
-    refusals = build_decision_events(
-        (
-            tool_use_id,
-            ToolConfirmationResult(
-                allow=False, deny_message="The user stopped this turn; the call did not run."
-            ),
-        )
-        for tool_use_id in fresh
+    await _refuse_blocked(
+        anthropic, session_id, fresh, message="The user stopped this turn; the call did not run."
     )
-    with contextlib.suppress(_anthropic.APIError):
-        await anthropic.beta.sessions.events.send(session_id, events=refusals)
     raise _InterruptInConsume()
 
 

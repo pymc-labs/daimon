@@ -32,17 +32,37 @@ def test_daimon_server_name_matches_the_defaults_constant() -> None:
 @pytest.mark.parametrize(
     ("tool", "effect"),
     [
+        # Plain reads.
         ("get_issue", "read"),
         ("list_teams", "read"),
         ("search", "read"),
         ("notion_get_page", "read"),
-        ("query-database", "read"),
+        ("fetch-page", "read"),
+        ("getContact", "read"),
+        ("find_user", "read"),
+        # Plain writes and unknowns.
         ("create_issue", "write"),
         ("update_deal", "write"),
         ("delete_list", "write"),
         ("send_email", "write"),
         ("run_report", "write"),
         ("something_unfamiliar", "write"),
+        # Evaluator finding 1: compound names that used to read as reads.
+        ("get_or_create_contact", "write"),
+        ("find_or_create", "write"),
+        ("search_and_replace", "write"),
+        ("fetch_and_delete", "write"),
+        ("lookup_and_update", "write"),
+        ("retrieve_and_cancel", "write"),
+        ("view_and_edit", "write"),
+        ("count_and_reset", "write"),
+        ("linear_search_and_delete", "write"),
+        ("api_get_and_post", "write"),
+        ("list_delete", "write"),
+        ("run_query", "write"),
+        ("sql_query", "write"),
+        ("getOrCreateContact", "write"),
+        ("call_get_page", "write"),
     ],
 )
 def test_the_tool_name_decides_when_nothing_else_does(tool: str, effect: str) -> None:

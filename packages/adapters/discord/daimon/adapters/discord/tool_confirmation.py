@@ -103,6 +103,8 @@ class _ConfirmationView(discord.ui.LayoutView):
             await interaction.response.send_message(NO_LONGER_PENDING_MESSAGE, ephemeral=True)
             return
         self._answer.set_result(answer)
+        # Answered: nothing on this card listens any more.
+        self.stop()
         answered = build_confirmation_card(
             self._prompt, state=answer, answered_by_platform_user_id=str(interaction.user.id)
         )
@@ -127,7 +129,8 @@ def discord_confirmation_hook(channel: discord.abc.Messageable) -> ConfirmationH
         loop = asyncio.get_running_loop()
         answer: asyncio.Future[ConfirmationAnswer] = loop.create_future()
         pending = build_confirmation_card(prompt, state="pending", token=secrets.token_urlsafe(12))
-        message = await channel.send(view=_ConfirmationView(pending, prompt, answer))
+        view = _ConfirmationView(pending, prompt, answer)
+        message = await channel.send(view=view)
         timeout_s = max(0.0, (prompt.expires_at - datetime.now(UTC)).total_seconds())
         try:
             result = await asyncio.wait_for(asyncio.shield(answer), timeout=timeout_s)
@@ -136,10 +139,12 @@ def discord_confirmation_hook(channel: discord.abc.Messageable) -> ConfirmationH
         except asyncio.CancelledError:
             # The turn was stopped while the card was up: retire its buttons.
             answer.cancel()
+            view.stop()
             await _retire(message, prompt, "denied")
             raise
         if result == "expired":
             answer.cancel()
+            view.stop()
             await _retire(message, prompt, "expired")
         return result
 
