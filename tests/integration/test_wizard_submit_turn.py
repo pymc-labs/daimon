@@ -15,6 +15,7 @@ chokepoint runs on every test here, which is the whole point of this file.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from decimal import Decimal
 from typing import Any
@@ -23,17 +24,20 @@ from uuid import UUID
 
 import discord
 import httpx
+import pytest
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
 from daimon.adapters.discord.wizard_submit import WizardSubmitButton
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.agent_memory_stores import insert_memory_store
 from daimon.core.stores.domain import Role, TenantRow, WizardSessionRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import get_live_thread_session, list_orphaned_turns
@@ -755,3 +759,62 @@ async def test_a_bind_phase_ceiling_does_not_escape_the_background_task(
         if call.args and isinstance(call.args[0], str)
     ]
     assert posted_texts, "the bind-phase ceiling must render through the existing turn-failure path"
+
+
+@pytest.mark.parametrize(
+    "sealed_id", ["5001", "4001", None], ids=["sealed-thread", "sealed-parent", "open"]
+)
+async def test_wizard_origin_controls_the_actual_memory_mount(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    sealed_id: str | None,
+) -> None:
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800019001")
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(sealed_channel_ids=() if sealed_id is None else (sealed_id,)),
+    )
+    await insert_memory_store(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID),
+        memory_store_id="memstore_wizard_policy",
+    )
+    await db_session.commit()
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+    channel = _make_channel(thread_id=5001, parent_id=4001)
+    sent_events: list[dict[str, Any]] = []
+    stream_hits: list[str] = []
+    created: list[dict[str, Any]] = []
+    router = _build_router(str(tenant.id), sent_events=sent_events, stream_hits=stream_hits)
+
+    def create(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        body = json.loads(request.content)
+        created.append(body)
+        session = ma_session(
+            id="ses_wizard_policy",
+            agent_id=_AGENT_ID,
+            model=_MODEL_ID,
+            environment_id=_ENV_ID,
+            resources=body["resources"],
+        )
+        return httpx.Response(200, json=session.model_dump(mode="json"))
+
+    router.add("POST", r"/v1/sessions", create)
+    runtime = _make_runtime(db_session_factory, router)
+    bot = _make_bot(runtime)
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+    item = await WizardSubmitButton.from_custom_id(interaction, MagicMock(), _submit_match(row.id))
+    assert await item.interaction_check(interaction) is True
+    await item.callback(interaction)
+    await asyncio.gather(*list(bot._bg_tasks))
+
+    assert len(created) == 1
+    memory = next(
+        resource for resource in created[0]["resources"] if resource["type"] == "memory_store"
+    )
+    assert memory["access"] == ("read_write" if sealed_id is None else "read_only")
+    if sealed_id is not None:
+        assert "mounted read-only" in memory["instructions"]
+    assert stream_hits == ["ses_wizard_policy"]

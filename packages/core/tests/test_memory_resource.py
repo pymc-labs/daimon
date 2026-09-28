@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 import pytest
 from daimon.core.memory_resource import (
     MEMORY_INSTRUCTIONS,
+    READ_ONLY_MEMORY_INSTRUCTIONS,
     archive_memory_store_for_agent,
     ensure_memory_store_and_mount,
 )
@@ -46,7 +47,9 @@ async def test_cold_path_creates_store_and_binding(
 
     assert mount["type"] == "memory_store"
     assert mount["access"] == ("read_only" if read_only else "read_write")
-    assert mount["instructions"] == MEMORY_INSTRUCTIONS
+    assert mount["instructions"] == (
+        READ_ONLY_MEMORY_INSTRUCTIONS if read_only else MEMORY_INSTRUCTIONS
+    )
     assert mount["memory_store_id"] in state.stores
     created = state.stores[mount["memory_store_id"]]
     assert created["metadata"]["daimon_tenant"] == str(tenant.id)
