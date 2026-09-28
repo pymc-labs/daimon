@@ -23,6 +23,7 @@ from anthropic.types.beta.sessions import (
 from daimon.core.turn import run_turn
 from daimon.core.turn.posture import AutoApprove, BillingExempt, RequireApproval
 from daimon.core.turn.state import TextBlock
+from daimon.core.turn.termination import TerminationReason
 from daimon.testing.turn_fakes import (
     DelayThenYield,
     FakeAnthropic,
@@ -220,6 +221,7 @@ async def test_read_timeout_while_terminated_finalizes_without_reopening() -> No
     assert final.stop_reason is not None
     assert final.stop_reason.type == "end_turn"
     assert len(lc.terminal_success) == 1
+    assert final.termination is TerminationReason.COMPLETED
 
 
 async def test_rescheduling_status_behaves_like_running() -> None:
@@ -433,6 +435,9 @@ async def test_terminated_replay_keeps_answer_after_current_turn_idle(
     assert final.error is None, "the terminal idle ended this turn before session termination"
     assert final.stop_reason is not None
     assert final.stop_reason.type == "end_turn"
+    assert final.termination is TerminationReason.COMPLETED, (
+        "a later termination does not relabel a turn that already ended"
+    )
 
 
 async def test_eventless_cycle_closes_the_abandoned_stream() -> None:

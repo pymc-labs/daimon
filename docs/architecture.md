@@ -166,6 +166,25 @@ Every call must declare a billing posture, from
 `span.model_request_end` event through the bound recorder, `BillingExempt`
 meters nothing and logs why.
 
+### How a turn ended
+
+`packages/core/daimon/core/turn/termination.py` defines `TerminationReason`,
+one closed enum for every way a turn can end: it completed, the user stopped
+it, the stream or MA failed in one of several named ways, the ceiling fired, or
+admission or binding refused it before a driver ran. Each driver finalizer, and
+both ceiling handlers, set `TurnState.termination` before the terminal hook
+fires, so a lifecycle and the caller's `RunOutcome.termination` always agree.
+Refusals raise before any state exists; `termination_reason(err)` maps the
+exception the adapter caught to its member, and never raises: anything it does
+not recognise is `unknown`. Two members have no exception behind them and are
+set by the caller: `admission_concurrency_shed` when `should_admit_turn`
+refuses, and `recovery_failed` when replacing a lost session raises out of
+`run_prepared_turn`. A session MA reports terminated without any terminal
+event for this turn is `session_terminated`, never `completed`.
+`TurnError.kind` is unchanged, and
+every `TurnKind` value is also a `TerminationReason` value with the same
+string.
+
 ## Tenancy and isolation
 
 One Discord guild or one Slack workspace is one tenant. The tenant UUID is

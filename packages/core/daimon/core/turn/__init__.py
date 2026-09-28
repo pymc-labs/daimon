@@ -46,6 +46,7 @@ from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
 )
+from daimon.core.turn.termination import TerminationReason, termination_reason
 
 __all__ = [
     # SDK alias (re-exported for short imports in driver/test code)
@@ -88,6 +89,9 @@ __all__ = [
     "TextBlock",
     "ToolUseBlock",
     "TurnState",
+    # how a turn ended
+    "TerminationReason",
+    "termination_reason",
     # reducers
     "apply",
     # driver

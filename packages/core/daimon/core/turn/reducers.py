@@ -70,6 +70,7 @@ from daimon.core.turn.state import (
     TurnState,
     UsageTotals,
 )
+from daimon.core.turn.termination import TerminationReason
 
 
 def apply(state: TurnState, event: SessionEvent) -> TurnState:
@@ -111,6 +112,7 @@ def apply(state: TurnState, event: SessionEvent) -> TurnState:
             return dataclasses.replace(
                 state,
                 error=TurnError(kind="upstream", message="session terminated by MA"),
+                termination=TerminationReason.SESSION_TERMINATED,
                 seen_event_ids=seen,
             )
         case "span.model_request_end":

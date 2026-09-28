@@ -50,6 +50,7 @@ from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLif
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_recorder
 from daimon.core.turn.run import RunOutcome, _is_dead_session, run_prepared_turn
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.termination import TerminationReason
 from daimon.testing.db import build_test_engine
 from daimon.testing.ma import (
     MARouter,
@@ -346,6 +347,7 @@ async def test_happy_path_runs_once_and_returns_recovered_false(
     assert outcome.ma_session_id == "sess_1", "must report the original session id"
     assert outcome.mapping_id == row.id, "must report the original mapping id"
     assert outcome.state.error is None, "a clean idle-end-turn run has no error"
+    assert outcome.termination is TerminationReason.COMPLETED
     assert len(session_bodies) == 0, "no create_session call on the happy path"
 
 
@@ -396,6 +398,7 @@ async def test_dead_session_recovers_once_and_rebinds_recorder(
         render_interval_s=0.001,
     )
 
+    assert outcome.termination is TerminationReason.COMPLETED, "the recovered run is what ended"
     assert outcome.recovered is True, "a dead-session signature must trigger exactly one recovery"
     assert outcome.ma_session_id != "sess_old", "the final session id must be the new one"
     assert outcome.mapping_id != row.id, "the final mapping id must be the new row"
@@ -1224,6 +1227,8 @@ async def test_ceiling_breach_on_first_attempt_returns_ceiling_error_and_marks_m
     assert outcome.state.error is not None
     assert outcome.state.error.kind == "ceiling"
     assert outcome.recovered is False, "a first-attempt breach never entered recovery"
+    assert outcome.termination is TerminationReason.CEILING
+    assert caller_lifecycle.terminal_failures[0][0].termination is TerminationReason.CEILING
     assert outcome.mapping_id == row.id, "must report the originally prepared mapping id"
     assert outcome.ma_session_id == "sess_1"
     assert len(session_bodies) == 0, "a first-attempt breach must never call create_session"
@@ -1566,6 +1571,10 @@ async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_hel
     assert len(caller_lifecycle.terminal_failures) == 1, (
         "the withheld first-attempt failure must still be delivered exactly once"
     )
+    assert outcome.termination is TerminationReason.RECOVERY_CANCELLED
+    assert caller_lifecycle.terminal_failures[0][0].termination is (
+        TerminationReason.RECOVERY_CANCELLED
+    ), "the caller's hook and the outcome must agree on how the turn ended"
 
 
 async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interrupts_it(

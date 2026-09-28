@@ -23,6 +23,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
     StopReason,
 )
 from daimon.core.errors import TurnError
+from daimon.core.turn.termination import TerminationReason
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +117,9 @@ class TurnState:
     """Servers that failed this turn, newest status per server name."""
     retrying_error: TurnError | None = None
     """The last `retrying` error MA reported; only surfaces if nothing follows."""
+    termination: TerminationReason | None = None
+    """How the turn ended. Every driver exit sets it; `None` means still running
+    (the reducer sets it early only when MA terminates the session)."""
 
 
 def extract_final_response(content: list[ContentBlock]) -> str:
