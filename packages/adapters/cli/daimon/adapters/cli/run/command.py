@@ -24,7 +24,7 @@ from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.outcomes import current_outcome, observe_turn
-from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.posture import BillingExempt, RequireApproval, ToolConfirmation
 from daimon.core.turn.state import TurnState
 
 
@@ -54,12 +54,33 @@ def run_command(
 
     settings = load_settings()
 
+    # No card surface here: with the tool-safety policy on, reads run and
+    # third-party writes are refused (`no_confirmation_surface`); off, this is
+    # the driver's default `RequireApproval`.
+    tool_confirmation = chat_tool_confirmation(
+        settings.tool_safety,
+        requester_platform_user_id=settings.cli.local_user or "cli",
+        confirm=None,
+        trusted_servers=trusted_servers_for(
+            str(settings.mcp.public_url) if settings.mcp.public_url is not None else None
+        ),
+    )
+
     async def _with_defaults() -> int:
         async with build_runtime(settings) as rt:
-            return await run_conversation(rt=rt, session_id=session, user_message=user_message)
+            return await run_conversation(
+                rt=rt,
+                session_id=session,
+                user_message=user_message,
+                tool_confirmation=tool_confirmation,
+            )
 
     exit_code = asyncio.run(_with_defaults())
     raise typer.Exit(code=exit_code)
+
+
+# `RequireApproval` is frozen and field-less; one shared default (ruff B008).
+_DEFAULT_TOOL_CONFIRMATION: ToolConfirmation = RequireApproval()
 
 
 def _resolve_user_message(raw: str) -> str:
@@ -74,10 +95,15 @@ async def run_conversation(
     session_id: str,
     user_message: str,
     deadline: datetime | None = None,
+    tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
 ) -> int:
     with observe_turn(rt.sessionmaker, tenant_id=None, platform="cli"):
         return await run_conversation_observed(
-            rt=rt, session_id=session_id, user_message=user_message, deadline=deadline
+            rt=rt,
+            session_id=session_id,
+            user_message=user_message,
+            deadline=deadline,
+            tool_confirmation=tool_confirmation,
         )
 
 
@@ -87,6 +113,7 @@ async def run_conversation_observed(
     session_id: str,
     user_message: str,
     deadline: datetime | None = None,
+    tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
 ) -> int:
     turn_id = f"turn_{uuid.uuid4().hex[:12]}"
     lifecycle = NdjsonLifecycle(stdout=sys.stdout, session_id=session_id, turn_id=turn_id)
@@ -108,18 +135,7 @@ async def run_conversation_observed(
             lifecycle=lifecycle,
             cancel=cancel,
             billing=BillingExempt(reason="cli-operator-run"),
-            # No card surface here: with the tool-safety policy on, reads run
-            # and third-party writes are refused (`no_confirmation_surface`).
-            tool_confirmation=chat_tool_confirmation(
-                rt.settings.tool_safety,
-                requester_platform_user_id=rt.settings.cli.local_user or "cli",
-                confirm=None,
-                trusted_servers=trusted_servers_for(
-                    str(rt.settings.mcp.public_url)
-                    if rt.settings.mcp.public_url is not None
-                    else None
-                ),
-            ),
+            tool_confirmation=tool_confirmation,
             deadline=effective_deadline,
         )
     except anthropic.APIError as err:

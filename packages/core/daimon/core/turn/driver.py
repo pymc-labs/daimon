@@ -169,27 +169,31 @@ async def _decide_or_refuse_on_cancel(
         _decide_blocked(tool_confirmation, state, fresh), name="turn.decide_blocked"
     )
     cancel_task = asyncio.create_task(cancel.wait(), name="turn.decide_cancel_waiter")
+    # Set once the wait ends on its own (a decision or the cancel event); if
+    # the `finally` runs with it unset, this coroutine is being torn down from
+    # outside (the turn ceiling, a caller) and the pending ids are refused.
+    settled = False
     try:
         await asyncio.wait({decide_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+        settled = True
         if decide_task.done() and not cancel.is_set():
             return decide_task.result()
-    except asyncio.CancelledError:
-        with _suppress_task_exc():
-            await asyncio.shield(
-                _refuse_blocked(
-                    anthropic,
-                    session_id,
-                    fresh,
-                    message="This turn ran out of time; the call did not run.",
-                )
-            )
-        raise
     finally:
         for task in (decide_task, cancel_task):
             if not task.done():
                 task.cancel()
             with _suppress_task_exc():
                 await task
+        if not settled:
+            with _suppress_task_exc():
+                await asyncio.shield(
+                    _refuse_blocked(
+                        anthropic,
+                        session_id,
+                        fresh,
+                        message="This turn ran out of time; the call did not run.",
+                    )
+                )
     await _refuse_blocked(
         anthropic, session_id, fresh, message="The user stopped this turn; the call did not run."
     )
