@@ -100,22 +100,43 @@ config). The order is load-bearing and documented as such in the module:
 1. Resolve the platform user to an `accounts` row, via
    `get_or_create_platform_principal` in
    `packages/core/daimon/core/stores/identity.py`.
-2. Resolve config through the cascade
+2. Invoker policy — the tenant's access policy (below) may restrict who can
+   start a turn. A refused user raises `AdmissionDenied("invoker_not_allowed")`
+   before the cascade, so they learn nothing about the tenant's configuration
+   and no MA call is made.
+3. Resolve config through the cascade
    `thread → channel → tenant → deployment`, in
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are
    named by `ConfigTier` in `packages/core/daimon/core/scope.py`; the bottom
    one comes from `defaults/config.yaml`, see [defaults.md](defaults.md).
-3. Raise `MissingTurnConfigError` if no agent or environment resolved — before
+4. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a
    billing one.
-4. Resolve the agent and environment to live MA ids via
+5. Resolve the agent and environment to live MA ids via
    `packages/core/daimon/core/ma_resolver.py`, which self-heals by re-running
    defaults reconciliation when a tag no longer resolves, and rejects an agent
    whose `archived_at` is set.
-5. Balance gate — `tenant_balance.is_over_balance`.
-6. Monthly cap gate — `billing.is_over_cap`.
+6. Balance gate — `tenant_balance.is_over_balance`.
+7. Monthly cap gate — `billing.is_over_cap`.
 
-Either gate raises `AdmissionDenied`. See [billing.md](billing.md).
+The policy, balance and cap gates each raise `AdmissionDenied` with a
+reason literal; each adapter renders its own notice. See [billing.md](billing.md).
+
+**Tenant access policy — `packages/core/daimon/core/access_policy.py`.** One
+`TenantAccessPolicy` per tenant, stored as JSON in `tenant_access_policies`
+(`packages/core/daimon/core/stores/access_policy.py`). A tenant with no row
+gets the open default, so nothing changes until a policy is written; a row that
+no longer parses raises `AccessPolicyUnreadable` and callers refuse rather than
+fall open. Ids are the platform's own (Discord snowflakes, Slack ids):
+
+| Field | Empty means | Enforced by |
+| --- | --- | --- |
+| `invoker_user_ids` | anyone may start a turn; admins always may | `admit()` |
+| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | not yet |
+| `sealed_channel_ids` | nothing is sealed | not yet |
+
+A sealed channel's content is readable only from a turn inside it (the channel
+or a thread under it). There is no editor yet; operators write the row directly.
 
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA

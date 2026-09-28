@@ -5,10 +5,12 @@ deployment config cascade, MA resolve + SDK retrieve, the per-tenant balance
 gate, and the per-user monthly cap gate -- returning a frozen `Admission` or
 raising a typed error. No boolean gate result crosses this boundary.
 
-Gate ORDER is load-bearing and must not be reordered: identity -> cascade ->
-missing-config -> resolve/retrieve -> balance -> cap. A tenant that is both
-over-balance and mis-configured must see the config error (matches both
-adapters' inline sequences today).
+Gate ORDER is load-bearing and must not be reordered: identity -> invoker
+policy -> cascade -> missing-config -> resolve/retrieve -> balance -> cap. A
+tenant that is both over-balance and mis-configured must see the config error
+(matches both adapters' inline sequences today). The invoker policy runs
+before the cascade so a refused user learns nothing about the tenant's
+configuration and never reaches an MA call.
 
 Ported verbatim from `bot.py`'s inline pre-turn sequence (the reference
 implementation). Both the Discord and Slack adapters now call `admit()` as
@@ -23,12 +25,14 @@ from datetime import datetime
 from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
+from daimon.core.access_policy import is_invoker_allowed
 from daimon.core.billing import is_over_cap
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
-from daimon.core.stores.accounts import set_role
+from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
@@ -73,6 +77,20 @@ async def admit(
         if role is not None:
             await set_role(session, principal.account_id, role)
         await session.commit()
+        # Read after the role commit, so a refused turn still records the role.
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+        if role is None:
+            account = await get_account(session, principal.account_id)
+            role = account.role if account is not None else None
+
+    # --- Invoker policy: a tenant may restrict who can start a turn. Admin is
+    # the live role when the adapter supplied one, else the stored one. An
+    # unreadable policy raised `AccessPolicyUnreadable` above -- refused, never
+    # open. ---
+    if not is_invoker_allowed(
+        policy, external_user_id=external_user_id, is_admin=role is Role.ADMIN
+    ):
+        raise AdmissionDenied(reason="invoker_not_allowed")
 
     # --- Config resolution (per turn) ---
     scope = ScopeContext(

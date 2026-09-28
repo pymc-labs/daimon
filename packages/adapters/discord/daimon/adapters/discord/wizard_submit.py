@@ -69,6 +69,7 @@ import anthropic as _anthropic
 import sentry_sdk
 import structlog
 from daimon.adapters.discord.bot import (
+    INVOKER_NOT_ALLOWED_NOTICE,
     DaimonBot,
     _credit_depleted_message,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same balance-depleted copy the mention path shows
     _resolve_bot_display_name,  # pyright: ignore[reportPrivateUsage]  # reused verbatim: the same bot-display-name resolution the mention path uses
@@ -432,7 +433,12 @@ async def run_wizard_submit_turn(
             )
             return
         except AdmissionDenied as err:
-            if err.reason == "balance_depleted":
+            if err.reason == "invoker_not_allowed":
+                _log.info(
+                    "wizard_submit.skipped.invoker_not_allowed", user_id=str(interaction.user.id)
+                )
+                await channel.send("Your answers were recorded, but " + INVOKER_NOT_ALLOWED_NOTICE)
+            elif err.reason == "balance_depleted":
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
                 await channel.send(
                     "Your answers were recorded, but "

@@ -215,6 +215,30 @@ class TenantConfig(Base):
     mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'agent'"))
 
 
+class TenantAccessPolicyRecord(Base):
+    """A tenant's access policy (`daimon.core.access_policy.TenantAccessPolicy` as JSON).
+
+    No row means the open default, so tenants that never set one are unchanged.
+    """
+
+    __tablename__ = "tenant_access_policies"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", name="pk_tenant_access_policies"),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+            name="fk_tenant_access_policies_tenants",
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ChannelConfig(Base):
     __tablename__ = "channel_config"
     __table_args__ = (
