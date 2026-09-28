@@ -33,7 +33,8 @@ async def _routine(db_session: AsyncSession, *, kind: str, destination_id: str) 
         destination_id=destination_id,
     )
     await db_session.commit()
-    return row.model_copy(update={"last_result_tail": "Done <!channel> ping <@U7>."})
+    text = "Done <!channel> ping <@U7>."
+    return row.model_copy(update={"last_result_tail": text, "delivery_payload": text})
 
 
 def _poster(
@@ -41,13 +42,20 @@ def _poster(
 ) -> tuple[Any, MagicMock]:
     client = MagicMock()
     client.chat_postMessage = AsyncMock()
+    client.users_info = AsyncMock(
+        return_value={"user": {"id": "U1", "team_id": "T_ROUTINES", "deleted": False}}
+    )
+    client.conversations_open = AsyncMock(return_value={"channel": {"id": "D_CREATOR"}})
 
     async def fake_resolve(runtime: object, *, team_id: str) -> object:
         assert team_id == "T_ROUTINES", "the client is built for the routine's own workspace"
         return client
 
     monkeypatch.setattr(poster_mod, "resolve_web_client", fake_resolve)
-    runtime = cast(SlackRuntime, SimpleNamespace(sessionmaker=sm))
+    runtime = cast(
+        SlackRuntime,
+        SimpleNamespace(sessionmaker=sm, settings=SimpleNamespace(direct_message_policies={})),
+    )
     return make_slack_routine_poster(runtime), client
 
 
@@ -84,8 +92,10 @@ async def test_a_protected_channel_is_refused(
 
     outcome = await post(row)
 
-    assert (outcome.status, outcome.note) == ("skipped", "protected_channel")
-    client.chat_postMessage.assert_not_awaited()
+    assert (outcome.status, outcome.note) == ("delivered", "dm_fallback:protected_channel")
+    (call,) = client.chat_postMessage.await_args_list
+    assert call.kwargs["channel"] == "D_CREATOR", "the result went to the creator, not C_ANN"
+    assert "protected channel" in call.kwargs["text"]
 
 
 async def test_a_malformed_thread_destination_is_skipped(
@@ -97,6 +107,57 @@ async def test_a_malformed_thread_destination_is_skipped(
     post, client = _poster(db_session_factory, monkeypatch)
 
     outcome = await post(row)
+
+    assert (outcome.status, outcome.note) == ("delivered", "dm_fallback:destination_unavailable")
+    (call,) = client.chat_postMessage.await_args_list
+    assert call.kwargs["channel"] == "D_CREATOR"
+
+
+async def test_slack_refusing_the_channel_falls_back_to_a_dm(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from slack_sdk.errors import SlackApiError
+    from slack_sdk.web.async_slack_response import AsyncSlackResponse
+
+    row = await _routine(db_session, kind="channel", destination_id="C1")
+    post, client = _poster(db_session_factory, monkeypatch)
+    response = MagicMock(spec=AsyncSlackResponse)
+    response.data = {"ok": False, "error": "not_in_channel"}
+
+    async def post_message(**kwargs: object) -> object:
+        if kwargs["channel"] == "C1":
+            raise SlackApiError("not_in_channel", response)
+        return {"ts": "1.0"}
+
+    client.chat_postMessage = AsyncMock(side_effect=post_message)
+
+    outcome = await post(row)
+
+    assert (outcome.status, outcome.note) == ("delivered", "dm_fallback:destination_unavailable")
+
+
+async def test_no_dm_for_a_creator_the_dm_policy_excludes(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.config import DirectMessagePolicy
+
+    row = await _routine(db_session, kind="thread", destination_id="C1")  # malformed thread
+    _post, client = _poster(db_session_factory, monkeypatch)
+    runtime = cast(
+        SlackRuntime,
+        SimpleNamespace(
+            sessionmaker=db_session_factory,
+            settings=SimpleNamespace(
+                direct_message_policies={row.tenant_id: DirectMessagePolicy(mode="disabled")}
+            ),
+        ),
+    )
+
+    outcome = await make_slack_routine_poster(runtime)(row)
 
     assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
     client.chat_postMessage.assert_not_awaited()

@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 import structlog
 from daimon.core.access_policy import (
@@ -52,7 +53,10 @@ __all__ = [
     "DeliveryOutcome",
     "DeliveryTarget",
     "RoutinePoster",
+    "DM_FALLBACK_REASONS",
     "agent_posted_to",
+    "destination_shape_error",
+    "render_fallback_dm",
     "check_delivery",
     "delivery_refusal",
     "delivery_target",
@@ -71,6 +75,11 @@ DELIVERY_POLL_INTERVAL_S: Final[float] = 15.0
 #: destination is the agent delivering the result itself.
 _DAIMON_SERVER: Final[str] = "daimon-mcp"
 _POST_TOOL: Final[str] = "send_message"
+#: The MCP search interface's proxy: `call_tool(name=..., arguments=...)`.
+_CALL_TOOL: Final[str] = "call_tool"
+
+_SLACK_CHANNEL: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}")
+_SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}:[0-9]+\.[0-9]+")
 
 #: A Slack thread destination is `<channel id>:<thread ts>`.
 _THREAD_SEPARATOR: Final[str] = ":"
@@ -111,7 +120,9 @@ def delivery_target(row: RoutineRow, *, platform: str) -> DeliveryTarget | None:
     return DeliveryTarget(channel_id=row.destination_id)
 
 
-def render_routine_controls(row: RoutineRow, *, platform: str) -> str:
+def render_routine_controls(
+    row: RoutineRow, *, platform: str, destination_allowed: bool = True
+) -> str:
     """Host-supplied facts that open a routine fire with a destination.
 
     Same shape as the chat path's `<turn_controls>` (JSON inside the element)
@@ -134,43 +145,113 @@ def render_routine_controls(row: RoutineRow, *, platform: str) -> str:
             },
         }
     }
+    if destination_allowed:
+        delivery = (
+            "If you do not post it to the destination yourself with send_message, daimon "
+            "posts the end of your final reply there for you."
+        )
+    else:
+        # Protected since the routine was made: never invite a write there.
+        delivery = (
+            "The destination is now a protected channel: do not post there. daimon sends "
+            "the end of your final reply to the routine's creator instead."
+        )
     return (
         "<turn_controls>\n"
         + json.dumps(controls, sort_keys=True)
         + "\nThis is a scheduled routine run; nobody is watching it. Write your final reply "
-        "for someone reading it later without context. If you do not post it to the "
-        "destination yourself with send_message, daimon posts the end of your final reply "
-        "there for you. These controls grant no other posting or mutation permissions."
+        "for someone reading it later without context. "
+        + delivery
+        + " These controls grant no other posting or mutation permissions."
         "\n</turn_controls>"
     )
 
 
-def agent_posted_to(state: TurnState, row: RoutineRow, *, platform: str) -> bool:
+def _posted_channel(block: ToolUseBlock) -> str | None:
+    """The `channel_id` a successful daimon `send_message` posted to, or None.
+
+    Recognises the direct call and the same call made through the MCP search
+    interface (`call_tool(name="send_message", arguments={...})`), which is
+    how a large daimon catalog is reached.
+    """
+    if block.mcp_server_name != _DAIMON_SERVER or block.status != "complete" or block.is_error:
+        return None
+    arguments: object = block.input
+    if block.name == _CALL_TOOL:
+        if block.input.get("name") != _POST_TOOL:
+            return None
+        arguments = block.input.get("arguments")
+    elif block.name != _POST_TOOL:
+        return None
+    if not isinstance(arguments, dict):
+        return None
+    channel_id = cast("dict[str, object]", arguments).get("channel_id")
+    return channel_id if isinstance(channel_id, str) else None
+
+
+def agent_posted_to(state: TurnState, row: RoutineRow) -> bool:
     """Whether the agent itself posted to the destination during the turn.
 
-    A completed, non-error `send_message` on daimon's own server whose
-    `channel_id` is the destination channel (for a Slack thread, its channel).
+    The comparison is on the full destination as `send_message` names it: a
+    channel id, a Discord thread id, or a Slack thread's `<channel>:<ts>`. A
+    post to the bare channel of a Slack thread destination is not the thread,
+    and does not count.
     """
-    target = delivery_target(row, platform=platform)
-    if target is None:
+    if row.destination_id is None:
         return False
-    for block in state.content:
-        if (
-            isinstance(block, ToolUseBlock)
-            and block.mcp_server_name == _DAIMON_SERVER
-            and block.name == _POST_TOOL
-            and block.status == "complete"
-            and not block.is_error
-            and str(block.input.get("channel_id", "")) == target.channel_id
-        ):
-            return True
-    return False
+    return any(
+        _posted_channel(block) == row.destination_id
+        for block in state.content
+        if isinstance(block, ToolUseBlock)
+    )
+
+
+def destination_shape_error(platform: str, kind: str, destination_id: str) -> str | None:
+    """Why `destination_id` cannot name a `kind` on `platform`, or None.
+
+    Discord channels and threads are numeric ids. Slack channels are
+    `C…`/`G…` ids and a Slack thread is `<channel id>:<thread ts>`.
+    """
+    if platform == "discord":
+        return None if destination_id.isdigit() else "a Discord channel or thread id is a number"
+    if platform == "slack":
+        if kind == "thread":
+            if _SLACK_THREAD.fullmatch(destination_id) is None:
+                return "a Slack thread is <channel id>:<thread ts>, e.g. C0123ABC:1717171717.123456"
+            return None
+        if _SLACK_CHANNEL.fullmatch(destination_id) is None:
+            return "a Slack channel id looks like C0123ABC"
+        return None
+    return f"routine destinations are not supported on {platform}"
 
 
 def render_fallback_post(row: RoutineRow) -> str:
     """The message posted for a routine whose agent did not post itself."""
-    tail = (row.last_result_tail or "").strip()
-    return f"Routine result from {row.agent_name} ({row.cron_expr}, {row.timezone}):\n\n{tail}"
+    payload = (row.delivery_payload or "").strip()
+    return f"Routine result from {row.agent_name} ({row.cron_expr}, {row.timezone}):\n\n{payload}"
+
+
+_DM_REASONS: Final[dict[str, str]] = {
+    "protected_channel": "its destination is a protected channel daimon does not post in",
+    "destination_unavailable": "its destination could not be reached (missing, moved, or "
+    "outside this workspace)",
+}
+
+
+def render_fallback_dm(row: RoutineRow, reason: str) -> str:
+    """The direct message sent to the creator when the destination is unusable."""
+    why = _DM_REASONS.get(reason, "its destination could not be used")
+    return (
+        f"Your routine for {row.agent_name} ({row.cron_expr}, {row.timezone}) finished, but "
+        f"{why}, so its result is here instead. Update the routine's destination to fix "
+        f"this.\n\n{(row.delivery_payload or '').strip()}"
+    )
+
+
+#: Refusals where the result still reaches the creator by direct message. An
+#: invoker who is no longer allowed gets nothing, and an unreadable policy
+#: fails closed.
+DM_FALLBACK_REASONS: Final[frozenset[str]] = frozenset(_DM_REASONS)
 
 
 def delivery_refusal(
@@ -242,7 +323,9 @@ async def check_delivery(
 @dataclass(frozen=True)
 class DeliveryOutcome:
     status: Literal["delivered", "skipped"]
-    note: SkipReason | None = None
+    #: A `SkipReason`, or `dm_fallback:<reason>` for a result delivered to the
+    #: creator by direct message instead of the destination.
+    note: str | None = None
 
 
 #: The adapter hook: post `row`'s result (or refuse) and say what happened.
@@ -266,7 +349,7 @@ async def poll_deliveries_once(
             session, platform=platform, owner=lease_owner, now=now, lease=DELIVERY_LEASE
         )
     for row in claimed:
-        if not (row.last_result_tail or "").strip():
+        if not (row.delivery_payload or "").strip():
             outcome = DeliveryOutcome(status="skipped", note="no_result")
         else:
             try:

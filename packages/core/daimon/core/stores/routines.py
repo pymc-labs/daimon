@@ -132,10 +132,30 @@ async def update_routine(
     if clear_destination:
         if destination_kind is not None or destination_id is not None:
             raise StoreError("clear_destination cannot be combined with a new destination")
-        values.update(destination_kind=None, destination_id=None, delivery_status=None)
+        values.update(
+            destination_kind=None,
+            destination_id=None,
+            delivery_status=None,
+            delivery_payload=None,
+            delivery_note=None,
+        )
     elif destination_kind is not None or destination_id is not None:
         _check_destination(destination_kind, destination_id)
         values.update(destination_kind=destination_kind, destination_id=destination_id)
+        current = await get_routine(session, routine_id, tenant_id=tenant_id)
+        if (
+            current is not None
+            and current.delivery_status == "pending"
+            and (current.destination_kind, current.destination_id)
+            != (destination_kind, destination_id)
+        ):
+            # A result queued for the old destination is not posted to the
+            # new one.
+            values.update(
+                delivery_status="skipped",
+                delivery_note="destination_changed",
+                delivery_payload=None,
+            )
     if catch_up_policy is not None:
         if catch_up_policy not in ("skip", "run-once"):
             raise StoreError("catch_up_policy must be skip or run-once")
@@ -332,17 +352,20 @@ async def record_result(
     `tail` is written as-is (None or str).
 
     `delivery` is only passed for a routine with a destination (FEAT-085):
-    `pending` queues this fire's tail for the adapter to post, `skipped`
-    records why it will not be (`delivery_note`). Either replaces whatever an
-    earlier fire left in the outbox, so only the newest tail is ever posted.
-    Omitted, the outbox columns are untouched — a routine without a
-    destination writes exactly what it wrote before.
+    `pending` queues this fire's tail for the adapter to post (copied into
+    `delivery_payload`), `skipped` records why it will not be
+    (`delivery_note`). Either replaces whatever an earlier fire left in the
+    outbox, so only the newest result is ever posted. Omitted, the outbox
+    columns are untouched — a routine without a destination, a failed fire,
+    and an older scheduler all write exactly what they wrote before, and a
+    result still pending from an earlier successful fire stays pending.
     """
     values: dict[str, object] = {"last_result_tail": tail, "last_error": error}
     if delivery is not None:
         values.update(
             delivery_status=delivery,
             delivery_note=delivery_note,
+            delivery_payload=tail if delivery == "pending" else None,
             delivery_lease_owner=None,
             delivery_lease_expires_at=None,
             delivered_at=None,
@@ -376,7 +399,9 @@ async def claim_routine_deliveries(
     `interrupted` first. Pending rows are then claimed with `FOR UPDATE SKIP
     LOCKED`, so two adapter processes never take the same row.
     """
-    tenant_ids = select(Tenant.id).where(Tenant.platform == platform)
+    # Archived tenants are left alone: their rows stay pending and post if
+    # the workspace comes back.
+    tenant_ids = select(Tenant.id).where(Tenant.platform == platform, Tenant.archived_at.is_(None))
     await session.execute(
         update(Routine)
         .where(

@@ -1085,3 +1085,39 @@ async def test_fire_posting_elsewhere_still_queues_the_fallback(
     )
 
     assert after.delivery_status == "pending"
+
+
+async def test_fire_does_not_invite_a_post_into_a_destination_protected_since(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Eval regression: the controls must not tell the agent to post into a
+    channel the access policy now protects (send_message has no guard yet)."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    real_make_tenant = make_tenant
+
+    async def make_protected_tenant(session: AsyncSession, **kwargs: object) -> object:
+        tenant = await real_make_tenant(session, **kwargs)  # type: ignore[arg-type]
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(protected_channel_ids=("111222333",)),
+        )
+        return tenant
+
+    monkeypatch.setattr(f"{__name__}.make_tenant", make_protected_tenant)
+    after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to=None,
+    )
+
+    trigger = str(seen["trigger_message"])
+    assert "do not post there" in trigger
+    assert "posts the end of your final reply there" not in trigger
+    assert after.delivery_status == "pending", "the poster still routes it (DM fallback)"

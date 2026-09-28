@@ -2,9 +2,12 @@
 
 A routine may name a channel or thread. After a successful fire whose agent did
 not post there itself, the scheduler marks the row `delivery_status='pending'`
-and the chat adapter for the tenant's platform posts `last_result_tail`
-(claim → post → settle, at most once). Every column is nullable, so existing
-routines have no destination and behave exactly as before.
+and the chat adapter for the tenant's platform posts its own copy of
+that fire's result, `delivery_payload` (claim → post → settle, at most once).
+The payload is separate from `last_result_tail` so an older scheduler that
+still rewrites the tail cannot change what a pending post says. Every column
+is nullable, so existing routines have no destination and behave exactly as
+before.
 
 downgrade: destructive
 """
@@ -13,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0030_feat085_routine_destination"
-down_revision = "0029_sys081_turn_outcomes"
+down_revision = "0030_sys066_turn_usage"
 branch_labels = None
 depends_on = None
 
@@ -28,6 +31,7 @@ def upgrade() -> None:
         sa.Column("delivery_lease_expires_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.add_column("routines", sa.Column("delivery_note", sa.Text(), nullable=True))
+    op.add_column("routines", sa.Column("delivery_payload", sa.Text(), nullable=True))
     op.add_column("routines", sa.Column("delivered_at", sa.DateTime(timezone=True), nullable=True))
     op.create_check_constraint(
         "ck_routines_destination_kind",
@@ -59,6 +63,7 @@ def downgrade() -> None:
     op.drop_constraint("ck_routines_destination_pair", "routines", type_="check")
     op.drop_constraint("ck_routines_destination_kind", "routines", type_="check")
     op.drop_column("routines", "delivered_at")
+    op.drop_column("routines", "delivery_payload")
     op.drop_column("routines", "delivery_note")
     op.drop_column("routines", "delivery_lease_expires_at")
     op.drop_column("routines", "delivery_lease_owner")

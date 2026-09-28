@@ -14,6 +14,7 @@ from daimon.core.routine_delivery import (
     check_delivery,
     delivery_refusal,
     delivery_target,
+    destination_shape_error,
     poll_deliveries_once,
     render_fallback_post,
     render_routine_controls,
@@ -50,6 +51,7 @@ def _row(**overrides: object) -> RoutineRow:
         "last_fired_at": None,
         "last_error": None,
         "last_result_tail": "All green.",
+        "delivery_payload": "All green.",
         "destination_kind": "channel",
         "destination_id": "C1",
         "created_at": _NOW,
@@ -84,15 +86,21 @@ def test_routine_controls_name_the_destination_and_schedule() -> None:
 
 
 def _post_block(
-    channel_id: str, *, status: str = "complete", is_error: bool = False
+    channel_id: str,
+    *,
+    status: str = "complete",
+    is_error: bool = False,
+    via_call_tool: bool = False,
+    server: str = "daimon-mcp",
 ) -> ToolUseBlock:
+    arguments: dict[str, object] = {"channel_id": channel_id, "content": "done"}
     return ToolUseBlock(
         kind="tool_use",
         id="tu",
         type="agent.mcp_tool_use",
-        name="send_message",
-        input={"channel_id": channel_id},
-        mcp_server_name="daimon-mcp",
+        name="call_tool" if via_call_tool else "send_message",
+        input={"name": "send_message", "arguments": arguments} if via_call_tool else arguments,
+        mcp_server_name=server,
         status=status,  # type: ignore[arg-type]
         is_error=is_error,
     )
@@ -100,15 +108,52 @@ def _post_block(
 
 def test_agent_posted_only_counts_a_successful_post_to_the_destination() -> None:
     row = _row()
-    assert agent_posted_to(TurnState(content=[_post_block("C1")]), row, platform="slack")
-    assert not agent_posted_to(TurnState(content=[_post_block("C9")]), row, platform="slack")
+    assert agent_posted_to(TurnState(content=[_post_block("C1")]), row)
+    assert not agent_posted_to(TurnState(content=[_post_block("C9")]), row)
+    assert not agent_posted_to(TurnState(content=[_post_block("C1", is_error=True)]), row)
+    assert not agent_posted_to(TurnState(content=[_post_block("C1", status="failed")]), row)
+    assert not agent_posted_to(TurnState(content=[_post_block("C1", server="other")]), row)
+    assert not agent_posted_to(TurnState(), row)
+
+
+def test_a_post_through_call_tool_counts() -> None:
+    row = _row()
+    assert agent_posted_to(TurnState(content=[_post_block("C1", via_call_tool=True)]), row)
     assert not agent_posted_to(
-        TurnState(content=[_post_block("C1", is_error=True)]), row, platform="slack"
+        TurnState(content=[_post_block("C1", via_call_tool=True, is_error=True)]), row
     )
-    assert not agent_posted_to(
-        TurnState(content=[_post_block("C1", status="failed")]), row, platform="slack"
+
+
+def test_a_slack_thread_destination_needs_a_post_into_that_thread() -> None:
+    row = _row(destination_kind="thread", destination_id="C1:1717.5")
+    assert agent_posted_to(TurnState(content=[_post_block("C1:1717.5")]), row)
+    assert not agent_posted_to(TurnState(content=[_post_block("C1")]), row), (
+        "a top-level post in the channel is not the thread"
     )
-    assert not agent_posted_to(TurnState(), row, platform="slack")
+
+
+def test_protected_controls_do_not_invite_a_post() -> None:
+    text = render_routine_controls(_row(), platform="discord", destination_allowed=False)
+    assert "do not post there" in text
+    assert "posts the end of your final reply there" not in text
+
+
+@pytest.mark.parametrize(
+    ("platform", "kind", "destination_id", "ok"),
+    [
+        ("discord", "channel", "123456", True),
+        ("discord", "thread", "123456", True),
+        ("discord", "channel", "general", False),
+        ("slack", "channel", "C0123ABC", True),
+        ("slack", "channel", "C0123ABC:1.2", False),
+        ("slack", "thread", "C0123ABC:1717171717.123456", True),
+        ("slack", "thread", "C0123ABC", False),
+        ("slack", "channel", "#general", False),
+        ("teams", "channel", "x", False),
+    ],
+)
+def test_destination_shape(platform: str, kind: str, destination_id: str, ok: bool) -> None:
+    assert (destination_shape_error(platform, kind, destination_id) is None) is ok
 
 
 def test_the_fallback_post_carries_the_tail() -> None:
@@ -349,3 +394,63 @@ async def test_check_delivery_applies_the_stored_policy(
     )
 
     assert (refused, allowed) == ("protected_channel", None)
+
+
+async def test_an_older_writer_rewriting_the_tail_cannot_change_a_pending_post(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Mixed versions: a scheduler that predates the outbox still rewrites
+    `last_result_tail` (no `delivery` argument). The pending post keeps the
+    result it was queued with."""
+    row = await _routine(db_session)
+    await record_result(db_session, row.id, tail="new fire", error=None, delivery="pending")
+    await record_result(db_session, row.id, tail="older worker", error=None)  # pre-085 writer
+    await db_session.commit()
+    posted: list[str] = []
+
+    async def post(claimed: RoutineRow) -> DeliveryOutcome:
+        posted.append(render_fallback_post(claimed))
+        return DeliveryOutcome(status="delivered")
+
+    await poll_deliveries_once(db_session_factory, platform="discord", post=post, now=_NOW)
+
+    assert len(posted) == 1 and posted[0].endswith("new fire")
+
+
+async def test_a_failed_fire_leaves_an_earlier_pending_result_in_place(
+    db_session: AsyncSession,
+) -> None:
+    row = await _routine(db_session)
+    await record_result(db_session, row.id, tail="good run", error=None, delivery="pending")
+    await record_result(db_session, row.id, tail=None, error="balance_depleted")
+    after = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
+    assert after is not None
+    assert (after.delivery_status, after.delivery_payload) == ("pending", "good run")
+
+
+async def test_changing_the_destination_drops_a_pending_post(db_session: AsyncSession) -> None:
+    row = await _routine(db_session)
+    await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
+    await update_routine(
+        db_session, row.id, tenant_id=row.tenant_id, destination_kind="channel", destination_id="9"
+    )
+    after = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
+    assert after is not None
+    assert (after.delivery_status, after.delivery_note) == ("skipped", "destination_changed")
+
+
+async def test_archived_tenants_are_not_claimed(db_session: AsyncSession) -> None:
+    from daimon.core._models import Tenant
+    from sqlalchemy import update
+
+    row = await _routine(db_session)
+    await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
+    await db_session.execute(
+        update(Tenant).where(Tenant.id == row.tenant_id).values(archived_at=_NOW)
+    )
+    assert (
+        await claim_routine_deliveries(
+            db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
+        )
+        == []
+    )

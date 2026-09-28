@@ -45,7 +45,7 @@ from daimon.adapters.discord.vision import (
     download_as_image_blocks,
     is_vision_image_attachment,
 )
-from daimon.core.config import DiscordSettings, Settings
+from daimon.core.config import DirectMessagePolicy, DiscordSettings, Settings
 from daimon.core.continuity.continuation import ContinuationDecision, check_wake_responder
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -427,7 +427,12 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     platform="discord",
                     post=make_discord_routine_poster(
-                        self.runtime.sessionmaker, fetch_channel=self._channel_by_id
+                        self.runtime.sessionmaker,
+                        fetch_channel=self._channel_by_id,
+                        open_dm=self._open_member_dm,
+                        dm_policy=lambda row: self.runtime.settings.direct_message_policies.get(
+                            row.tenant_id, DirectMessagePolicy()
+                        ),
                     ),
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
@@ -1607,6 +1612,18 @@ class DaimonBot(commands.Bot):
     async def _channel_by_id(self, channel_id: int) -> object:
         """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+
+    async def _open_member_dm(self, guild_id: int, user_id: int) -> discord.abc.Messageable:
+        """A DM with a human member of `guild_id` (FEAT-085's delivery fallback).
+
+        Same membership rule as the direct-message tool: the recipient must be
+        a current, non-bot member of the tenant's guild.
+        """
+        guild = self.get_guild(guild_id) or await self.fetch_guild(guild_id)
+        member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+        if member.bot:
+            raise LookupError("the routine's creator is not a human member")
+        return await member.create_dm()
 
     async def _open_wake_thread(self, wake: WakeThread) -> bool:
         """The wake poller's hook: dispatch a thread's due wakes, spawned.

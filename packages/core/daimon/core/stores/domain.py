@@ -191,6 +191,7 @@ class RoutineRow(BaseModel):
     destination_id: str | None = None
     delivery_status: RoutineDeliveryStatus | None = None
     delivery_note: str | None = None
+    delivery_payload: str | None = None
     delivered_at: datetime | None = None
     created_at: datetime
     updated_at: datetime

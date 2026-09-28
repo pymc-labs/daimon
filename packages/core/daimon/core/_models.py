@@ -343,6 +343,9 @@ class Routine(Base):
         DateTime(timezone=True), nullable=True
     )
     delivery_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The text a pending post carries: that fire's result, copied so a writer
+    # that only knows `last_result_tail` cannot change what gets posted.
+    delivery_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
