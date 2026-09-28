@@ -13,7 +13,7 @@ import re
 
 _FENCE_RE = re.compile(r"^```(\S*)\s*$")
 
-_TEAMS_LIMIT = 4_000
+TEAMS_LIMIT = 4_000
 
 
 def _fence_state(text: str) -> tuple[bool, str]:
@@ -37,7 +37,7 @@ def _find_split(window: str) -> int:
     return len(window)
 
 
-def split_answer(text: str, limit: int = _TEAMS_LIMIT) -> list[str]:
+def split_answer(text: str, limit: int = TEAMS_LIMIT) -> list[str]:
     """Split `text` into chunks of at most `limit` chars, repairing code fences."""
     if len(text) <= limit:
         return [text]

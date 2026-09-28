@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 from typing import Protocol
@@ -28,12 +29,14 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
+from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
     extract_final_response,
     extract_sealed_responses,
 )
+from daimon.core.turn.termination import termination_reason
 from microsoft_teams.api import MessageActivityInput, SentActivity
 
 log = structlog.get_logger()
@@ -46,6 +49,12 @@ _DELIVERY_FAILED = "⚠️ Something went wrong posting the answer."
 # cannot get a bot token.
 TEAMS_SEND_ERRORS = (httpx.HTTPError, OSError, ValueError)
 SEND_TIMEOUT_S = 30.0
+
+
+def bound_request_id() -> str:
+    """The `rid` bound in this turn's log context, or a fresh one."""
+    rid = structlog.contextvars.get_contextvars().get("rid")
+    return rid if isinstance(rid, str) and rid else uuid.uuid4().hex
 
 
 class TeamsSender(Protocol):
@@ -85,8 +94,10 @@ class TeamsTurnLifecycle:
         model_id: str,
         clock: Callable[[], float] = time.monotonic,
         adopt_message_id: str | None = None,
+        request_id: Callable[[], str] = bound_request_id,
     ) -> None:
         self._sender = sender
+        self._request_id = request_id
         self._conversation_id = conversation_id
         self._service_url = service_url
         self._cancel_key = cancel_key
@@ -239,8 +250,27 @@ class TeamsTurnLifecycle:
                     self.card_closed = True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
-        reason = state.error.message if state.error is not None else str(err)
-        await self.close_with_notice(f"❌ {reason or 'error'} · {self._footer(state)}")
+        footer = self._footer(state)
+        label = state.error.message if state.error is not None else str(err)
+        text = f"❌ {label or 'error'} · {footer}"
+        reason = request_id = None
+        # The notice is words on the ❌ card, never a reason not to close it:
+        # if building it fails, the card falls back to the raw error.
+        try:
+            reason = state.termination or termination_reason(err)
+            request_id = self._request_id()
+            notice = render_termination_notice(reason, state=state, request_id=request_id)
+            if notice is not None:
+                text = card.termination_text(notice, footer=footer)
+        except Exception:
+            log.warning("turn.terminal_notice_failed", exc_info=True)
+        log.warning(
+            "turn.terminal_failure",
+            error=str(err),
+            reason=str(reason) if reason is not None else None,
+            request_id=request_id,
+        )
+        await self.close_with_notice(text)
 
     async def on_reconnect(self, reason: ReconnectReason) -> None:
         return None

@@ -50,6 +50,7 @@ from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
+from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
 from daimon.core.continuity.continuation import check_wake_responder
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
@@ -209,6 +210,8 @@ class TeamsApp:
             spawn=self.spawn,
             dispatch=self.dispatch_after_input,
         )
+        # Tool-write confirmation cards awaiting a click.
+        self.confirmations = TeamsConfirmationCards(self._sender)
         self._processing: set[str] = set()
         self._pending: dict[str, list[TeamsInbound]] = {}
         self._inflight: dict[uuid.UUID, int] = {}
@@ -725,6 +728,9 @@ class TeamsApp:
                 recovery_lifecycle=recovery_lifecycle,
                 image_blocks=attachments.image_blocks or None,
                 deadline=deadline,
+                confirm_write=self.confirmations.hook(
+                    conversation_id=inbound.conversation_id, service_url=inbound.service_url
+                ),
             )
         if outcome.mapping_id is not None:
             markers.add(outcome.mapping_id)

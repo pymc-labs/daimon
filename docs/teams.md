@@ -99,6 +99,9 @@ conversation the requester belongs to), task handoff and fresh starts,
 timers (`create_timer`, `list_timers`, `cancel_timer`), `bind_public_repo`
 and the GitHub App install link. The MCP server posts
 through the Bot Framework REST API with the same app registration.
+With tool safety on (`DAIMON_TOOL_SAFETY__ENABLED`), an attached tool's write
+waits on an Approve/Deny card in the conversation that only the requester can
+answer.
 
 ### Capacity
 
