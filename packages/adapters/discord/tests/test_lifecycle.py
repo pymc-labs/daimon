@@ -23,9 +23,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 )
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.theme import COLOR_RED
+from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from daimon.core.turn.termination import TerminationReason
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -283,6 +286,55 @@ class TestCleanReplace:
 # ---------------------------------------------------------------------------
 # SPEC-R7: Error embed on terminal failure
 # ---------------------------------------------------------------------------
+
+
+_NOTICE_REASONS = [
+    TerminationReason.CONNECTION_LOST,
+    TerminationReason.UPSTREAM,
+    TerminationReason.INTERRUPTED,
+    TerminationReason.INTERRUPT_TIMEOUT,
+    TerminationReason.REQUIRES_ACTION,
+    TerminationReason.CEILING,
+    TerminationReason.MCP_DEGRADED_EMPTY,
+]
+
+
+@pytest.mark.parametrize("reason", _NOTICE_REASONS, ids=str)
+async def test_terminal_failure_card_carries_the_termination_notice(
+    reason: TerminationReason,
+) -> None:
+    """The red card explains the reason: headline in the footer, the rest in the body."""
+    lc, _, edits = _make_lifecycle()
+    await lc.on_render(TurnState())
+    state = TurnState(
+        termination=reason,
+        content=[
+            ToolUseBlock(
+                kind="tool_use", id="tu_1", type="agent.tool_use", name="fit_model", input={}
+            )
+        ],
+    )
+
+    await lc.on_terminal_failure(state, Exception("x" * 300))
+
+    embed = edits[-1][1]["embeds"][0]
+    notice = render_termination_notice(reason, state=state)
+    assert notice is not None
+    assert embed.footer.text.startswith(f"❌ {notice.headline} · ")
+    assert notice.cause in embed.description
+    assert notice.next_step in embed.description, "the next step is not truncated away"
+    assert "`fit_model`" in embed.description, "work in flight is named"
+    assert "`rid: " in embed.description
+    assert "xxx" not in embed.description + embed.footer.text, "raw error stays in the logs"
+
+
+async def test_terminal_failure_without_a_reason_on_the_state_maps_the_error() -> None:
+    lc, _, edits = _make_lifecycle()
+    await lc.on_render(TurnState())
+
+    await lc.on_terminal_failure(TurnState(), TurnError(kind="connection_lost"))
+
+    assert edits[-1][1]["embeds"][0].footer.text.startswith("❌ Connection lost · ")
 
 
 class TestErrorEmbed:

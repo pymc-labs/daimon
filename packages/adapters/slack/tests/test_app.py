@@ -3767,7 +3767,8 @@ async def test_run_thread_turn_pump_phase_ceiling_renders_terminal_error_in_thre
     on_terminal_failure sets final_ts to the status ts on its normal flush
     path, which is why that watermark write fires at all.
     """
-    from daimon.core.turn.ceiling import CEILING_MESSAGE
+    from daimon.core.turn.notices import render_termination_notice
+    from daimon.core.turn.termination import TerminationReason
 
     team_id = "T_PUMP_CEILING"
     channel = "C_TEST"
@@ -3841,14 +3842,16 @@ async def test_run_thread_turn_pump_phase_ceiling_renders_terminal_error_in_thre
     )
     last_blocks = update_calls[-1].kwargs["json"]["blocks"]
     rendered_text = " ".join(
-        element.get("text", "")
+        text if isinstance(text := element.get("text", ""), str) else text.get("text", "")
         for block in last_blocks
         for element in block.get("elements", [block])
         if isinstance(element, dict)
     )
     assert "❌" in rendered_text, "a ceiling breach must render the terminal error emoji"
-    assert CEILING_MESSAGE in rendered_text, (
-        "the rendered card must carry the shared CEILING_MESSAGE text -- no new "
+    ceiling_notice = render_termination_notice(TerminationReason.CEILING)
+    assert ceiling_notice is not None
+    assert ceiling_notice.headline in rendered_text and ceiling_notice.cause in rendered_text, (
+        "the rendered card must carry the core ceiling notice -- no new "
         "Slack-specific ceiling copy may be introduced"
     )
 

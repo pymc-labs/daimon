@@ -217,6 +217,17 @@ event for this turn is `session_terminated`, never `completed`.
 every `TurnKind` value is also a `TerminationReason` value with the same
 string.
 
+`packages/core/daimon/core/turn/notices.py` turns a reason into a
+`TerminationNotice`: a short headline, the cause, the tool work still running
+and how much had finished, what survived, the next step, and a request id. The
+copy lives in core; Discord and Slack draw it in `on_terminal_failure` as the
+body of the red card, with the headline as the footer reason, and log the
+request id with the underlying error so it is the handle for the detail. No
+lifecycle hook carries it -- the reason rides on the state every lifecycle
+already receives -- so the CLI, headless routines and any new adapter keep
+their existing failure path, and `TerminationNotice.plain_text()` is the
+fallback wording for a surface without markup.
+
 ## Tenancy and isolation
 
 One Discord guild or one Slack workspace is one tenant. The tenant UUID is

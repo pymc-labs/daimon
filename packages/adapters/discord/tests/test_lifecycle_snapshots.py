@@ -63,6 +63,7 @@ def _make_lifecycle(
         agent_name="Atlas",
         model_id="claude-sonnet-4-6",
         clock=clock,
+        request_id=lambda: "01TESTREQUESTID0000000000",
     )
     return lc, sends, edits
 

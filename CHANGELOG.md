@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exit and derivable from admission and session-binding refusals with
   `termination_reason(err)`. Notices and outcome records can build on one
   vocabulary.
+- When a turn ends early, the red Discord card and the Slack error card now
+  explain it: what happened, which tools were still running, what was kept,
+  what to do next, and a request id to find the error in the logs. The raw,
+  truncated error text no longer appears in the card.
 - Core selects chat, routine, relay and handoff prompt fragments per invocation.
   Agent specs can replace or extend each fragment; default chat is unchanged.
 - Per-tenant operator-funded mode replaces depleted-balance refusals with structured alerts while preserving usage metering and configured caps. Configure it with `daimon tenants funding-mode`.

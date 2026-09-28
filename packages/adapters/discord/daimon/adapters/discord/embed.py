@@ -18,6 +18,7 @@ from daimon.adapters.discord.theme import (
     COLOR_THINKING,
     COLOR_TOOL_RUNNING,
 )
+from daimon.core.turn.notices import TerminationNotice
 
 # ---------------------------------------------------------------------------
 # Phase enum
@@ -86,6 +87,8 @@ class EmbedState:
     usage_out: int = 0
     cost_str: str | None = None
     text_preview: str | None = None
+    notice: str = ""
+    """Rendered termination notice; the ERROR card's body."""
 
 
 # ---------------------------------------------------------------------------
@@ -235,12 +238,16 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         if state.cost_str is not None:
             parts.append(state.cost_str)
         summary = " · ".join(parts)
+        description = ""
         if state.phase is TurnPhase.ERROR:
             reason = state.trail[-1].text if state.trail else "error"
             footer = f"{_EMOJI_CROSS} {reason} · {summary}"
+            description = state.notice
         else:
             footer = summary
-        return EmbedData(phase=state.phase, title="", description="", color=color, footer=footer)
+        return EmbedData(
+            phase=state.phase, title="", description=description, color=color, footer=footer
+        )
 
     # In-progress turns show the title + elapsed + activity trail; no footer yet.
     lines: list[str] = []
@@ -281,3 +288,18 @@ def to_preview_embed_data(state: EmbedState) -> EmbedData | None:
         color=_PHASE_COLOR[state.phase],
         footer=None,
     )
+
+
+def format_termination_notice(notice: TerminationNotice) -> str:
+    """Draw the core notice as the ERROR card's body, in Discord markdown.
+
+    The headline is not repeated here: it is already the footer's reason.
+    """
+    lines = [notice.cause]
+    if (work := notice.work_line(lambda name: f"`{name}`")) is not None:
+        lines.append(work)
+    lines.append(notice.survived)
+    lines.append(f"**Next:** {notice.next_step}")
+    if notice.request_id is not None:
+        lines.append(f"`rid: {notice.request_id}`")
+    return "\n".join(lines)

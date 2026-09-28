@@ -60,12 +60,14 @@ from daimon.adapters.slack import lifecycle as lifecycle_mod
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import (
     TextBlock,
     ToolUseBlock,
     TurnState,
     UsageTotals,
 )
+from daimon.core.turn.termination import TerminationReason
 from daimon.testing import ma_model_usage
 from slack_sdk.errors import SlackApiError
 
@@ -754,6 +756,49 @@ async def test_terminal_success_empty_content_shows_turn_cancelled(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        TerminationReason.CONNECTION_LOST,
+        TerminationReason.UPSTREAM,
+        TerminationReason.INTERRUPTED,
+        TerminationReason.INTERRUPT_TIMEOUT,
+        TerminationReason.REQUIRES_ACTION,
+        TerminationReason.CEILING,
+        TerminationReason.MCP_DEGRADED_EMPTY,
+    ],
+    ids=str,
+)
+async def test_terminal_failure_card_carries_the_termination_notice(
+    fake_slack_web_client: Any, reason: TerminationReason
+) -> None:
+    """The error card explains the reason: a notice section above the ❌ summary."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    state = TurnState(
+        termination=reason,
+        content=[
+            ToolUseBlock(
+                kind="tool_use", id="tu_1", type="agent.tool_use", name="fit_model", input={}
+            )
+        ],
+    )
+
+    await lc.on_terminal_failure(state, RuntimeError("x" * 300))
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    notice = render_termination_notice(reason, state=state)
+    assert notice is not None
+    section, context = blocks[0], blocks[-1]
+    assert section["type"] == "section"
+    assert notice.cause in section["text"]["text"]
+    assert notice.next_step in section["text"]["text"], "the next step is not truncated away"
+    assert "`fit_model`" in section["text"]["text"], "work in flight is named"
+    assert "`rid: " in section["text"]["text"]
+    assert context["elements"][0]["text"].startswith(f"❌ {notice.headline} · ")
+    assert "xxx" not in _block_text(blocks), "raw error stays in the logs"
+
+
 async def test_terminal_failure_does_not_raise(fake_slack_web_client: Any) -> None:
     """on_terminal_failure updates/posts error state and does NOT raise."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
@@ -768,9 +813,11 @@ async def test_terminal_failure_does_not_raise(fake_slack_web_client: Any) -> No
 
     blocks = _last_update_blocks(fake_slack_web_client)
     text = _block_text(blocks)
-    assert "❌" in text and "upstream blew up" in text, (
-        "terminal failure must render the ❌ error footer with the failure reason"
+    assert "❌ Something went wrong" in text, (
+        "terminal failure must render the ❌ error footer with the notice headline"
     )
+    assert "`rid: " in text, "the notice carries a request id to find the logged error"
+    assert "upstream blew up" not in text, "raw exception text stays in the logs"
     assert not _has_actions_block(blocks), "error terminal must drop the cancel button"
 
 

@@ -50,7 +50,15 @@ from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
-from daimon.adapters.slack.blockkit import EmbedEvent, State, TurnPhase, to_blocks, update
+from daimon.adapters.slack.blockkit import (
+    EmbedEvent,
+    State,
+    TurnPhase,
+    format_termination_notice,
+    to_blocks,
+    update,
+)
+from daimon.adapters.slack.errors import generate_request_id
 from daimon.adapters.slack.feedback import build_feedback_actions_block
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn, escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.split import split_for_slack_safe
@@ -58,12 +66,14 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
+from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
     extract_final_response,
     extract_sealed_responses,
 )
+from daimon.core.turn.termination import termination_reason
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -148,11 +158,13 @@ class SlackTurnLifecycle:
         clock: Callable[[], float] = time.monotonic,
         adopt_status_ts: str | None = None,
         intent_id: UUID | None = None,
+        request_id: Callable[[], str] = generate_request_id,
     ) -> None:
         self._trigger_ts = trigger_ts
         self._notify_on_completion = notify_on_completion
         self._answer_ts: str | None = None
         self._client = client
+        self._request_id = request_id
         self._channel = channel
         self._thread_ts = thread_ts
         self._cancel = cancel
@@ -577,10 +589,21 @@ class SlackTurnLifecycle:
         Does not re-raise — the lifecycle boundary absorbs all failures.
         """
         try:
-            log.warning("turn.terminal_failure", error=str(err))
+            reason = state.termination or termination_reason(err)
+            request_id = self._request_id()
+            log.warning(
+                "turn.terminal_failure", error=str(err), reason=str(reason), request_id=request_id
+            )
+            notice = render_termination_notice(reason, state=state, request_id=request_id)
+            label = notice.headline if notice is not None else str(err)[:100]
             # Transition to the ERROR phase so to_blocks renders the ❌ error
-            # footer (reason + usage) and removes the cancel button — Discord parity.
-            self._state = update(self._state, EmbedEvent(kind="error", label=str(err)[:100]))
+            # footer (reason + usage) under the notice and removes the cancel
+            # button — Discord parity.
+            self._state = update(self._state, EmbedEvent(kind="error", label=label))
+            if notice is not None:
+                self._state = dataclasses.replace(
+                    self._state, notice=format_termination_notice(notice)
+                )
             self._apply_usage(state)
             await self._flush_terminal()
             self.final_ts = self._status_ts
