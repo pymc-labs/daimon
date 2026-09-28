@@ -225,7 +225,7 @@ async def _decide_or_refuse_on_cancel(
                         anthropic,
                         session_id,
                         fresh,
-                        message="This turn ran out of time; the call did not run.",
+                        message="This turn ended before the call was approved; it did not run.",
                     ),
                     name="turn.refuse_blocked",
                 ),
