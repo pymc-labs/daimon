@@ -78,6 +78,15 @@ and dialog re-checks the organisation, the clicker and their role.
 The bot token is only sent to Bot Framework hosts, downloads and uploads only
 go to SharePoint hosts, and every redirect hop is re-checked.
 
+### Keys and sign-ins
+
+When an agent asks for an API key or an MCP token (`request_agent_key`,
+`request_mcp_token`), it posts a card in the conversation. Only the person who
+asked can open it; the secret goes into a password field in a Teams dialog and
+never through the chat. `request_mcp_oauth` opens a private sign-in link the
+same way. Once the value is saved, the card shows the outcome and the waiting
+work resumes. Replacing an existing key follows the same admin rules as Slack.
+
 ### Agent tools
 
 MCP tools that need a chat platform work from Teams turns: `send_message` and
@@ -103,4 +112,6 @@ found and is left as is.
 ### Not supported yet
 
 Reactions, reading channel history, files in channels (both need Microsoft
-Graph), and file posting through `send_message`.
+Graph), file posting through `send_message`, and private inputs a password
+field cannot take: `.env` uploads, multi-line secrets, and repository or
+skill-repository tokens.
