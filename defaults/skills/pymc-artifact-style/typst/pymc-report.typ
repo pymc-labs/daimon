@@ -11,12 +11,19 @@
 //                                restrained color, comfortable measure,
 //                                one idea per rule, tables without verticals.
 //
-//  Brand palette (shared with the current website):
-//    Deep Navy Blue  #0C1F40   (primary / text)
-//    Pastel Aqua     #B4E7DD   (main 02 / rules, accents)
-//    Soft Periwinkle #9FAAE2   (secondary)
-//    Soft White      #F7F7F7   (surfaces)
-//    Peach Orange    #F6AE72   (accent — use sparingly)
+//  Brand palette (pymc-labs.com, MarketingLayout.BTaXrrww.css, 2026-09-28):
+//    Navy            #0C1F40   (primary / text)
+//    Navy deep       #07142A   (dark surfaces, footer)
+//    Navy header     #071530   (dark header band)
+//    Aqua            #B4E7DD   (rules, spines, fills)
+//    Periwinkle      #9FAAE2   (secondary fills, series)
+//    Peach           #F6AE72   (warm fill — use sparingly)
+//    Violet          #C8B4E7   (optional fill)
+//    Soft white      #F7F7F7   (surfaces)
+//  Text accents (readable on white / soft white; the pale colors are not):
+//    Teal            #0C9E82   (accent text, icons; pairs with an aqua tint)
+//    Indigo          #5462C4   (link / interactive accent text)
+//    Dark orange     #C4720A   (warm status text; pairs with a peach tint)
 // ============================================================================
 
 #import "@preview/marginalia:0.2.0" as marginalia
@@ -29,6 +36,12 @@
 #let periwinkle = rgb("#9FAAE2")
 #let soft-white = rgb("#F7F7F7")
 #let peach      = rgb("#F6AE72")
+#let navy-deep   = rgb("#07142A")
+#let navy-header = rgb("#071530")
+#let violet      = rgb("#C8B4E7")
+#let teal        = rgb("#0C9E82")   // text accents: readable on white
+#let indigo      = rgb("#5462C4")
+#let dark-orange = rgb("#C4720A")
 #let ink        = navy                       // website text color
 #let muted      = ink
 #let hairline   = navy.lighten(78%)          // faint structural rules (not text)
@@ -41,6 +54,7 @@
 #let math-font    = "Fira Math"    // sans math
 #let mono-font    = "JetBrains Mono"
 #let heading-stretch = 100%
+#let heading-tracking = -0.02em   // website h1 letter-spacing
 
 // small helper: content -> string (best-effort, for document metadata)
 #let to-string(content) = {
@@ -79,7 +93,7 @@
 // (draft: false) build. Usage: `caption: [ … #figtag("brisk-otter-lamp")]`.
 #let figtag(code) = context if _draft.get() {
   // box() keeps the code on one line (no mid-word hyphenation in the margin)
-  [#h(0.35em)#box(text(font: mono-font, fill: peach.darken(18%))[#("[" + code + "]")])]
+  [#h(0.35em)#box(text(font: mono-font, fill: dark-orange)[#("[" + code + "]")])]
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +295,7 @@
     stroke: (left: _spine-w + aqua), radius: 2pt, breakable: false,
   )[
     // title: a headline, but smaller than a section heading
-    #context text(font: heading-font, stretch: heading-stretch, weight: "regular",
+    #context text(font: heading-font, stretch: heading-stretch, weight: "medium",
           size: 1.3 * _fs.get(), fill: ink)[#title]
     #v(0.6em)
     #set par(first-line-indent: 0pt, justify: false)
@@ -363,16 +377,11 @@
   title: none, subtitle: none, client: none, date: none,
   author: none, status: "Confidential", paper: "a4",
   logo: "../assets/pymc-labs-logo-dark.png",
-  cover-background: none,              // plain by default; 4 or 9 for legacy artwork,
-                                   // none for a plain cover, or a custom image path
+  cover-background: none,              // plain by default, or a custom image path
   draft: false,                    // true → a bold DRAFT mark in the top-right
 ) = {
   let g = _tufte-geom(paper)
-  // Resolve the cover-background shorthand: 4 / 9 map to the bundled brand
-  // graphics; anything else is treated as a path (or none).
-  let _bg = if cover-background == 4 { "../assets/cover-4.png" }
-            else if cover-background == 9 { "../assets/cover-9.png" }
-            else { cover-background }
+  let _bg = cover-background
   // Cover uses its own tighter margin (sleeker, content closer to the edges)
   // than the Tufte body pages.
   let cm = 12.75mm
@@ -389,7 +398,7 @@
       {
         set align(right)
         if draft {
-          text(font: body-font, fill: peach.darken(18%), weight: "bold",
+          text(font: body-font, fill: dark-orange, weight: "bold",
                size: 16pt, tracking: 0.08em)[DRAFT]
           v(8pt)
         }
@@ -397,7 +406,7 @@
           #set par(leading: 0.55em, justify: false)
           #if client != none [Prepared for #client \ ]
           #if date != none [#date \ ]
-          #if status != none [#text(fill: peach.darken(18%))[#status]]
+          #if status != none [#text(fill: dark-orange)[#status]]
         ]
       },
     )
@@ -408,8 +417,8 @@
     #block(width: 86%)[
       #set par(justify: false, first-line-indent: 0pt)
       #set text(hyphenate: false)
-      #text(font: heading-font, stretch: heading-stretch, weight: "regular",
-            size: 46pt, fill: navy)[
+      #text(font: heading-font, stretch: heading-stretch, weight: "semibold",
+            tracking: heading-tracking, size: 46pt, fill: navy)[
         #set par(leading: 0.32em)
         #title
       ]
@@ -494,11 +503,13 @@
               supplement: [Section])
   show heading: set text(font: heading-font, fill: ink)
   show heading.where(level: 1): it => block(above: 3.0em, below: 1.9em)[
-    #set text(stretch: heading-stretch, weight: "bold", size: 1.70 * font-size)
+    #set text(stretch: heading-stretch, weight: "semibold", tracking: heading-tracking,
+              size: 1.70 * font-size)
     #if it.numbering != none [#counter(heading).display(it.numbering)#h(0.55em)]#it.body
   ]
   show heading.where(level: 2): it => block(above: 1.7em, below: 1.2em)[
-    #set text(stretch: heading-stretch, weight: "semibold", size: 1.33 * font-size)
+    #set text(stretch: heading-stretch, weight: "medium", tracking: -0.015em,
+              size: 1.33 * font-size)
     #if it.numbering != none [#counter(heading).display(it.numbering)#h(0.5em)]#it.body
   ]
   show heading.where(level: 3): it => block(above: 1.4em, below: 0.85em)[
@@ -595,9 +606,9 @@
     v(4pt)
     grid(columns: (1fr, auto, 1fr), align: (left, center, right),
       text(font: body-font, size: 8pt, fill: ink)[
-        PyMC Labs#if status != none [ · #text(fill: peach.darken(18%))[#status]]
+        PyMC Labs#if status != none [ · #text(fill: dark-orange)[#status]]
       ],
-      if draft { text(font: body-font, size: 8pt, fill: peach.darken(18%))[\[DRAFT\]] },
+      if draft { text(font: body-font, size: 8pt, fill: dark-orange)[\[DRAFT\]] },
       text(font: heading-font, size: 8pt, fill: ink)[
         #counter(page).display("1")
       ],
@@ -631,8 +642,8 @@
   if outline-depth > 0 {
     // "Contents" title styled like a section heading (no number), space below
     block(above: 3.0em, below: 1.5em)[
-      #text(font: heading-font, stretch: heading-stretch, weight: "regular",
-            size: 1.70 * font-size, fill: ink)[Contents]
+      #text(font: heading-font, stretch: heading-stretch, weight: "semibold",
+            tracking: heading-tracking, size: 1.70 * font-size, fill: ink)[Contents]
     ]
     show outline.entry: it => {
       set text(font: body-font, fill: ink, weight: "light")

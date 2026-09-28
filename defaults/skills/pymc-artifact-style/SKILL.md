@@ -11,7 +11,8 @@ own style — never substitute a client's brand colors unless the user explicitl
 asks for a client-branded artifact.
 
 Use the current [PyMC Labs website](https://www.pymc-labs.com/) identity:
-Inter, navy text, pale accents, and the dark/light PyMC Labs wordmarks.
+Inter, navy text, pale fills, three readable text accents, and the dark/light
+PyMC Labs wordmarks.
 The bundled report class adapts the existing Tufte layout to that identity.
 Read [references/website-brand.md](references/website-brand.md) for source
 provenance, exact website tokens, and the distinction between website styling
@@ -32,9 +33,10 @@ network access to the brand repos.
 typst/pymc-report.typ      the report class — import this
 typst/starter.typ          minimal working report; copy it and replace content
 typst/report-example.typ   the full worked example — read it for the helpers
-fonts/                     Inter, JetBrains Mono, Fira Math
+fonts/                     Inter (300–700), JetBrains Mono, Fira Math
 assets/pymc-labs-logo-dark.png   dark wordmark for light backgrounds
 assets/pymc-labs-logo-light.png  light wordmark for dark backgrounds
+assets/pymc-marketing-logo.png, causalpy-logo.png  library logos, for decks about them
 mpl/                       matplotlibrc + plotstyle.py + axes.py
 ```
 
@@ -63,10 +65,11 @@ falls back to a serif and the result stops looking like a PyMC report.
 
 ### Fonts
 
-Use `Inter` for body and headings, with normal stretch (`100%`). Use
-`JetBrains Mono` for code. Fira Math remains the document math face; the
-website does not specify a math font. All are bundled. Archivo and Fira Mono
-remain available for legacy sources, but are no longer the defaults.
+Use `Inter` for body and headings, with normal stretch (`100%`): body 400,
+headings 600 (large) and 500 (smaller), with slightly tight tracking, as on the
+website. Use `JetBrains Mono` for code. Fira Math is the document math face; the
+website does not specify one. All are bundled. Archivo and Fira Mono are no
+longer part of the style and are not bundled.
 
 ### Writing the document
 
@@ -128,28 +131,38 @@ context`.
 
 | Token | Hex | Use |
 |---|---|---|
-| navy | `#0C1F40` | body text, headings, first series |
-| periwinkle | `#9FAAE2` | accent, series |
-| aqua | `#B4E7DD` | rules, spines, series |
-| peach | `#F6AE72` | single status accent — use sparingly |
-| soft-white | `#F7F7F7` | code slabs, fills |
-| navy-deep | `#07142A` | dark surfaces |
-| violet | `#C8B4E7` | optional website accent |
+| navy | `#0C1F40` | body text, headings, chart furniture, first series |
+| navy-deep | `#07142A` | dark surfaces, footers |
+| navy-header | `#071530` | dark header bands |
+| aqua | `#B4E7DD` | rules, spines, fills, series |
+| periwinkle | `#9FAAE2` | secondary fills, series |
+| peach | `#F6AE72` | warm fill — use sparingly |
+| violet | `#C8B4E7` | optional fill |
+| soft-white | `#F7F7F7` | code slabs, panels; text on dark surfaces |
+| white | `#FFFFFF` | page |
 
-Chart variants retained from the report style (not website tokens) — light: navy `#798496`, peri `#CAD0EF`, aqua `#D6F2EC`, peach `#FAD2B1`.
-Dark: navy `#08142A`, peri `#676E93`, aqua `#759690`, peach `#A0714A`.
+The pale colors (aqua, periwinkle, peach, violet) are fills. They are unreadable
+as small text on white. For colored **text** use the website's text accents:
 
-Navy text on white. Color earns its place (Butterick) — the accent punctuates,
-it does not decorate.
+| Text accent | Hex | Use |
+|---|---|---|
+| teal | `#0C9E82` | accent text, icons, "positive" labels; pairs with an aqua tint behind it |
+| indigo | `#5462C4` | links and interactive text (hover state on the site) |
+| dark-orange | `#C4720A` | warm status text (e.g. *Confidential*, *Draft*); pairs with a peach tint |
+
+A tag or badge is text accent on a translucent fill of its pale partner: teal on
+aqua at ~35%, dark-orange on peach at ~35%. Navy text on white otherwise. Color
+earns its place (Butterick) — the accent punctuates, it does not decorate.
 
 ## Typography
 
 | Role | Face |
 |---|---|
-| Body | **Inter** regular — ask for family `Inter` |
-| Headings | **Inter** bold/semibold, normal stretch |
+| Body | **Inter** 400 — ask for family `Inter` |
+| Headings | **Inter** 600 (h1) / 500 (h2, h3), tracking −0.02em / −0.015em |
 | Math | **Fira Math**, weight 300 |
 | Code | **JetBrains Mono** on soft-white |
+| Serif accent (HTML only) | `Georgia, serif`, italic 500 — a word or phrase in a display line, never body text; not bundled, so not in PDFs |
 
 Headings are unnumbered by default — hierarchy is typographic, the register is
 editorial.
@@ -158,11 +171,11 @@ editorial.
 
 ```python
 import matplotlib as mpl
-mpl.rc_file("mpl/matplotlibrc")     # brand palette, Inter, navy bold titles
+mpl.rc_file("mpl/matplotlibrc")     # website palette, Inter, navy semibold titles
 ```
 
-`mpl/plotstyle.py` carries `PALETTE`, `PALETTE_LIGHT`, `PALETTE_DARK` and a
-`fill_between` patch that gives clean edges; `mpl/axes.py` adds
+`mpl/plotstyle.py` carries `PALETTE` (fills), `PALETTE_TEXT` (text accents),
+`CYCLE` (series order: strong colors first, pale last) and a `fill_between` patch that gives clean edges; `mpl/axes.py` adds
 `add_axis_end_tick_caps`. Import them alongside the rc if you want the helpers.
 
 ArviZ draws through matplotlib, so `az.plot_posterior`, `az.plot_trace` and
@@ -177,9 +190,12 @@ SVG path-mode collides bold/regular glyphs).
 The palette the rc cycles, if you need it by hand:
 
 ```
-0C1F40  navy        F6AE72  peach       9FAAE2  periwinkle   759690  aqua-dark
-798496  navy-light  E0886A  peach-mid   676E93  peri-dark    B4E7DD  aqua
+0C1F40  navy        0C9E82  teal         F6AE72  peach        5462C4  indigo
+9FAAE2  periwinkle  C4720A  dark-orange  C8B4E7  violet       B4E7DD  aqua
 ```
+
+Aqua, violet and periwinkle are low-contrast lines on white; with more than
+five series, prefer small multiples to the tail of the cycle.
 
 ## Chart rules that matter more than color
 
@@ -242,13 +258,13 @@ and clear space. Both are official website assets with real transparency;
 do not recolor or regenerate them.
 
 The report defaults to the dark logo and a plain cover. The older logo files
-and `cover-4.png` / `cover-9.png` remain for existing documents only; do not
-use them for new artifacts unless requested.
+and cover artwork are no longer part of the style and are not bundled.
 
 ## When the bundled template cannot be used
 
 Match the palette and typography by hand: navy body and headings, aqua rules,
-peach for a single status accent, soft-white code slabs, Inter (or the closest
+dark-orange for a single status word, teal or indigo for accent text,
+soft-white code slabs, Inter (or the closest
 humanist sans available). Tables get horizontal rules only. Say plainly in the
 delivery that this is an unbranded fallback and the binding is missing — do not
 quietly ship something that looks nothing like a PyMC report.
