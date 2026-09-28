@@ -559,7 +559,8 @@ class CryptoSettings(BaseModel):
         default=(),
         description=(
             "Ordered tuple of Fernet keys used to encrypt/decrypt stored "
-            "credentials, including agent environment values. The first key encrypts "
+            "credentials. Agent environment values encrypt when keys are configured; "
+            "without keys they remain plaintext. The first key encrypts "
             "new values; older keys "
             "remain valid for decrypting existing ciphertext during rotation."
         ),

@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Encrypt agent environment values with rotatable deployment keys, including existing rows on upgrade.
+- Encrypt agent environment values with rotatable deployment keys when configured, including existing rows on upgrade.
+
+### Upgrade notes
+
+- Agent environment encryption is opt-in through `DAIMON_CRYPTO__KEYS`; keyless deployments retain plaintext storage and initialization still succeeds. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
 
 ### Added
 

@@ -315,20 +315,38 @@ external stores, keys and MA mappings are complete.
 
 ### Agent environment encryption
 
-Agent environment values in `agent_files.content` are encrypted with the same
-`DAIMON_CRYPTO__KEYS` MultiFernet key ring as other credentials. Names and
-attribution remain readable. Configure these keys before storing environment
-values. Reads and mounted `.env` files are decrypted transparently.
+Agent environment values in `agent_files.content` are encrypted when
+`DAIMON_CRYPTO__KEYS` is configured, using the same MultiFernet key ring as other
+credentials. Names and attribution remain readable. Keyless deployments keep
+plaintext storage and log `agent_env.encryption_disabled` when the session
+factory starts; initialization and environment writes continue to work.
 
-Stop application writers before upgrading through `0028_agent_env_encryption`.
-Run the migration with the deployment's crypto keys; it encrypts existing rows
-in one transaction and refuses to migrate nonempty tables without keys. Empty
-tables need no key. The migration cannot run in offline SQL mode or downgrade
-to plaintext. Restart all processes on the new version after upgrading.
+Stop old application readers and writers before upgrading through
+`0028_agent_env_encryption`, since old readers cannot decode encrypted values.
+With keys configured, the migration encrypts existing rows in one transaction;
+without keys it is a no-op. The migration uses a five-second lock timeout, so a
+busy database fails the migration instead of waiting indefinitely. Retry during
+a maintenance window. It requires an online database connection.
 
-To rotate keys, prepend a new key and retain older keys for reads. Rewriting an
-environment value encrypts it with the first key. Do not retire old keys until
-all stored credentials have been re-encrypted. Old database backups still
-contain plaintext environment values and need the same access restrictions as
-other secret backups. Application encryption protects database-only access;
+Encrypted values use a reserved `enc:v1:` prefix. Migration retries and writes
+validate and preserve existing envelopes instead of encrypting them twice.
+New code accepts unmarked legacy plaintext, logs a warning containing only row
+identifiers when encryption is enabled, and encrypts it on the next write.
+Wrong keys or corrupt marked ciphertext fail closed. Do not remove keys while
+encrypted values remain. When enabling keys after a keyless migration, rewrite
+existing values through the application or re-run this migration's data upgrade
+under maintenance; setting keys alone does not rewrite existing rows.
+
+For rollback, stop application readers and writers and run the migration's
+Alembic downgrade with the original keys available before starting old code.
+When this revision is the head, use `alembic downgrade -1`. The downgrade restores
+plaintext in the same transaction and refuses to decrypt encrypted rows without
+valid keys. Keyless plaintext-only downgrades remain a no-op.
+
+To rotate keys, prepend a new key and retain older keys for reads. Rewriting a
+decrypted environment value encrypts it with the first key. Do not retire old
+keys until all stored credentials have been re-encrypted. Old backups, WAL, and
+dead tuples can still contain plaintext. Normal VACUUM makes dead tuple space
+reusable; it is not a secure erasure guarantee. Apply secret-retention controls
+to backups and storage. Application encryption protects database-only access;
 access to both the database and the key ring permits decryption.

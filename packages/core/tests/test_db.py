@@ -70,3 +70,18 @@ async def test_build_session_factory_produces_usable_sessions_when_called() -> N
             assert result.scalar_one() == 42
     finally:
         await engine.dispose()
+
+
+async def test_keyless_factory_warns_once_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv("DAIMON_CRYPTO__KEYS", "[]")
+    engine = build_engine(os.environ["DAIMON_DATABASE__TEST_URL"])
+    try:
+        with capture_logs() as logs:
+            factory = build_session_factory(engine)
+            async with factory() as first, factory() as second:
+                assert first.info["crypto_keys"] == second.info["crypto_keys"] == ()
+        assert [log["event"] for log in logs] == ["agent_env.encryption_disabled"]
+    finally:
+        await engine.dispose()

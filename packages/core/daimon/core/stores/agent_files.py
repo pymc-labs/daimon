@@ -5,30 +5,39 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+import structlog
 from cryptography.fernet import MultiFernet
 from daimon.core._models import AgentFile
+from daimon.core.agent_env_crypto import PREFIX, decode_value, encode_value
 from daimon.core.config import load_crypto_settings
 from daimon.core.errors import StoreError
-from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
+from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores.domain import AgentFileRow
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-def _cipher(session: AsyncSession) -> MultiFernet:
+def _cipher(session: AsyncSession) -> MultiFernet | None:
     """Use injected deployment keys; raw sessions resolve the same crypto settings."""
     keys = session.info.get(
         "crypto_keys", session.get_bind().get_execution_options().get("crypto_keys")
     )
     if keys is None:
         keys = tuple(k.get_secret_value() for k in load_crypto_settings().keys)
-    return build_multifernet(keys)
+    return build_multifernet(keys) if keys else None
 
 
-def _row(session: AsyncSession, orm: AgentFile) -> AgentFileRow:
+def _row(cipher: MultiFernet | None, orm: AgentFile) -> AgentFileRow:
+    if cipher is not None and not orm.content.startswith(PREFIX):
+        structlog.get_logger(__name__).warning(
+            "agent_env.legacy_plaintext",
+            tenant_id=str(orm.tenant_id),
+            agent_id=str(orm.agent_id),
+            key=orm.key,
+        )
     return AgentFileRow.model_validate(orm).model_copy(
-        update={"content": decrypt_token(_cipher(session), orm.content.encode("ascii"))}
+        update={"content": decode_value(cipher, orm.content)}
     )
 
 
@@ -58,7 +67,8 @@ async def put_agent_file(
     if key == "":
         raise StoreError("key must not be empty")
 
-    content = encrypt_token(_cipher(session), content).decode("ascii")
+    cipher = _cipher(session)
+    content = encode_value(cipher, content)
     stmt = (
         pg_insert(AgentFile)
         .values(
@@ -83,7 +93,7 @@ async def put_agent_file(
     result = await session.execute(stmt)
     orm = result.scalar_one()
     await session.flush()
-    return _row(session, orm)
+    return _row(cipher, orm)
 
 
 async def put_agent_file_if_unchanged(
@@ -122,7 +132,8 @@ async def put_agent_file_if_unchanged(
     if key == "":
         raise StoreError("key must not be empty")
 
-    content = encrypt_token(_cipher(session), content).decode("ascii")
+    cipher = _cipher(session)
+    content = encode_value(cipher, content)
     if expected_updated_at is None:
         insert_stmt = (
             pg_insert(AgentFile)
@@ -159,7 +170,7 @@ async def put_agent_file_if_unchanged(
     await session.flush()
     if orm is None:
         return None
-    return _row(session, orm)
+    return _row(cipher, orm)
 
 
 async def get_agent_file(
@@ -173,7 +184,7 @@ async def get_agent_file(
     orm = await session.get(AgentFile, (tenant_id, agent_id, key))
     if orm is None:
         return None
-    return _row(session, orm)
+    return _row(_cipher(session), orm)
 
 
 async def list_agent_files(
@@ -191,7 +202,9 @@ async def list_agent_files(
         )
         .order_by(AgentFile.key)
     )
-    return [_row(session, o) for o in result.scalars().all()]
+    rows = result.scalars().all()
+    cipher = _cipher(session) if rows else None
+    return [_row(cipher, o) for o in rows]
 
 
 async def delete_agent_file(
