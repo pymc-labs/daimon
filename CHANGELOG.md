@@ -209,6 +209,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Slack top-ups sent the checkout route an internal admin token for the
+  clicking account. They now send a plain account token, as Discord does;
+  the route only needs the account.
 - GitHub App installation tokens are minted for the one bound repository
   instead of every repository in the installation, and read-only when the
   binding was verified as a public repo or the token is used for skill sync.
