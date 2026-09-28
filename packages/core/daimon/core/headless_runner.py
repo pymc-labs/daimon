@@ -58,6 +58,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 )
 from cryptography.fernet import MultiFernet
 from daimon.core.config import McpSettings
+from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.sessions import create_session
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.driver import run_turn as drive_turn
@@ -120,6 +121,7 @@ async def run_turn(
     agent_id: str,
     environment_id: str,
     trigger_message: str,
+    origin: TurnContext = "routine",
     mcp_settings: McpSettings | None = None,
     account_id: uuid.UUID | None = None,
     usage_record_factory: Callable[[str, str], Callable[..., Awaitable[None]]] | None = None,
@@ -255,7 +257,7 @@ async def run_turn(
     state: TurnState = await drive_turn(
         anthropic=anthropic,
         session_id=session.id,
-        user_message=trigger_message,
+        user_message=context_prompt(origin, system=session.agent.system) + trigger_message,
         lifecycle=_NoOpLifecycle(),
         cancel=asyncio.Event(),  # never set — headless has no cancel source
         render_interval_s=2.0,  # nothing renders; do not spin the diff timer

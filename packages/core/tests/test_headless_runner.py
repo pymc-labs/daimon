@@ -179,7 +179,8 @@ def _build_client(
     return build_fake_anthropic(router.dispatch)
 
 
-async def test_run_turn_returns_last_message_text() -> None:
+@pytest.mark.parametrize("origin", ["chat", "routine", "relay", "handoff"])
+async def test_run_turn_returns_last_message_text(origin) -> None:
     events: list[BetaManagedAgentsSessionEvent] = [
         BetaManagedAgentsAgentMessageEvent(
             id="evt_msg_1",
@@ -194,16 +195,21 @@ async def test_run_turn_returns_last_message_text() -> None:
             stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
         ),
     ]
-    client = _build_client(events)
+    sent = []
+    client = _build_client(events, send_capture=sent)
 
     tail = await run_turn(
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
         trigger_message="hi",
+        origin=origin,
     )
 
     assert tail == "hello world", "run_turn should return the agent.message text"
+    from daimon.core.context_prompt import context_prompt
+
+    assert sent[0]["events"][0]["content"][0]["text"] == context_prompt(origin) + "hi"
 
 
 async def test_tail_truncated_at_1000() -> None:

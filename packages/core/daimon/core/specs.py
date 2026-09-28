@@ -30,6 +30,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
 from anthropic.types.beta.beta_packages_params import BetaPackagesParams
+from daimon.core.context_prompt import ContextFragment, TurnContext, encode_fragments
 from daimon.core.errors import SpecError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -112,6 +113,9 @@ class AgentSpec(BaseModel):
     model: BetaManagedAgentsModelParam
     description: str | None = None
     system: str | None = None
+    context_fragments: dict[TurnContext, ContextFragment] = Field(
+        default_factory=dict[TurnContext, ContextFragment], exclude=True
+    )
     tools: list[Annotated[Tool, Field(discriminator="type")]] | None = None
     mcp_servers: list[BetaManagedAgentsURLMCPServerParams] | None = None
     multiagent: BetaManagedAgentsMultiagentParams | None = None
@@ -306,6 +310,9 @@ def dump_agent_spec(
             category=UserWarning,
         )
         dumped = spec.model_dump(mode=mode, exclude_none=exclude_none)
+
+    if spec.context_fragments:
+        dumped["system"] = encode_fragments(spec.system or "", spec.context_fragments)
 
     tools = cast(
         "list[dict[str, Any]]",
