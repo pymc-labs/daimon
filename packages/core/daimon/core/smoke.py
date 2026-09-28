@@ -185,6 +185,7 @@ async def run_smoke_check(
                 environment_id=resolved_environment_id,
                 trigger_message=SMOKE_PROMPT,
                 usage_record_factory=usage_record_factory,
+                session_factory=session_factory,
                 tenant_id=tenant_id,
             )
     except TimeoutError as err:

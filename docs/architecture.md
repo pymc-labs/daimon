@@ -418,6 +418,7 @@ or a deployment-provided Google MCP server.
 Existing static-bearer vault credentials are upgraded in place on the next
 session creation. Credential metadata records the identity version so subsequent
 creates leave the token stable; unrelated and OAuth credentials are preserved.
+
 ### Completion signals
 
 The core driver calls an optional `on_acknowledgment` lifecycle hook with
@@ -505,3 +506,30 @@ can be inserted before a leading table. See the [Slack table block reference](ht
 
 Streaming status previews and MCP `send_message` remain plain text. Tables inside
 code fences remain literal examples. Other adapters need no renderer changes.
+
+
+
+### Durable turn outcomes
+
+`turn_outcomes` stores one content-free terminal record per logical turn. A UUID
+follows admission, session binding and execution; a dead-session recovery remains
+one turn. Discord, Slack, their continuation/wizard paths, headless routines and
+CLI runs use the same recorder. Admission and concurrency refusals are recorded
+even when no model runs. The row contains tenant/account and agent identifiers,
+platform/channel/thread identifiers, the shared `TerminationReason`, UTC start/end
+and monotonic duration, recovery status, exception class, package release and
+observed usage-event keys. It contains no messages, prompts, answers, tool inputs,
+rendered error strings or credentials. Missing attribution stays null (for example,
+a CLI run against an existing MA session); no tenant is inferred from user text.
+
+The terminal path schedules a bounded background write and never awaits database
+I/O. Inserts are idempotent on the turn UUID. At most 256 writes are pending; each
+has a one-second timeout and owns its database connection. Failures and queue
+saturation log identifiers and exception class only. Runtime shutdown drains
+pending writes before disposing its engine. These are best-effort diagnostics:
+process crashes, queue saturation and database outages can lose an outcome. They
+are not a transactional audit log, and never change admission, billing or replies.
+Library-only headless calls without a session factory remain unrecorded; all
+production headless entrypoints provide one. Usage references are the natural
+`(managed_session_id, event_id)` keys, including calls observed during recovery;
+billing-exempt calls may have no corresponding `usage_events` row.

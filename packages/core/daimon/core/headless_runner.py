@@ -63,6 +63,7 @@ from daimon.core.sessions import create_session
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.driver import run_turn as drive_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import (
     AutoApprove,
     Billed,
@@ -116,6 +117,76 @@ _assert_satisfies_turn_lifecycle(_NoOpLifecycle())
 
 
 async def run_turn(
+    *,
+    anthropic: AsyncAnthropic,
+    agent_id: str,
+    environment_id: str,
+    trigger_message: str,
+    origin: TurnContext = "routine",
+    mcp_settings: McpSettings | None = None,
+    account_id: uuid.UUID | None = None,
+    usage_record_factory: Callable[[str, str], Callable[..., Awaitable[None]]] | None = None,
+    tenant_id: uuid.UUID | None = None,
+    agent_uuid: uuid.UUID | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    fernet: MultiFernet | None = None,
+    github_fallback_pat: str | None = None,
+    github_app_id: str | None = None,
+    github_app_private_key: str | None = None,
+    deadline: datetime | None = None,
+) -> str:
+    observation = current_outcome.get()
+    if observation is None and session_factory is not None:
+        observation = TurnObservation(session_factory, tenant_id, "headless", origin=origin)
+    if observation is None:
+        return await run_turn_impl(
+            anthropic=anthropic,
+            agent_id=agent_id,
+            environment_id=environment_id,
+            trigger_message=trigger_message,
+            origin=origin,
+            mcp_settings=mcp_settings,
+            account_id=account_id,
+            usage_record_factory=usage_record_factory,
+            tenant_id=tenant_id,
+            agent_uuid=agent_uuid,
+            session_factory=session_factory,
+            fernet=fernet,
+            github_fallback_pat=github_fallback_pat,
+            github_app_id=github_app_id,
+            github_app_private_key=github_app_private_key,
+            deadline=deadline,
+        )
+    observation.agent_id = agent_id
+    observation.account_id = account_id
+    observation.origin = origin
+    try:
+        with observation.activate():
+            result = await run_turn_impl(
+                anthropic=anthropic,
+                agent_id=agent_id,
+                environment_id=environment_id,
+                trigger_message=trigger_message,
+                origin=origin,
+                mcp_settings=mcp_settings,
+                account_id=account_id,
+                usage_record_factory=usage_record_factory,
+                tenant_id=tenant_id,
+                agent_uuid=agent_uuid,
+                session_factory=session_factory,
+                fernet=fernet,
+                github_fallback_pat=github_fallback_pat,
+                github_app_id=github_app_id,
+                github_app_private_key=github_app_private_key,
+                deadline=deadline,
+            )
+    except BaseException as exc:
+        observation.finish(error=exc)
+        raise
+    return result
+
+
+async def run_turn_impl(
     *,
     anthropic: AsyncAnthropic,
     agent_id: str,
@@ -267,6 +338,8 @@ async def run_turn(
         deadline=effective_deadline,
     )
 
+    if (observation := current_outcome.get()) is not None:
+        observation.finish(state=state)
     if state.error is not None:
         raise state.error
 

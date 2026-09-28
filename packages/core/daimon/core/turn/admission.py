@@ -20,7 +20,7 @@ their pre-turn gate.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Literal
 
@@ -40,6 +40,7 @@ from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, MissingTurnConfigError
+from daimon.core.turn.outcomes import TurnObservation, current_outcome
 
 __all__ = ["Admission", "AdmissionDenied", "MissingTurnConfigError", "admit"]
 
@@ -55,9 +56,48 @@ class Admission:
     # Turn from a sealed channel (or a thread under one), or from a DM when the
     # tenant asks for it: memory mounts must be read-only.
     memory_read_only: bool = False
+    observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 
 async def admit(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    external_user_id: str,
+    channel_id: str,
+    now: datetime,
+    thread_id: str | None = None,
+    role: Role | None = None,
+    is_dm: bool = False,
+) -> Admission:
+    observation = current_outcome.get() or TurnObservation(
+        deps.sessionmaker, tenant_id, platform, channel_id, thread_id
+    )
+    observation.channel_id = channel_id
+    observation.thread_id = thread_id
+    try:
+        with observation.activate():
+            result = await admit_impl(
+                deps,
+                tenant_id=tenant_id,
+                platform=platform,
+                external_user_id=external_user_id,
+                channel_id=channel_id,
+                now=now,
+                thread_id=thread_id,
+                role=role,
+                is_dm=is_dm,
+            )
+    except BaseException as exc:
+        observation.finish(error=exc)
+        raise
+    observation.account_id = result.account_id
+    observation.agent_id = result.agent.id
+    return replace(result, observation=observation)
+
+
+async def admit_impl(
     deps: TurnDeps,
     *,
     tenant_id: uuid.UUID,
@@ -92,6 +132,9 @@ async def admit(
         policy, external_user_id=external_user_id, is_admin=role is Role.ADMIN
     ):
         raise AdmissionDenied(reason="invoker_not_allowed")
+
+    if (observation := current_outcome.get()) is not None:
+        observation.account_id = principal.account_id
 
     # --- Config resolution (per turn) ---
     scope = ScopeContext(
@@ -164,6 +207,8 @@ async def admit(
         agent = await get_setup_responder(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
     else:
         agent = await deps.anthropic.beta.agents.retrieve(agent_id)
+    if (observation := current_outcome.get()) is not None:
+        observation.agent_id = agent.id
     environment = await deps.anthropic.beta.environments.retrieve(env_id)
 
     # --- Liveness check on the already-retrieved agent: it was archived out of

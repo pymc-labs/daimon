@@ -51,7 +51,7 @@ from daimon.testing.ma_models import (
 from daimon.testing.turn_fakes import RecordingLifecycle
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .conftest import make_status_idle
+from .conftest import make_session_error, make_status_idle
 
 from daimon.testing.factories import (  # isort: skip
     make_ledger_entry,
@@ -63,7 +63,7 @@ _NOW = datetime(2026, 7, 28, tzinfo=UTC)
 
 
 def _chokepoint_router(
-    *, tenant_id: uuid.UUID, session_bodies: list[dict[str, object]]
+    *, tenant_id: uuid.UUID, session_bodies: list[dict[str, object]], failure: bool = False
 ) -> MARouter:
     """Resolve agent/environment for tenant_id, serve memory-store cold
     provisioning + session-create (each call assigns the next `sess_N` id),
@@ -111,7 +111,14 @@ def _chokepoint_router(
             type="span.model_request_end",
         )
         idle = make_status_idle(event_id="evt_idle")
-        return sse_response([usage_evt.model_dump(mode="json"), idle.model_dump(mode="json")])
+        events = [usage_evt.model_dump(mode="json")]
+        if failure:
+            events.append(
+                make_session_error(
+                    event_id="evt_error", message="NEVER STORE THIS SECRET"
+                ).model_dump(mode="json")
+            )
+        return sse_response([*events, idle.model_dump(mode="json")])
 
     router.add("GET", r"/v1/sessions/(?P<sid>[^/]+)/events/stream", _stream)
 
@@ -150,11 +157,15 @@ def _recovery_lifecycle(_cancel: asyncio.Event) -> RecordingLifecycle:
 
 
 @pytest.mark.parametrize("funding_mode", ["prepaid", "operator_funded"])
+@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("failure", [False, True])
 async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     funding_mode: FundingMode,
+    platform: str,
+    failure: bool,
 ) -> None:
     tenant = await make_tenant(db_session)
     await make_tenant_config(
@@ -168,14 +179,14 @@ async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
     await db_session.commit()
 
     session_bodies: list[dict[str, object]] = []
-    router = _chokepoint_router(tenant_id=tenant.id, session_bodies=session_bodies)
+    router = _chokepoint_router(tenant_id=tenant.id, session_bodies=session_bodies, failure=failure)
     deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
 
     # --- Stage one: admit() ---
     admission = await admit(
         deps,
         tenant_id=tenant.id,
-        platform="discord",
+        platform=platform,
         external_user_id="user-1",
         channel_id="chan-1",
         now=_NOW,
@@ -190,7 +201,7 @@ async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
         deps,
         admission,
         tenant_id=tenant.id,
-        platform="discord",
+        platform=platform,
         external_user_id="user-1",
         thread_id="thread-e2e",
         session_account_id=session_account_id,
@@ -203,7 +214,7 @@ async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
+        platform=platform,
         thread_id="thread-e2e",
         external_user_id="user-1",
         user_message="hello",
@@ -214,14 +225,14 @@ async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
         render_interval_s=0.001,
     )
 
-    assert outcome.state.error is None, "the full chokepoint run must complete cleanly"
+    assert (outcome.state.error is not None) == failure
     assert outcome.recovered is False, "no dead-session signature in this flow"
 
     async with db_session_factory() as s:
         live = await get_live_thread_session(
             s,
             tenant_id=tenant.id,
-            platform="discord",
+            platform=platform,
             thread_id="thread-e2e",
             account_id=session_account_id,
         )
@@ -245,6 +256,21 @@ async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
     debit_rows = [r for r in ledger_rows if r.reason == "turn_debit"]
     assert len(debit_rows) == 1, "record_turn_usage must write exactly one turn_debit ledger row"
     assert debit_rows[0].delta_usd < 0, "a debit row must be negative"
+
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
+    async with db_session_factory() as session:
+        outcomes = await list_for_tenant(session, tenant.id)
+    assert len(outcomes) == 1
+    row = outcomes[0]
+    assert row.platform == platform
+    assert row.reason == outcome.termination
+    assert row.channel_id == "chan-1" and row.thread_id == "thread-e2e"
+    assert row.agent_id == admission.agent.id and row.session_id == outcome.ma_session_id
+    assert row.usage_refs == [{"session_id": outcome.ma_session_id, "event_id": "evt_span"}]
+    assert "NEVER STORE THIS SECRET" not in str(row)
 
 
 async def test_bind_session_requires_an_admission_value(

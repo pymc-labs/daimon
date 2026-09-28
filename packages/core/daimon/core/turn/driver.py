@@ -68,6 +68,7 @@ from daimon.core.turn.approvals import build_confirmation_events, pending_confir
 from daimon.core.turn.ceiling import ceiling_error, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge
+from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import (
     AutoApprove,
     Billed,
@@ -320,6 +321,8 @@ async def run_turn(
         await anthropic.beta.sessions.events.send(session_id, events=batch)
         await acknowledge(lifecycle, "accepted")
 
+    if (observation := current_outcome.get()) is not None:
+        observation.session_id = session_id
     pump_coro = _pump(
         anthropic=anthropic,
         session_id=session_id,
@@ -780,6 +783,8 @@ async def _bill_once(billing: BillingPosture, event: object, billed_event_ids: s
         return
     if event.id in billed_event_ids:
         return
+    if (observation := current_outcome.get()) is not None:
+        observation.note_usage(event)
     match billing:
         case Billed(record=record):
             await record(event=event)

@@ -71,6 +71,8 @@ from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import record_result, update_routine_agent_id
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_balance import is_over_balance
+from daimon.core.turn.outcomes import current_outcome, drain_outcomes
+from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
@@ -220,6 +222,8 @@ async def _build_fire(
         # Admission gate: per-tenant balance — independent of Stripe config.
         # Keys on row.tenant_id (NOT NULL). Mirror run_one_tick's cap_exceeded skip.
         if await is_over_balance(sessionmaker=sm, tenant_id=row.tenant_id):
+            if (observation := current_outcome.get()) is not None:
+                observation.finish(reason=TerminationReason.ADMISSION_BALANCE_DEPLETED)
             log.info(
                 "routine.skipped.over_balance",
                 routine_id=str(row.id),
@@ -472,6 +476,7 @@ async def run(
             key=scheduler_settings.advisory_lock_key,
         )
         await client.close()
+        await drain_outcomes()
         await engine.dispose()
         return 1
 
@@ -574,6 +579,7 @@ async def run(
             log.exception("advisory unlock failed")
         await lock_conn.close()
         await client.close()
+        await drain_outcomes()
         if _engine_override is None:
             await engine.dispose()
 

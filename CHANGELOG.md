@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Record content-free terminal turn outcomes across chat, headless and routine paths, including refusals, with bounded best-effort persistence and links to observed usage events.
+
 - Every turn now ends with a typed `TerminationReason` from the turn core,
   set on `TurnState.termination` and `RunOutcome.termination` for every driver
   exit and derivable from admission and session-binding refusals with

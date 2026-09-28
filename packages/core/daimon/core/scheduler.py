@@ -18,6 +18,8 @@ from daimon.core.stores.routines import (
     record_result,
     skip_slots_during_fire,
 )
+from daimon.core.turn.outcomes import TurnObservation, observe_turn
+from daimon.core.turn.termination import TerminationReason
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -159,6 +161,9 @@ async def run_one_tick(
                 log.exception("caps.is_over_cap failed", routine_id=str(row.id))
                 continue
         if over:
+            TurnObservation(
+                sm, row.tenant_id, "scheduler", origin="routine", agent_id=row.agent_id
+            ).finish(reason=TerminationReason.ADMISSION_CAP_EXCEEDED)
             try:
                 async with sm() as s, s.begin():
                     await record_result(s, row.id, tail=None, error="cap_exceeded")
@@ -181,7 +186,10 @@ async def run_one_tick(
         try:
             async with sem:
                 try:
-                    await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
+                    with observe_turn(
+                        sm, tenant_id=row.tenant_id, platform="scheduler", origin="routine"
+                    ):
+                        await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
                 except TimeoutError as err:
                     # Capture to Sentry, then keep the existing swallow —
                     # sibling tasks continue and record_result still runs.
