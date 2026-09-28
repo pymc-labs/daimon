@@ -111,7 +111,9 @@ async def _status(db: async_sessionmaker[AsyncSession], key: uuid.UUID) -> tuple
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("setup", [None, new_setup_thread_id(CONVERSATION_ID)])
+@pytest.mark.parametrize(
+    "setup", [None, new_setup_thread_id(CONVERSATION_ID)], ids=["chat", "setup"]
+)
 async def test_a_handoff_runs_after_the_turn_as_the_requester(
     db_session_factory: async_sessionmaker[AsyncSession], setup: str | None
 ) -> None:
