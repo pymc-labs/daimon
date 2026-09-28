@@ -138,6 +138,7 @@ source_modules = [
     "daimon.core.mcp_vault_janitor",
     "daimon.core.media",
     "daimon.core.memory_resource",
+    "daimon.core.memory_view",
     "daimon.core.message_feedback",
     "daimon.core.models_catalog",
     "daimon.core.notebooks",

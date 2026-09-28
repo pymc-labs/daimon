@@ -18,9 +18,8 @@ from daimon.adapters.slack.privacy_panel.read import load_purge_preview, resolve
 from daimon.adapters.slack.privacy_panel.views import (
     build_delete_modal,
     build_privacy_main_container,
-    summary_line,
 )
-from daimon.core.privacy import PurgePreview, PurgePreviewRow
+from daimon.core.privacy import PurgePreview, PurgePreviewRow, summary_line
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.identity import find_platform_principal
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
