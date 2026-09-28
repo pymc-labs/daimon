@@ -15,10 +15,10 @@ EXTENDS Naturals, FiniteSets, TLC
 (* the fence, and the duplicate turn comes back.                           *)
 (***************************************************************************)
 
-CONSTANTS Dispatchers, MaxAttempts, MaxCrashes, EnableFence
+CONSTANTS Dispatchers, MaxAttempts, MaxCrashes, MaxReleases, EnableFence
 
-VARIABLES status, owner, started, expired, attempts, pc, effects, crashes
-vars == <<status, owner, started, expired, attempts, pc, effects, crashes>>
+VARIABLES status, owner, started, expired, attempts, pc, effects, crashes, releases
+vars == <<status, owner, started, expired, attempts, pc, effects, crashes, releases>>
 
 None == "none"
 Terminal == {"delivered", "skipped"}
@@ -32,15 +32,17 @@ Init ==
     /\ pc = [d \in Dispatchers |-> "idle"]
     /\ effects = 0
     /\ crashes = 0
+    /\ releases = 0
 
 Holds(d) == status = "claimed" /\ owner = d
 
+(* A pending row is always claimable; a takeover also needs attempts left. *)
 Claimable ==
-    /\ attempts < MaxAttempts
-    /\ \/ status = "pending"
-       \/ /\ status = "claimed"
-          /\ expired
-          /\ (EnableFence => ~started)
+    \/ status = "pending"
+    \/ /\ status = "claimed"
+       /\ expired
+       /\ attempts < MaxAttempts
+       /\ (EnableFence => ~started)
 
 Claim(d) ==
     /\ pc[d] = "idle"
@@ -51,7 +53,7 @@ Claim(d) ==
     /\ expired' = FALSE
     /\ attempts' = attempts + 1
     /\ pc' = [pc EXCEPT ![d] = "claimed"]
-    /\ UNCHANGED <<effects, crashes>>
+    /\ UNCHANGED <<effects, crashes, releases>>
 
 (* The decision said skip: no turn, settle while still the owner. *)
 SkipDecided(d) ==
@@ -60,7 +62,7 @@ SkipDecided(d) ==
     /\ ~started
     /\ status' = "skipped"
     /\ pc' = [pc EXCEPT ![d] = "idle"]
-    /\ UNCHANGED <<owner, started, expired, attempts, effects, crashes>>
+    /\ UNCHANGED <<owner, started, expired, attempts, effects, crashes, releases>>
 
 Start(d) ==
     /\ pc[d] = "claimed"
@@ -69,34 +71,50 @@ Start(d) ==
     /\ started' = TRUE
     /\ expired' = FALSE
     /\ pc' = [pc EXCEPT ![d] = "started"]
-    /\ UNCHANGED <<status, owner, attempts, effects, crashes>>
+    /\ UNCHANGED <<status, owner, attempts, effects, crashes, releases>>
 
 (* start_wake returned False: somebody took the row over. Touch nothing. *)
 StartLost(d) ==
     /\ pc[d] = "claimed"
     /\ ~(Holds(d) /\ ~started)
     /\ pc' = [pc EXCEPT ![d] = "idle"]
-    /\ UNCHANGED <<status, owner, started, expired, attempts, effects, crashes>>
+    /\ UNCHANGED <<status, owner, started, expired, attempts, effects, crashes, releases>>
 
 (* The turn itself: visible and billed, whatever the row says by now. *)
 Effect(d) ==
     /\ pc[d] = "started"
     /\ effects' = effects + 1
     /\ pc' = [pc EXCEPT ![d] = "effected"]
-    /\ UNCHANGED <<status, owner, started, expired, attempts, crashes>>
+    /\ UNCHANGED <<status, owner, started, expired, attempts, crashes, releases>>
 
 (* Owner-guarded settle; a dispatcher that lost the row writes nothing. *)
 Settle(d) ==
     /\ pc[d] = "effected"
     /\ status' = IF Holds(d) THEN "delivered" ELSE status
     /\ pc' = [pc EXCEPT ![d] = "idle"]
-    /\ UNCHANGED <<owner, started, expired, attempts, effects, crashes>>
+    /\ UNCHANGED <<owner, started, expired, attempts, effects, crashes, releases>>
+
+(* release_wake: the owner knows the turn did not run (the session was busy
+   at bind, before the effect). Back to pending, fence cleared, claim refunded.
+   Bounded, so progress is checked under a thread that is busy only so often. *)
+Release(d) ==
+    /\ pc[d] \in {"claimed", "started"}
+    /\ Holds(d)
+    /\ releases < MaxReleases
+    /\ status' = "pending"
+    /\ owner' = None
+    /\ started' = FALSE
+    /\ expired' = FALSE
+    /\ attempts' = attempts - 1
+    /\ pc' = [pc EXCEPT ![d] = "idle"]
+    /\ releases' = releases + 1
+    /\ UNCHANGED <<effects, crashes>>
 
 Expire ==
     /\ status = "claimed"
     /\ ~expired
     /\ expired' = TRUE
-    /\ UNCHANGED <<status, owner, started, attempts, pc, effects, crashes>>
+    /\ UNCHANGED <<status, owner, started, attempts, pc, effects, crashes, releases>>
 
 (* abandon_interrupted_wakes: expired and fenced, or out of attempts. *)
 Abandon ==
@@ -104,18 +122,19 @@ Abandon ==
     /\ expired
     /\ (started \/ attempts >= MaxAttempts)
     /\ status' = "skipped"
-    /\ UNCHANGED <<owner, started, expired, attempts, pc, effects, crashes>>
+    /\ UNCHANGED <<owner, started, expired, attempts, pc, effects, crashes, releases>>
 
 Crash(d) ==
     /\ pc[d] /= "idle"
     /\ crashes < MaxCrashes
     /\ pc' = [pc EXCEPT ![d] = "idle"]
     /\ crashes' = crashes + 1
-    /\ UNCHANGED <<status, owner, started, expired, attempts, effects>>
+    /\ UNCHANGED <<status, owner, started, expired, attempts, effects, releases>>
 
 Next ==
     \/ \E d \in Dispatchers :
-        Claim(d) \/ SkipDecided(d) \/ Start(d) \/ StartLost(d) \/ Effect(d) \/ Settle(d) \/ Crash(d)
+        Claim(d) \/ SkipDecided(d) \/ Start(d) \/ StartLost(d) \/ Effect(d) \/ Settle(d)
+        \/ Release(d) \/ Crash(d)
     \/ Expire
     \/ Abandon
 
@@ -128,6 +147,7 @@ TypeOK ==
     /\ pc \in [Dispatchers -> {"idle", "claimed", "started", "effected"}]
     /\ effects \in 0..(MaxAttempts + 1)
     /\ crashes \in 0..MaxCrashes
+    /\ releases \in 0..MaxReleases
 
 AtMostOneExternalEffect == effects <= 1
 DeliveredHasExternalEffect == status = "delivered" => effects >= 1

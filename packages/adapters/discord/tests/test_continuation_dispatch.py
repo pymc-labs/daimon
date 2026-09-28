@@ -23,10 +23,12 @@ from daimon.core.continuity.wakes import (
     WAKE_RETRY_DELAY,
     WAKE_RUN_LEASE,
     abandon_interrupted_wakes,
+    list_due_wake_threads,
 )
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import (
     get_continuation,
+    list_pending_continuations,
     record_continuation,
 )
 from daimon.testing import ma_agent
@@ -67,6 +69,7 @@ async def _seed_pending_row(
     db_session_factory: async_sessionmaker[AsyncSession],
     *,
     requested_work: str | None,
+    available_at: datetime | None = None,
 ) -> tuple[uuid.UUID, uuid.UUID, str, uuid.UUID]:
     """Seed one pending continuation row; return (tenant_id, account_id, thread_id, key)."""
     async with db_session_factory() as session, session.begin():
@@ -88,6 +91,7 @@ async def _seed_pending_row(
             reason="task_handoff",
             idempotency_key=idempotency_key,
             requested_work=requested_work,
+            available_at=available_at,
         )
     return tenant.id, account.id, "42", idempotency_key
 
@@ -192,25 +196,77 @@ async def test_preparation_failure_settles_skipped_not_delivered(
     assert settled.skip_reason == "blocked_preparation_failed"
 
 
-async def test_a_busy_session_releases_the_same_row_for_a_later_retry(
+async def test_a_handoff_survives_any_number_of_busy_binds_as_on_main(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A follow-up that cannot bind because a turn is still running is not lost.
+    """Baseline parity: five busy binds, then a free session, delivers the handoff.
 
-    Nothing ran, and this dispatcher knows it, so the SAME row goes back to
-    `pending` a little later instead of being settled. The retry is the same
-    key: at-most-once holds because only a claim can run it.
+    On main each busy bind settled the row and re-queued the request under a
+    new key for the next turn in the thread, with no limit, so the sixth turn
+    tail delivered it. Here the same row is released with its claim refunded
+    and `available_at` left NULL: still dispatched only at a turn tail, still
+    delivered on the sixth, and busy waits never touch the crash budget.
     """
     from daimon.core.turn.errors import SessionBusyError
 
-    tenant_id, _account_id, _thread_id, key = await _seed_pending_row(
+    tenant_id, _account_id, thread_id, key = await _seed_pending_row(
         db_session_factory, requested_work="continue"
     )
     thread = _make_thread()
     anthropic = build_stub_anthropic(_reachable_agent_handler(tenant_id, ma_agent_id="ag_target"))
     now = datetime.now(UTC)
+    tails = 0
+    delivered: list[str] = []
 
-    async def _busy_follow_up(row: object, decision: object) -> None:
+    async def _busy_five_times(row: TaskContinuationRow, decision: ContinuationDecision) -> None:
+        nonlocal tails
+        tails += 1
+        if tails <= 5:
+            raise SessionBusyError(pending_reasons=("agent_identity",), retry_after=now)
+        delivered.append(decision.seed_user_message or "")
+
+    for tail in range(6):
+        await dispatch_pending_continuations(
+            db_session_factory,
+            anthropic,
+            tenant_id=tenant_id,
+            thread=thread,
+            run_follow_up=_busy_five_times,
+            now=lambda tail=tail: now + timedelta(minutes=tail),
+        )
+        async with db_session_factory() as session:
+            row = await get_continuation(session, idempotency_key=key)
+        assert row is not None
+        if tail < 5:
+            assert row.status == "pending" and row.attempts == 0, "a busy wait is refunded"
+            assert row.available_at is None, "a handoff still waits for the next turn tail"
+            assert row.started_at is None and row.lease_owner is None
+
+    assert delivered == ["continue"], "the sixth turn tail delivers it, exactly once"
+    assert row.status == "delivered" and row.attempts == 1
+    assert await list_due_wake_threads(db_session_factory, platform="discord", now=now) == [], (
+        "a released handoff is never picked up by the poller; only a turn tail runs it"
+    )
+    async with db_session_factory() as session:
+        pending = await list_pending_continuations(
+            session, tenant_id=tenant_id, platform="discord", thread_id=thread_id
+        )
+    assert pending == [], "no second row is ever queued"
+
+
+async def test_a_busy_wake_is_released_for_the_poller_to_retry(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.turn.errors import SessionBusyError
+
+    tenant_id, _account_id, _thread_id, key = await _seed_pending_row(
+        db_session_factory, requested_work="continue", available_at=datetime.now(UTC)
+    )
+    thread = _make_thread()
+    anthropic = build_stub_anthropic(_reachable_agent_handler(tenant_id, ma_agent_id="ag_target"))
+    now = datetime.now(UTC) + timedelta(seconds=1)
+
+    async def _busy(row: object, decision: object) -> None:
         raise SessionBusyError(pending_reasons=("agent_identity",), retry_after=now)
 
     await dispatch_pending_continuations(
@@ -218,42 +274,67 @@ async def test_a_busy_session_releases_the_same_row_for_a_later_retry(
         anthropic,
         tenant_id=tenant_id,
         thread=thread,
-        run_follow_up=_busy_follow_up,
-        now=now,
+        run_follow_up=_busy,
+        now=lambda: now,
     )
-
     async with db_session_factory() as session:
-        released = await get_continuation(session, idempotency_key=key)
-    assert released is not None
-    assert released.status == "pending", "the claimed row must not be left claimed"
-    assert released.available_at == now + WAKE_RETRY_DELAY
-    assert released.started_at is None and released.lease_owner is None
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None and row.status == "pending" and row.attempts == 0
+    assert row.available_at == now + WAKE_RETRY_DELAY
 
-    run_follow_up = AsyncMock()
+
+async def test_each_row_is_stamped_with_the_time_it_actually_ran(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A second row dispatched after a long first turn gets a fresh lease and fence.
+
+    With one `now` for the whole pass, the second claim was written with a
+    lease that had already run out during the first turn.
+    """
+    tenant_id, account_id, _thread_id, first_key = await _seed_pending_row(
+        db_session_factory, requested_work="first job"
+    )
+    second_key = uuid.uuid4()
+    async with db_session_factory() as session, session.begin():
+        await record_continuation(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            parent_channel_id="parent-1",
+            thread_id="42",
+            requester_account_id=account_id,
+            requester_external_user_id="555",
+            target_ma_agent_id="ag_target",
+            target_name="target-agent",
+            reason="task_handoff",
+            idempotency_key=second_key,
+            requested_work="second job",
+        )
+    thread = _make_thread()
+    anthropic = build_stub_anthropic(_reachable_agent_handler(tenant_id, ma_agent_id="ag_target"))
+    start = datetime.now(UTC)
+    clock = [start]
+    turn_length = WAKE_CLAIM_LEASE + timedelta(minutes=5)
+
+    async def _slow_first_turn(row: TaskContinuationRow, decision: ContinuationDecision) -> None:
+        if row.idempotency_key == first_key:
+            clock[0] = clock[0] + turn_length
+
     await dispatch_pending_continuations(
         db_session_factory,
         anthropic,
         tenant_id=tenant_id,
         thread=thread,
-        run_follow_up=run_follow_up,
-        now=now + timedelta(seconds=1),
+        run_follow_up=_slow_first_turn,
+        now=lambda: clock[0],
     )
-    run_follow_up.assert_not_awaited()  # not due yet
 
-    later = now + WAKE_RETRY_DELAY + timedelta(seconds=1)
-    await dispatch_pending_continuations(
-        db_session_factory,
-        anthropic,
-        tenant_id=tenant_id,
-        thread=thread,
-        run_follow_up=run_follow_up,
-        now=later,
-    )
-    run_follow_up.assert_awaited_once()
     async with db_session_factory() as session:
-        delivered = await get_continuation(session, idempotency_key=key)
-    assert delivered is not None and delivered.status == "delivered"
-    assert delivered.attempts == 2
+        second = await get_continuation(session, idempotency_key=second_key)
+    assert second is not None and second.status == "delivered"
+    assert second.claimed_at == start + turn_length, "claimed after the first turn ended"
+    assert second.started_at == start + turn_length, "fenced after the first turn ended"
+    assert second.delivered_at == start + turn_length
 
 
 async def test_process_death_before_the_fence_is_retried_after_lease_expiry(
@@ -276,7 +357,7 @@ async def test_process_death_before_the_fence_is_retried_after_lease_expiry(
             tenant_id=tenant_id,
             thread=dying_thread,
             run_follow_up=run_follow_up,
-            now=now,
+            now=lambda: now,
         )
     async with db_session_factory() as session:
         stranded = await get_continuation(session, idempotency_key=key)
@@ -290,7 +371,7 @@ async def test_process_death_before_the_fence_is_retried_after_lease_expiry(
         tenant_id=tenant_id,
         thread=thread,
         run_follow_up=run_follow_up,
-        now=now + timedelta(seconds=1),
+        now=lambda: now + timedelta(seconds=1),
     )
     run_follow_up.assert_not_awaited()  # the dead process's lease is still live
 
@@ -300,7 +381,7 @@ async def test_process_death_before_the_fence_is_retried_after_lease_expiry(
         tenant_id=tenant_id,
         thread=thread,
         run_follow_up=run_follow_up,
-        now=now + WAKE_CLAIM_LEASE + timedelta(seconds=1),
+        now=lambda: now + WAKE_CLAIM_LEASE + timedelta(seconds=1),
     )
     run_follow_up.assert_awaited_once()
     async with db_session_factory() as session:
@@ -343,7 +424,7 @@ async def test_process_death_after_the_fence_settles_interrupted_and_never_rerun
             tenant_id=tenant_id,
             thread=thread,
             run_follow_up=_die_during_follow_up,
-            now=now,
+            now=lambda: now,
         )
 
     run_follow_up = AsyncMock()
@@ -354,7 +435,7 @@ async def test_process_death_after_the_fence_settles_interrupted_and_never_rerun
         tenant_id=tenant_id,
         thread=thread,
         run_follow_up=run_follow_up,
-        now=after_lease,
+        now=lambda: after_lease,
     )
     assert run_follow_up.await_count == 0, "a started claim must never be retried"
 

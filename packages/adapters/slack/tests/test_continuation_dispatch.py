@@ -21,13 +21,12 @@ from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continu
 from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
 from daimon.core.continuity.wakes import (
     WAKE_CLAIM_LEASE,
-    WAKE_RETRY_DELAY,
     WAKE_RUN_LEASE,
     abandon_interrupted_wakes,
 )
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.stores.task_continuations import get_continuation
+from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
 from daimon.core.turn.errors import SessionBusyError
 from daimon.testing import build_fake_anthropic, ma_agent
 from daimon.testing.factories import make_tenant
@@ -229,16 +228,18 @@ async def _read(
     return row
 
 
-async def test_a_busy_session_releases_the_same_row_for_a_later_retry(
+async def test_a_handoff_survives_any_number_of_busy_binds_as_on_main(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A follow-up that cannot bind because a turn is still running is not lost.
+    """Baseline parity: five busy binds, then a free session, delivers the handoff.
 
-    Nothing ran, and this dispatcher knows it, so the SAME row goes back to
-    `pending` a little later instead of being settled; the wake poller or the
-    next turn in the thread runs it then.
+    On main each busy bind settled the row and re-queued the request under a
+    new key for the next turn tail, without limit, so the sixth tail delivered
+    it. Here the same row is released with its claim refunded and
+    `available_at` left NULL: delivered on the sixth tail, exactly once.
     """
     thread_id = "9200000003.000001"
     request = await _seed_request(
@@ -247,13 +248,23 @@ async def test_a_busy_session_releases_the_same_row_for_a_later_retry(
     anthropic = build_fake_anthropic(_fake_target_agent_handler(str(request.tenant_id)))
     now = datetime.now(UTC)
 
-    async def _busy_follow_up(row: TaskContinuationRow, seed: str) -> None:
-        raise SessionBusyError(pending_reasons=("agent_identity",), retry_after=now)
+    async def _no_newer_message(*_args: object, **_kwargs: object) -> None:
+        return None
 
-    def _dispatch(
-        run_follow_up: Callable[[TaskContinuationRow, str], Awaitable[None]], at: datetime
-    ) -> Any:
-        return dispatch_pending_continuations(
+    monkeypatch.setattr(continuation_dispatch, "_latest_human_message_at", _no_newer_message)
+    tails = 0
+    delivered: list[str] = []
+
+    async def _busy_five_times(row: TaskContinuationRow, seed: str) -> None:
+        nonlocal tails
+        tails += 1
+        if tails <= 5:
+            raise SessionBusyError(pending_reasons=("agent_identity",), retry_after=now)
+        delivered.append(seed)
+
+    for tail in range(6):
+        at = now + timedelta(minutes=tail)
+        await dispatch_pending_continuations(
             db_session_factory,
             anthropic,
             fake_slack_web_client.client,
@@ -261,21 +272,21 @@ async def test_a_busy_session_releases_the_same_row_for_a_later_retry(
             channel="C_CONT_DISPATCH",
             thread_id=thread_id,
             active_turn=False,
-            run_follow_up=run_follow_up,
-            now=lambda: at,
+            run_follow_up=_busy_five_times,
+            now=lambda at=at: at,
         )
+        row = await _read(db_session_factory, request.idempotency_key)
+        if tail < 5:
+            assert row.status == "pending" and row.attempts == 0, "a busy wait is refunded"
+            assert row.available_at is None, "a handoff still waits for the next turn tail"
 
-    await _dispatch(_busy_follow_up, now)
-    released = await _read(db_session_factory, request.idempotency_key)
-    assert released.status == "pending", "the claimed row must not be left claimed"
-    assert released.available_at == now + WAKE_RETRY_DELAY
-    assert released.started_at is None
-
-    calls, run_follow_up = _recorder()
-    await _dispatch(run_follow_up, now + WAKE_RETRY_DELAY + timedelta(seconds=1))
-    assert [seed for _row, seed in calls] == ["please pick up the migration"]
-    delivered = await _read(db_session_factory, request.idempotency_key)
-    assert delivered.status == "delivered" and delivered.attempts == 2
+    assert delivered == ["please pick up the migration"]
+    row = await _read(db_session_factory, request.idempotency_key)
+    assert row.status == "delivered" and row.attempts == 1
+    pending = await list_pending_continuations(
+        db_session, tenant_id=request.tenant_id, platform="slack", thread_id=thread_id
+    )
+    assert pending == [], "no second row is ever queued"
 
 
 async def test_process_death_before_the_fence_is_retried_after_lease_expiry(

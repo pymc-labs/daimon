@@ -42,6 +42,7 @@ from daimon.core.stores.task_continuations import (
     abandon_interrupted_wake_rows,
     cancel_wake_row,
     claim_wake_row,
+    defer_wake_rows,
     list_dispatchable_continuations,
     list_due_wake_rows,
     record_continuation,
@@ -61,10 +62,12 @@ __all__ = [
     "WAKE_POLL_INTERVAL_S",
     "WAKE_RETRY_DELAY",
     "WAKE_RUN_LEASE",
+    "WAKE_UNAVAILABLE_DELAY",
     "WakeClaim",
     "WakeOpener",
     "WakeThread",
     "abandon_interrupted_wakes",
+    "busy_retry_at",
     "cancel_wake",
     "claim_wake",
     "enqueue_wake",
@@ -86,13 +89,18 @@ WAKE_CLAIM_LEASE: Final[timedelta] = timedelta(minutes=5)
 #: settle write. After this a started row is `interrupted`, never re-run.
 WAKE_RUN_LEASE: Final[timedelta] = timedelta(seconds=TURN_CEILING_S) + timedelta(minutes=5)
 
-#: Claims per row before it settles `attempts_exhausted`. Counts takeovers and
-#: releases alike, so a row that keeps killing its process stops eventually.
+#: Claims per row before it settles `attempts_exhausted`. Only claims that were
+#: lost to a crash count (a release refunds its claim), so a row that keeps
+#: killing its process stops eventually while a busy thread can wait forever.
 WAKE_MAX_ATTEMPTS: Final[int] = 5
 
 #: How far a released wake is pushed back — long enough for the turn that
 #: blocked it to finish.
 WAKE_RETRY_DELAY: Final[timedelta] = timedelta(seconds=30)
+
+#: How far a thread the adapter could not open is pushed back, so the poll
+#: moves on to other threads instead of offering the same ones every time.
+WAKE_UNAVAILABLE_DELAY: Final[timedelta] = timedelta(minutes=5)
 
 WAKE_POLL_INTERVAL_S: Final[float] = 15.0
 
@@ -127,10 +135,12 @@ class WakeThread(BaseModel):
 
 #: The adapter hook: start the adapter's continuation dispatch in this thread.
 #: Should spawn the dispatch and return, so one long turn does not hold up the
-#: poll; the dispatch must take the thread's turn guard. A thread that is gone
-#: goes to `skip_thread_wakes`; a transient failure just returns, and the rows
-#: are offered again next poll.
-WakeOpener = Callable[[WakeThread], Awaitable[None]]
+#: poll; the dispatch must take the thread's turn guard. Returns True when the
+#: dispatch was started (or the thread was settled with `skip_thread_wakes`
+#: because it is gone), False when the thread could not be opened this time —
+#: no token, archived workspace, a platform error. A False (or a raise) pushes
+#: the thread's rows back by `WAKE_UNAVAILABLE_DELAY`.
+WakeOpener = Callable[[WakeThread], Awaitable[bool]]
 
 
 async def enqueue_wake(
@@ -232,23 +242,39 @@ async def release_wake(
     sessionmaker: async_sessionmaker[AsyncSession],
     claim: WakeClaim,
     *,
-    now: datetime,
-    retry_after: timedelta = WAKE_RETRY_DELAY,
-) -> Literal["pending", "skipped"] | None:
+    retry_at: datetime | None,
+) -> bool:
     """Hand a claim back when the caller KNOWS its turn did not run.
 
     The thread was busy, the session could not be bound: the row goes back to
-    `pending` for `now + retry_after` and the poller picks it up then. After
-    `WAKE_MAX_ATTEMPTS` claims it settles `skipped/attempts_exhausted` instead.
+    `pending` and the claim is refunded, so waiting never counts against
+    `WAKE_MAX_ATTEMPTS`. `retry_at` is when a wake is offered again; None
+    leaves `available_at` alone, which keeps a handoff (NULL) waiting for the
+    next turn in its thread, as it did before the wake queue. False when the
+    claim had already been lost.
     """
     async with sessionmaker.begin() as session:
         return await release_wake_row(
             session,
             idempotency_key=claim.idempotency_key,
             owner=claim.owner,
-            retry_at=now + retry_after,
-            max_attempts=WAKE_MAX_ATTEMPTS,
+            retry_at=retry_at,
         )
+
+
+def busy_retry_at(
+    row: TaskContinuationRow, *, now: datetime, not_before: datetime | None = None
+) -> datetime | None:
+    """When a row released because its thread was busy is offered again.
+
+    A wake is retried by the poller after `WAKE_RETRY_DELAY`, or at the busy
+    session's own `retry_after` (`not_before`) if that is later. A handoff (no
+    `available_at`) keeps waiting for the next turn in its thread.
+    """
+    if row.available_at is None:
+        return None
+    retry_at = now + WAKE_RETRY_DELAY
+    return retry_at if not_before is None else max(retry_at, not_before)
 
 
 async def cancel_wake(
@@ -371,17 +397,33 @@ async def poll_wakes_once(
 ) -> int:
     """One poll: settle what must not re-run, then open every thread with due work.
 
-    Returns how many threads were opened. An opener that raises is logged and
-    does not stop the others; its rows are still claimable next poll.
+    Returns how many threads were opened. A thread whose opener returns False
+    or raises is pushed back by `WAKE_UNAVAILABLE_DELAY`, so the next poll's
+    batch reaches threads behind it; its rows are retried after that.
     """
     await abandon_interrupted_wakes(sessionmaker, platform=platform, now=now)
     threads = await list_due_wake_threads(sessionmaker, platform=platform, now=now)
+    opened = 0
     for thread in threads:
         try:
-            await open_thread(thread)
+            ok = await open_thread(thread)
         except Exception:
             log.exception("wake.open_thread_failed", thread_id=thread.thread_id)
-    return len(threads)
+            ok = False
+        if ok:
+            opened += 1
+            continue
+        async with sessionmaker.begin() as session:
+            await defer_wake_rows(
+                session,
+                tenant_id=thread.tenant_id,
+                platform=platform,
+                thread_id=thread.thread_id,
+                now=now,
+                retry_at=now + WAKE_UNAVAILABLE_DELAY,
+                max_attempts=WAKE_MAX_ATTEMPTS,
+            )
+    return opened
 
 
 async def run_wake_poller(

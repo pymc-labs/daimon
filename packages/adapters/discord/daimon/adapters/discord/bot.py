@@ -1572,16 +1572,17 @@ class DaimonBot(commands.Bot):
         finally:
             self._release_thread(thread.id)
 
-    async def _open_wake_thread(self, wake: WakeThread) -> None:
+    async def _open_wake_thread(self, wake: WakeThread) -> bool:
         """The wake poller's hook: dispatch a thread's due wakes, spawned.
 
         Goes through `dispatch_continuations_in_thread`, so a wake takes the
         same per-thread guard and the same admit -> bind -> run path as any
         continuation. A thread Discord says is gone or forbidden has its wakes
-        settled; any other failure leaves them for the next poll.
+        settled; any other failure returns False and the poller pushes the
+        thread back. While draining, the rows are left for the next process.
         """
         if self.draining:
-            return
+            return True
         try:
             channel = self.get_channel(int(wake.thread_id)) or await self.fetch_channel(
                 int(wake.thread_id)
@@ -1590,7 +1591,7 @@ class DaimonBot(commands.Bot):
             channel = None
         except discord.HTTPException as exc:
             log.warning("wake.thread_fetch_failed", thread_id=wake.thread_id, error=str(exc))
-            return
+            return False
         if not isinstance(channel, discord.Thread):
             await skip_thread_wakes(
                 self.runtime.sessionmaker,
@@ -1598,12 +1599,13 @@ class DaimonBot(commands.Bot):
                 reason="thread_unavailable",
                 now=datetime.now(UTC),
             )
-            return
+            return True
         self._spawn(
             self.dispatch_continuations_in_thread(
                 tenant_id=wake.tenant_id, thread=channel, guild_id=str(channel.guild.id)
             )
         )
+        return True
 
     def _release_thread(self, thread_id: int) -> None:
         """Free the thread's `_processing` slot; re-run a dispatch it skipped.

@@ -116,7 +116,7 @@ finite transition behavior.
 `WakeLease.tla` models the leased protocol in
 [`wakes.py`](../../packages/core/daimon/core/continuity/wakes.py): one row, two
 dispatchers, a lease that can expire at any moment (including under a live,
-slow owner), at most two crashes and three attempts.
+slow owner), at most two crashes, two busy releases and three attempts.
 
 | Model item | Implementation |
 | --- | --- |
@@ -124,16 +124,16 @@ slow owner), at most two crashes and three attempts.
 | `Start` / `StartLost` | `start_wake_row`: owner-guarded, commits `started_at` |
 | `Effect`, `Settle` | `run_follow_up`, then owner-guarded `settle_wake_row` in the Discord/Slack dispatchers |
 | `SkipDecided` | a `decide_continuation` skip, settled before any fence |
+| `Release` | `release_wake_row` after `SessionBusyError` (raised at bind, before the turn): owner-only, back to pending, fence cleared, claim refunded |
 | `Expire` | `lease_expires_at` passing; `WAKE_CLAIM_LEASE`, then `WAKE_RUN_LEASE` after the fence |
 | `Abandon` | `abandon_interrupted_wake_rows`, run by every poll |
 
 `WakeLease` is clean for `AtMostOneExternalEffect` and
-`DeliveredHasExternalEffect` (367 distinct states). `WakeLeaseProgress` shows
+`DeliveredHasExternalEffect` (1123 distinct states). `WakeLeaseProgress` shows
 `PendingEventuallySettles` under weak fairness of the dispatcher steps, the
 lease clock and the abandon sweep — the property `ContinuationCrashProgress`
 violates. `WakeLeaseNoFence` lets a takeover ignore the fence, which is
 `ContinuationRecovery`'s blind retry, and TLC finds the duplicate effect
-again (164 distinct states). A release (the owner handing a row back when it
-knows the turn did not run) is not modelled; it is an owner-only write.
+again (234 distinct states).
 
 Checked 2026-09-28 with tla2tools 1.7.4, one worker.

@@ -34,7 +34,9 @@ from daimon.core.continuity.continuation import (
     decide_continuation,
 )
 from daimon.core.continuity.wakes import (
+    WAKE_RETRY_DELAY,
     WakeClaim,
+    busy_retry_at,
     claim_wake,
     list_dispatchable_wakes,
     release_wake,
@@ -85,7 +87,7 @@ async def _dispatch_one(
     claim: WakeClaim,
     thread: discord.Thread,
     run_follow_up: RunFollowUp,
-    now: datetime,
+    now: Callable[[], datetime],
 ) -> None:
     request = ContinuationRequest(
         tenant_id=row.tenant_id,
@@ -115,7 +117,7 @@ async def _dispatch_one(
         sessionmaker,
         anthropic,
         request=request,
-        now=now,
+        now=now(),
         latest_user_message_at=latest_user_message_at,
         active_turn=active_turn,
     )
@@ -123,17 +125,17 @@ async def _dispatch_one(
     if decision.action == "skip_turn_running" and row.available_at is not None:
         # A wake has no person waiting on a reply to be told anything; it
         # simply runs after the turn in progress.
-        await release_wake(sessionmaker, claim, now=now)
+        await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
         return
     if decision.action != "dispatch":
         if decision.message is not None:
             await thread.send(decision.message)
         await settle_wake(
-            sessionmaker, claim, status="skipped", now=now, skip_reason=decision.action
+            sessionmaker, claim, status="skipped", now=now(), skip_reason=decision.action
         )
         return
 
-    if not await start_wake(sessionmaker, claim, now=now):
+    if not await start_wake(sessionmaker, claim, now=now()):
         # Another dispatcher took the row over while this one was deciding.
         return
     try:
@@ -144,7 +146,7 @@ async def _dispatch_one(
             sessionmaker,
             claim,
             status="skipped",
-            now=now,
+            now=now(),
             skip_reason="blocked_preparation_failed",
         )
         return
@@ -156,27 +158,31 @@ async def _dispatch_one(
             sessionmaker,
             claim,
             status="skipped",
-            now=now,
+            now=now(),
             skip_reason=f"admission_denied:{exc.reason}",
         )
         return
-    except SessionBusyError:
+    except SessionBusyError as busy:
         # Same outcome as `skip_turn_running`, reached one step later: a turn
         # was still running in this thread when the follow-up tried to bind, so
         # the destination could not take the session over. Nothing ran, so the
-        # SAME row goes back to pending a little later and the wake poller
-        # retries it; at-most-once still holds because only a claim can run it.
+        # SAME row goes back to pending with its claim refunded: a handoff
+        # waits for the next turn in this thread, as it always has; a wake is
+        # retried by the poller shortly. Only a claim can run it, so
+        # at-most-once holds, and waiting never uses up the crash budget.
         log.warning("continuation.dispatch_turn_running", thread_id=row.thread_id)
-        await release_wake(sessionmaker, claim, now=now)
+        await release_wake(
+            sessionmaker, claim, retry_at=busy_retry_at(row, now=now(), not_before=busy.retry_after)
+        )
         return
     except (DaimonError, _anthropic.APIError, discord.HTTPException) as exc:
         log.warning("continuation.dispatch_failed", thread_id=row.thread_id, error=str(exc))
         await settle_wake(
-            sessionmaker, claim, status="skipped", now=now, skip_reason="dispatch_failed"
+            sessionmaker, claim, status="skipped", now=now(), skip_reason="dispatch_failed"
         )
         return
 
-    await settle_wake(sessionmaker, claim, status="delivered", now=now)
+    await settle_wake(sessionmaker, claim, status="delivered", now=now())
 
 
 async def dispatch_pending_continuations(
@@ -186,7 +192,7 @@ async def dispatch_pending_continuations(
     tenant_id: uuid.UUID,
     thread: discord.Thread,
     run_follow_up: RunFollowUp,
-    now: datetime | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
     """Claim and run every continuation or due wake `thread` may run now.
 
@@ -196,19 +202,21 @@ async def dispatch_pending_continuations(
     it and this one does nothing), decided (`decide_continuation`), and either
     fenced and dispatched via `run_follow_up` or settled as skipped with the
     decision's own copy.
+
+    `now` is a clock, read afresh for every claim, start, settle and release:
+    a row dispatched after a long turn for the row before it must not be
+    stamped with a time from before that turn (its lease would be born
+    expired). Tests inject a fixed or stepping clock.
     """
-    effective_now = now if now is not None else datetime.now(UTC)
     pending = await list_dispatchable_wakes(
         sessionmaker,
         tenant_id=tenant_id,
         platform="discord",
         thread_id=str(thread.id),
-        now=effective_now,
+        now=now(),
     )
     for row in pending:
-        claim = await claim_wake(
-            sessionmaker, idempotency_key=row.idempotency_key, now=effective_now
-        )
+        claim = await claim_wake(sessionmaker, idempotency_key=row.idempotency_key, now=now())
         if claim is None:
             continue
         await _dispatch_one(
@@ -218,5 +226,5 @@ async def dispatch_pending_continuations(
             claim=claim,
             thread=thread,
             run_follow_up=run_follow_up,
-            now=effective_now,
+            now=now,
         )

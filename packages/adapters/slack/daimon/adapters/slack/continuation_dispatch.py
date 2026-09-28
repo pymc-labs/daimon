@@ -32,6 +32,8 @@ from daimon.core.continuity.continuation import (
     decide_continuation,
 )
 from daimon.core.continuity.wakes import (
+    WAKE_RETRY_DELAY,
+    busy_retry_at,
     claim_wake,
     list_dispatchable_wakes,
     release_wake,
@@ -116,7 +118,7 @@ async def dispatch_pending_continuations(
     (`start_wake`) before `run_follow_up`. A dispatch settles `delivered` only
     after `run_follow_up` returns without raising; a preparation failure
     settles `skipped`/`blocked_preparation_failed`, a thread whose previous
-    turn is still running releases the row back to pending for a later retry,
+    turn is still running releases the row back to pending (claim refunded),
     and any other boundary error settles `skipped`/`dispatch_failed`. A process
     that dies holding a claim leaves it to the lease: retried if it never
     started, settled `interrupted` if it had.
@@ -157,7 +159,7 @@ async def dispatch_pending_continuations(
         if decision.action == "skip_turn_running" and row.available_at is not None:
             # A wake has no person waiting on a reply to be told anything; it
             # simply runs after the turn in progress.
-            await release_wake(sessionmaker, claim, now=now())
+            await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
             continue
 
         if decision.action == "dispatch":
@@ -197,15 +199,20 @@ async def dispatch_pending_continuations(
                     skip_reason=f"admission_denied:{exc.reason}",
                 )
                 continue
-            except SessionBusyError:
+            except SessionBusyError as busy:
                 # Same outcome as `skip_turn_running`, reached one step later:
                 # a turn was still running in this thread when the follow-up
                 # tried to bind, so the destination could not take the session
-                # over. Nothing ran, so the SAME row goes back to pending a
-                # little later and the wake poller retries it; at-most-once
-                # still holds because only a claim can run it.
+                # over. Nothing ran, so the SAME row goes back to pending with
+                # its claim refunded: a handoff waits for the next turn in this
+                # thread, as it always has; a wake is retried by the poller
+                # shortly. Waiting never uses up the crash budget.
                 log.warning("slack.continuation.dispatch_turn_running", row_id=str(row.id))
-                await release_wake(sessionmaker, claim, now=now())
+                await release_wake(
+                    sessionmaker,
+                    claim,
+                    retry_at=busy_retry_at(row, now=now(), not_before=busy.retry_after),
+                )
                 continue
             except (DaimonError, anthropic_pkg.APIError, SlackApiError) as exc:
                 log.warning(

@@ -13,11 +13,16 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
+from daimon.core.continuity.continuation import (
+    ContinuationRequest,
+    claim_continuation,
+    record_continuation,
+)
 from daimon.core.continuity.wakes import (
     WAKE_CLAIM_LEASE,
     WAKE_MAX_ATTEMPTS,
     WAKE_RUN_LEASE,
+    WAKE_UNAVAILABLE_DELAY,
     WakeThread,
     abandon_interrupted_wakes,
     cancel_wake,
@@ -31,7 +36,7 @@ from daimon.core.continuity.wakes import (
     start_wake,
 )
 from daimon.core.stores.domain import TaskContinuationRow
-from daimon.core.stores.task_continuations import get_continuation
+from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -145,7 +150,41 @@ async def test_an_expired_unstarted_claim_is_retried_and_a_started_one_is_not(
     assert row.status == "skipped" and row.skip_reason == "interrupted"
 
 
-async def test_release_gives_the_row_back_until_attempts_run_out(
+async def test_a_release_refunds_its_claim_so_waiting_never_exhausts_the_row(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    request = _request(await _tenant(db_session_factory))
+    await enqueue_wake(db_session_factory, request, available_at=_NOW)
+
+    at = _NOW
+    for _ in range(WAKE_MAX_ATTEMPTS * 3):
+        claim = await claim_wake(
+            db_session_factory, idempotency_key=request.idempotency_key, now=at
+        )
+        assert claim is not None and claim.attempts == 1
+        assert await start_wake(db_session_factory, claim, now=at)
+        at = at + timedelta(minutes=1)
+        assert await release_wake(db_session_factory, claim, retry_at=at)
+        row = await _read(db_session_factory, request.idempotency_key)
+        assert row.status == "pending" and row.attempts == 0 and row.started_at is None
+        assert row.available_at == at
+
+
+async def test_a_handoff_release_without_retry_at_keeps_waiting_for_a_turn_tail(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    request = _request(await _tenant(db_session_factory))
+    await record_continuation(db_session_factory, request)
+    claim = await claim_wake(db_session_factory, idempotency_key=request.idempotency_key, now=_NOW)
+    assert claim is not None
+
+    assert await release_wake(db_session_factory, claim, retry_at=None)
+    row = await _read(db_session_factory, request.idempotency_key)
+    assert row.status == "pending" and row.available_at is None
+    assert await list_due_wake_threads(db_session_factory, platform="discord", now=_NOW) == []
+
+
+async def test_crashed_claims_exhaust_the_row_after_max_attempts(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     request = _request(await _tenant(db_session_factory))
@@ -157,15 +196,36 @@ async def test_release_gives_the_row_back_until_attempts_run_out(
             db_session_factory, idempotency_key=request.idempotency_key, now=at
         )
         assert claim is not None and claim.attempts == attempt
-        assert await start_wake(db_session_factory, claim, now=at)
-        outcome = await release_wake(db_session_factory, claim, now=at)
-        at = at + timedelta(minutes=1)
-        if attempt < WAKE_MAX_ATTEMPTS:
-            assert outcome == "pending"
-            assert (await _read(db_session_factory, request.idempotency_key)).started_at is None
-    assert outcome == "skipped"
+        at = at + WAKE_CLAIM_LEASE + timedelta(seconds=1)  # the holder died; lease runs out
+    assert (
+        await claim_wake(db_session_factory, idempotency_key=request.idempotency_key, now=at)
+        is None
+    )
+    await abandon_interrupted_wakes(db_session_factory, platform="discord", now=at)
     row = await _read(db_session_factory, request.idempotency_key)
     assert row.status == "skipped" and row.skip_reason == "attempts_exhausted"
+
+
+async def test_legacy_claim_and_list_never_hand_out_a_future_wake(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An adapter still on the pre-queue API cannot run a scheduled wake early."""
+    tenant_id = await _tenant(db_session_factory)
+    request = _request(tenant_id)
+    tomorrow = datetime.now(UTC) + timedelta(days=1)
+    await enqueue_wake(db_session_factory, request, available_at=tomorrow)
+
+    async with db_session_factory() as session:
+        listed = await list_pending_continuations(
+            session, tenant_id=tenant_id, platform="discord", thread_id="thread-1"
+        )
+    assert listed == []
+    assert not await claim_continuation(
+        db_session_factory, idempotency_key=request.idempotency_key, now=datetime.now(UTC)
+    )
+    assert await claim_continuation(
+        db_session_factory, idempotency_key=request.idempotency_key, now=tomorrow
+    )
 
 
 async def test_a_cancelled_wake_can_never_be_claimed(
@@ -229,7 +289,7 @@ async def test_skip_thread_wakes_settles_every_due_wake_in_the_thread(
     assert (await _read(db_session_factory, later.idempotency_key)).status == "pending"
 
 
-async def test_poll_opens_each_due_thread_once_and_survives_a_failing_opener(
+async def test_poll_opens_each_due_thread_once_and_defers_a_failing_opener(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = await _tenant(db_session_factory)
@@ -239,16 +299,73 @@ async def test_poll_opens_each_due_thread_once_and_survives_a_failing_opener(
         )
     opened: list[str] = []
 
-    async def _open(thread: WakeThread) -> None:
+    async def _open(thread: WakeThread) -> bool:
         opened.append(thread.thread_id)
         if thread.thread_id == "thread-a":
             raise RuntimeError("platform down")
+        return True
 
     count = await poll_wakes_once(
         db_session_factory, platform="discord", open_thread=_open, now=_NOW
     )
-    assert count == 2
+    assert count == 1
     assert sorted(opened) == ["thread-a", "thread-b"]
+    due = await list_due_wake_threads(db_session_factory, platform="discord", now=_NOW)
+    assert [t.thread_id for t in due] == ["thread-b"], "the failed thread is pushed back"
+    later = _NOW + WAKE_UNAVAILABLE_DELAY
+    due = await list_due_wake_threads(db_session_factory, platform="discord", now=later)
+    assert sorted(t.thread_id for t in due) == ["thread-a", "thread-b"]
+
+
+async def test_a_thread_with_many_rows_takes_one_slot_in_the_batch(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _tenant(db_session_factory)
+    for _ in range(150):
+        await enqueue_wake(
+            db_session_factory, _request(tenant_id, thread_id="busy"), available_at=_NOW
+        )
+    await enqueue_wake(
+        db_session_factory, _request(tenant_id, thread_id="quiet"), available_at=_NOW
+    )
+
+    due = await list_due_wake_threads(db_session_factory, platform="discord", now=_NOW)
+    assert sorted(t.thread_id for t in due) == ["busy", "quiet"]
+
+
+async def test_unopenable_threads_do_not_starve_the_101st(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """100 threads the adapter cannot open (no token, archived) ahead of a healthy one.
+
+    Each poll offers at most 100 threads, oldest first. The unavailable ones
+    are pushed back, so the very next poll reaches thread 101.
+    """
+    tenant_id = await _tenant(db_session_factory)
+    dead_keys: list[uuid.UUID] = []
+    for n in range(100):
+        dead = _request(tenant_id, thread_id=f"dead-{n:03d}")
+        dead_keys.append(dead.idempotency_key)
+        await enqueue_wake(db_session_factory, dead, available_at=_NOW - timedelta(minutes=10))
+    healthy = _request(tenant_id, thread_id="healthy")
+    await enqueue_wake(db_session_factory, healthy, available_at=_NOW)
+    reached: list[str] = []
+
+    async def _open(thread: WakeThread) -> bool:
+        if thread.thread_id.startswith("dead-"):
+            return False
+        reached.append(thread.thread_id)
+        return True
+
+    await poll_wakes_once(db_session_factory, platform="discord", open_thread=_open, now=_NOW)
+    assert reached == [], "the first batch is the 100 older, unopenable threads"
+    await poll_wakes_once(
+        db_session_factory, platform="discord", open_thread=_open, now=_NOW + timedelta(seconds=15)
+    )
+    assert reached == ["healthy"], "the next poll reaches row 101"
+    deferred = await _read(db_session_factory, dead_keys[0])
+    assert deferred.status == "pending", "unopenable threads are deferred, never dropped"
+    assert deferred.available_at == _NOW + WAKE_UNAVAILABLE_DELAY
 
 
 def _concurrency_dsn() -> str:
@@ -284,14 +401,15 @@ async def test_a_wake_survives_a_restart_and_two_pollers_run_it_exactly_once() -
     try:
 
         def _opener(factory: async_sessionmaker[AsyncSession], name: str):
-            async def _open(thread: WakeThread) -> None:
+            async def _open(thread: WakeThread) -> bool:
                 if thread.thread_id != request.thread_id:
-                    return
+                    return True
                 claim = await claim_wake(factory, idempotency_key=request.idempotency_key, now=_NOW)
                 if claim is None or not await start_wake(factory, claim, now=_NOW):
-                    return
+                    return True
                 turns.append(name)
                 await settle_wake(factory, claim, status="delivered", now=_NOW)
+                return True
 
             return _open
 

@@ -294,9 +294,22 @@ against.
   A claim holds a lease, and `started_at` is committed just before the turn
   starts. If a claim's lease expires before `started_at` is set, the wake is
   retried. If it expires after, the wake is settled `interrupted` and never
-  run again (`formal/continuation/WakeLease.tla`). An adapter that starts no
-  poller leaves its wakes pending. The scheduler process has no platform
-  client, so it never runs wakes.
+  run again (`formal/continuation/WakeLease.tla`). Waiting on a busy thread
+  refunds the claim, so it never counts against the crash budget
+  (`WAKE_MAX_ATTEMPTS`). A thread the adapter cannot open (no token,
+  archived workspace, platform error) is pushed back five minutes, so it
+  cannot hold up other threads. An adapter that starts no poller leaves its
+  wakes pending. The scheduler process has no platform client, so it never
+  runs wakes.
+
+  **Rollout order.** Migration `0028_feat003_wake_queue` first, then every
+  Discord and Slack adapter process, and only then anything that enqueues
+  wakes (timers). The pre-queue claim and list calls in the store skip rows
+  whose `available_at` is in the future. But an adapter binary built before
+  this change dispatches without leases or fences, and never polls, so its
+  wakes would only run at a turn tail. Downgrading the migration settles
+  every scheduled wake that has not run as `skipped/downgraded`, so none of
+  them runs early.
 
 If you add another, reuse `admit()` rather than re-deriving the gate order.
 

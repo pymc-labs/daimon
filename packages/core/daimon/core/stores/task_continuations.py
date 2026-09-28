@@ -24,7 +24,7 @@ from typing import Literal
 
 from daimon.core._models import TaskContinuation
 from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -87,7 +87,8 @@ async def claim_continuation(
     `'claimed'` and matches nothing. Exactly one caller sees True, so exactly
     one turn is ever dispatched — a restart mid-dispatch cannot double-post.
 
-    A True return means the caller now owns the row and must settle it.
+    A True return means the caller now owns the row and must settle it. A
+    wake that is not due yet (`available_at` in the future) is never claimable.
     """
     claimed = (
         await session.execute(
@@ -95,6 +96,7 @@ async def claim_continuation(
             .where(
                 TaskContinuation.idempotency_key == idempotency_key,
                 TaskContinuation.status == "pending",
+                or_(TaskContinuation.available_at.is_(None), TaskContinuation.available_at <= now),
             )
             .values(status="claimed", claimed_at=now)
             .returning(TaskContinuation.id)
@@ -148,7 +150,12 @@ async def list_pending_continuations(
     platform: str,
     thread_id: str,
 ) -> list[TaskContinuationRow]:
-    """Undispatched continuations for one thread, oldest first."""
+    """Undispatched continuations for one thread that are due now, oldest first.
+
+    A wake scheduled for later (`available_at` in the future, by the database
+    clock) is left out, so a caller that predates the wake queue can never
+    run it early.
+    """
     rows = (
         await session.execute(
             select(TaskContinuation)
@@ -157,6 +164,10 @@ async def list_pending_continuations(
                 TaskContinuation.platform == platform,
                 TaskContinuation.thread_id == thread_id,
                 TaskContinuation.status == "pending",
+                or_(
+                    TaskContinuation.available_at.is_(None),
+                    TaskContinuation.available_at <= func.now(),
+                ),
             )
             .order_by(TaskContinuation.created_at, TaskContinuation.id)
         )
@@ -292,47 +303,41 @@ async def release_wake_row(
     *,
     idempotency_key: _uuid.UUID,
     owner: str,
-    retry_at: datetime,
-    max_attempts: int,
-) -> Literal["pending", "skipped"] | None:
-    """Hand a claim back for a later attempt, or give up once attempts run out.
+    retry_at: datetime | None,
+) -> bool:
+    """Hand a claim back because its turn could not run yet; False if the claim was lost.
 
     Only the owner may release, and only when it knows the turn did not run —
-    which is why this clears `started_at` where a takeover never could. Returns
-    the status the row ended in, or None when the owner had lost the claim.
+    which is why this clears `started_at` where a takeover never could. A
+    release is a deferral, not a failed attempt: the claim it took is refunded,
+    so a thread that stays busy for a long time never uses up the budget that
+    is kept for crashes. `retry_at=None` keeps the row's `available_at` as it
+    is, so a handoff (NULL) waits for the next turn in its thread exactly as it
+    always did; a wake passes the instant to retry at.
     """
-    row = (
+    values: dict[str, object] = {
+        "status": "pending",
+        "lease_owner": None,
+        "lease_expires_at": None,
+        "started_at": None,
+        "attempts": TaskContinuation.attempts - 1,
+    }
+    if retry_at is not None:
+        values["available_at"] = retry_at
+    released = (
         await session.execute(
-            select(TaskContinuation.attempts)
+            update(TaskContinuation)
             .where(
                 TaskContinuation.idempotency_key == idempotency_key,
                 TaskContinuation.status == "claimed",
                 TaskContinuation.lease_owner == owner,
             )
-            .with_for_update()
+            .values(**values)
+            .returning(TaskContinuation.id)
         )
     ).scalar_one_or_none()
-    if row is None:
-        return None
-    exhausted = row >= max_attempts
-    values: dict[str, object] = (
-        {"status": "skipped", "skip_reason": "attempts_exhausted", "lease_expires_at": None}
-        if exhausted
-        else {
-            "status": "pending",
-            "available_at": retry_at,
-            "lease_owner": None,
-            "lease_expires_at": None,
-            "started_at": None,
-        }
-    )
-    await session.execute(
-        update(TaskContinuation)
-        .where(TaskContinuation.idempotency_key == idempotency_key)
-        .values(**values)
-    )
     await session.flush()
-    return "skipped" if exhausted else "pending"
+    return released is not None
 
 
 async def cancel_wake_row(
@@ -395,28 +400,88 @@ async def list_due_wake_rows(
     max_attempts: int,
     limit: int,
 ) -> list[TaskContinuationRow]:
-    """Rows a poller should act on: due wakes, and claims to take over.
+    """The oldest actionable row of up to `limit` threads, longest-waiting thread first.
 
-    A pending row with no `available_at` is left to the next turn in its
-    thread, as it always was; an expired unstarted claim is taken over
-    whatever its origin, since that is the only way it would ever settle.
+    Actionable: a due wake, or a claim to take over. A pending row with no
+    `available_at` is left to the next turn in its thread, as it always was;
+    an expired unstarted claim is taken over whatever its origin, since that
+    is the only way it would ever settle. One row per thread, so a thread with
+    many rows cannot crowd the others out of the batch; a thread the adapter
+    could not open is pushed back (`defer_wake_rows`), so the scan moves on.
     """
+    actionable = and_(
+        TaskContinuation.platform == platform,
+        _dispatchable(now, max_attempts=max_attempts),
+        or_(
+            TaskContinuation.status == "claimed",
+            TaskContinuation.available_at.is_not(None),
+        ),
+    )
+    first_per_thread = (
+        select(TaskContinuation.id)
+        .where(actionable)
+        .distinct(TaskContinuation.tenant_id, TaskContinuation.thread_id)
+        .order_by(
+            TaskContinuation.tenant_id,
+            TaskContinuation.thread_id,
+            TaskContinuation.available_at.nulls_first(),
+            TaskContinuation.id,
+        )
+        .subquery()
+    )
     rows = (
         await session.execute(
             select(TaskContinuation)
+            .where(TaskContinuation.id.in_(select(first_per_thread.c.id)))
+            .order_by(TaskContinuation.available_at.nulls_first(), TaskContinuation.id)
+            .limit(limit)
+        )
+    ).scalars()
+    return [TaskContinuationRow.model_validate(row) for row in rows]
+
+
+async def defer_wake_rows(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+    now: datetime,
+    retry_at: datetime,
+    max_attempts: int,
+) -> int:
+    """Push a thread's actionable rows back to `retry_at`; how many moved.
+
+    For a thread the adapter could not open this poll (no token, workspace
+    archived, platform error). Nothing ran, so an expired unstarted claim goes
+    back to pending too, without spending an attempt. Rows are not skipped:
+    the thread may come back.
+    """
+    moved = (
+        await session.execute(
+            update(TaskContinuation)
             .where(
+                TaskContinuation.tenant_id == tenant_id,
                 TaskContinuation.platform == platform,
+                TaskContinuation.thread_id == thread_id,
                 _dispatchable(now, max_attempts=max_attempts),
                 or_(
                     TaskContinuation.status == "claimed",
                     TaskContinuation.available_at.is_not(None),
                 ),
             )
-            .order_by(TaskContinuation.available_at.nulls_first(), TaskContinuation.id)
-            .limit(limit)
+            .values(
+                status="pending",
+                available_at=retry_at,
+                lease_owner=None,
+                lease_expires_at=None,
+            )
+            .returning(TaskContinuation.id)
         )
     ).scalars()
-    return [TaskContinuationRow.model_validate(row) for row in rows]
+    count = len(list(moved))
+    await session.flush()
+    return count
 
 
 async def abandon_interrupted_wake_rows(

@@ -325,23 +325,24 @@ class SlackApp:
             )
         )
 
-    async def _open_wake_thread(self, wake: WakeThread) -> None:
+    async def _open_wake_thread(self, wake: WakeThread) -> bool:
         """The wake poller's hook: dispatch a thread's due wakes, spawned.
 
         Goes through `dispatch_continuations_in_thread`, so a wake takes the
         same per-thread guard and the same admit -> bind -> run path as any
-        continuation. A workspace with no stored bot token is skipped this
-        poll; the rows wait for it to be reinstalled.
+        continuation. A workspace that is archived or has no stored bot token
+        returns False, and the poller pushes its rows back rather than
+        offering them every poll; they run if the workspace comes back.
         """
         if self.draining:
-            return
+            return True
         async with self.runtime.sessionmaker() as session:
             tenant = await get_tenant(session, wake.tenant_id)
         if tenant is None or tenant.archived_at is not None:
-            return
+            return False
         web_client = await resolve_web_client(self.runtime, team_id=tenant.external_id)
         if web_client is None:
-            return
+            return False
         self._spawn(
             self.dispatch_continuations_in_thread(
                 web_client=web_client,
@@ -352,6 +353,7 @@ class SlackApp:
                 team_id=tenant.external_id,
             )
         )
+        return True
 
     async def _recover_orphaned_turns(self) -> None:
         delay_s = _ORPHAN_RECOVERY_RETRY_DELAY_S
