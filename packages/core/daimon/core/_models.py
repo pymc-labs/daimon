@@ -1972,6 +1972,7 @@ class TurnOutcome(Base):
     unpriced_calls: Mapped[int | None] = mapped_column(Integer)
     billing_posture: Mapped[str | None] = mapped_column(Text)
 
+
 class SecurityAuditEvent(Base):
     """Append-only security metadata with dedicated erasure and retention maintenance."""
 

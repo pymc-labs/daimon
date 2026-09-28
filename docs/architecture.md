@@ -614,6 +614,7 @@ observes billed and exempt spans without changing metering; natural
 The operator command `daimon usage turns` queries tenant-scoped rows and channel /
 origin summaries without upstream requests. See [billing](billing.md#per-turn-usage-telemetry)
 for unknown-cost and historical-row semantics.
+
 ### Security audit trail
 
 Authenticated requests through the main JWT MCP application (`tools/call` and
