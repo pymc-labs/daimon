@@ -1838,11 +1838,17 @@ class SessionPreparation(Base):
 
 
 class TaskContinuation(Base):
-    """A queued first turn for an agent a task was just handed to.
+    """A queued turn owed to a thread: a handoff's first turn, or a later wake.
 
     `idempotency_key` plus the `status` ladder is the at-most-once guarantee:
     a dispatcher claims a row with a single conditional UPDATE, so a restart
     mid-dispatch can never post the same continuation twice.
+
+    The lease columns make it a durable wake queue (`daimon.core.continuity.
+    wakes`): a claim carries an owner and an expiry, and `started_at` is the
+    fence committed just before the turn begins. An expired claim is retried
+    only while `started_at` is NULL; once it is set, nobody can tell whether
+    the turn ran, so the row is settled instead of run again.
     """
 
     __tablename__ = "task_continuations"
@@ -1852,7 +1858,7 @@ class TaskContinuation(Base):
             name="ck_task_continuations_reason",
         ),
         CheckConstraint(
-            "status IN ('pending', 'claimed', 'delivered', 'skipped')",
+            "status IN ('pending', 'claimed', 'delivered', 'skipped', 'cancelled')",
             name="ck_task_continuations_status",
         ),
         UniqueConstraint("idempotency_key", name="uq_task_continuations_idempotency_key"),
@@ -1862,6 +1868,13 @@ class TaskContinuation(Base):
             "platform",
             "thread_id",
             "status",
+        ),
+        Index(
+            "task_continuations_due_idx",
+            "platform",
+            "status",
+            "available_at",
+            postgresql_where=text("available_at IS NOT NULL"),
         ),
     )
 
@@ -1890,3 +1903,12 @@ class TaskContinuation(Base):
     )
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # NULL: dispatched only at the tail of the next turn in the thread (a
+    # handoff). Set: also polled, and not claimable before this instant.
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))

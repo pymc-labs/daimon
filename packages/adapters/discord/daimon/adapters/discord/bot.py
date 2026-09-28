@@ -51,6 +51,7 @@ from daimon.core.continuity.messages import (
     render_replacement_summary,
     render_unexpected_loss,
 )
+from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_thread_wakes
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
@@ -369,6 +370,10 @@ class DaimonBot(commands.Bot):
         # From then on every turn entry passes the sweep barrier. Left unset
         # only by unit tests that build a bot without logging it in.
         self._orphan_recovery_armed: bool = False
+        # Set by the process entrypoint, so the wake poller runs in the
+        # deployed bot (started from setup_hook, once login has completed)
+        # and never in a test that drives setup_hook directly.
+        self.wake_poller_enabled: bool = False
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Fire-and-forget a background task, tracked so it isn't GC'd."""
@@ -402,6 +407,15 @@ class DaimonBot(commands.Bot):
     async def setup_hook(self) -> None:
         """Arm orphan recovery and load command Cogs before on_ready syncs the tree."""
         self.start_orphan_recovery()
+        if self.wake_poller_enabled:
+            self._spawn(
+                run_wake_poller(
+                    self.runtime.sessionmaker,
+                    platform="discord",
+                    open_thread=self._open_wake_thread,
+                    should_stop=lambda: self.draining or self.is_closed(),
+                )
+            )
         from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
         from daimon.adapters.discord.commands.billing import BillingCog
         from daimon.adapters.discord.commands.help import HelpCog
@@ -1557,6 +1571,41 @@ class DaimonBot(commands.Bot):
             await self._drain_pending_mentions(thread.id, guild_id, tenant_id)
         finally:
             self._release_thread(thread.id)
+
+    async def _open_wake_thread(self, wake: WakeThread) -> bool:
+        """The wake poller's hook: dispatch a thread's due wakes, spawned.
+
+        Goes through `dispatch_continuations_in_thread`, so a wake takes the
+        same per-thread guard and the same admit -> bind -> run path as any
+        continuation. A thread Discord says is gone or forbidden has its wakes
+        settled; any other failure returns False and the poller pushes the
+        thread back. While draining, the rows are left for the next process.
+        """
+        if self.draining:
+            return True
+        try:
+            channel = self.get_channel(int(wake.thread_id)) or await self.fetch_channel(
+                int(wake.thread_id)
+            )
+        except (discord.NotFound, discord.Forbidden):
+            channel = None
+        except discord.HTTPException as exc:
+            log.warning("wake.thread_fetch_failed", thread_id=wake.thread_id, error=str(exc))
+            return False
+        if not isinstance(channel, discord.Thread):
+            await skip_thread_wakes(
+                self.runtime.sessionmaker,
+                thread=wake,
+                reason="thread_unavailable",
+                now=datetime.now(UTC),
+            )
+            return True
+        self._spawn(
+            self.dispatch_continuations_in_thread(
+                tenant_id=wake.tenant_id, thread=channel, guild_id=str(channel.guild.id)
+            )
+        )
+        return True
 
     def _release_thread(self, thread_id: int) -> None:
         """Free the thread's `_processing` slot; re-run a dispatch it skipped.

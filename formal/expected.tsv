@@ -21,6 +21,9 @@ continuation	ContinuationDispatch	ContinuationDispatch	clean	9	-	at-most-once cl
 continuation	ContinuationDispatch	ContinuationCrashProgress	violates:PendingEventuallySettles	9	-	documented gap: process death after claim strands the continuation
 continuation	ContinuationDispatch	ContinuationProgress	clean	5	-	crash-free progress
 continuation	ContinuationDispatch	ContinuationRecovery	violates:AtMostOneExternalEffect	17	-	hypothetical blind stale-claim retry duplicates the turn
+continuation	WakeLease	WakeLease	clean	1123	-	leased wake queue: two dispatchers, lease expiry under a live owner, bounded crashes and busy releases; the start fence keeps one external effect
+continuation	WakeLease	WakeLeaseProgress	clean	1123	-	liveness: with the lease clock and abandon sweep fair, a pending wake always settles (fixes ContinuationCrashProgress)
+continuation	WakeLease	WakeLeaseNoFence	violates:AtMostOneExternalEffect	234	-	mutation: takeover ignores the start fence (ContinuationRecovery's blind retry) and the turn runs twice
 # ---- adapter recovery ----
 adapter_recovery	AdapterRecovery	AdapterRecovery	clean	4	-	compare-and-clear + recovery before admission
 adapter_recovery	AdapterRecovery	DiscordUnsafe	violates:LiveTurnHasMarker	8	-	pre-fix Discord: blind clear + turn admitted before recovery

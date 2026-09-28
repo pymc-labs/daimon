@@ -283,8 +283,35 @@ against.
 - **`daimon run`**, in
   `packages/adapters/cli/daimon/adapters/cli/run/command.py`, is a single-turn
   subprocess entry point that calls `run_turn` directly with `BillingExempt`.
+- **Wakes** run a turn in an existing thread later, with nobody mentioning the
+  bot: a handoff's first turn for the new agent, work unblocked by a private
+  form, and anything queued through `daimon.core.continuity.wakes`. A wake is
+  a `task_continuations` row. The Discord and Slack adapters each run a wake
+  poller (`run_wake_poller`) that opens threads with due rows and hands them
+  to the adapter's continuation dispatch. That dispatch takes the thread's
+  turn guard and goes through `admit()`, `bind_session()` and
+  `run_prepared_turn()` like a mention, so the balance and cap gates apply.
+  A claim holds a lease, and `started_at` is committed just before the turn
+  starts. If a claim's lease expires before `started_at` is set, the wake is
+  retried. If it expires after, the wake is settled `interrupted` and never
+  run again (`formal/continuation/WakeLease.tla`). Waiting on a busy thread
+  refunds the claim, so it never counts against the crash budget
+  (`WAKE_MAX_ATTEMPTS`). A thread the adapter cannot open (no token,
+  archived workspace, platform error) is pushed back five minutes, so it
+  cannot hold up other threads. An adapter that starts no poller leaves its
+  wakes pending. The scheduler process has no platform client, so it never
+  runs wakes.
 
-If you add a fourth, reuse `admit()` rather than re-deriving the gate order.
+  **Rollout order.** Migration `0028_feat003_wake_queue` first, then every
+  Discord and Slack adapter process, and only then anything that enqueues
+  wakes (timers). The pre-queue claim and list calls in the store skip rows
+  whose `available_at` is in the future. But an adapter binary built before
+  this change dispatches without leases or fences, and never polls, so its
+  wakes would only run at a turn tail. Downgrading the migration settles
+  every scheduled wake that has not run as `skipped/downgraded`, so none of
+  them runs early.
+
+If you add another, reuse `admit()` rather than re-deriving the gate order.
 
 ## Standalone apps
 

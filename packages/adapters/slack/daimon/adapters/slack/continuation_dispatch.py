@@ -2,11 +2,12 @@
 
 A handoff that carried work to continue queues a `task_continuations` row
 (`daimon.core.continuity.continuation`) rather than running a second turn
-inline. This module is the Slack-side caller of that contract: after every
-turn completes, it lists whatever is still pending for that thread, claims
-each row (at-most-once across restarts), decides whether it should still run,
-and either runs the receiving agent's first turn or posts the decision's skip
-copy.
+inline; a wake (`daimon.core.continuity.wakes`) queues the same row with an
+`available_at`. This module is the Slack-side caller of that contract: after
+every turn completes, or when the wake poller opens the thread, it lists what
+the thread may run now, claims each row under a lease (at-most-once across
+restarts), decides whether it should still run, and either fences and runs the
+receiving agent's first turn or posts the decision's skip copy.
 
 `run_follow_up` is injected rather than built here so tests can assert
 claim/skip/decide behaviour without running a second real turn — the actual
@@ -28,15 +29,24 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.slack.context import THREAD_PAGE_LIMIT
 from daimon.core.continuity.continuation import (
     ContinuationRequest,
-    claim_continuation,
     decide_continuation,
-    record_continuation,
-    settle_continuation,
+)
+from daimon.core.continuity.wakes import (
+    WAKE_RETRY_DELAY,
+    busy_retry_at,
+    claim_wake,
+    list_dispatchable_wakes,
+    release_wake,
+    settle_wake,
+    start_wake,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.stores.domain import TaskContinuationRow
-from daimon.core.stores.task_continuations import list_pending_continuations
-from daimon.core.turn.errors import SessionBusyError, SessionPreparationFailed
+from daimon.core.turn.errors import (
+    AdmissionDenied,
+    SessionBusyError,
+    SessionPreparationFailed,
+)
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -95,7 +105,7 @@ async def dispatch_pending_continuations(
     run_follow_up: RunFollowUp,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
-    """Claim and settle every still-pending continuation queued for this thread.
+    """Claim and settle every continuation or due wake this thread may run now.
 
     Called from the Slack turn-completion path (once a turn's own answer has
     been posted and its marker cleared), so the common case is an empty list
@@ -104,23 +114,21 @@ async def dispatch_pending_continuations(
     `decide_continuation` -- this function does not re-derive it.
 
     Each row is claimed before it is decided, so a decision to skip is still
-    only ever made by the one process that will also settle it. A dispatch
-    settles `delivered` only after `run_follow_up` returns without raising;
-    a preparation failure settles `skipped`/`blocked_preparation_failed`, a
-    thread whose previous turn is still running settles `skipped`/`turn_running`
-    and re-queues the same request under a new idempotency key, and any other
-    boundary error settles `skipped`/`dispatch_failed` -- so a claimed row is
-    never left behind by the process that claimed it.
+    only ever made by the one process that will also settle it, and fenced
+    (`start_wake`) before `run_follow_up`. A dispatch settles `delivered` only
+    after `run_follow_up` returns without raising; a preparation failure
+    settles `skipped`/`blocked_preparation_failed`, a thread whose previous
+    turn is still running releases the row back to pending (claim refunded),
+    and any other boundary error settles `skipped`/`dispatch_failed`. A process
+    that dies holding a claim leaves it to the lease: retried if it never
+    started, settled `interrupted` if it had.
     """
-    async with sessionmaker() as session:
-        rows = await list_pending_continuations(
-            session, tenant_id=tenant_id, platform="slack", thread_id=thread_id
-        )
+    rows = await list_dispatchable_wakes(
+        sessionmaker, tenant_id=tenant_id, platform="slack", thread_id=thread_id, now=now()
+    )
     for row in rows:
-        claimed = await claim_continuation(
-            sessionmaker, idempotency_key=row.idempotency_key, now=now()
-        )
-        if not claimed:
+        claim = await claim_wake(sessionmaker, idempotency_key=row.idempotency_key, now=now())
+        if claim is None:
             continue
 
         request = ContinuationRequest(
@@ -148,80 +156,79 @@ async def dispatch_pending_continuations(
             active_turn=active_turn,
         )
 
+        if decision.action == "skip_turn_running" and row.available_at is not None:
+            # A wake has no person waiting on a reply to be told anything; it
+            # simply runs after the turn in progress.
+            await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
+            continue
+
         if decision.action == "dispatch":
             seed = decision.seed_user_message
             if seed is None:
                 # decide_continuation never returns "dispatch" without one;
                 # guards a caller-side contract break rather than a real path.
                 log.error("slack.continuation.dispatch_missing_seed", row_id=str(row.id))
-                await settle_continuation(
-                    sessionmaker,
-                    idempotency_key=row.idempotency_key,
-                    status="skipped",
-                    now=now(),
-                    skip_reason="missing_seed",
+                await settle_wake(
+                    sessionmaker, claim, status="skipped", now=now(), skip_reason="missing_seed"
                 )
+                continue
+            if not await start_wake(sessionmaker, claim, now=now()):
+                # Another dispatcher took the row over while this one decided.
                 continue
             try:
                 await run_follow_up(row, seed)
             except SessionPreparationFailed:
                 log.warning("slack.continuation.dispatch_preparation_failed", row_id=str(row.id))
-                await settle_continuation(
+                await settle_wake(
                     sessionmaker,
-                    idempotency_key=row.idempotency_key,
+                    claim,
                     status="skipped",
                     now=now(),
                     skip_reason="blocked_preparation_failed",
                 )
                 continue
-            except SessionBusyError:
+            except AdmissionDenied as exc:
+                # The balance or cap gate said no: the turn never started, and
+                # a wake is held to the same policy as a mention. Not retried.
+                log.info("slack.continuation.dispatch_admission_denied", row_id=str(row.id))
+                await settle_wake(
+                    sessionmaker,
+                    claim,
+                    status="skipped",
+                    now=now(),
+                    skip_reason=f"admission_denied:{exc.reason}",
+                )
+                continue
+            except SessionBusyError as busy:
                 # Same outcome as `skip_turn_running`, reached one step later:
                 # a turn was still running in this thread when the follow-up
                 # tried to bind, so the destination could not take the session
-                # over. The store has no "unclaim", so the claimed row is
-                # settled `skipped` and the SAME request is queued again under
-                # a NEW idempotency key. At-most-once still holds per key (the
-                # settled row can never dispatch again) while the work the
-                # person asked for is not dropped -- the next turn to finish in
-                # this thread picks the new row up.
+                # over. Nothing ran, so the SAME row goes back to pending with
+                # its claim refunded: a handoff waits for the next turn in this
+                # thread, as it always has; a wake is retried by the poller
+                # shortly. Waiting never uses up the crash budget.
                 log.warning("slack.continuation.dispatch_turn_running", row_id=str(row.id))
-                await settle_continuation(
+                await release_wake(
                     sessionmaker,
-                    idempotency_key=row.idempotency_key,
-                    status="skipped",
-                    now=now(),
-                    skip_reason="turn_running",
-                )
-                await record_continuation(
-                    sessionmaker,
-                    request.model_copy(update={"idempotency_key": uuid.uuid4()}),
+                    claim,
+                    retry_at=busy_retry_at(row, now=now(), not_before=busy.retry_after),
                 )
                 continue
             except (DaimonError, anthropic_pkg.APIError, SlackApiError) as exc:
                 log.warning(
                     "slack.continuation.dispatch_failed", row_id=str(row.id), error=str(exc)
                 )
-                await settle_continuation(
-                    sessionmaker,
-                    idempotency_key=row.idempotency_key,
-                    status="skipped",
-                    now=now(),
-                    skip_reason="dispatch_failed",
+                await settle_wake(
+                    sessionmaker, claim, status="skipped", now=now(), skip_reason="dispatch_failed"
                 )
                 continue
-            await settle_continuation(
-                sessionmaker, idempotency_key=row.idempotency_key, status="delivered", now=now()
-            )
+            await settle_wake(sessionmaker, claim, status="delivered", now=now())
             continue
 
         if decision.message is not None:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel, thread_ts=thread_id, text=decision.message
             )
-        await settle_continuation(
-            sessionmaker,
-            idempotency_key=row.idempotency_key,
-            status="skipped",
-            now=now(),
-            skip_reason=decision.action,
+        await settle_wake(
+            sessionmaker, claim, status="skipped", now=now(), skip_reason=decision.action
         )

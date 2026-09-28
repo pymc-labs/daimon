@@ -21,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   isolated restore drill; workspace-wide Managed Agents object export and a
   state-by-state disaster recovery contract in the self-hosting guide.
 - Routine dispatch runs independently of scheduler ticks, with bounded in-flight tasks, per-routine `skip`/`run-once` catch-up policies, and visible skipped-slot ranges.
-
 - Tenants can opt into accepted/done reactions and a fresh final reply that pings
   only the requester on Discord and Slack with `completion_pings`; defaults stay unchanged.
 - Tenant access policy: a tenant can limit who may start a turn to a list of
@@ -33,7 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `send_direct_message` delivers private agent messages to verified Discord/Slack
   tenant members, with per-tenant disabled/allowlist policies and delivery receipts.
-
+- A durable wake queue runs a turn in an existing thread later, at most once,
+  through the same admission, bind and run path as a mention. The Discord and
+  Slack adapters poll for due wakes. A wake whose process dies before its turn
+  starts is retried when the lease expires. One that dies after the turn
+  starts is settled `interrupted` and never re-run. Migration
+  `0028_feat003_wake_queue` adds the lease columns to `task_continuations`.
 - Added durable initial-card intent rows and bounded Discord and Slack history
   lookup. Both adapters now commit an intent before posting, record the
   returned message ID, and reconcile unresolved cards after a restart. A
@@ -66,6 +70,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the loss window after a token is burned but before its body is read.
 
 ### Changed
+
+- A handoff or private-input continuation whose process dies mid-dispatch is
+  no longer stuck in `claimed`: it is retried if its turn had not started, and
+  settled `skipped/interrupted` if it had. When the session is busy, the same
+  row goes back to pending instead of being queued again under a new key. It
+  still waits for the next turn in the thread, and busy retries stay
+  unlimited. A continuation whose process dies five times before its turn
+  starts is settled `skipped/attempts_exhausted`, and nothing is posted to the
+  thread.
 
 - `get_agent` now returns the agent's `system` prompt to an admin caller on
   an agent chat tools may edit, so a setup flow can save the prompt before
