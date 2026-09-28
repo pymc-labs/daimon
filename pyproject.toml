@@ -102,6 +102,7 @@ source_modules = [
     "daimon.core.config",
     "daimon.core.constants",
     "daimon.core.continuity",
+    "daimon.core.context_prompt",
     "daimon.core.credential_env",
     "daimon.core.credential_requests",
     "daimon.core.cron",
