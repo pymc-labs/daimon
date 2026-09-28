@@ -281,3 +281,8 @@ The spec converter stores this configuration in the agent's system field so it
 survives upload, forks and defaults fingerprints. Replacing that system field
 without the configuration removes the overrides. An empty replacement disables a
 fragment. These blocks affect prompting only and grant no extra permissions.
+
+Operator recovery tools: `daimon backup platform-export` exports the dedicated
+MA workspace through core; `scripts/backup/postgres.sh` backs up/restores Postgres.
+See [self-hosting](self-hosting.md#backup-and-disaster-recovery) for the recovery
+contract and limits.

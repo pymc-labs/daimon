@@ -17,6 +17,25 @@ services:
       timeout: 3s
       retries: 10
 
+  # One-shot, opt-in logical backup. Schedule externally and copy off-host.
+  backup:
+    image: postgres:18-alpine
+    profiles: ["backup"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-daimon}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env.example)}
+      PGDATABASE: ${POSTGRES_DB:-daimon}
+    volumes:
+      - ./scripts/backup:/backup-tools:ro
+      - ${DAIMON_BACKUP_DIR:-./backups}:/backups
+    entrypoint: ["sh", "/backup-tools/postgres.sh"]
+    command: ["backup", "/backups/latest"]
+    restart: "no"
+
   init:
     build: .
     depends_on:

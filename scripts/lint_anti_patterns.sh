@@ -119,7 +119,9 @@ ALLOWLIST_T3=(
   'anthropic.beta.agents.retrieve = AsyncMock(return_value=ma_agent())'
   'anthropic.beta.environments.retrieve = AsyncMock(return_value=ma_environment())'
 )
-ALLOWLIST_T4=("ma_index.py" "ma.py")  # the legitimate filtered-list homes
+# Recovery export is intentionally workspace-wide, operator CLI only; it never
+# serves a tenant-facing endpoint. All other list homes filter by tenant.
+ALLOWLIST_T4=("ma_index.py" "ma.py" "core/defaults/platform_export.py")
 # Approved agent-creation chokepoints: each guarantees the base agent_toolset
 # via dump_agent_spec or merge_default_agent_toolset.
 ALLOWLIST_T5=(

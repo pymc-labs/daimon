@@ -199,3 +199,116 @@ The sign-in routes live at `{origin}/oauth/mcp/start` and
 from a browser and `DAIMON_CRYPTO__KEYS` must be set. If one connection
 fails, the agent still answers and names the server it could not use under
 the reply. Ask it to disconnect the server or connect it again.
+
+## Backup and disaster recovery
+
+Use managed Postgres with point-in-time recovery for production. Set a recovery
+point objective (maximum acceptable data loss) and a recovery time objective
+(maximum outage), then schedule and rehearse backups to meet them. A dump on the
+same disk as the database does not protect against disk loss. Keep encrypted,
+off-host copies with retention and access controls, and retain the application
+release/commit and migration revision alongside each recovery set.
+
+### Backup contract
+
+| State class | What to preserve | Recovery contract |
+| --- | --- | --- |
+| Postgres | Whole database: tenants, encrypted credentials, mappings, routines, usage, balances, and Alembic revision | Consistent logical snapshot via the optional service below, or provider PITR. Restore into a fresh DB with the same major Postgres version and matching application release. Roles/ownership/grants are intentionally excluded; the restore user owns the objects. |
+| Encryption and configuration | All active **and historical** `DAIMON_CRYPTO__KEYS`, signing secrets, OAuth/API credentials, `.env`, Compose overrides, defaults and pinned code | Keep in a separate encrypted secret-manager backup. Losing a decryption key makes its stored ciphertext unrecoverable. Restore keys before starting services; do not generate replacement keys for existing ciphertext. |
+| Report and notebook hosts | Their configured persistent data directories/volumes, including published files, source bundles and metadata | Stop writers, snapshot/copy the entire directories with permissions, then restore to the same mount paths. The main Compose file does not mount these optional hosts: inventory their actual deployments. |
+| Media and artifact stores | Media file-store data and any configured S3-compatible artifact bucket | Snapshot local media directories; enable bucket versioning/backup independently of URL expiry and lifecycle deletion. Restore keys/paths unchanged; expired presigned links must be reissued. |
+| Managed Agents objects | Current agents/environments, every downloadable custom skill version, current memory-store contents | `daimon backup platform-export` creates a workspace-wide operator archive. Existing DB mappings remain valid only in the original intact MA workspace. Loss of that workspace requires manual recreation and ID remapping. |
+| MA transcripts and session disks | Platform-retained session events, files and ephemeral sandboxes | **Not covered** by the object export or database dump. Do not promise recovery of ongoing sessions. Retain important deliverables in backed-up stores; start fresh sessions after platform loss. |
+
+Quiesce adapters, scheduler, webhook ingestion and optional file hosts before
+capturing a coordinated recovery set. A Postgres dump is internally consistent,
+but it cannot make file stores and MA atomic with the database. Stop active MA
+turns and edits too. Record capture times and any changes allowed during capture.
+The service below only backs up Postgres, not the other rows of this table.
+
+### Create backups
+
+With the normal Compose environment configured:
+
+```bash
+mkdir -p backups
+chmod 700 backups
+docker compose --profile backup run --rm backup backup /backups/2026-09-28T220000Z
+uv run daimon backup platform-export backups/platform-2026-09-28T220000Z.zip
+```
+
+Use a unique timestamp each time; existing destinations are never overwritten.
+`DAIMON_BACKUP_DIR` can select a different host directory. Schedule the one-shot
+Compose command with your host scheduler; no backup daemon runs by default.
+A completed database directory contains `database.dump` and `SHA256SUMS`.
+A failed backup may leave an incomplete directory: never treat it as usable
+without its checksum file and a successful restore drill. Encrypt and copy the
+recovery set off-host; the checksum detects corruption, not malicious tampering.
+
+The platform command only reads the dedicated MA workspace configured by
+`DAIMON_ANTHROPIC__API_KEY`. It does not run model turns. Its private (0600) ZIP
+contains JSON definitions with original IDs and metadata, nested skill ZIPs,
+full memory contents, and a versioned manifest with per-entry SHA-256 hashes.
+It includes all tenants in that workspace and can contain private data and
+secret-bearing definitions: restrict access like a database dump. Upstream
+failures or a full, potentially truncated skills page abort the export without
+publishing a partial ZIP. Remote names and
+memory paths remain data, never filesystem paths.
+
+This first version is **not replayable by `defaults apply`**. That importer owns
+deployment defaults, not arbitrary tenant objects or memory contents. Retain
+original `defaults/` and skill sources for `daimon defaults apply`; use exported
+JSON/skill ZIPs for manual tenant-object reconstruction, restore memory paths
+and contents through MA, then reconcile database IDs before enabling traffic.
+Vault secrets, historic agent/environment/memory versions, and transcripts are
+excluded. This archive is evidence and recovery material, not a full MA clone.
+
+### Restore a database
+
+Keep adapters and scheduler stopped. Provision an **empty** database first and
+restore with the Postgres 18 client image (or matching local client tools).
+Set `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD` and `PGDATABASE` through your secret
+manager/environment, never put passwords in command arguments. With Compose,
+for a new database named `daimon_recovery` on its Postgres service:
+
+```bash
+docker compose exec postgres sh -c 'createdb -U "$POSTGRES_USER" daimon_recovery'
+docker compose --profile backup run --rm \
+  -e PGDATABASE=daimon_recovery -e DAIMON_RESTORE_DATABASE=daimon_recovery \
+  backup restore /backups/2026-09-28T220000Z
+```
+
+For local client tools the equivalent command is:
+
+```bash
+DAIMON_RESTORE_DATABASE="$PGDATABASE" sh scripts/backup/postgres.sh restore backups/2026-09-28T220000Z
+```
+
+The command validates the checksum, requires explicit target-name confirmation,
+refuses a database containing relations, and runs `pg_restore` in one transaction
+with errors fatal. It never drops existing data. Restore only trusted archives:
+Postgres dumps contain executable SQL. Use a dedicated empty target with no
+concurrent writers. On failure, investigate before retrying; do not bypass the
+empty-database guard to overwrite a running deployment.
+
+Restore file stores and the original keys, point application configuration at
+the recovered database, and start the matching application release first.
+Inspect `alembic_version`, row counts and representative tenant/credential,
+routine, usage and published-file records. Verify decryption and platform IDs
+before enabling traffic or scheduling. Apply upgrades only after this check.
+If the original MA workspace survives, retain its mappings; if it was lost, do
+not resume routines until manual object reconstruction and ID remapping finish.
+
+### Local restore drill
+
+```bash
+sh scripts/backup/drill.sh
+```
+
+This runs the actual backup/restore commands against a disposable,
+network-isolated Postgres container and removes only that container on exit.
+It verifies rows, a migration marker and an identity sequence, plus rejection of
+nonempty targets, missing confirmation and corrupt dumps. It uses no deployment
+credentials. Also rehearse your real recovery set in an isolated environment:
+this small drill does not establish your production recovery time or prove that
+external stores, keys and MA mappings are complete.
