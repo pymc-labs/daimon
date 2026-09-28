@@ -24,7 +24,7 @@ from rich.console import Console
 tenants_app = typer.Typer(help="Tenants: list and delete.")
 
 
-_VALID_PLATFORMS = ("discord", "cli", "slack")
+_VALID_PLATFORMS = ("discord", "cli", "slack", "teams")
 
 
 def _validate_platform(value: str) -> Platform:

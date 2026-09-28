@@ -240,5 +240,5 @@ async def test_tenants_list_rejects_unknown_platform(
     rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
     console = _make_console()
 
-    with pytest.raises(typer.BadParameter, match="discord, cli, slack"):
-        await tenants_list(rt=rt, console=console, platform="teams", as_json=True)
+    with pytest.raises(typer.BadParameter, match="discord, cli, slack, teams"):
+        await tenants_list(rt=rt, console=console, platform="matrix", as_json=True)
