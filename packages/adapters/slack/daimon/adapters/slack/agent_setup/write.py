@@ -57,7 +57,6 @@ from daimon.core.specs import (
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import clear_agent_references, set_fields, unset_fields
-from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
@@ -189,46 +188,6 @@ def _build_fork_fernet(runtime: SlackRuntime) -> MultiFernet:
     if not runtime.settings.crypto.keys:
         return build_multifernet((Fernet.generate_key().decode(),))
     return _build_runtime_fernet(runtime)
-
-
-async def create_blank_agent(
-    runtime: SlackRuntime,
-    *,
-    tenant_id: uuid.UUID,
-    name: str,
-    system: str | None,
-    model: str,
-    account_id: uuid.UUID,
-) -> ResourceOutcome:
-    """Build a blank AgentSpec from modal fields and reconcile.
-
-    Tenant-scoped name uniqueness: rejects if ``name`` already exists anywhere
-    in this tenant, regardless of owner. Agent names are tenant-wide identity —
-    reconcile dedup and the resolver key on (tenant, name) only.
-    """
-    collisions = await find_agents_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
-    if collisions:
-        raise DaimonError(
-            f"This workspace already has an agent named *{name}*. Pick a different name."
-        )
-    try:
-        spec = AgentSpec.model_validate({"name": name, "model": model, "system": system})
-    except ValidationError as err:
-        raise DaimonError(f"Spec validation failed: {err}") from err
-    public_url = (
-        str(runtime.settings.mcp.public_url)
-        if runtime.settings.mcp.public_url is not None
-        else None
-    )
-    return await reconcile_agent(
-        runtime.anthropic,
-        spec,
-        tenant_id=tenant_id,
-        dry_run=False,
-        account_id=account_id,
-        public_url=public_url,
-        managed=False,
-    )
 
 
 async def fork_agent(

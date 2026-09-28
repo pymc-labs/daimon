@@ -1,4 +1,4 @@
-"""Cross-adapter primitives for fork-copy and best-effort delete archival.
+"""Cross-adapter primitives for blank-agent creation, fork-copy and delete archival.
 
 Extracted from Discord's `agent_setup.write` module (the original,
 audited implementation) so Slack and MCP get a behavior-identical copy of
@@ -19,16 +19,57 @@ import anthropic as anthropic_errors
 import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
+from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
+from daimon.core.defaults.reconcile_agents import reconcile_agent
+from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import get_pat, upsert_credential_encrypted
 from daimon.core.memory_resource import archive_memory_store_for_agent
+from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_mcp_credentials as mcp_credentials_store
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from daimon.core.stores.agent_repo_binding import copy_binding, get_binding
 from daimon.core.stores.domain import AgentRepoBindingRow
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger()
+
+
+async def create_blank_agent(
+    anthropic: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+    system: str | None,
+    model: str,
+    account_id: uuid.UUID,
+    public_url: str | None,
+) -> ResourceOutcome:
+    """Create an unrouted, user-owned agent from a panel's New agent form.
+
+    Names are tenant-wide identity (reconcile dedup and the resolver key on
+    tenant and name only), so any existing agent with `name` refuses it.
+    `managed=False`: a seeded-looking agent would be swept by the next
+    defaults apply because it is not in the seeded spec list.
+    """
+    if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=name):
+        raise DaimonError(
+            f"This workspace already has an agent named {name}. Pick a different name."
+        )
+    try:
+        spec = AgentSpec.model_validate({"name": name, "model": model, "system": system})
+    except ValidationError as err:
+        raise DaimonError(f"Spec validation failed: {err}") from err
+    return await reconcile_agent(
+        anthropic,
+        spec,
+        tenant_id=tenant_id,
+        dry_run=False,
+        account_id=account_id,
+        public_url=public_url,
+        managed=False,
+    )
 
 
 async def copy_credential_and_repo_binding(
