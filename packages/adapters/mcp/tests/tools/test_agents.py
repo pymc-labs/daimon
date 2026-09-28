@@ -448,6 +448,47 @@ async def test_get_agent_impl_withholds_system_prompt_of_uneditable_agent_even_f
     )
 
 
+@pytest.mark.parametrize(
+    "expected_ma_agent_id",
+    [pytest.param(None, id="by-name"), pytest.param("ag_tenant_b", id="by-pinned-ma-id")],
+)
+async def test_get_agent_impl_never_returns_another_tenants_agent_or_prompt(
+    expected_ma_agent_id: str | None,
+) -> None:
+    """A tenant-A admin naming tenant B's agent, or pinning its MA id, gets
+    neither the agent nor its prompt -- the org-wide MA list holds both."""
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                ma_agent(
+                    id="ag_tenant_b",
+                    name="shared-name",
+                    system="tenant B prompt",
+                    metadata={
+                        "daimon_tenant": str(tenant_b),
+                        "daimon_name": "shared-name",
+                        "daimon_account": str(uuid.uuid4()),
+                    },
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    auth = AuthIdentity(account_id=uuid.uuid4(), tenant_id=tenant_a, role=Role.ADMIN, is_admin=True)
+
+    with pytest.raises(ToolError) as excinfo:
+        await _get_agent_impl(
+            _runtime(client), auth, "shared-name", expected_ma_agent_id=expected_ma_agent_id
+        )
+
+    assert "tenant B prompt" not in str(excinfo.value), "the error must not carry the prompt"
+
+
 async def test_list_agents_impl_never_returns_system_prompt() -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
