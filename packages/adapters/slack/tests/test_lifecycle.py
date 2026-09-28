@@ -62,6 +62,7 @@ from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import (
+    McpServerFailure,
     TextBlock,
     ToolUseBlock,
     TurnState,
@@ -797,6 +798,49 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     assert "`rid: " in section["text"]["text"]
     assert context["elements"][0]["text"].startswith(f"❌ {notice.headline} · ")
     assert "xxx" not in _block_text(blocks), "raw error stays in the logs"
+
+
+async def test_terminal_failure_notice_fits_slack_limits_with_many_long_names(
+    fake_slack_web_client: Any,
+) -> None:
+    """45 failed servers and 45 running tools, every name 100 characters: the
+    section stays under Slack's 3,000-character limit and the top-level text
+    carries the notice instead of a bare phase name."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    state = TurnState(
+        termination=TerminationReason.MCP_DEGRADED_EMPTY,
+        mcp_failures=tuple(
+            McpServerFailure(
+                server_name=f"{i:02d}" + "s" * 98,
+                error_type="mcp_connection_failed_error",
+                message="down",
+                retry_status="exhausted",
+            )
+            for i in range(45)
+        ),
+        content=[
+            ToolUseBlock(
+                kind="tool_use",
+                id=f"tu_{i}",
+                type="agent.tool_use",
+                name=f"{i:02d}" + "t" * 98,
+                input={},
+            )
+            for i in range(45)
+        ],
+    )
+
+    await lc.on_terminal_failure(state, RuntimeError("x"))
+
+    calls = fake_slack_web_client.mock.requests.get(("POST", _UPDATE_URL), [])
+    body = calls[-1].kwargs["json"]
+    section = body["blocks"][0]["text"]["text"]
+    assert len(section) <= 3000
+    assert "and 42 more" in section and "and 40 more" in section
+    assert "`rid: " in section
+    assert body["text"].startswith("Tool connection failed: "), "fallback text is the notice"
+    assert len(body["text"]) <= 3000
 
 
 async def test_terminal_failure_does_not_raise(fake_slack_web_client: Any) -> None:

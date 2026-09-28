@@ -37,7 +37,10 @@ from enum import Enum
 from typing import Any, Literal
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
-from daimon.core.turn.notices import TerminationNotice
+from daimon.core.turn.notices import TerminationNotice, fit_notice
+
+# Slack rejects a section block whose text exceeds 3,000 characters.
+NOTICE_MAX_CHARS = 2900
 
 # ---------------------------------------------------------------------------
 # Phase enum
@@ -343,11 +346,11 @@ def format_termination_notice(notice: TerminationNotice) -> str:
 
     The headline is not repeated here: it is already the summary's reason.
     """
-    lines = [notice.cause]
-    if (work := notice.work_line(lambda name: f"`{escape_mrkdwn(name)}`")) is not None:
+    lines = [escape_mrkdwn(notice.cause)]
+    work = notice.work_line(lambda name: f"`{escape_mrkdwn(name.replace('`', ''))}`")
+    if work is not None:
         lines.append(work)
     lines.append(notice.survived)
     lines.append(f"*Next:* {notice.next_step}")
-    if notice.request_id is not None:
-        lines.append(f"`rid: {notice.request_id}`")
-    return "\n".join(lines)
+    tail = f"`rid: {notice.request_id}`" if notice.request_id is not None else None
+    return fit_notice(lines, tail=tail, limit=NOTICE_MAX_CHARS)

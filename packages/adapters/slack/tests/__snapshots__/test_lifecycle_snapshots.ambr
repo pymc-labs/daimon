@@ -100,7 +100,12 @@
             'type': 'context',
           }),
         ]),
-        'text': 'error …',
+        'text': '''
+          Something went wrong: The turn ended unexpectedly.
+          The conversation and its workspace are kept.
+          Send your message again. If it keeps happening, share the request id with an admin.
+          Request id: 01TESTREQUESTID0000000000
+        ''',
       }),
     ]),
   })

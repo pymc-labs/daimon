@@ -27,7 +27,7 @@ from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.reducers import apply
-from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 
 # ---------------------------------------------------------------------------
@@ -326,6 +326,43 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     assert "`fit_model`" in embed.description, "work in flight is named"
     assert "`rid: " in embed.description
     assert "xxx" not in embed.description + embed.footer.text, "raw error stays in the logs"
+
+
+async def test_terminal_failure_notice_fits_discord_limits_with_many_long_names() -> None:
+    """45 failed servers and 45 running tools, every name 100 characters: the
+    card still fits an embed description (4,096) and footer (2,048)."""
+    lc, _, edits = _make_lifecycle()
+    await lc.on_render(TurnState())
+    state = TurnState(
+        termination=TerminationReason.MCP_DEGRADED_EMPTY,
+        mcp_failures=tuple(
+            McpServerFailure(
+                server_name=f"{i:02d}" + "s" * 98,
+                error_type="mcp_connection_failed_error",
+                message="down",
+                retry_status="exhausted",
+            )
+            for i in range(45)
+        ),
+        content=[
+            ToolUseBlock(
+                kind="tool_use",
+                id=f"tu_{i}",
+                type="agent.tool_use",
+                name=f"{i:02d}" + "t" * 98,
+                input={},
+            )
+            for i in range(45)
+        ],
+    )
+
+    await lc.on_terminal_failure(state, Exception("x"))
+
+    embed = edits[-1][1]["embeds"][0]
+    assert len(embed.description) <= 4096
+    assert len(embed.footer.text) <= 2048
+    assert "and 42 more" in embed.description and "and 40 more" in embed.description
+    assert "`rid: " in embed.description
 
 
 async def test_terminal_failure_without_a_reason_on_the_state_maps_the_error() -> None:

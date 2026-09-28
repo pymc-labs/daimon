@@ -51,6 +51,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
 from daimon.adapters.slack.blockkit import (
+    NOTICE_MAX_CHARS,
     EmbedEvent,
     State,
     TurnPhase,
@@ -66,7 +67,7 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
-from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.notices import fit_notice, render_termination_notice
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
@@ -364,16 +365,18 @@ class SlackTurnLifecycle:
                 text=text,
             )
 
-    async def _flush_terminal(self) -> None:
+    async def _flush_terminal(self, fallback_text: str | None = None) -> None:
         """Unconditionally flush the terminal Block Kit surface, bypassing debounce.
 
         Sets _terminal=True so subsequent _maybe_flush calls become no-ops. The
         caller MUST have already transitioned the state to a terminal phase
         (done/error) so to_blocks emits the collapsed footer with no cancel button.
+        ``fallback_text`` replaces the generic top-level ``text`` that
+        notifications and screen readers show instead of the blocks.
         """
         self._terminal = True
         blocks = to_blocks(self._state, now=self._clock(), cancel_key=self._cancel_key)
-        await self._post_or_update(blocks, f"{self._state.phase.value} …")
+        await self._post_or_update(blocks, fallback_text or f"{self._state.phase.value} …")
 
     async def _flush_cancelled(self) -> None:
         """Replace the status message with a plain 'Turn cancelled.' notice.
@@ -605,7 +608,11 @@ class SlackTurnLifecycle:
                     self._state, notice=format_termination_notice(notice)
                 )
             self._apply_usage(state)
-            await self._flush_terminal()
+            await self._flush_terminal(
+                fit_notice([notice.plain_text()], tail=None, limit=NOTICE_MAX_CHARS)
+                if notice is not None
+                else None
+            )
             self.final_ts = self._status_ts
         except Exception:
             log.warning("turn.terminal_failure.flush_failed", exc_info=True)

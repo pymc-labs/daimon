@@ -18,7 +18,7 @@ from daimon.adapters.discord.theme import (
     COLOR_THINKING,
     COLOR_TOOL_RUNNING,
 )
-from daimon.core.turn.notices import TerminationNotice
+from daimon.core.turn.notices import TerminationNotice, fit_notice
 
 # ---------------------------------------------------------------------------
 # Phase enum
@@ -155,6 +155,9 @@ _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 _TRAIL_MAX = 5
 
 _TEXT_PREVIEW_MAX_CHARS = 250
+
+# Discord caps an embed description at 4,096 characters.
+_NOTICE_MAX_CHARS = 4000
 
 
 def _escape_markdown(text: str) -> str:
@@ -295,11 +298,10 @@ def format_termination_notice(notice: TerminationNotice) -> str:
 
     The headline is not repeated here: it is already the footer's reason.
     """
-    lines = [notice.cause]
-    if (work := notice.work_line(lambda name: f"`{name}`")) is not None:
+    lines = [_escape_markdown(notice.cause)]
+    if (work := notice.work_line(lambda name: f"`{name.replace('`', '')}`")) is not None:
         lines.append(work)
     lines.append(notice.survived)
     lines.append(f"**Next:** {notice.next_step}")
-    if notice.request_id is not None:
-        lines.append(f"`rid: {notice.request_id}`")
-    return "\n".join(lines)
+    tail = f"`rid: {notice.request_id}`" if notice.request_id is not None else None
+    return fit_notice(lines, tail=tail, limit=_NOTICE_MAX_CHARS)

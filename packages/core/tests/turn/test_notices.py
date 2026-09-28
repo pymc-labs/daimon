@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 from daimon.core.turn import TerminationReason, render_termination_notice
+from daimon.core.turn.notices import fit_notice
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
 
 _ENDED_EARLY = [r for r in TerminationReason if r is not TerminationReason.COMPLETED]
@@ -125,3 +126,45 @@ def test_plain_text_carries_every_field_in_order() -> None:
     assert lines[0] == f"{notice.headline}: {notice.cause}"
     assert lines[1].startswith("Still running when it ended: bash")
     assert lines[2:] == [notice.survived, notice.next_step, "Request id: 01ABC"]
+
+
+def _many_failures(count: int, length: int) -> tuple[McpServerFailure, ...]:
+    return tuple(
+        McpServerFailure(
+            server_name=f"{i:02d}" + "s" * (length - 2),
+            error_type="mcp_connection_failed_error",
+            message="down",
+            retry_status="exhausted",
+        )
+        for i in range(count)
+    )
+
+
+def test_many_long_server_names_stay_bounded() -> None:
+    """The reviewer's case: 45 failed servers with 100-character names."""
+    state = TurnState(
+        mcp_failures=_many_failures(45, 100),
+        content=[_tool("t" * 500 + str(i), "pending") for i in range(45)],
+    )
+
+    notice = render_termination_notice(
+        TerminationReason.MCP_DEGRADED_EMPTY, state=state, request_id="01RID"
+    )
+
+    assert notice is not None
+    assert "and 42 more" in notice.cause
+    work = notice.work_line()
+    assert work is not None and "and 40 more" in work
+    assert len(notice.plain_text()) < 1000
+
+
+def test_fit_notice_clips_the_body_and_keeps_the_request_id() -> None:
+    fitted = fit_notice(["x" * 5000, "y" * 5000], tail="`rid: 01RID`", limit=3000)
+
+    assert len(fitted) == 3000
+    assert fitted.endswith("…\n`rid: 01RID`")
+
+
+def test_fit_notice_leaves_short_notices_alone() -> None:
+    assert fit_notice(["a", "b"], tail="rid", limit=100) == "a\nb\nrid"
+    assert fit_notice(["a" * 10], tail=None, limit=5) == "aaaa…"

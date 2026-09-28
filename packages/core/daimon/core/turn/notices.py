@@ -13,7 +13,7 @@ reason alone decides whether the session was kept (most failures) or retired
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -21,9 +21,15 @@ from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 
-__all__ = ["TerminationNotice", "render_termination_notice"]
+__all__ = ["TerminationNotice", "fit_notice", "render_termination_notice"]
 
+# Every name in a notice comes from outside (tool and MCP server names), so
+# each is clipped and only the first few are listed: the notice has to fit a
+# Slack section (3,000 chars) and a Discord embed description (4,096) with room
+# to spare, whatever the turn was doing.
 _IN_FLIGHT_SHOWN = 5
+_SERVERS_SHOWN = 3
+_NAME_MAX = 60
 _KEPT = "The conversation and its workspace are kept."
 _RETRY = "Send your message again."
 _SHARE_RID = "If it keeps happening, share the request id with an admin."
@@ -198,10 +204,11 @@ class TerminationNotice:
         """
         parts: list[str] = []
         if self.in_flight:
-            shown = [quote(name) for name in self.in_flight[:_IN_FLIGHT_SHOWN]]
-            hidden = len(self.in_flight) - len(shown)
-            more = f" and {hidden} more" if hidden else ""
-            parts.append(f"Still running when it ended: {', '.join(shown)}{more}.")
+            parts.append(
+                "Still running when it ended: "
+                + _listed(self.in_flight, shown=_IN_FLIGHT_SHOWN, quote=quote)
+                + "."
+            )
         if self.finished_tools:
             noun = "tool call" if self.finished_tools == 1 else "tool calls"
             parts.append(f"Finished before that: {self.finished_tools} {noun}.")
@@ -242,7 +249,7 @@ def render_termination_notice(
         in_flight = tuple(b.name for b in tools if b.status == "pending")
         finished = sum(1 for b in tools if b.status != "pending")
         if reason is TerminationReason.MCP_DEGRADED_EMPTY and state.mcp_failures:
-            names = ", ".join(f.server_name for f in state.mcp_failures)
+            names = _listed([f.server_name for f in state.mcp_failures], shown=_SERVERS_SHOWN)
             cause = f"The tool server {names} failed and the agent had no reply without it."
         if reason is TerminationReason.RATE_LIMITED and state.rate_limit_until is not None:
             next_step = f"Send your message again after {_clock(state.rate_limit_until)}."
@@ -260,3 +267,28 @@ def render_termination_notice(
 
 def _clock(at: datetime) -> str:
     return at.astimezone(UTC).strftime("%H:%M UTC")
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _listed(names: Sequence[str], *, shown: int, quote: Callable[[str], str] = str) -> str:
+    """The first `shown` names, each clipped, then how many were left out."""
+    listed = ", ".join(quote(_clip(name, _NAME_MAX)) for name in names[:shown])
+    hidden = len(names) - shown
+    return f"{listed} and {hidden} more" if hidden > 0 else listed
+
+
+def fit_notice(lines: Sequence[str], *, tail: str | None, limit: int) -> str:
+    """Join a drawn notice, clipped to `limit` characters with `…`.
+
+    `tail` (the request id line) is always kept whole: it is the one part an
+    operator needs back. The bounded fields keep real notices far below every
+    platform limit; this is the last guard, not the usual path.
+    """
+    body = "\n".join(lines)
+    if tail is None:
+        return _clip(body, limit)
+    room = limit - len(tail) - 1
+    return f"{_clip(body, room)}\n{tail}"
