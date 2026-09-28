@@ -120,4 +120,7 @@ Reactions, reading channel history (`read_channel`, `read_thread`,
 from Teams turns), files in channels (both need Microsoft Graph), file posting
 through `send_message`, and private inputs a password field cannot take: `.env`
 uploads, multi-line secrets, and repository or skill-repository tokens.
+Also Discord and Slack only: `send_direct_message`, `/dm` conversations,
+routine destinations (refused on save), table rendering
+(`DAIMON_TABLE_RENDERING`) and completion pings (`DAIMON_COMPLETION_PINGS`).
 Removing the app does not archive the organisation's tenant.

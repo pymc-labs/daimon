@@ -86,6 +86,7 @@ async def test_teams_turns_lack_the_graph_and_non_password_tools() -> None:
     teams = {tool.name for tool in tools if "teams" in tool.tags}
     hidden = {"read_channel", "read_thread", "search_messages", "get_message", "list_channels"}
     hidden |= {"parse_link", "request_repo_binding", "request_skill_repo_token"}
+    hidden |= {"send_direct_message"}
     assert hidden <= {tool.name for tool in tools}, "a renamed tool must be renamed here too"
     assert teams >= {"send_message", "create_thread", "request_agent_key"}
-    assert not teams & hidden, "these need Microsoft Graph or a non-password input on Teams"
+    assert not teams & hidden, "these need Graph, a non-password input or Discord/Slack DMs"
