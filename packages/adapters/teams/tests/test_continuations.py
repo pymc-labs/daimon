@@ -373,6 +373,18 @@ async def test_a_wake_deferred_behind_a_turn_keeps_the_saved_input_and_the_cap(
     )
     assert teams._deferred_dispatch[THREAD_ID] == (TENANT, None, True), "a wake alone stays capped"
 
+    ran: list[str] = []
+
+    async def _dispatch(self: TeamsApp, thread_id: str, *_: Any) -> None:
+        ran.append(thread_id)
+
+    with patch.object(TeamsApp, "_dispatch_continuations", _dispatch):
+        teams._inflight[TENANT] = teams._teams.max_concurrent_turns_per_tenant
+        teams._release(CONVERSATION_ID)
+        teams._release(THREAD_ID)
+        await asyncio.gather(*teams._tasks)
+    assert ran == [CONVERSATION_ID], "at the cap the saved input resumes and the wake waits"
+
 
 async def test_a_disabled_deployment_runs_no_wake_poller(
     db_session_factory: async_sessionmaker[AsyncSession], no_wake_poller: AsyncMock
@@ -385,10 +397,14 @@ async def test_a_disabled_deployment_runs_no_wake_poller(
 
 
 async def test_start_runs_the_teams_wake_poller_until_drain(
-    db_session_factory: async_sessionmaker[AsyncSession], no_wake_poller: AsyncMock
+    db_session_factory: async_sessionmaker[AsyncSession],
+    no_wake_poller: AsyncMock,
+    no_boot_provisioning: AsyncMock,
 ) -> None:
     teams = TeamsApp(
-        runtime=build_teams_runtime(db_session_factory),
+        runtime=build_teams_runtime(
+            db_session_factory, teams=teams_settings(admins=(AAD_OBJECT_ID,))
+        ),
         sender=FakeSender(),
         commands={},
         bot_token=bot_token,
@@ -398,4 +414,5 @@ async def test_start_runs_the_teams_wake_poller_until_drain(
     assert kwargs["platform"] == "teams" and kwargs["open_thread"] == teams._open_wake_thread
     assert kwargs["should_stop"]() is False, "the poller runs while the app admits turns"
     await teams.drain(timeout=1.0)
+    assert no_boot_provisioning.call_args.kwargs["admin_user_ids"] == (AAD_OBJECT_ID,)
     assert kwargs["should_stop"]() is True, "drain stops the poller"
