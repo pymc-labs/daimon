@@ -18,6 +18,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal
+from xml.sax.saxutils import escape, quoteattr
 
 import anthropic
 import structlog
@@ -62,7 +63,7 @@ from daimon.core.continuity.messages import (
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
-from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.stores.domain import Role, TaskContinuationRow
@@ -94,6 +95,7 @@ from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import protection_state
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
+from daimon.core.turn_keys import list_mounted_key_names, render_keys_element
 from daimon.core.turn_origin import (
     HandoffNotice,
     SessionState,
@@ -156,6 +158,28 @@ def session_state(continuity: ContinuityOutcome) -> SessionState:
     elif continuity.transfer_kind == "history":
         lost = ("working files", "earlier conversation")
     return SessionState(state=continuity.state, applied=tuple(continuity.applied), lost=lost)
+
+
+def _user_message(
+    controls: str, inbound: TeamsInbound, *, is_admin: bool, keys: str, prefix: str
+) -> str:
+    """Host facts, then the person's escaped words, shaped like Slack's context XML."""
+    context = f'<channel platform="teams" id={quoteattr(inbound.channel_id)}/>'
+    query = (
+        f"<user_query author_id={quoteattr(inbound.user_id)} "
+        f'is_admin="{str(is_admin).lower()}">{escape(inbound.text)}</user_query>'
+    )
+    return "\n".join(
+        [
+            controls,
+            "<context>",
+            context,
+            *([keys] if keys else []),
+            "</context>",
+            "",
+            prefix + query,
+        ]
+    )
 
 
 def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
@@ -256,13 +280,14 @@ class TeamsApp:
         if self._recovery is None:
             self._recovery = asyncio.create_task(self._recover(), name="teams.boot-sweep")
             self.spawn(self._provision(), name="teams.provision")
-            poller = run_wake_poller(
-                self.runtime.sessionmaker,
-                platform="teams",
-                open_thread=self._open_wake_thread,
-                should_stop=lambda: self.draining,
-            )
-            self._wake_poller = asyncio.create_task(poller, name="teams.wake-poller")
+            if self._teams.enabled:  # a disabled deployment runs no timers either
+                poller = run_wake_poller(
+                    self.runtime.sessionmaker,
+                    platform="teams",
+                    open_thread=self._open_wake_thread,
+                    should_stop=lambda: self.draining,
+                )
+                self._wake_poller = asyncio.create_task(poller, name="teams.wake-poller")
         return self._recovery
 
     async def _open_wake_thread(self, wake: WakeThread) -> bool:
@@ -275,7 +300,8 @@ class TeamsApp:
             return True
         async with self.runtime.sessionmaker() as session:
             tenant = await get_tenant(session, wake.tenant_id)
-        if tenant is None or tenant.archived_at is not None:
+        # Another organisation's rows (a re-pointed or shared database) are not ours to run.
+        if tenant is None or tenant.archived_at is not None or tenant.id != self._tenant_id:
             return False
         self.spawn(
             self.dispatch_after_input(wake.tenant_id, wake.thread_id, None), name="teams.wake"
@@ -545,7 +571,8 @@ class TeamsApp:
                 is_dm=inbound.kind == "dm",
             )
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
-            if (refusal := _admission_refusal(err, tenant_id)) is not None:
+            refusal = _admission_refusal(err, tenant_id)
+            if refusal is not None and continuation is None:  # queued work settles silently
                 await self._say(inbound, refusal)
             if reraise:
                 raise
@@ -727,18 +754,20 @@ class TeamsApp:
             configuration_target_name=config.configuration_target_name,
             is_setup=config.thread_binding_kind == "setup",
         ) as origin:
-            # The controls are server facts, rendered apart from the person's words.
             notice = handoff(prepared.continuity) if handoff is not None else None
-            message = (
-                render_turn_origin(
-                    origin,
-                    responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
-                    session_state=None if notice else session_state(prepared.continuity),
-                    handoff=notice,
-                )
-                + "\n"
-                + attachments.prefix
-                + inbound.text
+            quiet = notice is not None or prepared.continuity.state == "continued"
+            controls = render_turn_origin(
+                origin,
+                responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
+                session_state=None if quiet else session_state(prepared.continuity),
+                handoff=notice,
+            )
+            message = _user_message(
+                controls,
+                inbound,
+                is_admin=self._role(inbound) is Role.ADMIN,
+                keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
+                prefix=attachments.prefix,
             )
 
             async def reseed() -> str:
@@ -786,6 +815,28 @@ class TeamsApp:
                 inbound, render_current_work_must_finish(admission.agent.name, handoff=False)
             )
 
+    async def _key_names(
+        self, tenant_id: uuid.UUID, inbound: TeamsInbound, admission: Admission
+    ) -> tuple[str, ...]:
+        """This agent's stored key names while the mounted `.env` still matches them."""
+        async with self.runtime.sessionmaker() as session:
+            live = await get_live_thread_session(
+                session,
+                tenant_id=tenant_id,
+                platform="teams",
+                thread_id=inbound.thread_id,
+                account_id=admission.account_id,
+            )
+            config = None if live is None else live.effective_config
+            return await list_mounted_key_names(
+                session,
+                tenant_id=tenant_id,
+                agent_id=derive_agent_uuid(
+                    tenant_id=tenant_id, ma_agent_id=str(admission.agent.id)
+                ),
+                env_sha256=None if config is None else config.env_sha256,
+            )
+
     def _release(self, key: str) -> None:
         """Free a conversation; re-run private-input dispatches that found it busy."""
         self._processing.discard(key)
@@ -810,7 +861,9 @@ class TeamsApp:
             await asyncio.shield(self._recovery)
         conversation_id = conversation_of(thread_id)
         if conversation_id in self._processing:
-            self._deferred_dispatch[thread_id] = (tenant_id, service_url)
+            # A wake's None must not drop a saved input's regional service URL.
+            previous = self._deferred_dispatch.get(thread_id, (tenant_id, None))[1]
+            self._deferred_dispatch[thread_id] = (tenant_id, service_url or previous)
             return
         async with self._holding(conversation_id, tenant_id):
             await self._dispatch_continuations(thread_id, tenant_id, service_url)

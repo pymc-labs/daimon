@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -23,6 +23,7 @@ from daimon.core.continuity.wakes import WakeThread, enqueue_wake, poll_wakes_on
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_agent_bindings import create_binding
@@ -46,6 +47,7 @@ from .conftest import (
     build_teams_runtime,
     make_inbound,
     patched_admission,
+    teams_settings,
 )
 
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
@@ -190,7 +192,7 @@ async def test_a_newer_message_supersedes_the_queued_work(
         ("invoker_not_allowed", app_module._NOT_INVITED),
     ],
 )
-async def test_a_refused_continuation_raises_after_telling_the_person(
+async def test_a_refused_turn_tells_only_a_live_person_then_raises(
     db_session_factory: async_sessionmaker[AsyncSession], reason: AdmissionDenialReason, copy: str
 ) -> None:
     sender = FakeSender()
@@ -203,7 +205,10 @@ async def test_a_refused_continuation_raises_after_telling_the_person(
     denied = AsyncMock(side_effect=AdmissionDenied(reason=reason))
     with patch.object(app_module, "admit", denied), pytest.raises(AdmissionDenied):
         await teams._run_turn(make_inbound("w"), TENANT, reraise=True)
-    assert [a.text for a in sender.activities] == [copy]
+    queued = cast(TaskContinuationRow, object())
+    with patch.object(app_module, "admit", denied), pytest.raises(AdmissionDenied):
+        await teams._run_turn(make_inbound("w"), TENANT, reraise=True, continuation=queued)
+    assert [a.text for a in sender.activities] == [copy], "queued work settles silently"
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
@@ -289,6 +294,11 @@ async def test_the_poller_opens_a_due_timer_and_runs_it_once(
         requester_account_id=account_id,
     )
     assert await teams._open_wake_thread(gone) is False, "a missing tenant is pushed back"
+    other = await provision_tenant(
+        db_session_factory, platform="teams", workspace_id=str(uuid.uuid4())
+    )
+    foreign = gone.model_copy(update={"tenant_id": other.tenant_id})
+    assert await teams._open_wake_thread(foreign) is False, "another organisation's rows wait"
 
 
 async def test_a_timer_whose_chat_changed_responder_says_so_and_never_runs(
@@ -326,6 +336,26 @@ async def test_a_continuation_in_a_protected_channel_settles_without_a_word(
         "skipped",
         "admission_denied:channel_protected",
     )
+
+
+async def test_a_wake_deferred_behind_a_turn_keeps_the_saved_service_url(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    teams, _ = await _app(db_session_factory, FakeSender())
+    teams._processing.add(CONVERSATION_ID)
+    await teams.dispatch_after_input(TENANT, CONVERSATION_ID, SERVICE_URL)
+    await teams.dispatch_after_input(TENANT, CONVERSATION_ID, None)
+    assert teams._deferred_dispatch[CONVERSATION_ID] == (TENANT, SERVICE_URL)
+
+
+async def test_a_disabled_deployment_runs_no_wake_poller(
+    db_session_factory: async_sessionmaker[AsyncSession], no_wake_poller: AsyncMock
+) -> None:
+    runtime = build_teams_runtime(db_session_factory, teams=teams_settings(enabled=False))
+    teams = TeamsApp(runtime=runtime, sender=FakeSender(), commands={}, bot_token=bot_token)
+    await teams.start()
+    await teams.drain(timeout=1.0)
+    no_wake_poller.assert_not_called()
 
 
 async def test_start_runs_the_teams_wake_poller_until_drain(

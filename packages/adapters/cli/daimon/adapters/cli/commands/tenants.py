@@ -346,6 +346,8 @@ async def tenants_access_policy_set(
         if ids is not None:
             if not ids:
                 raise typer.BadParameter(f"{field}: pass at least one non-empty id")
+            if validated_platform == "teams" and field == "protected_category_ids":
+                raise typer.BadParameter(f"{field}: Teams has no categories, got {ids[0]!r}")
             for value in ids:
                 cleaned = value.strip()
                 pattern = (

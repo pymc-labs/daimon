@@ -528,6 +528,7 @@ async def test_access_policy_get_refuses_null_row(
         ("teams", "invoker", "U123ABC"),
         ("teams", "invoker", str(uuid.UUID(int=0xABCDEF)).upper()),
         ("teams", "protected_channel", "C123ABC"),
+        ("teams", "protected_category", "19:ok@thread.tacv2"),
         ("teams", "sealed_channel", "19:abc@thread.tacv2;messageid=1"),
         ("cli", "invoker", " "),
         ("discord", "invoker", ""),
@@ -679,14 +680,14 @@ async def test_access_policy_accepts_platform_ids(
         external_id="valid-ids",
         invoker=users,
         protected_channel=channels,
-        protected_category=channels,
+        protected_category=None if platform == "teams" else channels,
         sealed_channel=channels,
     )
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant.id)
     assert policy.invoker_user_ids == tuple(users)
     assert policy.protected_channel_ids == tuple(channels)
-    assert policy.protected_category_ids == tuple(channels)
+    assert policy.protected_category_ids == (() if platform == "teams" else tuple(channels))
     assert policy.sealed_channel_ids == tuple(channels)
 
 
