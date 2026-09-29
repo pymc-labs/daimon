@@ -634,10 +634,15 @@ class TeamsDriver:
         agent_name: str | None = None,
     ) -> CapturedView:
         del tenant_id
-        label = _PANEL_LABELS.get(action)
-        if label is None:
+        if action.startswith("expand_"):
+            listed = action.removeprefix("expand_")
+            button = next(
+                a for a in _actions(self._panel_card) if a.get("data", {}).get("list") == listed
+            )
+        elif (label := _PANEL_LABELS.get(action)) is not None:
+            button = _find_button(self._panel_card, label, agent_name)
+        else:
             raise NotImplementedError(f"the Teams panel has no {action!r} control")
-        button = _find_button(self._panel_card, label, agent_name)
         data = cast(dict[str, Any], button.get("data") or {})
         where = {"workspace_id": workspace_id, "channel_id": channel_id, "user_id": user_id}
         if button.get("type") == "Action.Execute":

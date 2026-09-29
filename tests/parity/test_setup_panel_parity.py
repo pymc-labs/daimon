@@ -13,7 +13,7 @@ lists and in what order, that a member and an admin see the same controls, the
 routing sentence under an unrouted agent, the empty-roster copy, that creating
 an agent lands on its Details and says it answers nowhere yet, that a page
 number survives a trip into Details and back, and each long Details list
-behind Show more (Discord and Slack only, see `test_teams_deliberate_gaps.py`).
+behind Show more.
 
 What they deliberately do not agree on, and this module pins per platform
 instead of hiding, is recorded in `_DIVERGENCES` below — each one is a place
@@ -27,7 +27,6 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Final, cast
 
-import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.agent_setup.budget import ROSTER_PAGE_SIZE
 from daimon.adapters.slack.agent_setup.state import PANEL_PAGE_SIZE
@@ -706,8 +705,6 @@ async def test_back_from_details_restores_the_page_the_reader_was_on(
 # ---------------------------------------------------------------------------
 
 
-# A Teams Details list has no Show more (test_teams_deliberate_gaps.py).
-@pytest.mark.parametrize("driver", ["discord", "slack"], indirect=True)
 async def test_details_expands_one_long_list_at_a_time_and_can_collapse_it(
     driver: PlatformDriver,
     db_session: AsyncSession,

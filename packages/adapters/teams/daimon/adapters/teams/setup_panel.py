@@ -38,6 +38,7 @@ from daimon.adapters.teams.setup_conversation import (
     end_setup_conversation,
     open_setup_conversation,
 )
+from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
@@ -162,7 +163,9 @@ class SetupPanel:
             answering_map, window, is_admin=actor.is_admin, request_agent=request_agent
         )
 
-    async def _details(self, actor: Actor, name: str, page: int) -> AdaptiveCard | None:
+    async def _details(
+        self, actor: Actor, name: str, page: int, expanded: DetailListName | None = None
+    ) -> AdaptiveCard | None:
         """The Details card for `name`, or None when it left the roster.
 
         The roster maps the clicked name to an MA id, so a click never names an id itself.
@@ -192,7 +195,11 @@ class SetupPanel:
             )
         coding_tools = mcp.public_url is not None and mcp.jwt_secret is not None
         return cards.details_card(
-            details, here=actor.conversation_id, page=page, coding_tools=coding_tools
+            details,
+            here=actor.conversation_id,
+            page=page,
+            coding_tools=coding_tools,
+            expanded=expanded,
         )
 
     async def _act(
@@ -205,7 +212,8 @@ class SetupPanel:
         data = activity.value.action.data
         op, page, chat = data.get("op"), _page(data), actor.conversation_id
         if op == "details":
-            card = await self._details(actor, str(data.get("agent") or ""), page)
+            name, expanded = str(data.get("agent") or ""), cards.expanded_list(data)
+            card = await self._details(actor, name, page, expanded)
             return replace_card(
                 card or await self._agents(actor.tenant_id, chat=chat, page=page, notice=GONE)
             )

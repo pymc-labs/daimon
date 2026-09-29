@@ -12,7 +12,11 @@ from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal
 
 from daimon.adapters.teams.card_actions import button, heading
-from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
+from daimon.core.agent_detail_lists import (
+    DETAIL_LIST_COLLAPSED_COUNT,
+    DetailListName,
+    format_detail_lists,
+)
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.github_repo_auth import normalize_owner_repo
@@ -134,17 +138,35 @@ def _place(place: AnsweringPlace, *, here: str) -> str:
     return "the organisation default" if place.tier == "tenant" else "the deployment default"
 
 
-def _detail_lists(details: AgentDetails) -> list[CardElement]:
+def expanded_list(data: Mapping[str, object]) -> DetailListName | None:
+    """The Details list a Show more click opens; None for Show fewer or an unknown name."""
+    return next((k for k in _LIST_HEADINGS if data.get("expand") and data.get("list") == k), None)
+
+
+def _detail_lists(
+    details: AgentDetails, *, page: int, expanded: DetailListName | None
+) -> list[CardElement]:
     items: Mapping[DetailListName, Sequence[str]] = {
         "skills": [skill.title or skill.skill_id for skill in details.skills],
         "connections": [f"[{server.name}]({server.url})" for server in details.mcp_servers],
         "keys": [key.name for key in details.keys],
     }
-    lists = format_detail_lists(items, expanded=None, max_chars=_DETAIL_LIST_MAX_CHARS)
+    lists = format_detail_lists(items, expanded=expanded, max_chars=_DETAIL_LIST_MAX_CHARS)
     body: list[CardElement] = []
     for kind, title in _LIST_HEADINGS.items():
         if items[kind]:
             body.append(_text(f"**{title}**\n\n{lists[kind]}"))
+        if len(items[kind]) > DETAIL_LIST_COLLAPSED_COUNT:
+            opened = expanded == kind
+            toggle = _button(
+                "Show fewer" if opened else "Show more",
+                "details",
+                agent=details.name,
+                page=page,
+                list=kind,
+                expand=int(not opened),
+            )
+            body.append(ActionSet(actions=[toggle]))
     if details.skills_listing_truncated:
         body.append(_text("Some skill names may be missing.", subtle=True))
     if details.keys:
@@ -153,7 +175,12 @@ def _detail_lists(details: AgentDetails) -> list[CardElement]:
 
 
 def details_card(
-    details: AgentDetails, *, here: str, page: int, coding_tools: bool
+    details: AgentDetails,
+    *,
+    here: str,
+    page: int,
+    coding_tools: bool,
+    expanded: DetailListName | None = None,
 ) -> AdaptiveCard:
     """One agent's readable state. Key values are not in the model, so never here."""
     body: list[CardElement] = [_text(details.purpose)] if details.purpose else []
@@ -171,7 +198,7 @@ def details_card(
         repo = normalize_owner_repo(details.repo.repo_url)
         body.append(_text(f"**Repository:** {repo} ({state.replace('_', ' ')})"))
         body.append(_text(f"**Branch:** `{details.repo.default_branch}`"))
-    body += _detail_lists(details)
+    body += _detail_lists(details, page=page, expanded=expanded)
     actions: list[Action] = []
     if coding_tools:
         data = OpenDialogData(TOKEN_DIALOG, {"agent": details.name})

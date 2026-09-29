@@ -10,7 +10,7 @@ The rest follows from what a Teams bot can do (see `docs/teams.md`): commands
 answer only in the 1:1 chat, which has no threads, so a setup conversation is
 keyed inside it; channel history and files need Microsoft Graph; and a dialog's
 password field cannot take a `.env` upload or a repository token. Removing the
-app archives nothing, and a Details list has no Show more.
+app archives nothing.
 
 No platform parametrization, no database -- this is a scope check.
 """
@@ -18,7 +18,6 @@ No platform parametrization, no database -- this is a scope check.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -31,10 +30,8 @@ from daimon.adapters.mcp.tools.credential_requests import (
     _request_agent_key_impl,  # pyright: ignore[reportPrivateUsage]
     register_credential_request_tools,
 )
-from daimon.adapters.teams import setup_card
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
-from daimon.core.agent_details import AgentDetails, KeyEntry
 from daimon.core.config import TeamsSettings
 from daimon.core.stores.domain import Role
 from daimon.core.teams_threads import conversation_of, new_setup_thread_id
@@ -146,24 +143,3 @@ async def test_a_teams_key_request_cannot_ask_for_a_env_upload() -> None:
             purpose="several keys",
             channel_id="19:c@thread.tacv2",
         )
-
-
-def test_teams_details_lists_stay_collapsed() -> None:
-    keys = tuple(KeyEntry(name=f"KEY_{i:02d}", updated_at=datetime.now(UTC)) for i in range(12))
-    details = AgentDetails(
-        ma_agent_id="ag_1",
-        name="a",
-        model_id="m",
-        model_display_name="M",
-        daimon_managed=False,
-        created_by_is_workspace=False,
-        created_at=datetime.now(UTC),
-        answers_here=False,
-        keys=keys,
-        applies_note="",
-    )
-    card = setup_card.details_card(details, here="a:chat-1", page=0, coding_tools=False)
-    rendered = card.model_dump_json(by_alias=True)
-    assert "+6 more" in rendered and "Show more" not in rendered, (
-        "a Teams card edit redraws the whole card, so Details keeps each list collapsed"
-    )
