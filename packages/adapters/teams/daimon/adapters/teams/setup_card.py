@@ -170,6 +170,7 @@ def details_card(
         state = "⚠️ needs attention" if access.kind == "needs_attention" else access.kind
         repo = normalize_owner_repo(details.repo.repo_url)
         body.append(_text(f"**Repository:** {repo} ({state.replace('_', ' ')})"))
+        body.append(_text(f"**Branch:** `{details.repo.default_branch}`"))
     body += _detail_lists(details)
     actions: list[Action] = []
     if coding_tools:
