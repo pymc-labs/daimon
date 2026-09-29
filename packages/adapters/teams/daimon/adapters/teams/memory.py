@@ -9,7 +9,7 @@ from __future__ import annotations
 import anthropic
 import structlog
 from daimon.adapters.teams.card import TEAMS_LIMIT
-from daimon.adapters.teams.card_actions import heading
+from daimon.adapters.teams.card_actions import clip, heading
 from daimon.adapters.teams.commands import CommandContext
 from daimon.core.errors import DaimonError
 from daimon.core.memory_view import (
@@ -23,6 +23,7 @@ log = structlog.get_logger()
 
 EMPTY = "This agent has no memories yet — it will start remembering as it works."
 _FAILED = "Something went wrong fetching memory — try again later."
+_TITLE_MAX_CHARS = 300
 
 
 def _truncated(text: str) -> str:
@@ -30,6 +31,7 @@ def _truncated(text: str) -> str:
 
 
 def _card(title: str, text: str | None = None, hint: str | None = None) -> AdaptiveCard:
+    title = clip(title, _TITLE_MAX_CHARS)  # A title can carry the path someone typed.
     body: list[CardElement] = [heading(title)]
     if text is not None:
         body.append(TextBlock(text=_truncated(text), font_type="Monospace", wrap=True))

@@ -90,7 +90,7 @@ CODE_BLOCK = {
 MAX_BYTES = 26_000  # a margin under Teams' 28 KB
 EMOJI = "😀"
 NAME = "a" * 64  # agent names: `[A-Za-z0-9_-]{1,64}`
-KEY = "K" * 64
+KEY = "K" * 640
 CHANNEL = f"19:{'c' * 32}@thread.tacv2;messageid={'1' * 13}"
 URL = f"https://example.com/{'u' * 2028}"
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -252,7 +252,7 @@ def _routine(index: int = 0) -> RoutineRow:
         created_by_user_id=None,
         agent_id=f"agent_{index}",
         agent_name=NAME,
-        cron_expr="0,1,2,3,4,5,6,7,8,9 0,1,2,3,4,5,6,7,8,9 1,2,3,4,5,6,7,8,9 * *",
+        cron_expr="0," * 2000 + "0 * * * *",  # cron has no length limit
         timezone="America/Argentina/ComodRivadavia",
         trigger_message=EMOJI * 10_000,
         enabled=True,
@@ -373,7 +373,7 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
         10**6,
         user_id="u",
         is_admin=True,
-        notice=f"✅ Created routine on {NAME} ({_routine().cron_expr}).",
+        notice=routines_card.created_notice(NAME, _routine().cron_expr),
     ),
     "routine_output": lambda: routines_card.output_card(_routine()),
     "routine_error": lambda: routines_card.output_card(
@@ -391,6 +391,9 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
     "billing_admin": lambda: _billing(is_admin=True),
     "billing_checkout": lambda: checkout_card(URL, 100),
     "memory": lambda: memory._card(f"/memories/{EMOJI * 100}.md", EMOJI * 100_000),  # pyright: ignore[reportPrivateUsage]  # what show_memory sends
+    "memory_missing": lambda: memory._card(  # pyright: ignore[reportPrivateUsage]
+        f"No memory at /memories/{EMOJI * 10_000}.md.", hint="Send memory to list paths."
+    ),
     "help": lambda: help_card(COMMAND_HELP, bot=NAME),
     **{
         f"posted_{kind}_{state}": lambda kind=kind, state=state: _posted(kind, state)

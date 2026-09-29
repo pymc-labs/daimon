@@ -151,6 +151,11 @@ def button(
     )
 
 
+def clip(text: str, limit: int) -> str:
+    """`text` cut to `limit` characters, marked with an ellipsis when cut."""
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
 def heading(text: str) -> TextBlock:
     return TextBlock(text=text, weight="Bolder", size="Medium", wrap=True)
 

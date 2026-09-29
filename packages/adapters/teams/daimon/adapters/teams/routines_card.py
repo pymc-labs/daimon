@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
-from daimon.adapters.teams.card_actions import button, error_text, submitted_fields
+from daimon.adapters.teams.card_actions import button, clip, error_text, submitted_fields
 from daimon.core.routines import can_manage_routine, derive_glyph, routine_label
 from daimon.core.stores.domain import RoutineRow
 from microsoft_teams.cards import (
@@ -44,6 +44,13 @@ _ROWS_SHOWN = 20
 
 Op = Literal["refresh", "pause", "resume", "output", "delete", "confirm_delete"]
 
+# Cron has no length limit; a long one must not push the panel past a message.
+_CRON_MAX_CHARS = 100
+
+
+def created_notice(agent: str, cron: str) -> str:
+    return f"✅ Created routine on {agent} ({clip(cron, _CRON_MAX_CHARS)})."
+
 
 def _button(
     title: str, op: Op, row: RoutineRow | None = None, style: ActionStyle | None = None
@@ -56,7 +63,7 @@ def _routine(row: RoutineRow, *, can_manage: bool) -> Container:
     items: list[CardElement] = [
         TextBlock(text=f"{derive_glyph(row)} {routine_label(row)}", weight="Bolder", wrap=True),
         TextBlock(
-            text=f"{row.agent_name} · {row.cron_expr} ({row.timezone})",
+            text=f"{row.agent_name} · {clip(row.cron_expr, _CRON_MAX_CHARS)} ({row.timezone})",
             is_subtle=True,
             size="Small",
             wrap=True,

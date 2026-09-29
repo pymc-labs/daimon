@@ -29,6 +29,7 @@ from daimon.adapters.teams.routines_card import (
     FORM_FIELDS,
     confirm_delete_card,
     create_form,
+    created_notice,
     form_values,
     output_card,
     panel_card,
@@ -152,7 +153,7 @@ class RoutinesPanel:
         error = await self._create(actor, values)
         if error is not None:
             return await self._form(actor, values, error)
-        created = f"✅ Created routine on {values['agent']} ({values['cron']})."
+        created = created_notice(values["agent"], values["cron"])
         if ctx.activity.reply_to_id:
             panel = await self._panel(
                 actor.tenant_id, user_id=actor.user_id, is_admin=True, notice=created

@@ -11,7 +11,7 @@ import re
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal
 
-from daimon.adapters.teams.card_actions import button, heading
+from daimon.adapters.teams.card_actions import button, clip, heading
 from daimon.core.agent_detail_lists import (
     DETAIL_LIST_COLLAPSED_COUNT,
     DetailListName,
@@ -135,10 +135,6 @@ def roster_card(
     return _card("Agents", body, actions)
 
 
-def _clip(text: str, limit: int) -> str:
-    return text if len(text) <= limit else f"{text[: limit - 1]}…"
-
-
 def _place(place: AnsweringPlace, *, here: str) -> str:
     if place.tier == "channel" and place.channel_id is not None:
         return "this chat" if place.channel_id == here else f"channel `{place.channel_id}`"
@@ -204,7 +200,7 @@ def details_card(
 ) -> AdaptiveCard:
     """One agent's readable state. Key values are not in the model, so never here."""
     purpose = details.purpose
-    body: list[CardElement] = [_text(_clip(purpose, _PURPOSE_MAX_CHARS))] if purpose else []
+    body: list[CardElement] = [_text(clip(purpose, _PURPOSE_MAX_CHARS))] if purpose else []
     places = [_place(place, here=here) for place in details.answers_in]
     body.append(
         _text(f"**Answers in:** {_answers_in(places)}")
