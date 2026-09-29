@@ -24,15 +24,19 @@ detect a superseding human message -- is boundary-stubbed here the same way
 `create_session` and `build_context_xml` already are for this driver
 (`DiscordDriver`'s own docstring): the platform mocks in this suite are plain
 `MagicMock(spec=discord.Thread)` objects with no `.history` behavior wired up.
+Teams runs the Discord half with its own stub (`unsuperseded_continuations`).
 """
 
 from __future__ import annotations
 
 import uuid
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Literal
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation, record_continuation
@@ -43,18 +47,29 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .conftest import AGENT_ID, AGENT_TEXT, build_turn_router
 from .drivers.discord_driver import DiscordDriver
 from .drivers.slack_driver import SlackDriver
+from .drivers.teams_driver import TeamsDriver, unsuperseded_continuations
+
+#: (workspace, user, parent channel, thread) of the thread-addressed platforms.
+_THREAD_IDS = {
+    "discord": ("900003001", "555000333", "299999", "300000"),
+    "teams": (
+        str(uuid.UUID(int=900003001)),
+        str(uuid.UUID(int=555000333)),
+        "19:handoff@thread.tacv2",
+        "19:handoff@thread.tacv2;messageid=1700000000000",
+    ),
+}
 
 
-async def test_discord_handoff_continuation_dispatches_exactly_one_follow_up_turn(
+@pytest.mark.parametrize("platform", ["discord", "teams"])
+async def test_handoff_continuation_dispatches_exactly_one_follow_up_turn(
+    platform: Literal["discord", "teams"],
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    workspace_id = "900003001"
-    user_id = "555000333"
-    thread_id = "300000"
-    parent_channel_id = str(int(thread_id) - 1)
+    workspace_id, user_id, parent_channel_id, thread_id = _THREAD_IDS[platform]
 
-    tenant = await make_tenant(db_session, platform="discord", workspace_id=workspace_id)
+    tenant = await make_tenant(db_session, platform=platform, workspace_id=workspace_id)
     await tenant_ledger.insert_entry(
         db_session,
         tenant_id=tenant.id,
@@ -63,7 +78,7 @@ async def test_discord_handoff_continuation_dispatches_exactly_one_follow_up_tur
         idempotency_key=f"trial:{tenant.id}",
     )
     principal = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="discord", external_id=user_id
+        db_session, tenant_id=tenant.id, platform=platform, external_id=user_id
     )
     await db_session.commit()
 
@@ -72,7 +87,7 @@ async def test_discord_handoff_continuation_dispatches_exactly_one_follow_up_tur
     # `(managed_session_id, event_id)`: without fresh event ids per stream
     # open, three turns would silently collapse to one billed row.
     router = build_turn_router(str(tenant.id), fresh_event_ids=True)
-    driver = DiscordDriver()
+    driver = DiscordDriver() if platform == "discord" else TeamsDriver()
 
     # Turn 1: an ordinary mention, no binding/continuation yet -- establishes
     # the live session the handoff will later reuse.
@@ -96,7 +111,7 @@ async def test_discord_handoff_continuation_dispatches_exactly_one_follow_up_tur
         await upsert_responder_binding(
             session,
             tenant_id=tenant.id,
-            platform="discord",
+            platform=platform,
             parent_channel_id=parent_channel_id,
             thread_id=thread_id,
             responder_ma_agent_id=AGENT_ID,
@@ -107,7 +122,7 @@ async def test_discord_handoff_continuation_dispatches_exactly_one_follow_up_tur
         await record_continuation(
             session,
             tenant_id=tenant.id,
-            platform="discord",
+            platform=platform,
             parent_channel_id=parent_channel_id,
             thread_id=thread_id,
             requester_account_id=principal.account_id,
@@ -124,11 +139,16 @@ async def test_discord_handoff_continuation_dispatches_exactly_one_follow_up_tur
     # active (destination unchanged), so this turn runs and completes
     # normally; its completion is what triggers dispatch of the pending
     # continuation, still inside the same `on_message` call.
-    with patch(
-        "daimon.adapters.discord.continuation_dispatch._latest_human_message_at",
-        new_callable=AsyncMock,
-        return_value=None,
-    ):
+    unsuperseded: AbstractContextManager[object] = (
+        patch(
+            "daimon.adapters.discord.continuation_dispatch._latest_human_message_at",
+            new_callable=AsyncMock,
+            return_value=None,
+        )
+        if platform == "discord"
+        else unsuperseded_continuations()
+    )
+    with unsuperseded:
         posted_2 = await driver.dispatch_turn(
             sessionmaker=db_session_factory,
             router=router,

@@ -1,7 +1,7 @@
 """Scenario: a configuration change reaching a live thread through a real mention.
 
-Both platforms, through the real entry points (`DaimonBot.on_message` /
-`SlackApp._handle_app_mention`), because the promise is user-facing: a key
+Every platform, through the real entry points (`DaimonBot.on_message`,
+`SlackApp._handle_app_mention`, Teams' `/api/messages`), because the promise is user-facing: a key
 saved between two messages is usable in the next one, and a model change moves
 the task onto the new model instead of quietly billing the old one.
 
@@ -20,6 +20,7 @@ from decimal import Decimal
 from typing import Literal
 
 import httpx
+import pytest
 from anthropic.types.beta.beta_file_scope import BetaFileScope
 from anthropic.types.beta.file_metadata import FileMetadata
 from anthropic.types.beta.sessions.beta_managed_agents_delete_session_resource import (
@@ -52,7 +53,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import AGENT_ID, ENV_ID, MODEL_ID, build_turn_router
 from .drivers.discord_driver import DiscordDriver
+from .drivers.protocol import platform_ids
 from .drivers.slack_driver import SlackDriver
+from .drivers.teams_driver import TeamsDriver
 
 # The id both drivers' `create_session` stub returns, i.e. the session any
 # replacement lands on.
@@ -152,7 +155,7 @@ def _snapshot(
 async def _provision(
     session: AsyncSession,
     *,
-    platform: Literal["discord", "slack"],
+    platform: Literal["discord", "slack", "teams"],
     workspace_id: str,
     user_id: str,
 ) -> tuple[uuid.UUID, uuid.UUID]:
@@ -177,7 +180,7 @@ async def _seed_row(
     *,
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
-    platform: Literal["discord", "slack"],
+    platform: Literal["discord", "slack", "teams"],
     thread_id: str,
     ma_session_id: str,
     snapshot: SessionSnapshot,
@@ -224,23 +227,35 @@ async def _put_key(
     return hash_env_bytes(assemble_env_bytes(rows))
 
 
-async def test_a_key_saved_between_mentions_is_swapped_into_the_same_discord_session(
+def _thread_ids(
+    platform: Literal["discord", "teams"], *, workspace: int, user: int, thread: int
+) -> tuple[str, str, str]:
+    """(workspace, user, thread); a Teams thread is a channel post and its replies."""
+    workspace_id, user_id, channel = platform_ids(
+        platform, workspace=workspace, user=user, channel=thread
+    )
+    return workspace_id, user_id, channel if platform == "discord" else f"{channel};messageid=1"
+
+
+@pytest.mark.parametrize("platform", ["discord", "teams"])
+async def test_a_key_saved_between_mentions_is_swapped_into_the_same_session(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    platform: Literal["discord", "teams"],
 ) -> None:
-    workspace_id = "900002101"
-    user_id = "555000321"
-    thread_id = "200100"
+    workspace_id, user_id, thread_id = _thread_ids(
+        platform, workspace=900002101, user=555000321, thread=200100
+    )
 
     tenant_id, account_id = await _provision(
-        db_session, platform="discord", workspace_id=workspace_id, user_id=user_id
+        db_session, platform=platform, workspace_id=workspace_id, user_id=user_id
     )
     seeded_hash = await _put_key(db_session_factory, tenant_id=tenant_id, key="A", value="1")
     row_id = await _seed_row(
         db_session,
         tenant_id=tenant_id,
         account_id=account_id,
-        platform="discord",
+        platform=platform,
         thread_id=thread_id,
         ma_session_id=_LIVE_SESSION_ID,
         snapshot=_snapshot(env_sha256=seeded_hash, env_resource_id=_OLD_ENV_RESOURCE_ID),
@@ -249,7 +264,7 @@ async def test_a_key_saved_between_mentions_is_swapped_into_the_same_discord_ses
 
     calls: list[tuple[str, str]] = []
     router = _build_router(tenant_id, turn_session_id=_LIVE_SESSION_ID, resource_calls=calls)
-    driver = DiscordDriver()
+    driver = DiscordDriver() if platform == "discord" else TeamsDriver()
 
     posted = await driver.dispatch_turn(
         sessionmaker=db_session_factory,
@@ -286,7 +301,7 @@ async def test_a_key_saved_between_mentions_is_swapped_into_the_same_discord_ses
     live = await get_live_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
+        platform=platform,
         thread_id=thread_id,
         account_id=account_id,
     )
@@ -367,22 +382,24 @@ async def test_a_model_change_moves_a_slack_thread_onto_a_new_session_billed_at_
     assert rows[0].managed_session_id == _REPLACEMENT_SESSION_ID
 
 
-async def test_a_model_change_moves_a_discord_thread_onto_a_new_session_billed_at_the_new_model(
+@pytest.mark.parametrize("platform", ["discord", "teams"])
+async def test_a_model_change_moves_a_thread_onto_a_new_session_billed_at_the_new_model(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    platform: Literal["discord", "teams"],
 ) -> None:
-    workspace_id = "900002102"
-    user_id = "555000322"
-    thread_id = "200200"
+    workspace_id, user_id, thread_id = _thread_ids(
+        platform, workspace=900002102, user=555000322, thread=200200
+    )
 
     tenant_id, account_id = await _provision(
-        db_session, platform="discord", workspace_id=workspace_id, user_id=user_id
+        db_session, platform=platform, workspace_id=workspace_id, user_id=user_id
     )
     row_id = await _seed_row(
         db_session,
         tenant_id=tenant_id,
         account_id=account_id,
-        platform="discord",
+        platform=platform,
         thread_id=thread_id,
         ma_session_id=_LIVE_SESSION_ID,
         # The session froze haiku; the agent has since been moved to sonnet.
@@ -391,7 +408,7 @@ async def test_a_model_change_moves_a_discord_thread_onto_a_new_session_billed_a
     )
 
     router = _build_router(tenant_id, turn_session_id=_REPLACEMENT_SESSION_ID)
-    driver = DiscordDriver()
+    driver = DiscordDriver() if platform == "discord" else TeamsDriver()
 
     posted = await driver.dispatch_turn(
         sessionmaker=db_session_factory,
@@ -411,7 +428,7 @@ async def test_a_model_change_moves_a_discord_thread_onto_a_new_session_billed_a
     live = await get_live_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
+        platform=platform,
         thread_id=thread_id,
         account_id=account_id,
     )

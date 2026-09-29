@@ -3,7 +3,7 @@ and is framed as the SAME agent resuming rather than a handoff.
 
 A credential form that lands a value records a `task_continuations` row with
 `reason='private_input_applied'` in the transaction that carries the write
-(`credential_modals.py` on Discord, `credential_requests.py` on Slack) and
+(`credential_modals.py` on Discord, `credential_requests.py` on Slack and Teams) and
 dispatches nothing itself. The row is picked up the next time any turn
 finishes in its origin thread, through the very same
 `dispatch_pending_continuations` wiring a `task_handoff` row uses.
@@ -48,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .conftest import AGENT_ID, AGENT_TEXT, build_turn_router
 from .drivers.discord_driver import DiscordDriver
 from .drivers.slack_driver import SlackDriver
+from .drivers.teams_driver import TeamsDriver, unsuperseded_continuations
 
 #: The work the form promised to resume once the value landed. Longer than
 #: `MIN_REQUESTED_WORK` and distinctive, so it can be found verbatim in the
@@ -59,7 +60,7 @@ _REQUESTED_WORK = "finish the revenue chart now that the key is set"
 class _Thread:
     """One platform's addressing for the single thread every test here uses."""
 
-    platform: Literal["discord", "slack"]
+    platform: Literal["discord", "slack", "teams"]
     workspace_id: str
     user_id: str
     thread_id: str
@@ -81,6 +82,13 @@ _SLACK = _Thread(
     user_id="U_PRIVATE_INPUT_PARITY",
     thread_id="9300000010.000001",
     parent_channel_id="C_PRIVATE_INPUT_PARITY",
+)
+_TEAMS = _Thread(
+    platform="teams",
+    workspace_id=str(uuid.UUID(int=900004001)),
+    user_id=str(uuid.UUID(int=555000444)),
+    thread_id="19:private-input@thread.tacv2;messageid=1700000000000",
+    parent_channel_id="19:private-input@thread.tacv2",
 )
 
 
@@ -151,7 +159,8 @@ async def _mention(
     Discord's supersede check reads `thread.history`, which the suite's
     `MagicMock(spec=discord.Thread)` does not implement, so it is stubbed to
     "no newer human message" here; Slack's default `conversations.replies`
-    stub already returns an empty page and needs no patch.
+    stub already returns an empty page and needs no patch. Teams stamps the
+    triggering message itself as the latest (see `unsuperseded_continuations`).
     """
     if place.platform == "discord":
         with patch(
@@ -160,6 +169,17 @@ async def _mention(
             return_value=None,
         ):
             return await DiscordDriver().dispatch_turn(
+                sessionmaker=sessionmaker,
+                router=router,
+                tenant_id=tenant_id,
+                workspace_id=place.workspace_id,
+                channel_id=place.thread_id,
+                user_id=place.user_id,
+                text=text,
+            )
+    if place.platform == "teams":
+        with unsuperseded_continuations():
+            return await TeamsDriver().dispatch_turn(
                 sessionmaker=sessionmaker,
                 router=router,
                 tenant_id=tenant_id,
@@ -310,6 +330,15 @@ async def test_slack_private_input_continuation_dispatches_exactly_one_follow_up
     )
 
 
+async def test_teams_private_input_continuation_dispatches_exactly_one_follow_up_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _assert_dispatched_once(
+        _TEAMS, db_session=db_session, db_session_factory=db_session_factory
+    )
+
+
 async def _assert_no_handoff_notice(
     place: _Thread,
     *,
@@ -366,6 +395,15 @@ async def test_slack_private_input_continuation_carries_no_handoff_notice(
     )
 
 
+async def test_teams_private_input_continuation_carries_no_handoff_notice(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _assert_no_handoff_notice(
+        _TEAMS, db_session=db_session, db_session_factory=db_session_factory
+    )
+
+
 async def _assert_save_only_skipped_silently(
     place: _Thread,
     *,
@@ -413,4 +451,13 @@ async def test_slack_save_only_private_input_row_is_skipped_silently(
 ) -> None:
     await _assert_save_only_skipped_silently(
         _SLACK, db_session=db_session, db_session_factory=db_session_factory
+    )
+
+
+async def test_teams_save_only_private_input_row_is_skipped_silently(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _assert_save_only_skipped_silently(
+        _TEAMS, db_session=db_session, db_session_factory=db_session_factory
     )
