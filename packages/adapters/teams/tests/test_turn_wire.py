@@ -8,8 +8,10 @@ sends must be one Teams accepts (`assert_teams_accepts`).
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
@@ -34,12 +36,18 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing import list_response, ma_session
-from daimon.testing.ma import MARouter, build_fake_anthropic, sse_response
+from daimon.testing.ma import (
+    MARouter,
+    build_fake_anthropic,
+    make_fake_memory_store_handler,
+    sse_response,
+)
 from daimon.testing.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME
 from daimon.testing.turn_router import AGENT_ID, AGENT_TEXT, ENV_ID, build_turn_router, turn_events
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
+    CHANNEL_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
@@ -80,16 +88,23 @@ async def funded_tenant(db_session_factory: async_sessionmaker[AsyncSession]) ->
 
 @asynccontextmanager
 async def _service(
-    db_factory: async_sessionmaker[AsyncSession], fake: TeamsApiFake, router: MARouter
+    db_factory: async_sessionmaker[AsyncSession],
+    fake: TeamsApiFake,
+    router: MARouter,
+    *,
+    one_session: bool = True,
 ) -> AsyncIterator[TeamsHttpService]:
-    """The started service over `router`; drained on exit, then every activity is checked."""
+    """The started service over `router`; drained on exit, then every activity is checked.
+
+    `one_session` hands every turn `SESSION_ID`; without it `router` creates sessions."""
     runtime = build_teams_runtime(
         db_factory,
         anthropic=build_fake_anthropic(router.dispatch),
         deployment_default=TURN_DEFAULT,
     )
     session = ma_session(id=SESSION_ID, agent_id=AGENT_ID, environment_id=ENV_ID)
-    with patch("daimon.core.turn.prepare.create_session", return_value=session):
+    create = patch("daimon.core.turn.prepare.create_session", return_value=session)
+    with create if one_session else nullcontext():
         async with running_service(runtime, fake) as service:
             yield service
             await service.turns.drain(timeout=30)
@@ -192,6 +207,84 @@ async def test_answer_replaces_the_status_card_in_the_conversation_it_came_from(
     assert "attachments" not in answer.body, "no card left under the answer"
     assert _feedback(answer) == {"type": "default"}, "Teams' thumbs up and down"
     assert "AIGeneratedContent" in str(answer.body["entities"]), "labelled AI generated"
+
+
+def _echo_sessions(router: MARouter) -> None:
+    """Sessions created from the request, as MA does, so a reused one matches its config,
+    memory mount included."""
+    sessions: dict[str, dict[str, Any]] = {}
+    memory = make_fake_memory_store_handler()
+    for method in ("GET", "POST"):
+        router.add(method, r"/v1/memory_stores(/.*)?", lambda r, m: memory(r))
+
+    def create(request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        body = json.loads(request.content)
+        session = ma_session(
+            id=f"sesn_{len(sessions) + 1}",
+            agent_id=AGENT_ID,
+            environment_id=ENV_ID,
+            resources=body.get("resources", []),
+            metadata=body.get("metadata") or {},
+        ).model_dump(mode="json")
+        sessions[session["id"]] = session
+        return httpx.Response(200, json=session)
+
+    router.add("POST", r"/v1/sessions", create)
+    router.add(
+        "GET",
+        r"/v1/sessions/(?P<id>[^/]+)",
+        lambda r, m: httpx.Response(200, json=sessions[m["id"]]),
+    )
+
+
+NEW_THREAD = f"{CHANNEL_ID};messageid=1700000000002"
+
+
+@pytest.mark.parametrize(
+    ("activities", "expected"),
+    [
+        (
+            [make_message_activity(), make_message_activity(activity_id="activity-2")],
+            ["sesn_1", "sesn_1"],
+        ),
+        (
+            [
+                make_channel_activity(),
+                make_channel_activity(activity_id="activity-2"),
+                make_channel_activity(activity_id="activity-3", conversation_id=NEW_THREAD),
+            ],
+            ["sesn_1", "sesn_1", "sesn_2"],
+        ),
+    ],
+    ids=["personal", "channel"],
+)
+async def test_a_follow_up_reuses_its_session_and_a_new_thread_starts_one(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    monkeypatch: pytest.MonkeyPatch,
+    activities: list[dict[str, object]],
+    expected: list[str],
+) -> None:
+    monkeypatch.setattr(output_delivery, "_POLL_DELAYS_S", (0.0,))  # One listing settles.
+    streams: list[str] = []
+    router = build_turn_router(str(TENANT), fresh_event_ids=True, stream_hits=streams)
+    router.add("GET", r"/v1/files", lambda r, m: list_response([]))  # The output sweep.
+    _echo_sessions(router)
+
+    def answers() -> list[SentRequest]:
+        return [r for r in teams_api_fake.activity_requests if "text" in r.body]
+
+    async with _service(db_session_factory, teams_api_fake, router, one_session=False) as service:
+        for count, activity in enumerate(activities, start=1):
+            await post_activity(service, activity)
+            # Tests share one DB connection: a turn must finish before the next starts.
+            await _until(
+                lambda count=count: len(answers()) == count and not service.turns.in_flight
+            )
+
+    assert streams == expected, "one session per chat or thread"
+    texts = [str(r.body["text"]) for r in answers()]
+    assert all(t.startswith(AGENT_TEXT) for t in texts), "no continuity notice on a reused session"
 
 
 async def test_long_answer_splits_into_ordered_parts_and_keeps_its_code_block_whole(
