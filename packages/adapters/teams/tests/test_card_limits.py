@@ -1,10 +1,8 @@
 """Every Adaptive Card the Teams adapter and the MCP server send is one Teams renders.
 
-Teams draws cards up to v1.5 and refuses a message over about 28 KB. Each case
-renders a builder with the largest inputs the code accepts: full pages, expanded
-lists, names at their validators' caps and emoji wherever text is free, since
-httpx sends raw UTF-8 and an emoji is its widest character at 4 bytes. Unbounded
-inputs are ten times any limit, so the builder must bound them itself.
+Teams draws cards up to v1.5 and refuses a message over about 28 KB. Each builder gets its
+largest accepted inputs, 4-byte emoji wherever text is free (httpx sends raw UTF-8), and ten
+times any limit where an input is unbounded, so the builder must bound it itself.
 """
 
 from __future__ import annotations
@@ -15,25 +13,16 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import httpx
 import pytest
-from daimon.adapters.teams import card, memory, setup_card
+from daimon.adapters.teams import card, memory, privacy_card, routines_card, setup_card
 from daimon.adapters.teams.billing_panel import checkout_card
 from daimon.adapters.teams.billing_panel import panel_card as billing_card
 from daimon.adapters.teams.credential_requests import credential_form, oauthdialog
 from daimon.adapters.teams.help import COMMAND_HELP, help_card
-from daimon.adapters.teams.privacy_card import (
-    confirm_card,
-    export_card,
-    no_data_card,
-    post_delete_card,
-)
-from daimon.adapters.teams.privacy_card import panel_card as privacy_card
 from daimon.adapters.teams.privacy_panel import NAME_MISMATCH
-from daimon.adapters.teams.routines_card import confirm_delete_card, create_form, output_card
-from daimon.adapters.teams.routines_card import panel_card as routines_card
 from daimon.adapters.teams.setup_panel import GONE
 from daimon.adapters.teams.tool_confirmation import confirmation_adaptive_card
 from daimon.core.agent_detail_lists import DetailListName
@@ -54,7 +43,8 @@ from daimon.core.ma import SessionDeletionReport
 from daimon.core.mcp_auth import coding_tool_config
 from daimon.core.message_split import split_fenced
 from daimon.core.models_catalog import ModelChoice
-from daimon.core.posted_controls.confirmation import build_confirmation_card
+from daimon.core.posted_controls import CardState
+from daimon.core.posted_controls.confirmation import ConfirmationCardState, build_confirmation_card
 from daimon.core.posted_controls.teams_card import (
     ADAPTIVE_CARD_TYPE,
     build_adaptive_card,
@@ -277,25 +267,7 @@ def _routine(index: int = 0) -> RoutineRow:
 
 def _preview() -> PurgePreview:
     row = PurgePreviewRow(count=10**6, example=EMOJI * 100)
-    return PurgePreview(
-        linked_principals=row,
-        principal_links=row,
-        routines=row,
-        user_configs=row,
-        account=row,
-        user_skills=row,
-        github_credentials=row,
-        github_oauth_states=row,
-        mcp_tokens=row,
-        agent_github_binding=row,
-        slack_user_tokens=row,
-        slack_turn_contexts=row,
-        direct_message_conversations=row,
-        credential_requests=row,
-        wizard_sessions=row,
-        message_feedback=row,
-        support_escalations=row,
-    )
+    return PurgePreview(**dict.fromkeys(PurgePreview.model_fields, row))
 
 
 def _purged() -> AccountPurgeResult:
@@ -351,7 +323,7 @@ def _request(kind: str) -> CredentialRequestRow:
     )
 
 
-def _posted(kind: str, state: str) -> Mapping[str, object]:
+def _posted(kind: str, state: CardState) -> Mapping[str, object]:
     change = ConfigurationChange(
         target_name=NAME,
         kind="key",
@@ -362,14 +334,14 @@ def _posted(kind: str, state: str) -> Mapping[str, object]:
     )
     posted = card_for_request(
         _request(kind),
-        state=state,  # pyright: ignore[reportArgumentType]  # every state is iterated below
+        state=state,
         outcome=change if state in ("applied", "partial") else None,
         refusal="token_rejected" if state == "refused" else None,
     )
     return build_adaptive_card(posted, token="t" * 43 if state == "requested" else None)
 
 
-def _confirmation(state: str) -> AdaptiveCard:
+def _confirmation(state: ConfirmationCardState) -> AdaptiveCard:
     call = ToolCall(
         tool_use_id="toolu_1",
         server_name=EMOJI * 64,
@@ -378,9 +350,7 @@ def _confirmation(state: str) -> AdaptiveCard:
     )
     prompt = prompt_for_tool_call(call, requester_platform_user_id=str(uuid.UUID(int=0)), now=NOW)
     confirmation = build_confirmation_card(
-        prompt,
-        state=state,  # pyright: ignore[reportArgumentType]  # every state is iterated below
-        token="t" * 64 if state == "pending" else None,
+        prompt, state=state, token="t" * 64 if state == "pending" else None
     )
     return confirmation_adaptive_card(confirmation, prompt, answered_by=EMOJI * 256)
 
@@ -398,23 +368,25 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
     "routing": _routing,
     "welcome": _welcome,
     "setup_notice": lambda: setup_card.notice_card(setup_card.ENDED),
-    "routines": lambda: routines_card(
+    "routines": lambda: routines_card.panel_card(
         [_routine(index) for index in range(PANEL_CAP)],
         10**6,
         user_id="u",
         is_admin=True,
         notice=f"✅ Created routine on {NAME} ({_routine().cron_expr}).",
     ),
-    "routine_output": lambda: output_card(_routine()),
-    "routine_error": lambda: output_card(_routine().model_copy(update={"last_error": "e" * 500})),
-    "routine_delete": lambda: confirm_delete_card(_routine()),
-    "privacy_none": lambda: no_data_card(NAME),
-    "privacy": lambda: privacy_card(_preview(), bot=NAME, policy_url=URL),
-    "privacy_export": lambda: export_card(_preview(), bot=NAME),
-    "privacy_confirm": lambda: confirm_card(
+    "routine_output": lambda: routines_card.output_card(_routine()),
+    "routine_error": lambda: routines_card.output_card(
+        _routine().model_copy(update={"last_error": "e" * 500})
+    ),
+    "routine_delete": lambda: routines_card.confirm_delete_card(_routine()),
+    "privacy_none": lambda: privacy_card.no_data_card(NAME),
+    "privacy": lambda: privacy_card.panel_card(_preview(), bot=NAME, policy_url=URL),
+    "privacy_export": lambda: privacy_card.export_card(_preview(), bot=NAME),
+    "privacy_confirm": lambda: privacy_card.confirm_card(
         _preview(), account_id=uuid.UUID(int=0), name=EMOJI * 256, error=NAME_MISMATCH
     ),
-    "privacy_deleted": lambda: post_delete_card(_purged(), bot=NAME),
+    "privacy_deleted": lambda: privacy_card.post_delete_card(_purged(), bot=NAME),
     "billing_member": lambda: _billing(is_admin=False),
     "billing_admin": lambda: _billing(is_admin=True),
     "billing_checkout": lambda: checkout_card(URL, 100),
@@ -423,20 +395,11 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
     **{
         f"posted_{kind}_{state}": lambda kind=kind, state=state: _posted(kind, state)
         for kind in ("env", "mcp", "mcp_oauth", "repo", "skill_repo")
-        for state in (
-            "requested",
-            "received",
-            "applied",
-            "partial",
-            "refused",
-            "expired",
-            "superseded",
-            "replaced",
-        )
+        for state in get_args(CardState)
     },
     **{
         f"confirmation_{state}": lambda state=state: _confirmation(state)
-        for state in ("pending", "approved", "denied", "expired")
+        for state in get_args(ConfirmationCardState)
     },
 }
 # Dialogs are invoke responses, never posted, so the message cap does not apply.
@@ -445,7 +408,7 @@ DIALOGS: dict[str, Callable[[], AdaptiveCard | TaskModuleResponse]] = {
         _models(), {"name": NAME, "purpose": EMOJI * 1000, "model": "claude-0"}, EMOJI * 1000
     ),
     "token": _token,
-    "routine_form": lambda: create_form(
+    "routine_form": lambda: routines_card.create_form(
         [f"{index:03d}{NAME[3:]}" for index in range(100)],
         {"agent": NAME, "cron": "c" * 100, "timezone": "t" * 100, "message": EMOJI * 1000},
         EMOJI * 1000,

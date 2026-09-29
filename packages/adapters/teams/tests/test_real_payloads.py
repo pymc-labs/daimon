@@ -1,9 +1,8 @@
 """Contract tests over Bot Framework activities shaped as Teams sends them.
 
-Each `data/activities/<case>.json` keeps the shape of a published Microsoft
-example or wire capture (`SOURCES`), identifiers swapped for this package's
-test constants. Activities go through the real `/api/messages` route; only the
-outbound Bot Framework transport, MSAL, MA and the turn itself are faked.
+Each `data/activities/<case>.json` keeps the shape of a published Microsoft example or wire
+capture (`SOURCES`), with this package's test identifiers. Activities go through the real
+`/api/messages` route; only the outbound Bot Framework transport, MSAL, MA and the turn are faked.
 """
 
 from __future__ import annotations
@@ -126,6 +125,24 @@ DOWNLOAD_URL = (
     "?UniqueId=00000000-0000-4000-8000-00000000f11e&Translate=false"
     "&tempauth=synthetic-not-a-real-token&ApiVersion=2.1"
 )
+# case: (kind, conversation, text without the bot's mention, files)
+MESSAGES: dict[str, tuple[str, str, str, tuple[InboundFile, ...]]] = {
+    "personal_message": (
+        "dm",
+        CONVERSATION_ID,
+        "Hello Teams TestAgent.Sending bold-italic rich text",
+        (),
+    ),
+    "channel_mention": ("channel", THREAD_ID, "summarise this week's releases", ()),
+    "channel_thread_reply": ("channel", THREAD_ID, "reply to thread", ()),
+    "personal_file": (
+        "dm",
+        CONVERSATION_ID,
+        "",
+        (InboundFile("shared_file", "quarterly_report.pdf", DOWNLOAD_URL),),
+    ),
+    "pasted_image": ("dm", CONVERSATION_ID, "", (InboundFile("pasted_image", "image", IMAGE_URL),)),
+}
 
 
 def _load(case: str) -> dict[str, Any]:
@@ -143,42 +160,29 @@ def _posts(fake: TeamsApiFake) -> list[dict[str, object]]:
     return [r.body for r in fake.activity_requests if r.method == "POST"]
 
 
+async def _run(
+    db_factory: async_sessionmaker[AsyncSession],
+    fake: TeamsApiFake,
+    case: str,
+    http_client: httpx.AsyncClient | None = None,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """POST `case` to the real service and drain it; the invoke response and each turn's kwargs."""
+    runtime = build_teams_runtime(db_factory, http_client=http_client)
+    with patched_turns() as turns:
+        async with running_service(runtime, fake) as service:
+            response = await post_activity(service, _load(case))
+            await service.turns.drain(timeout=30)
+    return response, turns
+
+
 def test_every_fixture_names_its_source() -> None:
     fixtures = sorted(path.stem for path in DATA.glob("*.json"))
     assert fixtures == sorted(SOURCES), "each payload records where its shape comes from"
 
 
-@pytest.mark.parametrize(
-    ("case", "kind", "conversation", "text", "files"),
-    [
-        (
-            "personal_message",
-            "dm",
-            CONVERSATION_ID,
-            "Hello Teams TestAgent.Sending bold-italic rich text",
-            (),
-        ),
-        ("channel_mention", "channel", THREAD_ID, "summarise this week's releases", ()),
-        ("channel_thread_reply", "channel", THREAD_ID, "reply to thread", ()),
-        (
-            "personal_file",
-            "dm",
-            CONVERSATION_ID,
-            "",
-            (InboundFile("shared_file", "quarterly_report.pdf", DOWNLOAD_URL),),
-        ),
-        (
-            "pasted_image",
-            "dm",
-            CONVERSATION_ID,
-            "",
-            (InboundFile("pasted_image", "image", IMAGE_URL),),
-        ),
-    ],
-)
-def test_real_messages_parse_to_verified_facts(
-    case: str, kind: str, conversation: str, text: str, files: tuple[InboundFile, ...]
-) -> None:
+@pytest.mark.parametrize("case", MESSAGES)
+def test_real_messages_parse_to_verified_facts(case: str) -> None:
+    kind, conversation, text, files = MESSAGES[case]
     inbound = _parse(_load(case))
     assert isinstance(inbound, TeamsInbound), f"{case} passes the identity checks"
     assert (inbound.kind, inbound.user_id, inbound.conversation_id) == (
@@ -203,33 +207,12 @@ def test_personal_message_without_a_conversation_tenant_is_denied() -> None:
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
-@pytest.mark.parametrize(
-    ("case", "conversation", "text"),
-    [
-        (
-            "personal_message",
-            CONVERSATION_ID,
-            "Hello Teams TestAgent.Sending bold-italic rich text",
-        ),
-        ("channel_mention", THREAD_ID, "summarise this week's releases"),
-        ("channel_thread_reply", THREAD_ID, "reply to thread"),
-    ],
-)
+@pytest.mark.parametrize("case", ["personal_message", "channel_mention", "channel_thread_reply"])
 async def test_real_message_runs_a_turn_answered_in_its_conversation(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    teams_api_fake: TeamsApiFake,
-    case: str,
-    conversation: str,
-    text: str,
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake, case: str
 ) -> None:
-    with patched_turns() as turns:
-        async with running_service(
-            build_teams_runtime(db_session_factory), teams_api_fake
-        ) as service:
-            await post_activity(service, _load(case))
-            await service.turns.drain(timeout=30)
-
-    [turn] = turns
+    _, conversation, text, _ = MESSAGES[case]
+    _, [turn] = await _run(db_session_factory, teams_api_fake, case)
     assert f">{text}</user_query>" in turn["user_message"]
     card = next(r for r in teams_api_fake.activity_requests if r.method == "POST")
     assert (
@@ -241,13 +224,7 @@ async def test_real_message_runs_a_turn_answered_in_its_conversation(
 async def test_group_chat_message_is_answered_with_the_refusal(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    with patched_turns() as turns:
-        async with running_service(
-            build_teams_runtime(db_session_factory), teams_api_fake
-        ) as service:
-            await post_activity(service, _load("group_chat_message"))
-            await service.turns.drain(timeout=30)
-
+    _, turns = await _run(db_session_factory, teams_api_fake, "group_chat_message")
     assert turns == [], "no turn runs in a group chat"
     [reply] = teams_api_fake.activity_requests
     assert str(reply.body.get("text")).endswith(GROUP_CHAT_UNSUPPORTED), "a quoted reply"
@@ -269,13 +246,7 @@ async def test_pasted_image_reaches_the_turn_as_a_vision_block(
         return httpx.Response(200, content=png.getvalue())
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(media))
-    runtime = build_teams_runtime(db_session_factory, http_client=http)
-    with patched_turns() as turns:
-        async with running_service(runtime, teams_api_fake) as service:
-            await post_activity(service, _load("pasted_image"))
-            await service.turns.drain(timeout=30)
-
-    [turn] = turns
+    _, [turn] = await _run(db_session_factory, teams_api_fake, "pasted_image", http)
     assert len(turn["image_blocks"]) == 1, "the pasted image is inlined"
     assert [str(r.url) for r in fetched] == [IMAGE_URL], "fetched from the service URL's host"
     assert fetched[0].headers["authorization"].startswith("Bearer "), "with the bot's token"
@@ -285,14 +256,7 @@ async def test_pasted_image_reaches_the_turn_as_a_vision_block(
 async def test_shared_file_reaches_the_turn_as_a_download_line(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    with patched_turns() as turns:
-        async with running_service(
-            build_teams_runtime(db_session_factory), teams_api_fake
-        ) as service:
-            await post_activity(service, _load("personal_file"))
-            await service.turns.drain(timeout=30)
-
-    [turn] = turns
+    _, [turn] = await _run(db_session_factory, teams_api_fake, "personal_file")
     assert "[attachment] `quarterly_report.pdf`" in turn["user_message"]
     assert DOWNLOAD_URL in turn["user_message"], "the agent gets the pre-authorised URL"
     assert turn["image_blocks"] is None, "a PDF is linked, not inlined"
@@ -302,9 +266,7 @@ async def test_shared_file_reaches_the_turn_as_a_download_line(
 async def test_card_action_is_answered_with_the_documented_card_response(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with running_service(build_teams_runtime(db_session_factory), teams_api_fake) as service:
-        response = await post_activity(service, _load("adaptive_card_action"))
-
+    response, _ = await _run(db_session_factory, teams_api_fake, "adaptive_card_action")
     assert (response["statusCode"], response["type"]) == (
         200,
         "application/vnd.microsoft.card.adaptive",
@@ -313,16 +275,13 @@ async def test_card_action_is_answered_with_the_documented_card_response(
     assert "Routines" in json.dumps(response["value"]), "the refreshed routines panel"
 
 
-def _agents(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
-    return list_response([ma_agent(tenant_id=TENANT, name="daimon").model_dump(mode="json")])
-
-
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_task_fetch_opens_the_dialog_and_task_submit_creates_the_routine(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
+    agent = ma_agent(tenant_id=TENANT, name="daimon").model_dump(mode="json")
     router = MARouter()
-    router.add("GET", r"/v1/agents$", _agents)
+    router.add("GET", r"/v1/agents$", lambda r, m: list_response([agent]))
     runtime = build_teams_runtime(
         db_session_factory,
         anthropic=build_fake_anthropic(router.dispatch),
@@ -388,10 +347,8 @@ async def _consent(
         await service.turns.outputs.sweep(make_inbound(), "sesn_1")
         [offer] = _posts(fake)
         card: Any = offer["attachments"]
-        context_key = (
-            "acceptContext" if payload["value"]["action"] == "accept" else "declineContext"
-        )
-        payload["value"]["context"] = card[0]["content"][context_key]  # Teams echoes it back.
+        context = card[0]["content"][f"{payload['value']['action']}Context"]
+        payload["value"]["context"] = context  # Teams echoes it back.
         response = await post_activity(service, payload)
         await service.turns.drain(timeout=30)
     return response, uploads, deletes
@@ -435,9 +392,7 @@ async def test_file_consent_decline_deletes_without_uploading(
 async def test_feedback_is_recorded_and_acknowledged_with_an_empty_body(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with running_service(build_teams_runtime(db_session_factory), teams_api_fake) as service:
-        response = await post_activity(service, _load("feedback"))
-
+    response, _ = await _run(db_session_factory, teams_api_fake, "feedback")
     assert response is None, "Teams answers a message/submitAction reply with a body with 400"
     async with db_session_factory() as session:
         [row] = (await session.execute(select(MessageFeedback))).scalars().all()
@@ -452,12 +407,6 @@ async def test_feedback_is_recorded_and_acknowledged_with_an_empty_body(
 async def test_lifecycle_events_are_acknowledged_and_ignored(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake, case: str
 ) -> None:
-    with patched_turns() as turns:
-        async with running_service(
-            build_teams_runtime(db_session_factory), teams_api_fake
-        ) as service:
-            response = await post_activity(service, _load(case))
-            await service.turns.drain(timeout=30)
-
+    response, turns = await _run(db_session_factory, teams_api_fake, case)
     assert response is None, "an empty 200"
     assert turns == [] and teams_api_fake.activity_requests == [], "nothing is posted"
