@@ -792,7 +792,9 @@ class TeamsApp:
             kind: Literal["transcript", "history"] = (
                 "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
             )
-            await self._say(inbound, render_unexpected_loss(kind))
+            loss = render_unexpected_loss(kind)
+            if not await final.prepend_revealed_answer(loss):
+                await self._say(inbound, loss)
         if summary is not None and not final.answer_prefix_applied:
             await self._say(inbound, summary)
         if outcome.mapping_id is not None and final.final_message_id is not None:

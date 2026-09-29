@@ -118,6 +118,8 @@ class TeamsTurnLifecycle:
         # A continuity notice that belongs above the answer it explains.
         self.answer_prefix: str | None = None
         self.answer_prefix_applied = False
+        # The first answer message as sent (text, footer), for `prepend_revealed_answer`.
+        self._revealed: tuple[str, str | None] | None = None
 
     @property
     def message_id(self) -> str | None:
@@ -247,6 +249,7 @@ class TeamsTurnLifecycle:
                 if index == 0:
                     current = self._message_id = await self._edit(message, current)
                     replaced = self.card_closed = True
+                    self._revealed = (chunk, footer if last == 0 else None)
                 else:
                     current = await self._send(message, message_id=None)
             self.final_message_id = current
@@ -263,6 +266,30 @@ class TeamsTurnLifecycle:
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
                 await self._send(card.notice_card(_DELIVERY_FAILED), message_id=self._message_id)
                 self.card_closed = True
+
+    async def prepend_revealed_answer(self, notice: str) -> bool:
+        """Edit `notice` in above the answer on screen; False if it cannot go there.
+
+        An unexpected workspace loss is known only after the answer replaced
+        the card, and a message sent then lands below the answer it explains.
+        False when no answer was shown, the notice would overflow the first
+        message, or the edit fails; the caller then sends it on its own.
+        """
+        if self._revealed is None or self._message_id is None:
+            return False
+        chunk, footer = self._revealed
+        updated = f"{notice}\n\n{chunk}"
+        if len(updated) > card.TEAMS_LIMIT:
+            return False
+        try:
+            await self._send(
+                card.answer_message(updated, footer=footer), message_id=self._message_id
+            )
+        except TEAMS_SEND_ERRORS:
+            log.warning("teams.turn.answer_prefix_failed", exc_info=True)
+            return False
+        self._revealed = (updated, footer)
+        return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         footer = self._footer(state)

@@ -134,6 +134,26 @@ async def test_an_answer_edit_that_keeps_timing_out_is_never_overwritten() -> No
     assert lifecycle.final_message_id is None, "no watermark past an answer nobody may have seen"
 
 
+async def test_a_late_notice_is_edited_in_above_the_answer() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    final = sender.activities[-1]
+    assert final.id == "m-1" and final.text is not None
+    assert final.text.startswith("I lost the workspace.\n\nThe posterior mean is 3.")
+    assert "daimon · " in final.text, "the footer stays on a single-message answer"
+
+
+async def test_a_late_notice_without_an_answer_on_screen_is_sent_on_its_own() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(TurnState(content=[]))
+
+    assert not await lifecycle.prepend_revealed_answer("I lost the workspace.")
+
+
 async def test_no_answer_reads_as_cancelled_or_done() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
