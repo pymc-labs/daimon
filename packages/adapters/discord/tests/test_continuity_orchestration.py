@@ -300,7 +300,7 @@ async def test_session_preparation_failed_posts_copy_and_runs_no_turn(
     assert any(p is not None and "could not get test-agent ready" in p.lower() for p in posted), (
         f"expected the preparation-failed copy, got {posted}"
     )
-    assert any(p is not None and "mention me again to retry" in p.lower() for p in posted)
+    assert any(p is not None and "ask again to retry" in p.lower() for p in posted)
     await _assert_no_recoverable_cards(db_session_factory)
     _ = tenant_id
 
