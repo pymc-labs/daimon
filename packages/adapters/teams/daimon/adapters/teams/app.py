@@ -245,8 +245,9 @@ class TeamsApp:
         # When each busy conversation last got a message: a newer one supersedes
         # queued continuation work (Teams cannot list a conversation's history).
         self._last_message_at: dict[str, datetime] = {}
-        # Private-input dispatches that found their chat busy, by thread key.
-        self._deferred_dispatch: dict[str, tuple[uuid.UUID, str | None]] = {}
+        # Dispatches that found their chat busy, by thread key: the service URL to
+        # use and whether the cap holds them back (only wakes; a saved input wins).
+        self._deferred_dispatch: dict[str, tuple[uuid.UUID, str | None, bool]] = {}
         self.draining = False
 
     @property
@@ -833,9 +834,9 @@ class TeamsApp:
         self._processing.discard(key)
         self._last_message_at.pop(key, None)
         for thread_id in [t for t in self._deferred_dispatch if conversation_of(t) == key]:
-            tenant_id, service_url = self._deferred_dispatch.pop(thread_id)
+            tenant_id, service_url, capped = self._deferred_dispatch.pop(thread_id)
             if not self.draining:
-                resume = self.dispatch_after_input(tenant_id, thread_id, service_url)
+                resume = self.dispatch_after_input(tenant_id, thread_id, service_url, capped=capped)
                 self.spawn(resume, name="teams.resume")
 
     async def dispatch_after_input(
@@ -854,9 +855,16 @@ class TeamsApp:
             await asyncio.shield(self._recovery)
         conversation_id = conversation_of(thread_id)
         if conversation_id in self._processing:
-            # A wake's None must not drop a saved input's regional service URL.
-            previous = self._deferred_dispatch.get(thread_id, (tenant_id, None))[1]
-            self._deferred_dispatch[thread_id] = (tenant_id, service_url or previous)
+            # A wake's None must not drop a saved input's regional service URL, and
+            # the cap never holds back a saved input's resume.
+            _, previous_url, previous_capped = self._deferred_dispatch.get(
+                thread_id, (tenant_id, None, True)
+            )
+            self._deferred_dispatch[thread_id] = (
+                tenant_id,
+                service_url or previous_url,
+                capped and previous_capped,
+            )
             return
         cap = self._teams.max_concurrent_turns_per_tenant
         if capped and not should_admit_turn(

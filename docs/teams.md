@@ -115,8 +115,8 @@ answer.
 
 Each tenant runs three turns at once by default
 (`DAIMON_TEAMS__MAX_CONCURRENT_TURNS_PER_TENANT`). A new thread over the limit
-gets a retry-later reply without starting a turn, and a due timer waits until a
-turn finishes.
+gets a retry-later reply without starting a turn, and due timers and handoffs
+from the wake poller wait until a turn finishes.
 
 ### Restart behaviour
 

@@ -52,12 +52,6 @@ async def provision_configured_tenant(
     await provision_tenant(
         sessionmaker, platform="teams", workspace_id=entra_tenant_id, signup_credit=signup_credit
     )
-    async with sessionmaker.begin() as session:
-        demoted = await demote_unlisted_admins(
-            session, tenant_id=tenant_id, platform="teams", admin_ids=admin_user_ids
-        )
-    if demoted:
-        log.info("teams.admins_demoted", tenant_id=str(tenant_id), count=demoted)
     # A new row defaults to ready; it is not until the reconcile below passes.
     was_ready = existing is not None and existing.provision_status == "ready"
     if not was_ready:
@@ -93,4 +87,11 @@ async def provision_configured_tenant(
             status=None if was_ready else "failed",
             reason=reason,
         )
+    # Last, so a failure here never holds the tenant's status back.
+    async with sessionmaker.begin() as session:
+        demoted = await demote_unlisted_admins(
+            session, tenant_id=tenant_id, platform="teams", admin_ids=admin_user_ids
+        )
+    if demoted:
+        log.info("teams.admins_demoted", tenant_id=str(tenant_id), count=demoted)
     return tenant_id

@@ -360,14 +360,18 @@ async def test_a_continuation_in_a_protected_channel_settles_without_a_word(
     )
 
 
-async def test_a_wake_deferred_behind_a_turn_keeps_the_saved_service_url(
+async def test_a_wake_deferred_behind_a_turn_keeps_the_saved_input_and_the_cap(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     teams, _ = await _app(db_session_factory, FakeSender())
-    teams._processing.add(CONVERSATION_ID)
+    teams._processing.update({CONVERSATION_ID, THREAD_ID})
     await teams.dispatch_after_input(TENANT, CONVERSATION_ID, SERVICE_URL)
-    await teams.dispatch_after_input(TENANT, CONVERSATION_ID, None)
-    assert teams._deferred_dispatch[CONVERSATION_ID] == (TENANT, SERVICE_URL)
+    await teams.dispatch_after_input(TENANT, CONVERSATION_ID, None, capped=True)
+    await teams.dispatch_after_input(TENANT, THREAD_ID, None, capped=True)
+    assert teams._deferred_dispatch[CONVERSATION_ID] == (TENANT, SERVICE_URL, False), (
+        "a saved input's URL survives the wake, and its resume ignores the cap"
+    )
+    assert teams._deferred_dispatch[THREAD_ID] == (TENANT, None, True), "a wake alone stays capped"
 
 
 async def test_a_disabled_deployment_runs_no_wake_poller(
