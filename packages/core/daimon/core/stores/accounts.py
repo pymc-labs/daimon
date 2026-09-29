@@ -7,11 +7,12 @@ path needed by the MCP verifier (account-existence check).
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from typing import Any, cast
 
 from daimon.core._models import Account, PlatformPrincipal, Tenant, UserConfig
 from daimon.core.stores.domain import AccountIdentityRow, AccountRow, Role
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,6 +85,29 @@ async def set_role(
         return
     orm.role = role.value
     await session.flush()
+
+
+async def demote_unlisted_admins(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, admin_ids: Collection[str]
+) -> int:
+    """Demote every `platform` admin in `tenant_id` whose external id is not in `admin_ids`.
+
+    For a platform whose admins are configuration: the live role is written
+    only on a person's next turn, and routines and MCP clients act on the
+    stored one until then. Returns how many accounts were demoted.
+    """
+    unlisted = select(PlatformPrincipal.account_id).where(
+        PlatformPrincipal.tenant_id == tenant_id,
+        PlatformPrincipal.platform == platform,
+        PlatformPrincipal.external_id.not_in(admin_ids),
+    )
+    stmt = (
+        update(Account)
+        .where(Account.id.in_(unlisted), Account.role == Role.ADMIN.value)
+        .values(role=Role.USER.value)
+    )
+    result = cast(CursorResult[Any], await session.execute(stmt))
+    return result.rowcount
 
 
 async def account_exists(session: AsyncSession, *, account_id: uuid.UUID) -> bool:

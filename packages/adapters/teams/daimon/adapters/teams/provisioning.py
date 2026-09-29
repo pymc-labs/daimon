@@ -5,7 +5,8 @@ for the configured Entra organisation is provisioned and reconciled at every
 boot instead. Same status rules as the Slack boot sweep: success (clean
 reconcile and the default agent on the roster) flips to `ready`; a failure
 keeps an already-ready tenant ready and records the reason; otherwise the
-tenant flips to `failed`. An archived tenant is left alone.
+tenant flips to `failed`. An archived tenant is left alone. Anyone no
+longer in `DAIMON_TEAMS__ADMIN_USER_IDS` loses the stored admin role here.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.accounts import demote_unlisted_admins
 from daimon.core.stores.tenants import get_tenant_liveness, set_provision_status
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -39,6 +41,7 @@ async def provision_configured_tenant(
     public_url: str | None,
     entra_tenant_id: str,
     signup_credit: Decimal,
+    admin_user_ids: tuple[str, ...],
 ) -> uuid.UUID | None:
     """Provision and reconcile the configured tenant. Returns its id unless archived."""
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=entra_tenant_id)
@@ -49,6 +52,12 @@ async def provision_configured_tenant(
     await provision_tenant(
         sessionmaker, platform="teams", workspace_id=entra_tenant_id, signup_credit=signup_credit
     )
+    async with sessionmaker.begin() as session:
+        demoted = await demote_unlisted_admins(
+            session, tenant_id=tenant_id, platform="teams", admin_ids=admin_user_ids
+        )
+    if demoted:
+        log.info("teams.admins_demoted", tenant_id=str(tenant_id), count=demoted)
     # A new row defaults to ready; it is not until the reconcile below passes.
     was_ready = existing is not None and existing.provision_status == "ready"
     if not was_ready:

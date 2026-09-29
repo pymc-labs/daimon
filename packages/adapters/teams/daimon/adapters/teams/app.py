@@ -325,6 +325,7 @@ class TeamsApp:
             public_url=public_url,
             entra_tenant_id=self._teams.tenant_id,
             signup_credit=settings.billing.signup_credit,
+            admin_user_ids=self._teams.admin_user_ids,
         )
 
     async def drain(self, timeout: float) -> None:

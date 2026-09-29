@@ -69,9 +69,9 @@ usual session resumes when `new` or **End** closes it. Opening one runs no turn.
 Teams has no workspace-admin flag a bot can read, so admins are listed by
 Entra object ID in `DAIMON_TEAMS__ADMIN_USER_IDS`. Their turns run with the
 admin role, and the panels unlock the admin actions for them. Every card click
-and dialog re-checks the organisation, the clicker and their role. Someone
-removed from the list keeps the admin role in agent tools until their next
-message. There are no ephemeral messages: refusals come as toasts, dialog
+and dialog re-checks the organisation, the clicker and their role. The list
+is read at boot, which also takes the stored admin role, used by routines and
+MCP clients, from anyone no longer on it. There are no ephemeral messages: refusals come as toasts, dialog
 messages or card edits only the clicker sees.
 
 ### Files
