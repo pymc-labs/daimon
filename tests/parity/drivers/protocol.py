@@ -29,6 +29,8 @@ from __future__ import annotations
 import uuid
 from typing import Literal, Protocol
 
+from anthropic import AsyncAnthropic
+from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.posted_controls import CardKind
 from daimon.core.purge import AccountPurgeResult
 from daimon.testing.ma import MARouter
@@ -78,6 +80,34 @@ def platform_ids(platform: str, *, workspace: int, user: int, channel: int) -> t
     if platform != "teams":
         return str(workspace), str(user), str(channel)
     return str(uuid.UUID(int=workspace)), str(uuid.UUID(int=user)), f"19:{channel}@thread.tacv2"
+
+
+def thread_ids(
+    platform: str, *, workspace: int, user: int, thread: int
+) -> tuple[str, str, str, str]:
+    """(workspace, user, parent channel, thread) of a thread-addressed platform.
+
+    `DiscordDriver` hangs a thread off channel `thread - 1`; a Teams thread is a
+    root post in its channel.
+    """
+    workspace_id, user_id, channel = platform_ids(
+        platform, workspace=workspace, user=user, channel=thread
+    )
+    if platform == "teams":
+        return workspace_id, user_id, channel, f"{channel};messageid=1"
+    return workspace_id, user_id, str(thread - 1), channel
+
+
+async def pin_agent(client: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str) -> str:
+    """The MA id a tool must be handed to act on `name`, read the way a real turn does.
+
+    `resolve_setup_agent` refuses an unpinned name, so a namesake recreated
+    since the caller last looked is never adopted silently.
+    """
+    agents = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=name)
+    if not agents:
+        raise AssertionError(f"the router serves no agent named {name!r}")
+    return agents[0].id
 
 
 class PlatformDriver(Protocol):

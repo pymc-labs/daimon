@@ -1,27 +1,23 @@
 """TeamsDriver -- the Teams half of the PlatformDriver Protocol.
 
-Every call starts the real Teams HTTP service (`create_teams_http_service`)
-over a `TeamsRuntime` and POSTs Bot Framework activities to `/api/messages`: a
-channel @mention for a turn, the `setup` command and its card invokes for the
-panel, `task/fetch` and `task/submit` for a credential card. Outbound Bot
-Framework calls land in `_TeamsApiFake`, mirrored from the Teams adapter's
-`tests/conftest.py`, which is not importable from here. The card itself is
-posted by the MCP tool through `TeamsBotClient` over an httpx mock transport.
+Every call starts the real Teams HTTP service over a `TeamsRuntime` and POSTs
+Bot Framework activities to `/api/messages`. Outbound Bot Framework calls land
+in `_TeamsApiFake` (after the adapter's `tests/conftest.py`, not importable
+here); the credential card is posted by the MCP tool through `TeamsBotClient`.
 
-Teams ids: the workspace is the Entra tenant and a user its object id (both
-UUIDs); a channel is `19:…@thread.tacv2` and a thread `…;messageid=<root>`.
-A channel id without a root starts a new thread, the way a new post does.
+Ids: the workspace is the Entra tenant and a user its object id (both UUIDs);
+a channel is `19:…@thread.tacv2` and a thread `…;messageid=<root>`. A channel
+id without a root starts a new thread, the way a new post does.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 import re
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -42,11 +38,10 @@ from daimon.adapters.mcp.tools.credential_requests import (
 )
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.teams.credential_requests import SUBMIT
-from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
+from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TeamsSettings
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.posted_controls import CardKind
@@ -67,17 +62,14 @@ from microsoft_teams.common.http.client import MiddlewareContext
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .cards import CapturedCard, read_teams_card
-from .protocol import PanelAction, parity_account_id
+from .cards import CapturedCard, read_teams_card, walk_components
+from .protocol import PanelAction, parity_account_id, pin_agent
 from .views import CapturedView, normalize_line, read_teams_view
 
 _CLIENT_ID = "parity-bot"
 _BOT_ID = f"28:{_CLIENT_ID}"
-_SERVICE_URL = "https://smba.trafficmanager.net/parity"
-_DRAIN_S = 30.0
 _CARD_TYPE = "application/vnd.microsoft.card.adaptive"
-_MCP_PUBLIC_URL = "https://mcp.example.com/mcp"
-_MCP_JWT_SECRET = "x" * 32
+_TURN_DEFAULT = DeploymentDefault(agent_name="test-agent", environment_name="test-env")
 
 #: The root post a card's origin thread hangs off, and the id Teams hands back
 #: for the posted card.
@@ -119,19 +111,13 @@ class _TeamsApiFake:
         self, context: MiddlewareContext, next: Callable[[], Awaitable[httpx.Response]]
     ) -> httpx.Response:
         del next
-        body: dict[str, Any] = {}
-        sent: object = context.json
-        if isinstance(sent, dict):
-            body = cast(dict[str, Any], sent)
-        elif context.content:
-            body = json.loads(cast(str | bytes, context.content))
         request = httpx.Request(context.method, context.url)
         path = httpx.URL(context.url).path
         if "/activities" not in path:
             return httpx.Response(200, json={}, request=request)
         update = re.search(r"/activities/([^/]+)$", path)
         activity_id = update.group(1) if update else f"m-{len(self.activities) + 1}"
-        self.activities.append((context.method, body, activity_id))
+        self.activities.append((context.method, cast(dict[str, Any], context.json), activity_id))
         return httpx.Response(200, json={"id": activity_id}, request=request)
 
 
@@ -140,41 +126,38 @@ def _cards_in(body: dict[str, Any]) -> list[dict[str, Any]]:
     return [a["content"] for a in attachments if a.get("contentType") == _CARD_TYPE]
 
 
-async def _stub_bot_token(_self: TokenManager) -> object:
-    return "parity-bot-token"
-
-
-@asynccontextmanager
-async def _serving(runtime: TeamsRuntime) -> AsyncIterator[tuple[TeamsHttpService, _TeamsApiFake]]:
-    """The started service with ingress auth, MSAL, boot provisioning and timers stubbed."""
-    teams = runtime.settings.teams
-    assert teams is not None
-    fake = _TeamsApiFake()
-    client = Client(ClientOptions())
-    client.use(fake)
-    with (
-        patch.dict(os.environ, {"DANGEROUSLY_ALLOW_UNAUTHENTICATED_REQUESTS": "true"}),
-        patch.object(TokenManager, "get_bot_token", _stub_bot_token),
-        patch("daimon.adapters.teams.app.provision_configured_tenant", new_callable=AsyncMock),
-        patch("daimon.adapters.teams.app.run_wake_poller", new_callable=AsyncMock),
-    ):
-        service = create_teams_http_service(settings=teams, runtime=runtime, client=client)
-        async with asgi_lifespan(service.app):
-            await service.turns.start()
-            yield service, fake
+def _actions(card: object) -> list[dict[str, Any]]:
+    """Every action on a card, in render order."""
+    return [c for c in walk_components(card) if str(c.get("type", "")).startswith("Action.")]
 
 
 async def _exchange(
     runtime: TeamsRuntime, activity: dict[str, Any]
 ) -> tuple[dict[str, Any], _TeamsApiFake]:
-    """POST one activity, let the work it spawned finish; the invoke response and the fake."""
-    async with _serving(runtime) as (service, fake):
-        transport = httpx.ASGITransport(app=service.app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://parity") as http:
-            response = await http.post("/api/messages", json=activity)
-        await service.turns.drain(_DRAIN_S)
-    if response.status_code != 200:
-        raise AssertionError(f"/api/messages answered {response.status_code}: {response.text}")
+    """POST one activity to the started service and drain the work it spawned.
+
+    Ingress auth, MSAL, boot provisioning and timers are stubbed.
+    """
+    assert runtime.settings.teams is not None
+    fake = _TeamsApiFake()
+    client = Client(ClientOptions())
+    client.use(fake)
+    with (
+        patch.dict(os.environ, {"DANGEROUSLY_ALLOW_UNAUTHENTICATED_REQUESTS": "true"}),
+        patch.object(TokenManager, "get_bot_token", AsyncMock(return_value="parity-bot-token")),
+        patch("daimon.adapters.teams.app.provision_configured_tenant", new_callable=AsyncMock),
+        patch("daimon.adapters.teams.app.run_wake_poller", new_callable=AsyncMock),
+    ):
+        service = create_teams_http_service(
+            settings=runtime.settings.teams, runtime=runtime, client=client
+        )
+        async with asgi_lifespan(service.app):
+            await service.turns.start()
+            transport = httpx.ASGITransport(app=service.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://parity") as http:
+                response = await http.post("/api/messages", json=activity)
+            await service.turns.drain(30.0)
+    assert response.status_code == 200, f"{response.status_code}: {response.text}"
     return (response.json() if response.content else {}), fake
 
 
@@ -193,7 +176,7 @@ def _activity(
         "type": "message",
         "id": str(uuid.uuid4().int)[:13],
         "channelId": "msteams",
-        "serviceUrl": _SERVICE_URL,
+        "serviceUrl": "https://smba.trafficmanager.net/parity",
         "from": {"id": f"29:{user}", "aadObjectId": user},
         "recipient": {"id": _BOT_ID, "name": "daimon"},
         "conversation": {
@@ -227,16 +210,13 @@ def _invoke(name: str, value: dict[str, Any], *, reply_to: str, **where: str) ->
 def unsuperseded_continuations() -> Iterator[None]:
     """Let a queued continuation run after the turn that triggers it.
 
-    Teams stamps a chat's latest message on arrival, so the triggering turn
-    itself would supersede a continuation queued before it; Discord's parity
-    scenarios stub its history read the same way.
+    Teams stamps a chat's latest message on arrival, so the triggering turn would
+    supersede it; Discord's scenarios stub its history read the same way.
     """
 
-    async def _none(_row: object) -> None:
-        return None
-
     async def _dispatch(*args: Any, **kwargs: Any) -> None:
-        await dispatch_pending_continuations(*args, **kwargs | {"latest_user_message_at": _none})
+        latest = AsyncMock(return_value=None)
+        await dispatch_pending_continuations(*args, **kwargs | {"latest_user_message_at": latest})
 
     with patch("daimon.adapters.teams.app.dispatch_pending_continuations", _dispatch):
         yield
@@ -271,10 +251,12 @@ class TeamsDriver:
         entra_tenant: str,
         admins: tuple[str, ...] = (),
         billing_config: object | None = None,
-        deployment_default: DeploymentDefault | None = None,
-        mcp: bool = True,
+        turn: bool = False,
     ) -> TeamsRuntime:
-        """Real turn deps over a MagicMock `Settings`; `mcp` configures daimon-mcp."""
+        """Real turn deps over a MagicMock `Settings`.
+
+        A `turn` runs as the other drivers' do: no daimon-mcp, `test-agent` by default.
+        """
         settings = MagicMock()
         settings.teams = TeamsSettings(
             client_id=_CLIENT_ID,
@@ -284,8 +266,8 @@ class TeamsDriver:
             admin_user_ids=admins,
         )
         settings.crypto.keys = (SecretStr(self._fernet_key),)
-        settings.mcp.public_url = _MCP_PUBLIC_URL if mcp else None
-        settings.mcp.jwt_secret = SecretStr(_MCP_JWT_SECRET) if mcp else None
+        settings.mcp.public_url = None if turn else "https://mcp.example.com/mcp"
+        settings.mcp.jwt_secret = None if turn else SecretStr("x" * 32)
         settings.mcp.app_root_url = None
         settings.github.fallback_pat = None
         settings.github.app_id = None
@@ -296,7 +278,7 @@ class TeamsDriver:
         settings.billing.signup_credit = Decimal("0")
         settings.tool_safety = OPEN_TOOL_SAFETY
         anthropic = build_fake_anthropic(router.dispatch)
-        default = deployment_default or DeploymentDefault()
+        default = _TURN_DEFAULT if turn else DeploymentDefault()
         resolver_cache = new_resolver_cache()
         return TeamsRuntime(
             settings=settings,
@@ -336,19 +318,16 @@ class TeamsDriver:
             router,
             entra_tenant=workspace_id,
             billing_config=billing_config,
-            deployment_default=DeploymentDefault(
-                agent_name="test-agent", environment_name="test-env"
-            ),
-            mcp=False,
+            turn=True,
         )
         activity = _activity(tenant=workspace_id, user=user_id, conversation=channel_id, text=text)
-        with patch("daimon.core.turn.prepare.create_session") as create_session:
-            create_session.return_value = ma_session(
-                id="sess_parity_test",
-                agent_id="ag_parity_test",
-                model="claude-sonnet-4-6",
-                environment_id="env_parity_test",
-            )
+        session = ma_session(
+            id="sess_parity_test",
+            agent_id="ag_parity_test",
+            model="claude-sonnet-4-6",
+            environment_id="env_parity_test",
+        )
+        with patch("daimon.core.turn.prepare.create_session", return_value=session):
             _response, fake = await _exchange(runtime, activity)
         return [
             body["text"] for _m, body, _id in fake.activities if isinstance(body.get("text"), str)
@@ -358,7 +337,10 @@ class TeamsDriver:
         return _BALANCE_BLOCKED_TEXT if kind == "balance" else _CAP_BLOCKED_TEXT
 
     def _mcp_runtime(
-        self, router: MARouter, sessionmaker: async_sessionmaker[AsyncSession]
+        self,
+        router: MARouter,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        teams_client: TeamsBotClient | None = None,
     ) -> McpRuntime:
         return McpRuntime(
             session_factory=sessionmaker,
@@ -369,6 +351,7 @@ class TeamsDriver:
             ),
             deployment_default=DeploymentDefault(),
             fernet=build_multifernet((self._fernet_key,)),
+            teams_client=teams_client,
         )
 
     def _auth(self, tenant_id: uuid.UUID, *, workspace_id: str, user_id: str) -> AuthIdentity:
@@ -392,12 +375,8 @@ class TeamsDriver:
     ) -> None:
         runtime = self._mcp_runtime(router, sessionmaker)
         auth = self._auth(tenant_id, workspace_id=_LIFECYCLE_TENANT, user_id=_LIFECYCLE_USER)
-        await _archive_agent_impl(
-            runtime,
-            auth,
-            name=name,
-            expected_ma_agent_id=await _pin_agent(runtime, tenant_id=tenant_id, name=name),
-        )
+        pinned = await pin_agent(runtime.client, tenant_id=tenant_id, name=name)
+        await _archive_agent_impl(runtime, auth, name=name, expected_ma_agent_id=pinned)
 
     async def fork_agent(
         self,
@@ -412,12 +391,9 @@ class TeamsDriver:
         del account_id  # the tool stamps the install's own account, not a caller's
         runtime = self._mcp_runtime(router, sessionmaker)
         auth = self._auth(tenant_id, workspace_id=_LIFECYCLE_TENANT, user_id=_LIFECYCLE_USER)
+        pinned = await pin_agent(runtime.client, tenant_id=tenant_id, name=source_name)
         await _fork_agent_impl(
-            runtime,
-            auth,
-            source_name=source_name,
-            new_name=new_name,
-            expected_ma_agent_id=await _pin_agent(runtime, tenant_id=tenant_id, name=source_name),
+            runtime, auth, source_name=source_name, new_name=new_name, expected_ma_agent_id=pinned
         )
 
     async def purge_account(
@@ -440,10 +416,6 @@ class TeamsDriver:
         raise NotImplementedError("removing the Teams app archives nothing on purpose")
 
     # -- posted-control lifecycle -------------------------------------------
-
-    def _record_cards(self, fake: _TeamsApiFake) -> None:
-        for _method, body, _id in fake.activities:
-            self._cards.extend(read_teams_card(card) for card in _cards_in(body))
 
     async def post_credential_card(
         self,
@@ -478,13 +450,9 @@ class TeamsDriver:
             client_secret="parity-secret",
             tenant_id=workspace_id,
         )
-        runtime = dataclasses.replace(self._mcp_runtime(router, sessionmaker), teams_client=client)
+        runtime = self._mcp_runtime(router, sessionmaker, teams_client=client)
         auth = self._auth(tenant_id, workspace_id=workspace_id, user_id=user_id)
-        agents = await find_agents_by_daimon_tag(
-            runtime.client, tenant_id=tenant_id, name=agent_name
-        )
-        if not agents:
-            raise AssertionError(f"the router serves no agent named {agent_name!r}")
+        agent_id = await pin_agent(runtime.client, tenant_id=tenant_id, name=agent_name)
         now = datetime.now(UTC)
         async with sessionmaker.begin() as session:
             origin = await create_origin(
@@ -496,7 +464,7 @@ class TeamsDriver:
                 thread_id=_thread_of(channel_id),
                 responder_ma_agent_id="ag_parity_responder",
                 responder_name="Daimon",
-                configuration_target_ma_agent_id=agents[0].id,
+                configuration_target_ma_agent_id=agent_id,
                 configuration_target_name=agent_name,
                 role=Role.ADMIN,
                 expires_at=now + timedelta(minutes=30),
@@ -507,7 +475,7 @@ class TeamsDriver:
             "channel_id": channel_id,
             "pending_task": pending_task,
             "origin_context_id": str(origin.id),
-            "expected_ma_agent_id": agents[0].id,
+            "expected_ma_agent_id": agent_id,
         }
         if kind in ("env", "env_file"):
             key = target if kind == "env" else None
@@ -526,7 +494,11 @@ class TeamsDriver:
             raise AssertionError(f"expected exactly one posted card, got {len(posted)}")
         [card] = _cards_in(posted[0])
         self._cards.append(read_teams_card(card))
-        return _token_from_card(card)
+        for action in _actions(card):
+            token = cast(dict[str, Any], action.get("data") or {}).get("token")
+            if isinstance(token, str):
+                return token
+        raise AssertionError("the posted card carries no credential button")
 
     async def click_private_input(
         self,
@@ -578,16 +550,11 @@ class TeamsDriver:
         """One click or submit on the posted card, from its thread; the dialog response."""
         # The requester is an admin, so a replacement reaches its compare-and-set.
         runtime = self._runtime(sessionmaker, router, entra_tenant=workspace_id, admins=(user_id,))
-        invoke = _invoke(
-            name,
-            {"data": data},
-            reply_to=_POSTED_MESSAGE_ID,
-            tenant=workspace_id,
-            user=user_id,
-            conversation=_thread_of(channel_id),
-        )
+        where = {"tenant": workspace_id, "user": user_id, "conversation": _thread_of(channel_id)}
+        invoke = _invoke(name, {"data": data}, reply_to=_POSTED_MESSAGE_ID, **where)
         response, fake = await _exchange(runtime, invoke)
-        self._record_cards(fake)
+        for _method, body, _id in fake.activities:
+            self._cards.extend(read_teams_card(card) for card in _cards_in(body))
         return cast(dict[str, Any], response.get("task") or {})
 
     def captured_cards(self) -> list[CapturedCard]:
@@ -622,15 +589,10 @@ class TeamsDriver:
         runtime = self._runtime(
             sessionmaker, router, entra_tenant=workspace_id, admins=self._panel_admins
         )
-        invoke = _invoke(
-            name,
-            value,
-            reply_to=self._panel_message_id,
-            tenant=workspace_id,
-            user=user_id,
-            conversation=channel_id,
+        where = {"tenant": workspace_id, "user": user_id, "conversation": channel_id}
+        return await _exchange(
+            runtime, _invoke(name, value, reply_to=self._panel_message_id, **where)
         )
-        return await _exchange(runtime, invoke)
 
     async def open_setup_panel(
         self,
@@ -732,21 +694,6 @@ class TeamsDriver:
         return list(self._views)
 
 
-def _actions(node: object) -> list[dict[str, Any]]:
-    """Every action on a card, in render order."""
-    found: list[dict[str, Any]] = []
-    if isinstance(node, dict):
-        typed = cast(dict[str, Any], node)
-        if str(typed.get("type", "")).startswith("Action."):
-            found.append(typed)
-        for value in typed.values():
-            found += _actions(value)
-    elif isinstance(node, list):
-        for item in cast(list[Any], node):
-            found += _actions(item)
-    return found
-
-
 def _find_button(card: dict[str, Any], label: str, agent_name: str | None) -> dict[str, Any]:
     """The button a reader would press: by label, and for Details by the row's agent."""
     for action in _actions(card):
@@ -756,20 +703,3 @@ def _find_button(card: dict[str, Any], label: str, agent_name: str | None) -> di
         if agent_name is None or data.get("agent") == agent_name:
             return action
     raise AssertionError(f"the panel on screen has no {label!r} button for {agent_name!r}")
-
-
-async def _pin_agent(runtime: McpRuntime, *, tenant_id: uuid.UUID, name: str) -> str:
-    """The MA id the lifecycle tools must be handed to act on `name` (see `SlackDriver`)."""
-    agents = await find_agents_by_daimon_tag(runtime.client, tenant_id=tenant_id, name=name)
-    if not agents:
-        raise AssertionError(f"the router serves no agent named {name!r}")
-    return agents[0].id
-
-
-def _token_from_card(card: dict[str, Any]) -> str:
-    """The request token the posted card's form button carries."""
-    for action in _actions(card):
-        token = cast(dict[str, Any], action.get("data") or {}).get("token")
-        if isinstance(token, str):
-            return token
-    raise AssertionError("the posted card carries no credential button")

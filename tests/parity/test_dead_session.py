@@ -18,7 +18,6 @@ the Discord half: both address a turn by its thread id alone.
 
 from __future__ import annotations
 
-import uuid
 from decimal import Decimal
 from typing import Literal
 
@@ -37,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import AGENT_ID, build_turn_router
 from .drivers.discord_driver import DiscordDriver
+from .drivers.protocol import thread_ids
 from .drivers.slack_driver import SlackDriver
 from .drivers.teams_driver import TeamsDriver
 
@@ -46,16 +46,6 @@ from .drivers.teams_driver import TeamsDriver
 # this scenario.
 _RECOVERED_SESSION_ID = "sess_parity_test"
 _DEAD_SESSION_ID = "sess_dead_before_recovery"
-
-#: (workspace, user, thread) of the thread-addressed platforms.
-_THREAD_IDS = {
-    "discord": ("900002001", "555000222", "200000"),
-    "teams": (
-        str(uuid.UUID(int=900002001)),
-        str(uuid.UUID(int=555000222)),
-        "19:dead-session@thread.tacv2;messageid=1700000000000",
-    ),
-}
 
 
 def _build_dead_session_router(tenant_id_str: str) -> MARouter:
@@ -91,7 +81,9 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    workspace_id, user_id, thread_id = _THREAD_IDS[platform]
+    workspace_id, user_id, _parent, thread_id = thread_ids(
+        platform, workspace=900002001, user=555000222, thread=200000
+    )
 
     tenant = await make_tenant(db_session, platform=platform, workspace_id=workspace_id)
     await tenant_ledger.insert_entry(

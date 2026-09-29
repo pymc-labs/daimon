@@ -37,6 +37,7 @@ from decimal import Decimal
 from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -54,6 +55,8 @@ from .drivers.teams_driver import TeamsDriver, unsuperseded_continuations
 #: `MIN_REQUESTED_WORK` and distinctive, so it can be found verbatim in the
 #: follow-up turn's outgoing user message.
 _REQUESTED_WORK = "finish the revenue chart now that the key is set"
+
+_DISCORD_HISTORY = "daimon.adapters.discord.continuation_dispatch._latest_human_message_at"
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,10 @@ _TEAMS = _Thread(
     user_id=str(uuid.UUID(int=555000444)),
     thread_id="19:private-input@thread.tacv2;messageid=1700000000000",
     parent_channel_id="19:private-input@thread.tacv2",
+)
+
+_EVERY_PLATFORM = pytest.mark.parametrize(
+    "place", [_DISCORD, _SLACK, _TEAMS], ids=lambda place: place.platform
 )
 
 
@@ -162,42 +169,32 @@ async def _mention(
     stub already returns an empty page and needs no patch. Teams stamps the
     triggering message itself as the latest (see `unsuperseded_continuations`).
     """
-    if place.platform == "discord":
-        with patch(
-            "daimon.adapters.discord.continuation_dispatch._latest_human_message_at",
-            new_callable=AsyncMock,
-            return_value=None,
-        ):
-            return await DiscordDriver().dispatch_turn(
-                sessionmaker=sessionmaker,
-                router=router,
-                tenant_id=tenant_id,
-                workspace_id=place.workspace_id,
-                channel_id=place.thread_id,
-                user_id=place.user_id,
-                text=text,
-            )
-    if place.platform == "teams":
-        with unsuperseded_continuations():
-            return await TeamsDriver().dispatch_turn(
-                sessionmaker=sessionmaker,
-                router=router,
-                tenant_id=tenant_id,
-                workspace_id=place.workspace_id,
-                channel_id=place.thread_id,
-                user_id=place.user_id,
-                text=text,
-            )
-    return await SlackDriver().dispatch_turn(
-        sessionmaker=sessionmaker,
-        router=router,
-        tenant_id=tenant_id,
-        workspace_id=place.workspace_id,
-        channel_id=place.parent_channel_id,
-        user_id=place.user_id,
-        text=text,
-        thread_ts=place.thread_id,
+    if place.platform == "slack":
+        return await SlackDriver().dispatch_turn(
+            sessionmaker=sessionmaker,
+            router=router,
+            tenant_id=tenant_id,
+            workspace_id=place.workspace_id,
+            channel_id=place.parent_channel_id,
+            user_id=place.user_id,
+            text=text,
+            thread_ts=place.thread_id,
+        )
+    driver, unsuperseded = (
+        (DiscordDriver(), patch(_DISCORD_HISTORY, new_callable=AsyncMock, return_value=None))
+        if place.platform == "discord"
+        else (TeamsDriver(), unsuperseded_continuations())
     )
+    with unsuperseded:
+        return await driver.dispatch_turn(
+            sessionmaker=sessionmaker,
+            router=router,
+            tenant_id=tenant_id,
+            workspace_id=place.workspace_id,
+            channel_id=place.thread_id,
+            user_id=place.user_id,
+            text=text,
+        )
 
 
 async def _settled(
@@ -282,13 +279,13 @@ async def _run_dispatch_scenario(
     return idempotency_key, posted_2
 
 
-async def _assert_dispatched_once(
+@_EVERY_PLATFORM
+async def test_private_input_continuation_dispatches_exactly_one_follow_up_turn(
     place: _Thread,
-    *,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The shared body of both platforms' at-most-once assertion."""
+    """The continuation runs exactly once and settles delivered."""
     idempotency_key, posted_2 = await _run_dispatch_scenario(
         place,
         db_session=db_session,
@@ -312,36 +309,9 @@ async def _assert_dispatched_once(
     )
 
 
-async def test_discord_private_input_continuation_dispatches_exactly_one_follow_up_turn(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    await _assert_dispatched_once(
-        _DISCORD, db_session=db_session, db_session_factory=db_session_factory
-    )
-
-
-async def test_slack_private_input_continuation_dispatches_exactly_one_follow_up_turn(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    await _assert_dispatched_once(
-        _SLACK, db_session=db_session, db_session_factory=db_session_factory
-    )
-
-
-async def test_teams_private_input_continuation_dispatches_exactly_one_follow_up_turn(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    await _assert_dispatched_once(
-        _TEAMS, db_session=db_session, db_session_factory=db_session_factory
-    )
-
-
-async def _assert_no_handoff_notice(
+@_EVERY_PLATFORM
+async def test_private_input_continuation_carries_no_handoff_notice(
     place: _Thread,
-    *,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -377,36 +347,9 @@ async def _assert_no_handoff_notice(
     )
 
 
-async def test_discord_private_input_continuation_carries_no_handoff_notice(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    await _assert_no_handoff_notice(
-        _DISCORD, db_session=db_session, db_session_factory=db_session_factory
-    )
-
-
-async def test_slack_private_input_continuation_carries_no_handoff_notice(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    await _assert_no_handoff_notice(
-        _SLACK, db_session=db_session, db_session_factory=db_session_factory
-    )
-
-
-async def test_teams_private_input_continuation_carries_no_handoff_notice(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    await _assert_no_handoff_notice(
-        _TEAMS, db_session=db_session, db_session_factory=db_session_factory
-    )
-
-
-async def _assert_save_only_skipped_silently(
+@_EVERY_PLATFORM
+async def test_save_only_private_input_row_is_skipped_silently(
     place: _Thread,
-    *,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -433,31 +376,4 @@ async def _assert_save_only_skipped_silently(
 
     assert await _billed_turn_count(db_session_factory, row.tenant_id) == 2, (
         "turn 1 + turn 2 only -- a save-only continuation bills nothing"
-    )
-
-
-async def test_discord_save_only_private_input_row_is_skipped_silently(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    await _assert_save_only_skipped_silently(
-        _DISCORD, db_session=db_session, db_session_factory=db_session_factory
-    )
-
-
-async def test_slack_save_only_private_input_row_is_skipped_silently(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    await _assert_save_only_skipped_silently(
-        _SLACK, db_session=db_session, db_session_factory=db_session_factory
-    )
-
-
-async def test_teams_save_only_private_input_row_is_skipped_silently(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    await _assert_save_only_skipped_silently(
-        _TEAMS, db_session=db_session, db_session_factory=db_session_factory
     )

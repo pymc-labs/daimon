@@ -36,7 +36,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal
 
 import discord
 
@@ -435,35 +435,31 @@ def read_slack_view(
 
 
 def _teams_items(node: Mapping[str, Any], key: str) -> list[dict[str, Any]]:
-    items: object = node.get(key)
-    if not isinstance(items, list):
-        return []
-    return [cast(dict[str, Any], i) for i in cast(list[object], items) if isinstance(i, dict)]
+    items = node.get(key)
+    return [item for item in items if isinstance(item, dict)] if items else []
 
 
-def _read_teams_element(collector: _Collector, element: Mapping[str, Any]) -> None:
+def _read_teams_element(
+    collector: _Collector, element: Mapping[str, Any], *, is_row: bool = False
+) -> None:
     kind = element.get("type")
-    if kind == "TextBlock":
-        text = str(element.get("text") or "")
-        if element.get("size") == "Medium":
-            collector.add_title(text)
-        elif element.get("isSubtle"):
-            collector.add_note(text)
-        else:
-            _add_block(collector, text)
+    text = str(element.get("text") or "")
+    if kind == "TextBlock" and element.get("size") == "Medium":
+        collector.add_title(text)
+    elif kind == "TextBlock" and element.get("isSubtle"):
+        collector.add_note(text)
+    elif kind == "TextBlock":
+        _add_block(collector, text, is_row=is_row)
     elif kind == "Container":
         # A roster row: the agent's name, its status as subtext, its Details button.
         items = _teams_items(element, "items")
-        is_row = any(
+        row = any(
             normalize_line(str(action.get("title") or ""), aliases={}) == _DETAILS_LABEL
             for item in items
             for action in _teams_items(item, "actions")
         )
         for item in items:
-            if is_row and item.get("type") == "TextBlock" and not item.get("isSubtle"):
-                _add_block(collector, str(item.get("text") or ""), is_row=True)
-            else:
-                _read_teams_element(collector, item)
+            _read_teams_element(collector, item, is_row=row)
     elif kind == "ActionSet":
         for action in _teams_items(element, "actions"):
             collector.add_button(action.get("title"))

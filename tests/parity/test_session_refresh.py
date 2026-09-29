@@ -53,7 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import AGENT_ID, ENV_ID, MODEL_ID, build_turn_router
 from .drivers.discord_driver import DiscordDriver
-from .drivers.protocol import platform_ids
+from .drivers.protocol import thread_ids
 from .drivers.slack_driver import SlackDriver
 from .drivers.teams_driver import TeamsDriver
 
@@ -227,23 +227,13 @@ async def _put_key(
     return hash_env_bytes(assemble_env_bytes(rows))
 
 
-def _thread_ids(
-    platform: Literal["discord", "teams"], *, workspace: int, user: int, thread: int
-) -> tuple[str, str, str]:
-    """(workspace, user, thread); a Teams thread is a channel post and its replies."""
-    workspace_id, user_id, channel = platform_ids(
-        platform, workspace=workspace, user=user, channel=thread
-    )
-    return workspace_id, user_id, channel if platform == "discord" else f"{channel};messageid=1"
-
-
 @pytest.mark.parametrize("platform", ["discord", "teams"])
 async def test_a_key_saved_between_mentions_is_swapped_into_the_same_session(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     platform: Literal["discord", "teams"],
 ) -> None:
-    workspace_id, user_id, thread_id = _thread_ids(
+    workspace_id, user_id, _parent, thread_id = thread_ids(
         platform, workspace=900002101, user=555000321, thread=200100
     )
 
@@ -388,7 +378,7 @@ async def test_a_model_change_moves_a_thread_onto_a_new_session_billed_at_the_ne
     db_session_factory: async_sessionmaker[AsyncSession],
     platform: Literal["discord", "teams"],
 ) -> None:
-    workspace_id, user_id, thread_id = _thread_ids(
+    workspace_id, user_id, _parent, thread_id = thread_ids(
         platform, workspace=900002102, user=555000322, thread=200200
     )
 

@@ -46,19 +46,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import AGENT_ID, AGENT_TEXT, build_turn_router
 from .drivers.discord_driver import DiscordDriver
+from .drivers.protocol import thread_ids
 from .drivers.slack_driver import SlackDriver
 from .drivers.teams_driver import TeamsDriver, unsuperseded_continuations
-
-#: (workspace, user, parent channel, thread) of the thread-addressed platforms.
-_THREAD_IDS = {
-    "discord": ("900003001", "555000333", "299999", "300000"),
-    "teams": (
-        str(uuid.UUID(int=900003001)),
-        str(uuid.UUID(int=555000333)),
-        "19:handoff@thread.tacv2",
-        "19:handoff@thread.tacv2;messageid=1700000000000",
-    ),
-}
 
 
 @pytest.mark.parametrize("platform", ["discord", "teams"])
@@ -67,7 +57,9 @@ async def test_handoff_continuation_dispatches_exactly_one_follow_up_turn(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    workspace_id, user_id, parent_channel_id, thread_id = _THREAD_IDS[platform]
+    workspace_id, user_id, parent_channel_id, thread_id = thread_ids(
+        platform, workspace=900003001, user=555000333, thread=300000
+    )
 
     tenant = await make_tenant(db_session, platform=platform, workspace_id=workspace_id)
     await tenant_ledger.insert_entry(
