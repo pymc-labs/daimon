@@ -211,6 +211,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - The checkout landing pages no longer tell every payer to return to Discord.
+- Continuity notices (workspace loss, fresh start, a failed preparation, a new
+  responder, a timer that did not run) say "here" and "ask again" instead of
+  "this thread" and "mention me", so they read right in a chat without threads.
 - Direct-message policies normalize tenant UUID keys and reject invalid keys at
   settings load, so restrictive policies cannot silently miss their tenant.
 
@@ -347,6 +350,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Sentry's event scrubber checks nested values, so a token inside a dict local,
+  such as request headers, no longer ships with an error event.
 - Slack top-ups sent the checkout route an internal admin token for the
   clicking account. They now send a plain account token, as Discord does;
   the route only needs the account.
