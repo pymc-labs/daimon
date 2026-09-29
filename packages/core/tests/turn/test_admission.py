@@ -96,7 +96,7 @@ def _deps(
     )
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_admit_over_balance_tenant_raises_admission_denied_balance_depleted(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -147,7 +147,7 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
     assert outcomes[0].account_id is not None
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("funding_mode", ["prepaid", "operator_funded"])
 async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
     db_session: AsyncSession,
