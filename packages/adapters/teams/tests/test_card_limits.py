@@ -7,12 +7,10 @@ times any limit where an input is unbounded, so the builder must bound it itself
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, get_args
 
 import httpx
@@ -60,8 +58,6 @@ from daimon.core.stores.domain import CredentialRequestRow, RoutineRow
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.notices import TerminationNotice
 from daimon.core.turn.termination import TerminationReason
-from jsonschema import Draft6Validator
-from jsonschema.exceptions import best_match
 from microsoft_teams.api import (
     Account,
     Attachment,
@@ -71,23 +67,8 @@ from microsoft_teams.api import (
 )
 from microsoft_teams.cards import AdaptiveCard
 
-# Vendored for an offline test from
-# https://raw.githubusercontent.com/microsoft/AdaptiveCards/main/schemas/1.5.0/adaptive-card.json
-SCHEMA = Path(__file__).parent / "data/adaptive-card-v1.5.schema.json"
-# Teams' own element, outside the Adaptive Cards schema:
-# https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/cards-format#codeblock-in-adaptive-cards
-CODE_BLOCK = {
-    "type": "object",
-    "properties": {
-        "type": {"enum": ["CodeBlock"]},
-        "codeSnippet": {"type": "string"},
-        "language": {"type": "string"},
-        "startLineNumber": {"type": "number"},
-    },
-    "required": ["type", "codeSnippet"],
-    "additionalProperties": False,
-}
-MAX_BYTES = 26_000  # a margin under Teams' 28 KB
+from .conftest import MAX_ACTIVITY_BYTES, assert_card_renders
+
 EMOJI = "😀"
 NAME = "a" * 64  # agent names: `[A-Za-z0-9_-]{1,64}`
 KEY = "K" * 640
@@ -95,12 +76,6 @@ CHANNEL = f"19:{'c' * 32}@thread.tacv2;messageid={'1' * 13}"
 URL = f"https://example.com/{'u' * 2028}"
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 MessageSource = MessageActivityInput | AdaptiveCard | Mapping[str, object]
-
-
-def _validator() -> Draft6Validator:
-    schema = json.loads(SCHEMA.read_text())
-    schema["definitions"]["ImplementationsOf.Element"]["anyOf"].append(CODE_BLOCK)
-    return Draft6Validator(schema)
 
 
 def _as_sent(source: MessageSource) -> dict[str, Any]:
@@ -421,26 +396,21 @@ DIALOGS: dict[str, Callable[[], AdaptiveCard | TaskModuleResponse]] = {
 }
 
 
-def _assert_renders(content: dict[str, Any]) -> None:
-    error = best_match(_validator().iter_errors(content))
-    assert error is None, f"{list(error.absolute_path)}: {error.message[:300]}"
-    version = tuple(int(part) for part in content["version"].split("."))
-    assert version <= (1, 5), f"Teams renders up to 1.5, not {content['version']}"
-
-
 @pytest.mark.parametrize("case", MESSAGES)
 def test_message_fits_teams_when_every_input_is_at_its_worst(case: str) -> None:
     activity = _as_sent(MESSAGES[case]())
     for attachment in activity.get("attachments", []):
-        _assert_renders(attachment["content"])
+        assert_card_renders(attachment["content"])
     size = len(httpx.Request("POST", "https://smba.example", json=activity).content)
-    assert size < MAX_BYTES, f"the message is {size:,} bytes; keep it under {MAX_BYTES:,}"
+    assert size < MAX_ACTIVITY_BYTES, (
+        f"the message is {size:,} bytes; keep it under {MAX_ACTIVITY_BYTES:,}"
+    )
 
 
 @pytest.mark.parametrize("case", DIALOGS)
 def test_dialog_renders_in_teams_when_every_input_is_at_its_worst(case: str) -> None:
     source = DIALOGS[case]()
     dumped = source.model_dump(by_alias=True, exclude_none=True)
-    _assert_renders(
+    assert_card_renders(
         dumped if isinstance(source, AdaptiveCard) else dumped["task"]["value"]["card"]["content"]
     )

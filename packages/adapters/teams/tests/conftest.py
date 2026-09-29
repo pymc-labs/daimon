@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from decimal import Decimal
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -21,6 +23,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import TeamsSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
@@ -37,6 +40,8 @@ from daimon.testing.db import db_engine as db_engine
 from daimon.testing.db import db_schema as db_schema
 from daimon.testing.db import db_session as db_session
 from daimon.testing.db import db_session_factory as db_session_factory
+from jsonschema import Draft6Validator
+from jsonschema.exceptions import best_match
 from microsoft_teams.api import MessageActivityInput, SentActivity
 from microsoft_teams.common import Client, ClientOptions
 from microsoft_teams.common.http.client import MiddlewareContext
@@ -54,6 +59,23 @@ CONVERSATION_ID = "a:conversation-1"
 CHANNEL_ID = "19:channel-1@thread.tacv2"
 THREAD_ID = f"{CHANNEL_ID};messageid=1700000000001"
 USER_NAME = "Ada Lovelace"
+# Vendored for an offline test from
+# https://raw.githubusercontent.com/microsoft/AdaptiveCards/main/schemas/1.5.0/adaptive-card.json
+CARD_SCHEMA = Path(__file__).parent / "data/adaptive-card-v1.5.schema.json"
+# Teams' own element, outside the Adaptive Cards schema:
+# https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/cards-format#codeblock-in-adaptive-cards
+CODE_BLOCK = {
+    "type": "object",
+    "properties": {
+        "type": {"enum": ["CodeBlock"]},
+        "codeSnippet": {"type": "string"},
+        "language": {"type": "string"},
+        "startLineNumber": {"type": "number"},
+    },
+    "required": ["type", "codeSnippet"],
+    "additionalProperties": False,
+}
+MAX_ACTIVITY_BYTES = 26_000  # a margin under Teams' 28 KB
 
 
 def teams_settings(*, enabled: bool = True, admins: tuple[str, ...] = ()) -> TeamsSettings:
@@ -239,6 +261,40 @@ class TeamsApiFake:
         return [r for r in self.requests if "/activities" in r.url]
 
 
+@functools.cache
+def card_validator() -> Draft6Validator:
+    schema = json.loads(CARD_SCHEMA.read_text())
+    schema["definitions"]["ImplementationsOf.Element"]["anyOf"].append(CODE_BLOCK)
+    return Draft6Validator(schema)
+
+
+def assert_card_renders(content: dict[str, Any]) -> None:
+    error = best_match(card_validator().iter_errors(content))
+    assert error is None, f"{list(error.absolute_path)}: {error.message[:300]}"
+    version = tuple(int(part) for part in content["version"].split("."))
+    assert version <= (1, 5), f"Teams renders up to 1.5, not {content['version']}"
+
+
+def assert_teams_accepts(request: SentRequest) -> None:
+    """One recorded activity as Teams takes it: renderable cards, under its size cap, and
+    an edit naming the activity it replaces."""
+    attachments = cast(list[dict[str, Any]], request.body.get("attachments") or [])
+    for attachment in attachments:
+        content = attachment.get("content")
+        if (
+            isinstance(content, dict)
+            and cast(dict[str, Any], content).get("type") == "AdaptiveCard"
+        ):
+            assert attachment.get("contentType") == ADAPTIVE_CARD_TYPE, "Teams shows a card by type"
+        if attachment.get("contentType") == ADAPTIVE_CARD_TYPE:
+            assert_card_renders(cast(dict[str, Any], content))
+    size = len(httpx.Request(request.method, request.url, json=request.body).content)
+    assert size < MAX_ACTIVITY_BYTES, f"{size:,} bytes; keep it under {MAX_ACTIVITY_BYTES:,}"
+    if request.method == "PUT":
+        edited = re.search(r"/activities/([^/]+)$", httpx.URL(request.url).path)
+        assert edited and request.body.get("id") == edited.group(1), "an edit names its activity"
+
+
 def build_teams_client(fake: TeamsApiFake) -> Client:
     client = Client(ClientOptions())
     client.use(fake)
@@ -278,6 +334,7 @@ def build_teams_runtime(
     anthropic: AsyncAnthropic | None = None,
     teams: TeamsSettings | None = None,
     http_client: httpx.AsyncClient | None = None,
+    deployment_default: DeploymentDefault | None = None,
 ) -> TeamsRuntime:
     """A runtime over the test DB and a fake MA transport, with real turn deps.
 
@@ -292,7 +349,9 @@ def build_teams_runtime(
     settings.billing.signup_credit = Decimal("0")
     settings.tool_safety = OPEN_TOOL_SAFETY
     client = anthropic or build_fake_anthropic(make_agent_env_echo_handler())
-    deployment_default = DeploymentDefault(agent_name="daimon", environment_name="default")
+    deployment_default = deployment_default or DeploymentDefault(
+        agent_name="daimon", environment_name="default"
+    )
     resolver_cache = new_resolver_cache()
     return TeamsRuntime(
         settings=settings,
