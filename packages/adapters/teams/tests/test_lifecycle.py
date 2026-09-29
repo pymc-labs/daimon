@@ -141,7 +141,19 @@ async def test_a_failed_retry_after_a_timed_out_edit_still_never_collapses_the_c
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
     assert all(a.id != "m-1" for a in sender.activities[3:]), "the landed edit is never replaced"
-    assert "went wrong posting" not in _card_json(sender, -1)
+    assert "timed out" in _card_json(sender, -1)
+    assert lifecycle.card_closed and lifecycle.final_message_id is None
+
+
+async def test_a_timed_out_cancel_notice_still_collapses_the_card() -> None:
+    """With no answer on screen there is nothing to protect, and nothing timed out to explain."""
+    sender = FakeSender(timeout_on={1})
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(TurnState())
+
+    assert sender.activities[-1].id == "m-1"
+    assert "went wrong posting" in _card_json(sender, -1)
+    assert lifecycle.card_closed
 
 
 async def test_a_late_notice_is_edited_in_above_the_answer() -> None:
@@ -163,6 +175,7 @@ async def test_a_late_notice_whose_edit_timed_out_counts_as_shown() -> None:
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
     assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert [a.id for a in sender.activities[2:]] == ["m-1", "m-1"], "edited, then retried once"
 
 
 async def test_a_late_notice_without_an_answer_on_screen_is_sent_on_its_own() -> None:

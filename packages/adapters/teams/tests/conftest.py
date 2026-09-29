@@ -246,7 +246,7 @@ def build_teams_client(fake: TeamsApiFake) -> Client:
 @dataclasses.dataclass
 class FakeSender:
     """A `TeamsSender` recording every send. Indices in `fail_on` raise; in
-    `timeout_on` they time out after landing."""
+    `timeout_on` they time out after landing (odd: httpx, even: asyncio)."""
 
     sent: list[tuple[str, MessageActivityInput, str | None]] = dataclasses.field(
         default_factory=list[tuple[str, MessageActivityInput, str | None]]
@@ -262,7 +262,7 @@ class FakeSender:
         if index in self.fail_on:
             raise httpx.ConnectError("unreachable")
         if index in self.timeout_on:
-            raise TimeoutError
+            raise httpx.ReadTimeout("slow") if index % 2 else TimeoutError()
         return SentActivity(id=activity.id or f"m-{index + 1}", activity_params=activity)
 
     @property

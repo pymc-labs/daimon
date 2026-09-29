@@ -266,7 +266,7 @@ class TeamsTurnLifecycle:
             capture_exception_with_scope(exc)
             if replaced or self._message_id is None:
                 return
-            if isinstance(exc, _TIMEOUTS):
+            if answer and isinstance(exc, _TIMEOUTS):
                 # The edit may have landed: neither this nor the boot sweep may overwrite
                 # it, so a new message covers the case where it did not.
                 self.card_closed = True
