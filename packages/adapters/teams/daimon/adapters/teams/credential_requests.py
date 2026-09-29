@@ -376,6 +376,9 @@ class TeamsCredentialRequests:
             log.info("teams.credential.already_used", kind="env")
             return
         log.info("teams.credential.env", key=consumed.target, state=state)
+        # First, as on Discord and Slack: if the outcome edit fails, the card
+        # should not still offer a button that can only be refused.
+        await self._edit(consumed, "received", service_url)
         change = ConfigurationChange(
             target_name=consumed.target_name or "this agent",
             kind="key",
