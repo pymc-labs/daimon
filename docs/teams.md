@@ -26,7 +26,8 @@ principal is created on first contact.
 
 ### Where it answers
 
-- **1:1 chat.** Every message is a turn, in the organisation's tenant.
+- **1:1 chat.** Every message is a turn, in the organisation's tenant. It
+  counts as a DM for the access policy, so `dm_memory_read_only` applies.
 - **Channels.** Only messages that @mention the bot. Each root post is its own
   thread and session; replies that @mention it continue that thread.
 - **Group chats** get a short refusal.
@@ -37,7 +38,10 @@ A turn shows one status card, edited in place, with a Cancel button only the
 author can use. The answer replaces the card, split across messages when long,
 with Teams' thumbs up/down feedback on the last one. Messages sent while a turn
 runs are queued and run as one follow-up per author. Work an agent hands off
-(`hand_off_task`) runs right after the turn that queued it.
+(`hand_off_task`) runs right after the turn that queued it; if admission
+refuses that work, it is dropped without a notice, as on Slack. Retried
+deliveries are deduplicated in memory only, so a retry that lands after a
+restart runs again.
 
 ### Commands and admins
 
@@ -123,7 +127,8 @@ Handoffs, work waiting on a private input and timers are durable wake-queue
 rows, and a wake poller opens every chat with due work. They survive a
 restart, a timer fires at its time, and one whose turn had already started
 when the process died is not run twice. A timer whose chat now answers as a
-different agent posts a notice instead of running.
+different agent posts a notice instead of running. A deployment with
+`DAIMON_TEAMS__ENABLED=false` runs no timers.
 
 ### Not supported yet
 
