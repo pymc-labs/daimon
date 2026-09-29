@@ -183,6 +183,7 @@ def _activity(
             "id": conversation,
             "conversationType": "channel" if channel else "personal",
             "tenantId": tenant,
+            **({"isGroup": True} if channel else {}),
         },
         "channelData": channel_data,
     }

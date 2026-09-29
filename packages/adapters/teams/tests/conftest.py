@@ -89,6 +89,8 @@ def make_message_activity(
         "conversationType": conversation_type,
         "tenantId": tenant_id,
     }
+    if is_group is None and conversation_type != "personal":
+        is_group = True  # Teams marks every channel and group chat.
     if is_group is not None:
         conversation["isGroup"] = is_group
     from_: dict[str, object] = {"id": f"29:{aad_object_id or 'unknown'}"}
@@ -408,10 +410,14 @@ def entra_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def stub_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Skip MSAL bot-token acquisition, which no local fake can intercept."""
+    """Skip MSAL token acquisition, which no local fake can intercept.
+
+    Stubbed at `get_app_token`, which the SDK's bot token and the adapter's
+    pasted-image fetch both go through.
+    """
     from microsoft_teams.apps.token_manager import TokenManager
 
-    async def _fake_token(self: TokenManager) -> object:
+    async def _fake_token(self: TokenManager, *args: object, **kwargs: object) -> object:
         return "test-bot-token"
 
-    monkeypatch.setattr(TokenManager, "get_bot_token", _fake_token)
+    monkeypatch.setattr(TokenManager, "get_app_token", _fake_token)
