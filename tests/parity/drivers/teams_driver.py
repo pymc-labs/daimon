@@ -43,7 +43,7 @@ from daimon.adapters.mcp.tools.credential_requests import (
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.teams.credential_requests import SUBMIT
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
-from daimon.adapters.teams.runtime import TeamsRuntime, build_turn_deps
+from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TeamsSettings
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
@@ -57,6 +57,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_session
 from daimon.testing.asgi import asgi_lifespan
 from daimon.testing.ma import MARouter, build_fake_anthropic
