@@ -41,7 +41,8 @@ tenants_app.add_typer(access_policy_app, name="access-policy")
 
 _VALID_PLATFORMS = ("discord", "cli", "slack", "teams")
 _ENTRA_OBJECT_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-_TEAMS_CHANNEL_ID = r"19:[^\s;]+@thread\.[a-z0-9]+"
+# A Teams channel thread is its channel id plus ";messageid=<root post>".
+_TEAMS_CHANNEL_ID = r"19:[^\s;]+@thread\.[a-z0-9]+(?:;messageid=[0-9]+)?"
 
 
 def _validate_platform(value: str) -> Platform:

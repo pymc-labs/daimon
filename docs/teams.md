@@ -33,6 +33,8 @@ principal is created on first contact.
 - **Group chats** get a short refusal.
 - **Protected channels** (tenant access policy; ids look like
   `19:…@thread.tacv2`) and their threads get no reply, notice or tool post.
+  One thread is named by adding `;messageid=<root post id>`. In a sealed
+  channel or thread, the agent's memory is read-only.
 
 A turn shows one status card, edited in place, with a Cancel button only the
 author can use. The answer replaces the card, split across messages when long,

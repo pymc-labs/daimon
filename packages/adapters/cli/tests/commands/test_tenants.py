@@ -529,7 +529,7 @@ async def test_access_policy_get_refuses_null_row(
         ("teams", "invoker", str(uuid.UUID(int=0xABCDEF)).upper()),
         ("teams", "protected_channel", "C123ABC"),
         ("teams", "protected_category", "19:ok@thread.tacv2"),
-        ("teams", "sealed_channel", "19:abc@thread.tacv2;messageid=1"),
+        ("teams", "sealed_channel", "19:abc@thread.tacv2;messageid=x"),
         ("cli", "invoker", " "),
         ("discord", "invoker", ""),
     ],
@@ -660,7 +660,15 @@ async def test_concurrent_policy_edits_preserve_both_fields(
         ("discord", ["1" * 15, "2" * 21], ["3" * 15, "4" * 21]),
         ("slack", ["U123ABC", "W456DEF"], ["C123ABC", "G456DEF", "D789ABC"]),
         ("cli", ["local-user"], ["local-channel"]),
-        ("teams", [str(uuid.UUID(int=7))], ["19:abc123@thread.tacv2", "19:x_y@thread.skype"]),
+        (
+            "teams",
+            [str(uuid.UUID(int=7))],
+            [
+                "19:abc123@thread.tacv2",
+                "19:x_y@thread.skype",
+                "19:abc123@thread.tacv2;messageid=17",
+            ],
+        ),
     ],
 )
 async def test_access_policy_accepts_platform_ids(
