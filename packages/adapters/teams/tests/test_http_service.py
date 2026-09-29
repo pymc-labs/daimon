@@ -154,6 +154,29 @@ async def test_unauthenticated_request_is_rejected_by_sdk(
     assert response.status_code == 401
 
 
+async def test_the_service_retries_a_throttled_send_through_the_sdk(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_bot_token: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Below every SDK middleware, so the production client chain is what retries."""
+    settings = teams_settings()
+    service = create_teams_http_service(
+        settings=settings, runtime=build_teams_runtime(db_session_factory, teams=settings)
+    )
+    statuses = iter([429, 201])
+
+    async def _send(self: httpx.AsyncClient, request: httpx.Request, **_: Any) -> httpx.Response:
+        headers = {"Retry-After": "0"}
+        return httpx.Response(next(statuses), headers=headers, json={"id": "m-1"}, request=request)
+
+    async with asgi_lifespan(service.app):
+        monkeypatch.setattr(httpx.AsyncClient, "send", _send)
+        sent = await service.teams_app.send("a:conversation-1", "hi")
+    assert sent.id == "m-1"
+    assert next(statuses, None) is None, "one 429, then the retry"
+
+
 async def test_a_throttled_bot_framework_call_is_retried_once() -> None:
     calls: list[str] = []
 
