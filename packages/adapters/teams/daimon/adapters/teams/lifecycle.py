@@ -44,6 +44,7 @@ log = structlog.get_logger()
 _DEBOUNCE_S = 5.0
 _SEALED_RESPONSE_MIN_CHARS = 500  # Same substantive-answer threshold as Slack.
 _DELIVERY_FAILED = "⚠️ Something went wrong posting the answer."
+_DELIVERY_UNCERTAIN = "⚠️ Posting the answer timed out. If it isn't above, ask again."
 # Everything an SDK send can raise: httpx.HTTPError for the Bot Framework
 # call, OSError for timeouts and MSAL's transport, ValueError when the SDK
 # cannot get a bot token.
@@ -134,13 +135,20 @@ class TeamsTurnLifecycle:
         return message_id or sent.id
 
     async def _edit(self, activity: MessageActivityInput, message_id: str | None) -> str:
-        """An edit is idempotent, so one that timed out is sent once more."""
+        """An edit is idempotent, so one that timed out is sent once more.
+
+        Once an attempt has timed out it may have landed, so any failure of
+        the retry is raised as a timeout too.
+        """
         try:
             return await self._send(activity, message_id=message_id)
         except _TIMEOUTS:
             if message_id is None:
                 raise
+        try:
             return await self._send(activity, message_id=message_id)
+        except TEAMS_SEND_ERRORS as exc:
+            raise TimeoutError from exc
 
     async def post_initial(self) -> None:
         """Post the card now, before session setup, so Cancel exists from the start."""
@@ -259,8 +267,11 @@ class TeamsTurnLifecycle:
             if replaced or self._message_id is None:
                 return
             if isinstance(exc, _TIMEOUTS):
-                # The edit may have landed: neither this nor the boot sweep may overwrite it.
+                # The edit may have landed: neither this nor the boot sweep may overwrite
+                # it, so a new message covers the case where it did not.
                 self.card_closed = True
+                with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                    await self._send(card.notice_card(_DELIVERY_UNCERTAIN), message_id=None)
                 return
             # Collapse the card so it does not show a live turn forever.
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
@@ -282,9 +293,9 @@ class TeamsTurnLifecycle:
         if len(updated) > card.TEAMS_LIMIT:
             return False
         try:
-            await self._send(
-                card.answer_message(updated, footer=footer), message_id=self._message_id
-            )
+            await self._edit(card.answer_message(updated, footer=footer), self._message_id)
+        except _TIMEOUTS:
+            log.warning("teams.turn.answer_prefix_timed_out", exc_info=True)  # may have landed
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.answer_prefix_failed", exc_info=True)
             return False

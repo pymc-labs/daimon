@@ -129,9 +129,19 @@ async def test_an_answer_edit_that_keeps_timing_out_is_never_overwritten() -> No
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
-    assert len(sender.sent) == 3, "no failure notice follows the two edits"
+    assert [a.id for a in sender.activities[1:]] == ["m-1", "m-1", None], "no edit after two"
+    assert "timed out" in _card_json(sender, -1), "a new message covers an edit that never landed"
     assert lifecycle.card_closed, "a closed card retires its intent, so the sweep skips it"
     assert lifecycle.final_message_id is None, "no watermark past an answer nobody may have seen"
+
+
+async def test_a_failed_retry_after_a_timed_out_edit_still_never_collapses_the_card() -> None:
+    sender = FakeSender(timeout_on={1}, fail_on={2})
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+
+    assert all(a.id != "m-1" for a in sender.activities[3:]), "the landed edit is never replaced"
+    assert "went wrong posting" not in _card_json(sender, -1)
 
 
 async def test_a_late_notice_is_edited_in_above_the_answer() -> None:
@@ -144,6 +154,15 @@ async def test_a_late_notice_is_edited_in_above_the_answer() -> None:
     assert final.id == "m-1" and final.text is not None
     assert final.text.startswith("I lost the workspace.\n\nThe posterior mean is 3.")
     assert "daimon · " in final.text, "the footer stays on a single-message answer"
+
+
+async def test_a_late_notice_whose_edit_timed_out_counts_as_shown() -> None:
+    """A timed-out edit may have landed; sending the notice as well could show it twice."""
+    sender = FakeSender(timeout_on={2, 3})
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
 
 
 async def test_a_late_notice_without_an_answer_on_screen_is_sent_on_its_own() -> None:
