@@ -44,6 +44,8 @@ log = structlog.get_logger()
 _DEBOUNCE_S = 5.0
 _SEALED_RESPONSE_MIN_CHARS = 500  # Same substantive-answer threshold as Slack.
 _DELIVERY_FAILED = "⚠️ Something went wrong posting the answer."
+# Slack's copy for a no-answer turn, which must not claim an answer existed.
+_FINISH_FAILED = "⚠️ Something went wrong finishing this turn."
 _DELIVERY_UNCERTAIN = "⚠️ Posting the answer timed out. If it isn't above, ask again."
 _ANSWER_CUT_SHORT = "⚠️ Part of this answer may be missing. Ask again if it stops short."
 # Everything an SDK send can raise: httpx.HTTPError for the Bot Framework
@@ -213,8 +215,8 @@ class TeamsTurnLifecycle:
             log.warning("teams.turn.notice_failed", exc_info=True)
 
     async def _close(self, text: str) -> None:
-        """Replace the card with a final notice."""
-        self._message_id = await self._send(card.notice_card(text), message_id=self._message_id)
+        """Replace the card with a final notice; an edit that timed out is sent once more."""
+        self._message_id = await self._edit(card.notice_card(text), self._message_id)
         self.final_message_id = self._message_id
         self.card_closed = True
 
@@ -281,7 +283,8 @@ class TeamsTurnLifecycle:
                 return
             # Collapse the card so it does not show a live turn forever.
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                await self._send(card.notice_card(_DELIVERY_FAILED), message_id=self._message_id)
+                failed = card.notice_card(_DELIVERY_FAILED if answer else _FINISH_FAILED)
+                await self._send(failed, message_id=self._message_id)
                 self.card_closed = True
 
     async def prepend_revealed_answer(self, notice: str) -> bool:

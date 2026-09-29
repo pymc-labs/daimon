@@ -156,14 +156,18 @@ async def test_a_failed_retry_after_a_timed_out_edit_still_never_collapses_the_c
     assert lifecycle.card_closed and lifecycle.final_message_id is None
 
 
-async def test_a_timed_out_cancel_notice_still_collapses_the_card() -> None:
-    """With no answer on screen there is nothing to protect, and nothing timed out to explain."""
+async def test_a_timed_out_cancel_notice_is_resent_then_collapsed_without_an_answer() -> None:
     sender = FakeSender(timeout_on={1})
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(TurnState())
+    assert [a.id for a in sender.activities[1:]] == ["m-1", "m-1"], "the edit is resent"
+    assert card.CANCELLED_NOTICE in _card_json(sender, -1) and lifecycle.card_closed
 
+    sender = FakeSender(timeout_on={1, 2})
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(TurnState())
     assert sender.activities[-1].id == "m-1"
-    assert "went wrong posting" in _card_json(sender, -1)
+    assert "went wrong finishing this turn" in _card_json(sender, -1), "no answer is claimed"
     assert lifecycle.card_closed
 
 
