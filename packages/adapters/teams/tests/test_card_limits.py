@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 import pytest
-from daimon.adapters.teams import card, setup_card
+from daimon.adapters.teams import card, memory, setup_card
 from daimon.adapters.teams.billing_panel import checkout_card
 from daimon.adapters.teams.billing_panel import panel_card as billing_card
 from daimon.adapters.teams.credential_requests import credential_form, oauthdialog
@@ -360,6 +360,7 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
     "billing_member": lambda: _billing(is_admin=False),
     "billing_admin": lambda: _billing(is_admin=True),
     "billing_checkout": lambda: checkout_card(URL, 100),
+    "memory": lambda: memory._card(f"/memories/{EMOJI * 100}.md", EMOJI * 100_000),  # pyright: ignore[reportPrivateUsage]  # what show_memory sends
     "help": lambda: help_card(COMMAND_HELP, bot=NAME),
     **{
         f"posted_{kind}_{state}": lambda kind=kind, state=state: _posted(kind, state)

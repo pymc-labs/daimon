@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import anthropic
 import structlog
+from daimon.adapters.teams.card import TEAMS_LIMIT
 from daimon.adapters.teams.card_actions import heading
 from daimon.adapters.teams.commands import CommandContext
 from daimon.core.errors import DaimonError
@@ -22,12 +23,10 @@ log = structlog.get_logger()
 
 EMPTY = "This agent has no memories yet — it will start remembering as it works."
 _FAILED = "Something went wrong fetching memory — try again later."
-# Headroom under Teams' ~28 KB message limit once the card JSON is added.
-_LIMIT = 20_000
 
 
 def _truncated(text: str) -> str:
-    return text if len(text) <= _LIMIT else text[:_LIMIT] + "\n… (truncated)"
+    return text if len(text) <= TEAMS_LIMIT else text[:TEAMS_LIMIT] + "\n… (truncated)"
 
 
 def _card(title: str, text: str | None = None, hint: str | None = None) -> AdaptiveCard:
