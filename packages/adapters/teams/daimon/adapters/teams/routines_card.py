@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import Literal
 
 from daimon.adapters.teams.card_actions import button, error_text, submitted_fields
-from daimon.core.routines import PANEL_CAP, can_manage_routine, derive_glyph, routine_label
+from daimon.core.routines import can_manage_routine, derive_glyph, routine_label
 from daimon.core.stores.domain import RoutineRow
 from microsoft_teams.cards import (
     Action,
@@ -39,6 +39,8 @@ FORM_FIELDS = {
     "message": "Trigger message",
 }
 _EMPTY_HINT = "No routines yet. Ask your agent to schedule one, e.g. 'daily 9am stand-up summary'."
+# Core caps the panel at 25 rows; 20 fit Teams' 28 KB with emoji labels.
+_ROWS_SHOWN = 20
 
 Op = Literal["refresh", "pause", "resume", "output", "delete", "confirm_delete"]
 
@@ -80,13 +82,14 @@ def panel_card(
     body: list[CardElement] = [TextBlock(text="Routines", weight="Bolder", size="Medium")]
     if notice:
         body.append(TextBlock(text=notice, wrap=True))
-    for row in rows:
+    hidden += max(0, len(rows) - _ROWS_SHOWN)
+    for row in rows[:_ROWS_SHOWN]:
         manage = can_manage_routine(row, user_id=user_id, is_admin=is_admin)
         body.append(_routine(row, can_manage=manage))
     if not rows:
         body.append(TextBlock(text=_EMPTY_HINT, wrap=True))
     if hidden:
-        more = f"+{hidden} more routine(s) not shown (cap: {PANEL_CAP})"
+        more = f"+{hidden} more routine(s) not shown (cap: {_ROWS_SHOWN})"
         body.append(TextBlock(text=more, is_subtle=True, size="Small", wrap=True))
     actions: list[Action] = [_button("Refresh", "refresh")]
     if is_admin:

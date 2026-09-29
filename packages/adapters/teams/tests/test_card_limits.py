@@ -33,6 +33,7 @@ from daimon.adapters.teams.privacy_card import (
 from daimon.adapters.teams.privacy_card import panel_card as privacy_card
 from daimon.adapters.teams.privacy_panel import NAME_MISMATCH
 from daimon.adapters.teams.routines_card import confirm_delete_card, create_form, output_card
+from daimon.adapters.teams.routines_card import panel_card as routines_card
 from daimon.adapters.teams.setup_panel import GONE
 from daimon.adapters.teams.tool_confirmation import confirmation_adaptive_card
 from daimon.core.agent_detail_lists import DetailListName
@@ -62,6 +63,7 @@ from daimon.core.posted_controls.teams_card import (
 from daimon.core.privacy import PurgePreview, PurgePreviewRow
 from daimon.core.purge import AccountPurgeResult, PurgeReport
 from daimon.core.roster import Roster, RosterAgent, paginate
+from daimon.core.routines import PANEL_CAP
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import build_setup_opener
 from daimon.core.stores.domain import CredentialRequestRow, RoutineRow
@@ -396,6 +398,13 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
     "routing": _routing,
     "welcome": _welcome,
     "setup_notice": lambda: setup_card.notice_card(setup_card.ENDED),
+    "routines": lambda: routines_card(
+        [_routine(index) for index in range(PANEL_CAP)],
+        10**6,
+        user_id="u",
+        is_admin=True,
+        notice=f"✅ Created routine on {NAME} ({_routine().cron_expr}).",
+    ),
     "routine_output": lambda: output_card(_routine()),
     "routine_error": lambda: output_card(_routine().model_copy(update={"last_error": "e" * 500})),
     "routine_delete": lambda: confirm_delete_card(_routine()),
