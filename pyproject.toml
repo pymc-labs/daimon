@@ -263,4 +263,5 @@ dev = [
     "daimon-testing",
     "aioresponses>=0.7.9",
     "syrupy>=5.5.3",
+    "jsonschema>=4.23",
 ]

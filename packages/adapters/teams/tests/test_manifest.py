@@ -1,63 +1,46 @@
-"""The registration template uses the published Teams v1.16 field names."""
+"""The registration template validates against the published Teams v1.16 schema."""
 
+import json
 from pathlib import Path
+from typing import Any
 
 import yaml
 from daimon.adapters.teams.help import COMMAND_HELP
+from jsonschema import Draft4Validator
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-# Top-level properties from the versioned Microsoft schema (offline test):
-# https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json
-V116_PROPERTIES = {
-    "$schema",
-    "manifestVersion",
-    "version",
-    "id",
-    "packageName",
-    "localizationInfo",
-    "developer",
-    "name",
-    "description",
-    "icons",
-    "accentColor",
-    "configurableTabs",
-    "staticTabs",
-    "bots",
-    "connectors",
-    "subscriptionOffer",
-    "composeExtensions",
-    "permissions",
-    "devicePermissions",
-    "validDomains",
-    "webApplicationInfo",
-    "graphConnector",
-    "showLoadingIndicator",
-    "isFullScreen",
-    "activities",
-    "configurableProperties",
-    "supportedChannelTypes",
-    "defaultBlockUntilAdminAction",
-    "publisherDocsUrl",
-    "defaultInstallScope",
-    "defaultGroupCapability",
-    "meetingExtensionDefinition",
-    "authorization",
+# Vendored for an offline test from
+# https://developer.microsoft.com/json-schemas/teams/v1.16/MicrosoftTeams.schema.json
+SCHEMA = Path(__file__).parent / "data/teams-manifest-v1.16.schema.json"
+# What an operator substitutes before zipping the package.
+PLACEHOLDERS = {
+    "${DAIMON_TEAMS__CLIENT_ID}": "00000000-0000-4000-8000-000000000001",
+    "DAIMON_HOST": "daimon.example.com",
 }
 
 
-def test_manifest_uses_v116_schema_keys() -> None:
-    manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
-    assert set(manifest) <= V116_PROPERTIES
-    assert manifest["manifestVersion"] == "1.16"
-    assert {"version", "id", "developer", "name", "description", "icons", "accentColor"} <= set(
-        manifest
+def _manifest() -> Any:
+    text = (REPO_ROOT / "docs/teams-app-manifest.yaml").read_text()
+    for placeholder, value in PLACEHOLDERS.items():
+        text = text.replace(placeholder, value)
+    return yaml.safe_load(text)
+
+
+def test_manifest_validates_against_the_v116_schema() -> None:
+    manifest = _manifest()
+    validator = Draft4Validator(
+        json.loads(SCHEMA.read_text()), format_checker=Draft4Validator.FORMAT_CHECKER
     )
-    assert {"short", "full"} <= set(manifest["name"])
+    errors = [
+        f"{'/'.join(map(str, e.absolute_path))}: {e.message}"
+        for e in validator.iter_errors(manifest)
+    ]
+    assert errors == []
+    assert manifest["manifestVersion"] == "1.16"
 
 
 def test_manifest_offers_what_the_adapter_answers() -> None:
-    manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
-    [bot] = manifest["bots"]
+    [bot] = _manifest()["bots"]
     assert bot["scopes"] == ["personal", "team"], "group chats are refused, so not offered"
     assert bot["supportsFiles"] is True
     [commands] = bot["commandLists"]
