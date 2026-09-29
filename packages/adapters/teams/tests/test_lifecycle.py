@@ -113,6 +113,27 @@ async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark()
     assert lifecycle.card_closed and lifecycle.final_message_id is None
 
 
+async def test_a_timed_out_answer_edit_is_sent_again_not_collapsed() -> None:
+    sender = FakeSender(timeout_on={1})
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+
+    assert [a.id for a in sender.activities[1:]] == ["m-1", "m-1"], "the edit is resent"
+    assert "The posterior mean is 3." in _card_json(sender, -1)
+    assert lifecycle.final_message_id == "m-1"
+
+
+async def test_an_answer_edit_that_keeps_timing_out_is_never_overwritten() -> None:
+    """The edit may have landed, so neither a failure notice nor the boot sweep replaces it."""
+    sender = FakeSender(timeout_on={1, 2})
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+
+    assert len(sender.sent) == 3, "no failure notice follows the two edits"
+    assert lifecycle.card_closed, "a closed card retires its intent, so the sweep skips it"
+    assert lifecycle.final_message_id is None, "no watermark past an answer nobody may have seen"
+
+
 async def test_no_answer_reads_as_cancelled_or_done() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)

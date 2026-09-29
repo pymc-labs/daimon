@@ -48,6 +48,8 @@ _DELIVERY_FAILED = "⚠️ Something went wrong posting the answer."
 # call, OSError for timeouts and MSAL's transport, ValueError when the SDK
 # cannot get a bot token.
 TEAMS_SEND_ERRORS = (httpx.HTTPError, OSError, ValueError)
+# A send that timed out may still have landed.
+_TIMEOUTS = (TimeoutError, httpx.TimeoutException)
 SEND_TIMEOUT_S = 30.0
 
 
@@ -128,6 +130,15 @@ class TeamsTurnLifecycle:
             self._conversation_id, activity, service_url=self._service_url
         )
         return message_id or sent.id
+
+    async def _edit(self, activity: MessageActivityInput, message_id: str | None) -> str:
+        """An edit is idempotent, so one that timed out is sent once more."""
+        try:
+            return await self._send(activity, message_id=message_id)
+        except _TIMEOUTS:
+            if message_id is None:
+                raise
+            return await self._send(activity, message_id=message_id)
 
     async def post_initial(self) -> None:
         """Post the card now, before session setup, so Cancel exists from the start."""
@@ -233,21 +244,25 @@ class TeamsTurnLifecycle:
             current = self._message_id
             for index, chunk in enumerate(chunks):
                 message = card.answer_message(chunk, footer=footer if index == last else None)
-                current = await self._send(message, message_id=current if index == 0 else None)
                 if index == 0:
-                    self._message_id = current
+                    current = self._message_id = await self._edit(message, current)
                     replaced = self.card_closed = True
+                else:
+                    current = await self._send(message, message_id=None)
             self.final_message_id = current
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
             capture_exception_with_scope(exc)
-            if not replaced and self._message_id is not None:
-                # Collapse the card so it does not show a live turn forever.
-                with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                    await self._send(
-                        card.notice_card(_DELIVERY_FAILED), message_id=self._message_id
-                    )
-                    self.card_closed = True
+            if replaced or self._message_id is None:
+                return
+            if isinstance(exc, _TIMEOUTS):
+                # The edit may have landed: neither this nor the boot sweep may overwrite it.
+                self.card_closed = True
+                return
+            # Collapse the card so it does not show a live turn forever.
+            with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                await self._send(card.notice_card(_DELIVERY_FAILED), message_id=self._message_id)
+                self.card_closed = True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         footer = self._footer(state)
