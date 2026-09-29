@@ -25,7 +25,7 @@ import httpx
 import pytest
 from aioresponses import CallbackResult
 from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
+from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
@@ -35,6 +35,7 @@ from daimon.core.stores.domain import ContinuationReason, Role, TaskContinuation
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TurnState

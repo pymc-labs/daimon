@@ -17,12 +17,13 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.adapters.teams.runtime import TeamsRuntime, build_turn_deps
+from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import TeamsSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.testing import (
     build_fake_anthropic,

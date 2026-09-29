@@ -25,7 +25,7 @@ import anthropic as _anthropic
 import discord
 import httpx
 import pytest
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -37,7 +37,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
-from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.errors import (
     SessionAgentMismatch,
     SessionBusyError,

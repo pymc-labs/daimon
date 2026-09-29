@@ -11,9 +11,10 @@ from unittest.mock import MagicMock
 import httpx
 from anthropic import AsyncAnthropic
 from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
+from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import build_fake_anthropic, make_agent_env_echo_handler, make_fake_ma_handler
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

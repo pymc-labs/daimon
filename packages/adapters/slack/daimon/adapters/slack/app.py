@@ -161,13 +161,12 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.gating import should_admit_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
-from daimon.core.turn.prepare import ContinuityOutcome, bind_session
+from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import (
-    SessionState,
     build_handoff_notice,
     render_turn_origin,
     turn_origin,
@@ -261,24 +260,6 @@ def _collect_files(events: list[dict[str, Any]]) -> list[SlackFile]:
     contribute nothing.
     """
     return [cast(SlackFile, f) for event in events for f in event.get("files", [])]
-
-
-def _build_session_state(continuity: ContinuityOutcome) -> SessionState:
-    """Turn a bind's `ContinuityOutcome` into the `<turn_controls>` fact block.
-
-    `lost` is derived from `transfer_kind` rather than carried on
-    `ContinuityOutcome` directly: a replacement's own transfer degrade ladder
-    (full/transcript/history) already says exactly what did not survive, and
-    repeating that vocabulary here is what keeps `render_turn_origin`'s
-    honesty instruction ("say what is missing before continuing") accurate.
-    """
-    if continuity.transfer_kind == "transcript":
-        lost: tuple[str, ...] = ("working files",)
-    elif continuity.transfer_kind == "history":
-        lost = ("working files", "earlier conversation")
-    else:
-        lost = ()
-    return SessionState(state=continuity.state, applied=tuple(continuity.applied), lost=lost)
 
 
 class SlackApp:
@@ -1891,7 +1872,7 @@ class SlackApp:
             # path so a plain turn's controls are byte-identical to before
             # this existed.
             session_state = (
-                _build_session_state(prepared.continuity)
+                prepared.continuity.session_state()
                 if prepared.continuity.state != "continued"
                 else None
             )

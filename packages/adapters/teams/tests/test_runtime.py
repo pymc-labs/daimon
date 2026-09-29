@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from daimon.adapters.teams.runtime import build_turn_deps
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import build_fake_anthropic, make_agent_env_echo_handler
 
 

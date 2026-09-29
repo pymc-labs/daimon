@@ -76,7 +76,7 @@ from daimon.adapters.slack.credential_requests import (
     run_mcp_credential_submission,
 )
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
+from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -96,6 +96,7 @@ from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.turn_origins import create_origin
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_session
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from pydantic import SecretStr

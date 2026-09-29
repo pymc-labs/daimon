@@ -98,7 +98,6 @@ from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_keys import list_mounted_key_names, render_keys_element
 from daimon.core.turn_origin import (
     HandoffNotice,
-    SessionState,
     build_handoff_notice,
     render_turn_origin,
     turn_origin,
@@ -148,16 +147,6 @@ _DENIALS: dict[AdmissionDenialReason, tuple[str, str | None]] = {
 LifecycleFactory = Callable[[asyncio.Event, str | None], TeamsTurnLifecycle]
 # Builds a continuation turn's handoff notice from what the bind carried across.
 HandoffFactory = Callable[[ContinuityOutcome], HandoffNotice]
-
-
-def session_state(continuity: ContinuityOutcome) -> SessionState:
-    """The bind's continuity as turn-control facts. Duplicated from the Slack adapter."""
-    lost: tuple[str, ...] = ()
-    if continuity.transfer_kind == "transcript":
-        lost = ("working files",)
-    elif continuity.transfer_kind == "history":
-        lost = ("working files", "earlier conversation")
-    return SessionState(state=continuity.state, applied=tuple(continuity.applied), lost=lost)
 
 
 def _user_message(
@@ -759,7 +748,7 @@ class TeamsApp:
             controls = render_turn_origin(
                 origin,
                 responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
-                session_state=None if quiet else session_state(prepared.continuity),
+                session_state=None if quiet else prepared.continuity.session_state(),
                 handoff=notice,
             )
             message = _user_message(

@@ -27,7 +27,7 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.runtime import SlackRuntime, build_turn_deps
+from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
@@ -49,6 +49,7 @@ from daimon.core.stores.thread_sessions import (
     mark_turn_active,
 )
 from daimon.core.turn.admission import Admission
+from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.errors import (
     SessionAgentMismatch,
     SessionBusyError,

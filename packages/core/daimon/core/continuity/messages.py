@@ -469,9 +469,7 @@ def render_preparation_failed(target_name: str) -> str:
 def render_unexpected_loss(transfer_kind: Literal["transcript", "history"]) -> str:
     """Tell the person their workspace was lost and describe what was recovered."""
     if transfer_kind == "transcript":
-        recovered_line = (
-            "I have this conversation and the files that were saved to your task."
-        )
+        recovered_line = "I have this conversation and the files that were saved to your task."
     else:
         recovered_line = "I have what was posted here, but not the earlier conversation."
     return "\n".join(
