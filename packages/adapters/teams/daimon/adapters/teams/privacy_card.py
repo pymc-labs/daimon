@@ -97,6 +97,7 @@ def _will_happen(preview: PurgePreview) -> list[str]:
         ("🤖 Remove", preview.agent_github_binding, "per-agent GitHub token link(s)"),
         ("🔐 Remove", preview.slack_user_tokens, "Slack user token(s)"),
         ("💬 Remove", preview.slack_turn_contexts, "Slack turn context(s)"),
+        ("💬 Remove", preview.direct_message_conversations, "private conversation(s)"),
     )
     lines = [
         f"{verb} **{row.count}** {label}" + (f" (e.g. {row.example})" if row.example else "")
