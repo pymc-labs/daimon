@@ -903,4 +903,4 @@ async def test_a_timer_set_with_another_agent_is_refused_before_bind(
     bind.assert_not_called()
     run_turn.assert_not_called()
     assert "set with old-agent" in refused.value.message
-    assert "uat-agent answers in this thread now" in refused.value.message
+    assert "uat-agent answers here now" in refused.value.message
