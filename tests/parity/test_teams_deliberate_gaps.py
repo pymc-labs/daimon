@@ -9,24 +9,40 @@ anything; `packages/adapters/teams/tests/test_boot_sweep.py` asserts that.
 The rest follows from what a Teams bot can do (see `docs/teams.md`): commands
 answer only in the 1:1 chat, which has no threads, so a setup conversation is
 keyed inside it; channel history and files need Microsoft Graph; and a dialog's
-password field cannot take a `.env` upload or a repository token.
+password field cannot take a `.env` upload or a repository token. Removing the
+app archives nothing, and a Details list has no Show more.
 
 No platform parametrization, no database -- this is a scope check.
 """
 
 from __future__ import annotations
 
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import pytest
 import yaml
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools.channels import register_channel_tools
-from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
+from daimon.adapters.mcp.tools.credential_requests import (
+    _request_agent_key_impl,  # pyright: ignore[reportPrivateUsage]
+    register_credential_request_tools,
+)
+from daimon.adapters.teams import setup_card
+from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, Refusal, parse_inbound
+from daimon.core.agent_details import AgentDetails, KeyEntry
+from daimon.core.config import TeamsSettings
+from daimon.core.stores.domain import Role
 from daimon.core.teams_threads import conversation_of, new_setup_thread_id
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from microsoft_teams.api import MessageActivity
+from microsoft_teams.api.activities.install_update import UninstalledActivity
+from pydantic import SecretStr
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TENANT = "00000000-0000-0000-0000-000000000001"
@@ -90,3 +106,64 @@ async def test_teams_turns_lack_the_graph_and_non_password_tools() -> None:
     assert hidden <= {tool.name for tool in tools}, "a renamed tool must be renamed here too"
     assert teams >= {"send_message", "create_thread", "request_agent_key"}
     assert not teams & hidden, "these need Graph, a non-password input or Discord/Slack DMs"
+
+
+def test_removing_the_teams_app_archives_nothing() -> None:
+    settings = TeamsSettings(client_id="bot", client_secret=SecretStr("s"), tenant_id=TENANT)
+    service = create_teams_http_service(settings=settings, runtime=cast(Any, MagicMock()))
+    removal = UninstalledActivity.model_validate(
+        {
+            "type": "installationUpdate",
+            "action": "remove",
+            "id": "a-1",
+            "channelId": "msteams",
+            "from": {"id": "29:u"},
+            "recipient": {"id": "28:bot"},
+            "conversation": {"id": "a:chat-1", "tenantId": TENANT},
+        }
+    )
+    assert not service.teams_app.router.select_handlers(removal), (
+        "Teams has no uninstall to archive on (docs/teams.md); if one lands, run the parity scenario"
+    )
+
+
+async def test_a_teams_key_request_cannot_ask_for_a_env_upload() -> None:
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.ADMIN,
+        platform="teams",
+        external_id=TENANT,
+        platform_user_id="00000000-0000-0000-0000-000000000002",
+        is_admin=True,
+    )
+    with pytest.raises(ToolError, match="cannot take a .env file upload"):
+        await _request_agent_key_impl(
+            cast(Any, MagicMock()),
+            auth,
+            agent_name="a",
+            key=None,
+            purpose="several keys",
+            channel_id="19:c@thread.tacv2",
+        )
+
+
+def test_teams_details_lists_stay_collapsed() -> None:
+    keys = tuple(KeyEntry(name=f"KEY_{i:02d}", updated_at=datetime.now(UTC)) for i in range(12))
+    details = AgentDetails(
+        ma_agent_id="ag_1",
+        name="a",
+        model_id="m",
+        model_display_name="M",
+        daimon_managed=False,
+        created_by_is_workspace=False,
+        created_at=datetime.now(UTC),
+        answers_here=False,
+        keys=keys,
+        applies_note="",
+    )
+    card = setup_card.details_card(details, here="a:chat-1", page=0, coding_tools=False)
+    rendered = card.model_dump_json(by_alias=True)
+    assert "+6 more" in rendered and "Show more" not in rendered, (
+        "a Teams card edit redraws the whole card, so Details keeps each list collapsed"
+    )
