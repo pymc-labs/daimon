@@ -10,8 +10,8 @@ from collections.abc import Callable
 import pytest
 from daimon.adapters.teams import card
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsTurnLifecycle, TimedSender
-from daimon.adapters.teams.split import TEAMS_LIMIT, split_answer
 from daimon.core.errors import TurnError
+from daimon.core.message_split import split_fenced
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -163,7 +163,7 @@ def test_an_oversized_notice_fits_the_teams_limit_and_keeps_the_request_id() -> 
 
     text = card.termination_text(huge, footer="daimon · 1s")
 
-    assert len(text) <= TEAMS_LIMIT, "Teams rejects an oversized message"
+    assert len(text) <= card.TEAMS_LIMIT, "Teams rejects an oversized message"
     assert text.endswith("…\n\nRequest id: rid-1\n\ndaimon · 1s"), "clipped before the tail"
 
 
@@ -183,5 +183,5 @@ async def test_a_hung_send_times_out_as_a_send_error() -> None:
 
 
 def test_a_long_non_ascii_answer_splits_under_the_teams_payload_cap() -> None:
-    chunks = split_answer("统计" * 5_000)
+    chunks = split_fenced("统计" * 5_000, card.TEAMS_LIMIT)
     assert len(chunks) > 1 and all(len(json.dumps(chunk)) < 28_000 for chunk in chunks)

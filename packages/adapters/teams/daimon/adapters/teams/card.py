@@ -12,11 +12,13 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Literal
 
-from daimon.adapters.teams.split import TEAMS_LIMIT
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from microsoft_teams.api import MessageActivityInput
 from microsoft_teams.cards import ActionSet, AdaptiveCard, CardElement, ExecuteAction, TextBlock
 
+# A Teams message is capped by payload size (about 28 KB), not characters;
+# 4 000 stays under it even when JSON escapes each character to six bytes.
+TEAMS_LIMIT = 4_000
 CANCEL_VERB = "cancel_turn"
 INTERRUPTED_NOTICE = (
     "❌ This turn was interrupted by a restart and cannot be resumed. "

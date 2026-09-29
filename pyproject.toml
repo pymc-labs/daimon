@@ -144,6 +144,7 @@ source_modules = [
     "daimon.core.memory_resource",
     "daimon.core.memory_view",
     "daimon.core.message_feedback",
+    "daimon.core.message_split",
     "daimon.core.models_catalog",
     "daimon.core.notebooks",
     "daimon.core.observability",

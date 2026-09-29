@@ -24,7 +24,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
 from daimon.adapters.teams import card
-from daimon.adapters.teams.split import split_answer
+from daimon.core.message_split import split_fenced
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.turn.degraded import render_degraded_notice
@@ -228,7 +228,7 @@ class TeamsTurnLifecycle:
                 self.answer_prefix_applied = True
             if degraded is not None:
                 answer = f"{answer}\n\n{degraded}"
-            chunks = split_answer(answer)
+            chunks = split_fenced(answer, card.TEAMS_LIMIT)
             last = len(chunks) - 1
             current = self._message_id
             for index, chunk in enumerate(chunks):
