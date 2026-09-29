@@ -20,6 +20,7 @@ from daimon.adapters.teams.http_service import (
 )
 from daimon.core.teams_bot_framework import SERVICE_URL
 from daimon.testing.asgi import asgi_lifespan
+from microsoft_teams.api.auth.cloud_environment import PUBLIC
 from microsoft_teams.common.http import MiddlewareContext, MiddlewareNext
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -195,8 +196,9 @@ async def test_a_throttled_bot_framework_call_is_retried_once() -> None:
     assert response.json() == {"id": "m-1"} and calls == ["POST", "POST"]
 
 
-def test_proactive_sends_use_the_commercial_service_url(
+def test_proactive_sends_use_the_commercial_cloud(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = _service(db_session_factory)
-    assert service.teams_app.options.service_url == SERVICE_URL
+    options = service.teams_app.options
+    assert options.service_url == SERVICE_URL and options.cloud is PUBLIC

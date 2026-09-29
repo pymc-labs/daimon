@@ -80,7 +80,7 @@ def test_channel_message_without_a_bot_mention_is_ignored_silently() -> None:
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"conversation_type": "groupChat"},
+        {"conversation_type": "groupChat", "is_group": False},
         {"conversation_type": "personal", "is_group": True},
     ],
 )
