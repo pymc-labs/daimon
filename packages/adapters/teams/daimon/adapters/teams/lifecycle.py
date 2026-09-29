@@ -45,6 +45,7 @@ _DEBOUNCE_S = 5.0
 _SEALED_RESPONSE_MIN_CHARS = 500  # Same substantive-answer threshold as Slack.
 _DELIVERY_FAILED = "⚠️ Something went wrong posting the answer."
 _DELIVERY_UNCERTAIN = "⚠️ Posting the answer timed out. If it isn't above, ask again."
+_ANSWER_CUT_SHORT = "⚠️ Part of this answer may be missing. Ask again if it stops short."
 # Everything an SDK send can raise: httpx.HTTPError for the Bot Framework
 # call, OSError for timeouts and MSAL's transport, ValueError when the SDK
 # cannot get a bot token.
@@ -264,7 +265,12 @@ class TeamsTurnLifecycle:
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
             capture_exception_with_scope(exc)
-            if replaced or self._message_id is None:
+            if replaced:
+                # A later part failed: the answer on screen may stop short.
+                with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                    await self._send(card.notice_card(_ANSWER_CUT_SHORT), message_id=None)
+                return
+            if self._message_id is None:
                 return
             if answer and isinstance(exc, _TIMEOUTS):
                 # The edit may have landed: neither this nor the boot sweep may overwrite

@@ -113,6 +113,17 @@ async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark()
     assert lifecycle.card_closed and lifecycle.final_message_id is None
 
 
+async def test_a_failed_later_part_says_the_answer_may_be_cut_short() -> None:
+    sender = FakeSender(fail_on={2})
+    lifecycle = await _posted(sender)
+    paragraph = "word " * 1000
+    await lifecycle.on_terminal_success(_answer("\n\n".join([paragraph] * 4)))
+
+    assert [a.id for a in sender.activities[1:]] == ["m-1", None, None], "answer, lost part, note"
+    assert "may be missing" in _card_json(sender, -1)
+    assert lifecycle.card_closed and lifecycle.final_message_id is None
+
+
 async def test_a_timed_out_answer_edit_is_sent_again_not_collapsed() -> None:
     sender = FakeSender(timeout_on={1})
     lifecycle = await _posted(sender)
