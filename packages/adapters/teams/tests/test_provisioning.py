@@ -8,12 +8,14 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from daimon.adapters.teams.provisioning import provision_configured_tenant
+from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.tenants import get_tenant_liveness, set_provision_status
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import ENTRA_TENANT_ID
@@ -93,19 +95,37 @@ async def test_boot_demotes_an_admin_removed_from_the_list(
 ) -> None:
     """Routines and MCP clients read the stored role, so a removed admin loses it at boot."""
     await _provision(db_session_factory, failed=False)
+    other = await provision_tenant(db_session_factory, platform="slack", workspace_id="T-OTHER")
     accounts = {}
     async with db_session_factory.begin() as session:
-        for user in ("kept-admin", "removed-admin"):
+        for key, tenant, platform, user in (
+            ("kept", TENANT, "teams", "kept-admin"),
+            ("removed", TENANT, "teams", "removed-admin"),
+            ("elsewhere", other.tenant_id, "slack", "removed-admin"),
+        ):
             principal = await get_or_create_platform_principal(
-                session, tenant_id=TENANT, platform="teams", external_id=user
+                session, tenant_id=tenant, platform=platform, external_id=user
             )
             await set_role(session, principal.account_id, Role.ADMIN)
-            accounts[user] = principal.account_id
+            accounts[key] = principal.account_id
 
     await _provision(db_session_factory, failed=False, admins=("kept-admin",))
 
     async with db_session_factory() as session:
-        kept = await get_account(session, accounts["kept-admin"])
-        removed = await get_account(session, accounts["removed-admin"])
-    assert kept is not None and kept.role is Role.ADMIN, "a listed admin keeps the role"
-    assert removed is not None and removed.role is Role.USER, "an unlisted admin is demoted"
+        roles = {
+            k: getattr(await get_account(session, a), "role", None) for k, a in accounts.items()
+        }
+    assert roles == {"kept": Role.ADMIN, "removed": Role.USER, "elsewhere": Role.ADMIN}, (
+        "only this organisation's unlisted Teams admins are demoted"
+    )
+
+
+async def test_a_failed_demotion_never_blocks_provisioning(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with patch(
+        "daimon.adapters.teams.provisioning.demote_unlisted_admins",
+        AsyncMock(side_effect=SQLAlchemyError("boom")),
+    ):
+        tenant = await _provision(db_session_factory, failed=False)
+    assert tenant is not None and tenant.provision_status == "ready"

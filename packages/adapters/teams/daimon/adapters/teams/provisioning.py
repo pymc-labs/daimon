@@ -49,6 +49,17 @@ async def provision_configured_tenant(
     if existing is not None and existing.archived_at is not None:
         log.warning("teams.tenant_archived", tenant_id=str(tenant_id))
         return None
+    # First, so the reconcile below neither delays nor skips it; a failure never blocks it.
+    try:
+        async with sessionmaker.begin() as session:
+            demoted = await demote_unlisted_admins(
+                session, tenant_id=tenant_id, platform="teams", admin_ids=admin_user_ids
+            )
+    except SQLAlchemyError:
+        log.exception("teams.admin_demotion_failed", tenant_id=str(tenant_id))
+    else:
+        if demoted:
+            log.info("teams.admins_demoted", tenant_id=str(tenant_id), count=demoted)
     await provision_tenant(
         sessionmaker, platform="teams", workspace_id=entra_tenant_id, signup_credit=signup_credit
     )
@@ -87,11 +98,4 @@ async def provision_configured_tenant(
             status=None if was_ready else "failed",
             reason=reason,
         )
-    # Last, so a failure here never holds the tenant's status back.
-    async with sessionmaker.begin() as session:
-        demoted = await demote_unlisted_admins(
-            session, tenant_id=tenant_id, platform="teams", admin_ids=admin_user_ids
-        )
-    if demoted:
-        log.info("teams.admins_demoted", tenant_id=str(tenant_id), count=demoted)
     return tenant_id
