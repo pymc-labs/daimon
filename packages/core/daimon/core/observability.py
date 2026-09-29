@@ -67,6 +67,12 @@ def _scrub_event(event: Event, hint: Hint) -> Event | None:
     return event
 
 
+def _event_scrubber() -> EventScrubber:
+    """Sentry's denylist scrubber, recursive: a token nested in a frame local
+    (a request dict, an SDK activity) is as secret as a top-level one."""
+    return EventScrubber(denylist=[*DEFAULT_DENYLIST, *_APP_DENYLIST], recursive=True)
+
+
 # The id-only Sentry scope tag keys used by the omit-unbound capture helper.
 _SCOPE_TAG_KEYS: tuple[str, str, str] = ("tenant_id", "rid", "guild_id")
 
@@ -123,9 +129,7 @@ def init_sentry(
         send_default_pii=False,
         traces_sample_rate=traces_sample_rate,
         before_send=_scrub_event,
-        event_scrubber=EventScrubber(
-            denylist=[*DEFAULT_DENYLIST, *_APP_DENYLIST],
-        ),
+        event_scrubber=_event_scrubber(),
         integrations=integrations,
     )
     sentry_sdk.set_tag("process", process)

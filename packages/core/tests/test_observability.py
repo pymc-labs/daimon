@@ -4,6 +4,7 @@ Tests cover:
   - init_sentry no-ops when dsn is None
   - _scrub_event redacts secret-keyed tag values
   - _scrub_event drops request.data and extra fields
+  - the event scrubber redacts secrets nested in frame locals
   - capture_exception_with_scope tags from contextvars, omits unbound, never raises
 """
 
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING
 import pytest
 import sentry_sdk
 from daimon.core.observability import (
+    _event_scrubber,
     _scrub_event,
     capture_exception_with_scope,
     init_sentry,
@@ -191,3 +193,16 @@ def test_scrub_event_drops_message_body_when_request_data_present() -> None:
     assert "extra" not in result, (
         "extra field must be removed to prevent arbitrary payload from leaving the process"
     )
+
+
+def test_event_scrubber_redacts_a_token_nested_in_a_frame_local() -> None:
+    """A bearer token inside a dict local (e.g. request headers) is redacted, not only top-level keys."""
+    frame_vars: dict[str, object] = {"request": {"headers": {"authorization": "Bearer abc"}}}
+    event: dict[str, object] = {
+        "exception": {"values": [{"stacktrace": {"frames": [{"vars": frame_vars}]}}]}
+    }
+
+    _event_scrubber().scrub_event(event)  # type: ignore[arg-type]
+
+    headers = frame_vars["request"]["headers"]  # type: ignore[index]
+    assert headers["authorization"] != "Bearer abc", "a nested secret must not ship to Sentry"
