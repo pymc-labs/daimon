@@ -2,8 +2,8 @@
 
 The panel scenarios assert on what a person actually reads, so they need the
 screen back as data after it has gone through a platform's own renderer:
-Discord's components-v2 `LayoutView` or Slack's Block Kit modal. Both
-renderers draw the same three screens from the same core models, so one reader
+Discord's components-v2 `LayoutView`, Slack's Block Kit modal or a Teams
+Adaptive Card. The renderers draw the same three screens from the same core models, so one reader
 per platform returning one shared `CapturedView` lets a scenario be written
 once and run twice.
 
@@ -36,7 +36,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 import discord
 
@@ -47,6 +47,7 @@ __all__ = [
     "read_discord_modal",
     "read_discord_view",
     "read_slack_view",
+    "read_teams_view",
 ]
 
 LineKind = Literal["heading", "row", "note", "field"]
@@ -425,6 +426,67 @@ def read_slack_view(
             _read_slack_block(collector, block)
     for key in ("submit", "close"):
         collector.add_button(_slack_chrome_label(view, key))
+    return collector.finish()
+
+
+# ---------------------------------------------------------------------------
+# Teams
+# ---------------------------------------------------------------------------
+
+
+def _teams_items(node: Mapping[str, Any], key: str) -> list[dict[str, Any]]:
+    items: object = node.get(key)
+    if not isinstance(items, list):
+        return []
+    return [cast(dict[str, Any], i) for i in cast(list[object], items) if isinstance(i, dict)]
+
+
+def _read_teams_element(collector: _Collector, element: Mapping[str, Any]) -> None:
+    kind = element.get("type")
+    if kind == "TextBlock":
+        text = str(element.get("text") or "")
+        if element.get("size") == "Medium":
+            collector.add_title(text)
+        elif element.get("isSubtle"):
+            collector.add_note(text)
+        else:
+            _add_block(collector, text)
+    elif kind == "Container":
+        # A roster row: the agent's name, its status as subtext, its Details button.
+        items = _teams_items(element, "items")
+        is_row = any(
+            normalize_line(str(action.get("title") or ""), aliases={}) == _DETAILS_LABEL
+            for item in items
+            for action in _teams_items(item, "actions")
+        )
+        for item in items:
+            if is_row and item.get("type") == "TextBlock" and not item.get("isSubtle"):
+                _add_block(collector, str(item.get("text") or ""), is_row=True)
+            else:
+                _read_teams_element(collector, item)
+    elif kind == "ActionSet":
+        for action in _teams_items(element, "actions"):
+            collector.add_button(action.get("title"))
+    elif kind in ("Input.Text", "Input.ChoiceSet"):
+        collector.add_body(str(element.get("label") or ""), kind="field")
+
+
+def read_teams_view(
+    card: Mapping[str, Any], *, aliases: Mapping[str, str] | None = None, title: str | None = None
+) -> CapturedView:
+    """Read one panel screen off the Adaptive Card Teams was sent.
+
+    The Medium heading is the title (a dialog's card has none, so `title` names
+    it), subtle TextBlocks are subtext, and every ActionSet and the card's own
+    actions are buttons.
+    """
+    collector = _Collector(aliases or {})
+    if title is not None:
+        collector.add_title(title)
+    for element in _teams_items(card, "body"):
+        _read_teams_element(collector, element)
+    for action in _teams_items(card, "actions"):
+        collector.add_button(action.get("title"))
     return collector.finish()
 
 

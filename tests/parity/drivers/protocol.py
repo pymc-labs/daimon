@@ -1,5 +1,5 @@
-"""PlatformDriver -- the typed entry-point surface shared by DiscordDriver
-and SlackDriver.
+"""PlatformDriver -- the typed entry-point surface shared by DiscordDriver,
+SlackDriver and TeamsDriver.
 
 Every method builds its own platform Runtime from the given `sessionmaker`
 + `router` (an MA transport fake); callers never construct a
@@ -67,6 +67,17 @@ action id or button label.
 def parity_account_id(tenant_id: uuid.UUID, user_id: str) -> uuid.UUID:
     """The account id both drivers act as for this (tenant, platform user)."""
     return uuid.uuid5(_PARITY_ACCOUNT_NAMESPACE, f"{tenant_id}:{user_id}")
+
+
+def platform_ids(platform: str, *, workspace: int, user: int, channel: int) -> tuple[str, str, str]:
+    """(workspace, user, channel) in the shape `platform` issues them.
+
+    Discord needs snowflakes and Slack takes any string; Teams tenants and users
+    are Entra UUIDs and its channels `19:…@thread.tacv2`.
+    """
+    if platform != "teams":
+        return str(workspace), str(user), str(channel)
+    return str(uuid.UUID(int=workspace)), str(uuid.UUID(int=user)), f"19:{channel}@thread.tacv2"
 
 
 class PlatformDriver(Protocol):

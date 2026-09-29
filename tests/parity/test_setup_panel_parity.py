@@ -1,23 +1,23 @@
-"""Scenario: the read-only setup panel says the same things on both platforms.
+"""Scenario: the read-only setup panel says the same things on every platform.
 
 Every test here opens the panel through the platform's own entry point — the
-Discord `/agent-setup` cog, the Slack slash handler — clicks the real controls,
-and reads whichever screen the click landed on back through
-`drivers.views`. The claims are then asserted against one shared expectation,
-so "Discord and Slack agree" is proved by both halves of a parametrized test
-meeting the same constant rather than by one platform being compared to the
-other's output.
+Discord `/agent-setup` cog, the Slack slash handler, the Teams `setup` command —
+clicks the real controls, and reads whichever screen the click landed on back
+through `drivers.views`. The claims are then asserted against one shared
+expectation, so agreement is proved by each half of a parametrized test
+meeting the same constant rather than by one platform being compared to
+another's output.
 
-What the two platforms agree on, and this module pins: which agents the roster
+What the platforms agree on, and this module pins: which agents the roster
 lists and in what order, that a member and an admin see the same controls, the
 routing sentence under an unrouted agent, the empty-roster copy, that creating
 an agent lands on its Details and says it answers nowhere yet, that a page
 number survives a trip into Details and back, and each long Details list
-behind Show more.
+behind Show more (Discord and Slack only, see `test_teams_deliberate_gaps.py`).
 
 What they deliberately do not agree on, and this module pins per platform
 instead of hiding, is recorded in `_DIVERGENCES` below — each one is a place
-the two designs chose different words or different sizes on purpose.
+the designs chose different words or different sizes on purpose.
 """
 
 from __future__ import annotations
@@ -27,9 +27,11 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Final, cast
 
+import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.agent_setup.budget import ROSTER_PAGE_SIZE
 from daimon.adapters.slack.agent_setup.state import PANEL_PAGE_SIZE
+from daimon.adapters.teams.setup_card import PAGE_SIZE as TEAMS_PAGE_SIZE
 from daimon.core.agent_detail_lists import DETAIL_LIST_COLLAPSED_COUNT
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.ma_identity import derive_agent_uuid
@@ -57,11 +59,16 @@ from .drivers.views import CapturedView, captured_titles
 #: is a design decision, not drift, and each is asserted per platform below so
 #: a change to either one fails a test rather than passing quietly.
 _DIVERGENCES: Final[Mapping[str, str]] = {
-    "roster title": "Discord titles the card by the channel; Slack titles the modal 'Agents'.",
-    "back": "Discord draws a Back button; Slack pops its own view stack.",
+    "roster title": "Discord titles the card by the channel; Slack and Teams title it 'Agents'.",
+    "back": "Discord and Teams draw a Back button; Slack pops its own view stack.",
     "page size": (
         f"Discord fits {ROSTER_PAGE_SIZE} rows on a page against the component budget; "
-        f"Slack fits {PANEL_PAGE_SIZE} against the block budget."
+        f"Slack fits {PANEL_PAGE_SIZE} against the block budget; Teams pages at {TEAMS_PAGE_SIZE}."
+    ),
+    "done": "Discord and Slack close the panel with Done; a Teams card stays in the chat.",
+    "channel": (
+        "Teams opens the panel in the 1:1 chat, so its routing sentences name 'a channel' "
+        "or no place rather than the one the panel is in."
     ),
 }
 
@@ -71,15 +78,24 @@ _DIVERGENCES: Final[Mapping[str, str]] = {
 _IDS: Final[Mapping[str, tuple[str, str, str]]] = {
     "discord": ("880000000000001", "990000000000002", "770000000000003"),
     "slack": ("T_PARITY_PANEL", "C_PARITY_PANEL", "U_PARITY_PANEL"),
+    "teams": (str(uuid.UUID(int=0x9A7E1)), "a:parity-panel", str(uuid.UUID(int=0x9A7E2))),
 }
 
 _CHANNEL_LABEL: Final = "#here"
+#: How each sentence names the place the panel is in, per `_DIVERGENCES["channel"]`.
+_NOTE_LABEL: Final[Mapping[str, str | None]] = {"teams": None}
+_REQUEST_LABEL: Final[Mapping[str, str]] = {"teams": "a channel"}
+_HERE: Final[Mapping[str, str]] = {"teams": "Channel here"}
 
 _ANSWERING = "answers-here"
 _BUILT_IN = "daimon"
 _UNROUTED = "unrouted-agent"
 
-_PAGE_SIZES: Final[Mapping[str, int]] = {"discord": ROSTER_PAGE_SIZE, "slack": PANEL_PAGE_SIZE}
+_PAGE_SIZES: Final[Mapping[str, int]] = {
+    "discord": ROSTER_PAGE_SIZE,
+    "slack": PANEL_PAGE_SIZE,
+    "teams": TEAMS_PAGE_SIZE,
+}
 _KEY_NAMES: Final[tuple[str, ...]] = tuple(f"KEY_{index:02d}" for index in range(1, 13))
 _SKILL_NAMES: Final[tuple[str, ...]] = tuple(f"skill-{index:02d}" for index in range(1, 13))
 _CONNECTION_NAMES: Final[tuple[str, ...]] = tuple(
@@ -88,10 +104,12 @@ _CONNECTION_NAMES: Final[tuple[str, ...]] = tuple(
 _UNROUTED_ROSTER_STATUS: Final[Mapping[str, str]] = {
     "discord": "not assigned",
     "slack": "Not assigned",
+    "teams": "Not assigned",
 }
 _ANSWERING_ROSTER_STATUS: Final[Mapping[str, str]] = {
     "discord": "answers here",
     "slack": "Answers in #here",
+    "teams": "Answers in this chat",
 }
 
 #: The Details sections, in the order both panels draw them.
@@ -128,10 +146,11 @@ def _list_value(details: CapturedView, heading: str) -> str | None:
     return labelled.removeprefix(heading).removeprefix(":").strip()
 
 
-def _unrouted_note(agent_name: str, *, is_admin: bool) -> str:
-    """The core's own sentence, on one line the way both panels render it."""
+def _unrouted_note(driver: PlatformDriver, agent_name: str, *, is_admin: bool) -> str:
+    """The core's own sentence, on one line the way every panel renders it."""
+    label = _NOTE_LABEL.get(driver.param_id, _CHANNEL_LABEL)
     return build_unrouted_note(
-        agent_name=agent_name, channel_label=_CHANNEL_LABEL, is_admin=is_admin
+        agent_name=agent_name, channel_label=label, is_admin=is_admin
     ).replace("\n", " ")
 
 
@@ -286,6 +305,7 @@ async def test_roster_lists_the_same_agents_in_the_same_order_on_both_platforms(
         _UNROUTED_ROSTER_STATUS[driver.param_id],
     ):
         assert status in view.body, f"{driver.param_id}: the compact roster keeps status {status!r}"
+    done = () if driver.param_id == "teams" else ("Done",)  # _DIVERGENCES["done"]
     assert view.action_labels == (
         "Details",
         "Details",
@@ -293,7 +313,7 @@ async def test_roster_lists_the_same_agents_in_the_same_order_on_both_platforms(
         f"Manage {_ANSWERING}",
         "New agent",
         "Who answers where",
-        "Done",
+        *done,
     ), (
         f"{driver.param_id}: every roster row carries its own Details, and the screen's actions agree"
     )
@@ -401,7 +421,7 @@ async def test_details_of_an_unrouted_agent_states_the_routing_request(
     assert details.title == _UNROUTED, (
         f"{driver.param_id}: Details is titled by the agent it describes"
     )
-    assert details.says(_unrouted_note(_UNROUTED, is_admin=True)), (
+    assert details.says(_unrouted_note(driver, _UNROUTED, is_admin=True)), (
         f"{driver.param_id}: an admin is given the sentence to say, in their own voice"
     )
     assert details.body.count(UNROUTED_LINE) == 1, (
@@ -434,7 +454,7 @@ async def test_details_of_an_unrouted_agent_asks_a_member_to_find_an_admin(
         agent_name=_UNROUTED,
     )
 
-    assert details.says(_unrouted_note(_UNROUTED, is_admin=False)), (
+    assert details.says(_unrouted_note(driver, _UNROUTED, is_admin=False)), (
         f"{driver.param_id}: a member is told who can make the change instead"
     )
 
@@ -564,7 +584,7 @@ async def test_creating_an_agent_lands_on_details_saying_it_answers_nowhere_yet(
     assert details.title == "churn-explorer", (
         f"{driver.param_id}: creation lands on the new agent's own Details"
     )
-    assert details.says(_unrouted_note("churn-explorer", is_admin=True)), (
+    assert details.says(_unrouted_note(driver, "churn-explorer", is_admin=True)), (
         f"{driver.param_id}: a brand-new agent answers nowhere, and says so with the "
         "request that would fix it"
     )
@@ -686,6 +706,8 @@ async def test_back_from_details_restores_the_page_the_reader_was_on(
 # ---------------------------------------------------------------------------
 
 
+# A Teams Details list has no Show more (test_teams_deliberate_gaps.py).
+@pytest.mark.parametrize("driver", ["discord", "slack"], indirect=True)
 async def test_details_expands_one_long_list_at_a_time_and_can_collapse_it(
     driver: PlatformDriver,
     db_session: AsyncSession,
@@ -841,10 +863,12 @@ async def test_who_answers_where_states_the_precedence_and_the_routing_request(
     assert routing.title == "Who answers where", (
         f"{driver.param_id}: the cascade screen is titled the same on both platforms"
     )
-    request = build_routing_request(agent_name=_UNROUTED, channel_label=_CHANNEL_LABEL)
+    label = _REQUEST_LABEL.get(driver.param_id, _CHANNEL_LABEL)
+    request = build_routing_request(agent_name=_UNROUTED, channel_label=label)
     assert routing.says(f"{PRECEDENCE_LINE} Tell Daimon: {request}"), (
         f"{driver.param_id}: the map states the rule, then the request that acts on it"
     )
-    assert routing.says("#here") and routing.says(_ANSWERING), (
+    here = _HERE.get(driver.param_id, _CHANNEL_LABEL)
+    assert routing.says(here) and routing.says(_ANSWERING), (
         f"{driver.param_id}: the channel the panel was opened in names its own responder"
     )
