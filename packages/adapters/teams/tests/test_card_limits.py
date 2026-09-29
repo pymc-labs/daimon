@@ -56,6 +56,8 @@ from daimon.core.roster import Roster, RosterAgent, paginate
 from daimon.core.setup_conversations import build_setup_opener
 from daimon.core.stores.domain import CredentialRequestRow, RoutineRow
 from daimon.core.tool_safety import ToolCall
+from daimon.core.turn.notices import TerminationNotice
+from daimon.core.turn.termination import TerminationReason
 from jsonschema import Draft6Validator
 from jsonschema.exceptions import best_match
 from microsoft_teams.api import (
@@ -131,6 +133,20 @@ def _footer() -> str:
 def _answer() -> MessageActivityInput:
     chunks = split_fenced(f"```python\n{EMOJI * 10 * card.TEAMS_LIMIT}", card.TEAMS_LIMIT)
     return card.answer_message(max(chunks, key=len), footer=_footer())
+
+
+def _termination() -> MessageActivityInput:
+    notice = TerminationNotice(
+        reason=TerminationReason.UPSTREAM,
+        headline=EMOJI * 10_000,
+        cause=EMOJI * 10_000,
+        survived=EMOJI * 10_000,
+        next_step=EMOJI * 10_000,
+        in_flight=tuple(f"{index}{'t' * 127}" for index in range(20)),
+        finished_tools=10**6,
+        request_id=f"req_{'r' * 60}",
+    )
+    return card.notice_card(card.termination_text(notice, footer=_footer()))
 
 
 def _roster() -> AdaptiveCard:
@@ -324,6 +340,8 @@ def _confirmation(state: str) -> AdaptiveCard:
 MESSAGES: dict[str, Callable[[], MessageSource]] = {
     "status": lambda: card.status_card(_turn_state(), now=99 * 3600.0, cancel_key="k" * 64),
     "answer": _answer,
+    "termination_notice": _termination,
+    "raw_error_notice": lambda: card.notice_card(f"❌ {EMOJI * 10_000} · {_footer()}"),
     "interrupted_notice": lambda: card.notice_card(card.INTERRUPTED_NOTICE),
     "roster": _roster,
     "routing": _routing,

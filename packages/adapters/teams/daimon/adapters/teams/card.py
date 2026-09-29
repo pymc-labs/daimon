@@ -17,7 +17,7 @@ from microsoft_teams.api import MessageActivityInput
 from microsoft_teams.cards import ActionSet, AdaptiveCard, CardElement, ExecuteAction, TextBlock
 
 # A Teams message is capped by payload size (about 28 KB), not characters;
-# 4 000 stays under it even when JSON escapes each character to six bytes.
+# 4 000 stays under it at 4 UTF-8 bytes each, the widest (an emoji).
 TEAMS_LIMIT = 4_000
 CANCEL_VERB = "cancel_turn"
 INTERRUPTED_NOTICE = (
@@ -27,6 +27,7 @@ INTERRUPTED_NOTICE = (
 CANCELLED_NOTICE = "Turn cancelled."
 _TRAIL_MAX = 5
 _PREVIEW_MAX_CHARS = 250
+_FALLBACK_MAX_CHARS = 100
 _TITLES = {"thinking": "🧠 thinking", "tool_running": "⚙️ running tool"}
 
 Phase = Literal["thinking", "tool_running"]
@@ -133,8 +134,13 @@ def termination_text(notice: TerminationNotice, *, footer: str) -> str:
 
 
 def notice_card(text: str) -> MessageActivityInput:
-    """A terminal card with no buttons: bailouts, failures, restarts."""
-    return _card([TextBlock(text=text, wrap=True)], fallback=text)
+    """A terminal card with no buttons: bailouts, failures, restarts.
+
+    Clipped as Slack clips its notices; the fallback repeats it, so it gets less.
+    """
+    body = fit_notice([text], tail=None, limit=TEAMS_LIMIT)
+    fallback = fit_notice([text], tail=None, limit=_FALLBACK_MAX_CHARS)
+    return _card([TextBlock(text=body, wrap=True)], fallback=fallback)
 
 
 def answer_message(text: str, *, footer: str | None) -> MessageActivityInput:
