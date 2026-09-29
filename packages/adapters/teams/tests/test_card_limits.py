@@ -35,10 +35,19 @@ from daimon.adapters.teams.privacy_panel import NAME_MISMATCH
 from daimon.adapters.teams.routines_card import confirm_delete_card, create_form, output_card
 from daimon.adapters.teams.setup_panel import GONE
 from daimon.adapters.teams.tool_confirmation import confirmation_adaptive_card
+from daimon.core.agent_detail_lists import DetailListName
+from daimon.core.agent_details import (
+    AgentDetails,
+    KeyEntry,
+    McpServerEntry,
+    RepoBinding,
+    SkillEntry,
+)
 from daimon.core.answering_map import AnsweringMap, ChannelAnswer, SetupThreadRef, TenantAnswer
 from daimon.core.billing_panel import BillingPanelState, MemberRow
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.continuity.messages import ConfigurationChange
+from daimon.core.github_repo_auth import RepoAccess
 from daimon.core.headless_runner import LAST_RESULT_TAIL_MAX
 from daimon.core.ma import SessionDeletionReport
 from daimon.core.mcp_auth import coding_tool_config
@@ -53,6 +62,7 @@ from daimon.core.posted_controls.teams_card import (
 from daimon.core.privacy import PurgePreview, PurgePreviewRow
 from daimon.core.purge import AccountPurgeResult, PurgeReport
 from daimon.core.roster import Roster, RosterAgent, paginate
+from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import build_setup_opener
 from daimon.core.stores.domain import CredentialRequestRow, RoutineRow
 from daimon.core.tool_safety import ToolCall
@@ -162,6 +172,42 @@ def _roster() -> AdaptiveCard:
     page = paginate(rows, page=1, page_size=setup_card.PAGE_SIZE)
     roster = Roster(rows=rows, answering=rows[setup_card.PAGE_SIZE])
     return setup_card.roster_card(roster, page, routed={r.name for r in rows}, notice=GONE)
+
+
+def _details(expanded: DetailListName) -> AdaptiveCard:
+    details = AgentDetails(
+        ma_agent_id=f"agent_{'0' * 26}",
+        name=NAME,
+        purpose=EMOJI * 10_000,
+        model_id="claude-opus-4-6",
+        model_display_name=NAME,
+        daimon_managed=False,
+        created_by_is_workspace=True,
+        created_at=NOW,
+        answers_in=tuple(
+            AnsweringPlace(tier="channel", channel_id=f"{CHANNEL}{index}") for index in range(500)
+        ),
+        answers_here=False,
+        repo=RepoBinding(
+            repo_url=f"https://github.com/{'o' * 39}/{'r' * 100}",
+            default_branch="b" * 255,
+            access=RepoAccess(kind="needs_attention", credential="none", corrective=EMOJI * 1000),
+        ),
+        skills=tuple(
+            SkillEntry(type="custom", skill_id=f"skill_{index}", title=EMOJI * 64, version="1")
+            for index in range(61)
+        ),
+        skills_listing_truncated=True,
+        mcp_servers=tuple(
+            McpServerEntry(name=EMOJI * 64, url=f"https://example.com/{index}/{EMOJI * 64}")
+            for index in range(61)
+        ),
+        keys=tuple(KeyEntry(name=f"{KEY}{index}", updated_at=NOW) for index in range(61)),
+        applies_note=f"Changes to {NAME} apply from the next message to it.",
+    )
+    return setup_card.details_card(
+        details, here=CHANNEL, page=10**6, coding_tools=True, expanded=expanded
+    )
 
 
 def _routing() -> AdaptiveCard:
@@ -344,6 +390,9 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
     "raw_error_notice": lambda: card.notice_card(f"❌ {EMOJI * 10_000} · {_footer()}"),
     "interrupted_notice": lambda: card.notice_card(card.INTERRUPTED_NOTICE),
     "roster": _roster,
+    "details_skills": lambda: _details("skills"),
+    "details_connections": lambda: _details("connections"),
+    "details_keys": lambda: _details("keys"),
     "routing": _routing,
     "welcome": _welcome,
     "setup_notice": lambda: setup_card.notice_card(setup_card.ENDED),

@@ -54,6 +54,9 @@ TOKEN_DIALOG = "agent_coding_tools"
 PAGE_SIZE = 20
 ENDED = "Setup conversation ended. Your next message goes back to your usual agent."
 _DETAIL_LIST_MAX_CHARS = 6_000
+# Discord's bounds on the purpose and the places an agent answers in.
+_PURPOSE_MAX_CHARS = 800
+_ROUTING_MAX_CHARS = 1_000
 
 _LIST_HEADINGS: dict[DetailListName, str] = {
     "skills": "Skills",
@@ -132,10 +135,27 @@ def roster_card(
     return _card("Agents", body, actions)
 
 
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
 def _place(place: AnsweringPlace, *, here: str) -> str:
     if place.tier == "channel" and place.channel_id is not None:
         return "this chat" if place.channel_id == here else f"channel `{place.channel_id}`"
     return "the organisation default" if place.tier == "tenant" else "the deployment default"
+
+
+def _answers_in(places: Sequence[str]) -> str:
+    """As many places as fit, then how many did not."""
+    shown: list[str] = []
+    used = 0
+    for place in places:
+        used += len(place) + 2
+        if used > _ROUTING_MAX_CHARS:
+            break
+        shown.append(place)
+    hidden = len(places) - len(shown)
+    return ", ".join([*shown, f"+{hidden} more"] if hidden else shown)
 
 
 def expanded_list(data: Mapping[str, object]) -> DetailListName | None:
@@ -183,10 +203,11 @@ def details_card(
     expanded: DetailListName | None = None,
 ) -> AdaptiveCard:
     """One agent's readable state. Key values are not in the model, so never here."""
-    body: list[CardElement] = [_text(details.purpose)] if details.purpose else []
+    purpose = details.purpose
+    body: list[CardElement] = [_text(_clip(purpose, _PURPOSE_MAX_CHARS))] if purpose else []
     places = [_place(place, here=here) for place in details.answers_in]
     body.append(
-        _text(f"**Answers in:** {', '.join(places)}")
+        _text(f"**Answers in:** {_answers_in(places)}")
         if places
         else _text(details.unrouted_note or "Not assigned yet.")
     )
