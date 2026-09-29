@@ -15,9 +15,12 @@ import pytest
 from daimon.adapters.teams.http_service import (
     MAX_TEAMS_HTTP_BODY_BYTES,
     TeamsHttpService,
+    bot_client,
     create_teams_http_service,
 )
+from daimon.core.teams_bot_framework import SERVICE_URL
 from daimon.testing.asgi import asgi_lifespan
+from microsoft_teams.common.http import MiddlewareContext, MiddlewareNext
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -149,3 +152,28 @@ async def test_unauthenticated_request_is_rejected_by_sdk(
     async with asgi_lifespan(service.app):
         response = await _request(service, "POST", "/api/messages", json=make_message_activity())
     assert response.status_code == 401
+
+
+async def test_a_throttled_bot_framework_call_is_retried_once() -> None:
+    calls: list[str] = []
+
+    class _ThrottleOnce:
+        async def send(self, context: MiddlewareContext, next: MiddlewareNext) -> httpx.Response:
+            request = httpx.Request(context.method, context.url)
+            calls.append(context.method)
+            if len(calls) == 1:
+                response = httpx.Response(429, headers={"Retry-After": "0"}, request=request)
+                raise httpx.HTTPStatusError("429", request=request, response=response)
+            return httpx.Response(200, json={"id": "m-1"}, request=request)
+
+    client = bot_client()
+    client.use(_ThrottleOnce())
+    response = await client.post(f"{SERVICE_URL}/v3/conversations/a/activities", json={})
+    assert response.json() == {"id": "m-1"} and calls == ["POST", "POST"]
+
+
+def test_proactive_sends_use_the_commercial_service_url(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = _service(db_session_factory)
+    assert service.teams_app.options.service_url == SERVICE_URL

@@ -14,10 +14,10 @@ from collections.abc import Callable, Mapping
 import httpx
 from daimon.core.config import TeamsSettings
 from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
+from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from pydantic import BaseModel, Field
 
-# Under the Teams SDK's default service URL for proactive sends.
-_CONVERSATIONS_URL = "https://smba.trafficmanager.net/teams/v3/conversations"
+_CONVERSATIONS_URL = f"{SERVICE_URL}/v3/conversations"
 _SCOPE = "https://api.botframework.com/.default"
 _TIMEOUT_S = 15.0
 _REFRESH_MARGIN_S = 300.0
@@ -102,15 +102,17 @@ class TeamsBotClient:
     async def _request(
         self, method: str, path: str, body: dict[str, object] | None = None
     ) -> httpx.Response:
-        response = await self._http.request(
-            method,
-            f"{_CONVERSATIONS_URL}{path}",
-            json=body,
-            headers={"Authorization": f"Bearer {await self._bearer()}"},
-            timeout=_TIMEOUT_S,
-        )
-        response.raise_for_status()
-        return response
+        async def attempt() -> httpx.Response:
+            response = await self._http.request(
+                method,
+                f"{_CONVERSATIONS_URL}{path}",
+                json=body,
+                headers={"Authorization": f"Bearer {await self._bearer()}"},
+                timeout=_TIMEOUT_S,
+            )
+            return response.raise_for_status()
+
+        return await retry_throttled(attempt)
 
     async def send(self, conversation_id: str, text: str) -> str:
         """Post a markdown message; returns its activity id."""

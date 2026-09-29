@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 import jwt
 import structlog
 from daimon.adapters.teams import (
@@ -33,17 +34,33 @@ from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
 from daimon.core.config import TeamsSettings
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
+from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from microsoft_teams.api import MessageSubmitActionInvokeActivity
 from microsoft_teams.api.auth.cloud_environment import PUBLIC
 from microsoft_teams.apps import ActivityContext, App, FastAPIAdapter
 from microsoft_teams.common import Client, ClientOptions
+from microsoft_teams.common.http import MiddlewareContext, MiddlewareNext
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 MAX_TEAMS_HTTP_BODY_BYTES = 64 * 1024
 log = structlog.get_logger(__name__)
+
+
+class _RetryThrottled:
+    """SDK HTTP middleware: every Bot Framework call gets one retry after a 429."""
+
+    async def send(self, context: MiddlewareContext, next: MiddlewareNext) -> httpx.Response:
+        return await retry_throttled(next)
+
+
+def bot_client(client: Client | ClientOptions | None = None) -> Client:
+    """The SDK's HTTP client, with the throttle retry after any middleware it already has."""
+    built = client.clone() if isinstance(client, Client) else Client(client or ClientOptions())
+    built.use(_RetryThrottled())
+    return built
 
 
 def _foreign_bearer(scope: Scope) -> bool:
@@ -171,7 +188,11 @@ def create_teams_http_service(
         client_secret=settings.client_secret.get_secret_value(),
         tenant_id=settings.tenant_id,
         http_server_adapter=http_adapter,
-        client=client,
+        client=bot_client(client),
+        # Pinned so stray SERVICE_URL or CLOUD env vars cannot split this process
+        # from the MCP server, which posts to the same hosts.
+        service_url=SERVICE_URL,
+        cloud=PUBLIC,
         # JWT validation stays on by default: the SDK reads its own
         # DANGEROUSLY_ALLOW_UNAUTHENTICATED_REQUESTS env var when the option
         # is left unset, which is the supported way to exercise real ingress

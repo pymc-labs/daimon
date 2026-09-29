@@ -132,6 +132,26 @@ async def test_send_posts_markdown_with_ai_label() -> None:
     assert body["entities"][0]["additionalType"] == ["AIGeneratedContent"]
 
 
+async def test_a_throttled_send_is_retried_once_after_retry_after() -> None:
+    fake = _Fake()
+    throttled: list[int] = []
+
+    def _throttle_first_post(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and "/activities" in str(request.url) and not throttled:
+            throttled.append(1)
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return fake(request)
+
+    client = TeamsBotClient(
+        httpx.AsyncClient(transport=httpx.MockTransport(_throttle_first_post)),
+        client_id="app-id",
+        client_secret="secret",
+        tenant_id=_ENTRA,
+    )
+    assert await client.send("a:chat", "hi") == "act-1"
+    assert len(fake.posts()) == 1 and throttled == [1], "sent once more after the 429"
+
+
 async def test_update_card_puts_to_the_activity() -> None:
     fake = _Fake()
     await _client(fake).update_card(_THREAD, "act-1", {"type": "AdaptiveCard"})

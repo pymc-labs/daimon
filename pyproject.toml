@@ -183,6 +183,7 @@ source_modules = [
     "daimon.core.specs",
     "daimon.core.support_escalation",
     "daimon.core.tables",
+    "daimon.core.teams_bot_framework",
     "daimon.core.teams_threads",
     "daimon.core.tenant_balance",
     "daimon.core.thread_classifier",

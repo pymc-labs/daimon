@@ -22,7 +22,8 @@ the adapter provisions that tenant and reconciles its defaults; turns are
 denied until the reconcile succeeds. The adapter fails closed unless the
 conversation tenant and the channel-data tenant both equal the configured one
 and the sender has a well-formed `aad_object_id`. Users need no setup: their
-principal is created on first contact.
+principal is created on first contact. Only the commercial Microsoft 365 cloud
+is supported; government and China clouds use other Bot Framework hosts.
 
 ### Where it answers
 
@@ -116,7 +117,8 @@ answer.
 Each tenant runs three turns at once by default
 (`DAIMON_TEAMS__MAX_CONCURRENT_TURNS_PER_TENANT`). A new thread over the limit
 gets a retry-later reply without starting a turn, and due timers and handoffs
-from the wake poller wait until a turn finishes.
+from the wake poller wait until a turn finishes. A post or edit Teams throttles
+(HTTP 429) is retried once after the wait Teams asks for, up to 10 seconds.
 
 ### Restart behaviour
 
