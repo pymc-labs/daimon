@@ -301,6 +301,28 @@ async def test_the_poller_opens_a_due_timer_and_runs_it_once(
     assert await teams._open_wake_thread(foreign) is False, "another organisation's rows wait"
 
 
+async def test_a_due_timer_waits_while_the_tenant_is_at_its_turn_cap(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Wakes count against the per-tenant cap: at the cap the timer stays due for the next poll."""
+    teams, account_id = await _app(db_session_factory, FakeSender())
+    key = await _hand_off(db_session_factory, account_id, timer=True)
+    ran: list[TeamsInbound] = []
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID, **kw: Any) -> None:
+        ran.append(inbound)
+
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        teams._inflight[TENANT] = teams._teams.max_concurrent_turns_per_tenant
+        await _poll(db_session_factory, teams)
+        assert ran == [], "no wake runs over the cap"
+        assert (await _status(db_session_factory, key))[0] == "pending", "the timer stays due"
+        del teams._inflight[TENANT]
+        await _poll(db_session_factory, teams)
+    assert len(ran) == 1, "the next poll under the cap runs it"
+    assert await _status(db_session_factory, key) == ("delivered", None)
+
+
 async def test_a_timer_whose_chat_changed_responder_says_so_and_never_runs(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

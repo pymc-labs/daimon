@@ -292,9 +292,8 @@ class TeamsApp:
         # Another organisation's rows (a re-pointed or shared database) are not ours to run.
         if tenant is None or tenant.archived_at is not None or tenant.id != self._tenant_id:
             return False
-        self.spawn(
-            self.dispatch_after_input(wake.tenant_id, wake.thread_id, None), name="teams.wake"
-        )
+        wake_dispatch = self.dispatch_after_input(wake.tenant_id, wake.thread_id, None, capped=True)
+        self.spawn(wake_dispatch, name="teams.wake")
         return True
 
     async def _recover(self) -> None:
@@ -840,12 +839,14 @@ class TeamsApp:
                 self.spawn(resume, name="teams.resume")
 
     async def dispatch_after_input(
-        self, tenant_id: uuid.UUID, thread_id: str, service_url: str | None
+        self, tenant_id: uuid.UUID, thread_id: str, service_url: str | None, *, capped: bool = False
     ) -> None:
         """Run what a saved private input or a due wake queued here, from outside a turn.
 
         A busy conversation is left to its turn's tail dispatch, and re-run on
         release in case that tail already passed. Messages queued meanwhile follow.
+        A `capped` dispatch (a wake) waits while the tenant is at its turn cap:
+        its rows stay due, so the next poll retries them.
         """
         if self.draining:
             return
@@ -856,6 +857,11 @@ class TeamsApp:
             # A wake's None must not drop a saved input's regional service URL.
             previous = self._deferred_dispatch.get(thread_id, (tenant_id, None))[1]
             self._deferred_dispatch[thread_id] = (tenant_id, service_url or previous)
+            return
+        cap = self._teams.max_concurrent_turns_per_tenant
+        if capped and not should_admit_turn(
+            current_in_flight=self._inflight.get(tenant_id, 0), cap=cap
+        ):
             return
         async with self._holding(conversation_id, tenant_id):
             await self._dispatch_continuations(thread_id, tenant_id, service_url)
