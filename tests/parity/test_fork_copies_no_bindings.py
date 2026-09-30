@@ -1,20 +1,9 @@
-"""Scenario (e): fork -> repo binding copied (core copy only), on both platforms.
+"""Scenario (e): fork -> no repo binding copied, on both platforms.
 
-Forking left the setup panel in the read-only rewrite, so the implementation
-both platforms have left is the chat tool. `driver.fork_agent` drives the REAL
-`tools/agents._fork_agent_impl` with this platform's own `AuthIdentity`, and
-the copy under test is the core helper it calls:
-`agent_lifecycle.copy_credential_and_repo_binding`.
-
-The source binding here is `anon:` (no credential) rather than `inline-pat:`
--- neither driver exposes a way to inject a pre-known Fernet key into the
-fork call (each builds its own runtime/throwaway key internally), so an
-inline-pat source's credential could never be decrypted with the key the
-test seeded it under. The `anon:` binding still exercises the real core-copy
-effect (repo_url/default_branch/ma_secret_ref copied verbatim) identically on
-both platforms; the inline-pat credential-rekey variant is Discord/Slack
-platform-specific coverage already exercised by
-packages/adapters/{discord,slack}/tests/agent_setup/test_*write*.py.
+`driver.fork_agent` drives the REAL `tools/agents._fork_agent_impl` with this
+platform's own `AuthIdentity`. A fork starts credential-less: the source's
+repo binding (and with it any proof of repo access or credential ref) stays
+behind, so copying an agent never hands out another project's repo access.
 """
 
 from __future__ import annotations
@@ -33,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .drivers.protocol import PlatformDriver
 
 
-async def test_fork_agent_copies_repo_binding(
+async def test_fork_agent_copies_no_repo_binding(
     driver: PlatformDriver,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -82,13 +71,4 @@ async def test_fork_agent_copies_repo_binding(
     fork_agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=str(fork_ma.id))
 
     fork_binding = await get_binding(db_session, tenant_id=tenant.id, agent_id=fork_agent_uuid)
-    assert fork_binding is not None, f"{driver.param_id}: fork must copy the source repo binding"
-    assert fork_binding.repo_url == "acme/fork-repo", (
-        f"{driver.param_id}: fork binding must point at the same repo"
-    )
-    assert fork_binding.default_branch == "main", (
-        f"{driver.param_id}: fork binding must copy default_branch"
-    )
-    assert fork_binding.ma_secret_ref == "anon:disabled", (
-        f"{driver.param_id}: a non-inline-pat secret ref is copied verbatim"
-    )
+    assert fork_binding is None, f"{driver.param_id}: a fork must not inherit the repo binding"

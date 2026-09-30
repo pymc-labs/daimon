@@ -1899,10 +1899,12 @@
     'fork_agent': dict({
       'description': '''
         Make a copy of Daimon or another agent that you can edit under a new name.
-        Copies its prompt, model, skills, MCP definitions, working-repo binding and
-        recorded GitHub access. Copying access does not freshly verify it.
+        Admin-only. Copies its prompt, model, skills and the MCP servers that need
+        no stored token. The copy starts with no credentials: no repo binding or
+        GitHub access, no API/service keys and no connector tokens; attach its own
+        with ``request_agent_key`` and the repo tools. An agent an operator pinned
+        to channels can't be copied.
         
-        API/service keys are not copied; add them with ``request_agent_key``.
         Use ``update_agent`` to edit the copy. Daimon cannot be edited directly.
         
         Continue configuring it through Daimon with the copy named as the setup
