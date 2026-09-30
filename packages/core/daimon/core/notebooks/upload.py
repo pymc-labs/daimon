@@ -67,6 +67,7 @@ def create_notebook_upload(
     *,
     slug: str | None = None,
     permanent: bool = False,
+    editable: bool = False,
     notebook_settings: NotebookSettings,
     principal_key: str | None = None,
     now: datetime,
@@ -75,15 +76,21 @@ def create_notebook_upload(
     """Mint an upload URL for a notebook.
 
     ``permanent`` picks the host's two shapes: False mints an ephemeral
-    edit-mode notebook (TTL-reaped, the editor is visible), True mints a
-    run-mode blog that survives restarts and is never reaped. It is one flag
+    scratch notebook (TTL-reaped), True mints a run-mode blog that survives
+    restarts and is never reaped. It is one flag
     rather than two minters because everything else — the slug namespace, the
     single-use token, the rate-limit charge, the curl the agent then runs — is
     identical, and a caller choosing between two tool names at mint time has to
     decide permanence before it knows whether the notebook is any good.
 
+    A scratch notebook is a read-only app unless ``editable`` asks for the
+    marimo editor. The editor runs arbitrary code on the shared notebook host
+    for anyone holding the link, so it is opt-in and never for a blog.
+
     ``slug`` None → a fresh random slug; otherwise principal-namespaced.
     """
+    if permanent and editable:
+        raise ValueError("a permanent blog cannot be editable; publish it read-only")
     if notebook_settings.host_url is None or notebook_settings.admin_secret is None:
         raise HostNotConfiguredError("notebook host not configured")
     resolved_slug = _resolve_slug(agent_slug=slug, principal_key=principal_key)
@@ -103,7 +110,7 @@ def create_notebook_upload(
         host=str(notebook_settings.host_url),
         secret=notebook_settings.admin_secret.get_secret_value(),
         slug=resolved_slug,
-        op="blog" if permanent else "notebook",
+        op="blog" if permanent else "notebook_edit" if editable else "notebook",
         max_bytes=notebook_settings.max_source_bytes,
         now=now,
         name=None,

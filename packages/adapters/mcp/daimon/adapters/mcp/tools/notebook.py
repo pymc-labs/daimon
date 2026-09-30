@@ -25,12 +25,20 @@ from fastmcp.exceptions import ToolError
 
 
 async def _create_notebook_upload_impl(
-    runtime: McpRuntime, *, slug: str | None, permanent: bool, principal_key: str
+    runtime: McpRuntime,
+    *,
+    slug: str | None,
+    permanent: bool,
+    principal_key: str,
+    editable: bool = False,
 ) -> dict[str, str]:
+    if permanent and editable:
+        raise ToolError("editable=True is for scratch notebooks only; a blog is always read-only")
     try:
         return create_notebook_upload(
             slug=slug,
             permanent=permanent,
+            editable=editable,
             notebook_settings=runtime.settings.notebook,
             principal_key=principal_key,
             now=datetime.now(UTC),
@@ -120,7 +128,7 @@ async def _list_notebooks_impl(
 def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def create_notebook_upload_url(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, slug: str | None = None, permanent: bool = False
+        ctx: Context, slug: str | None = None, permanent: bool = False, editable: bool = False
     ) -> dict[str, str]:
         """Mint a one-time upload URL for a marimo notebook.
 
@@ -129,11 +137,15 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         returned upload_url — the source never goes through a tool argument (which
         truncates large notebooks).
 
-        permanent=False (default) publishes a scratch notebook: the editor is
-        visible, and the host reaps it after its TTL. permanent=True publishes it
-        as a read-only blog — code hidden, interactive widgets live, survives host
-        restarts, never reaped. Prefer the default; re-upload the same slug with
-        permanent=True once the notebook is worth keeping.
+        permanent=False (default) publishes a scratch notebook that the host reaps
+        after its TTL. permanent=True publishes it as a blog that survives host
+        restarts and is never reaped. Prefer the default; re-upload the same slug
+        with permanent=True once the notebook is worth keeping.
+
+        Both are read-only apps by default: code hidden, interactive widgets live.
+        editable=True (scratch only) serves the marimo code editor instead. Anyone
+        holding that link can run arbitrary code on the notebook host, so pass it
+        only when the person you are sharing with asked to edit the notebook.
 
         Returns {upload_url, slug, upload_expires_at}. upload_expires_at is when the
         URL stops working (~5 min); use it promptly. Pass slug to reuse a stable URL
@@ -141,11 +153,17 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Then upload with: curl -sS -X PUT --data-binary @<file> "<upload_url>". The
         curl response JSON carries the live url (and expires_at for scratch
-        notebooks); share that. Never paste large file contents into a tool argument.
+        notebooks); share that whole url. Its access_token is the notebook's only
+        key, so share it only where the notebook belongs. Never paste large file
+        contents into a tool argument.
         """
         auth = await _auth(ctx)
         return await _create_notebook_upload_impl(
-            runtime, slug=slug, permanent=permanent, principal_key=str(auth.account_id)
+            runtime,
+            slug=slug,
+            permanent=permanent,
+            editable=editable,
+            principal_key=str(auth.account_id),
         )
 
     @mcp.tool

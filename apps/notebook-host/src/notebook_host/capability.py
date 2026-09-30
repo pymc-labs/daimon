@@ -19,7 +19,7 @@ from typing import Literal
 from fastapi import HTTPException, status
 from pydantic import BaseModel, ValidationError
 
-Op = Literal["blog", "notebook", "data"]
+Op = Literal["blog", "notebook", "notebook_edit", "data"]
 
 
 class CapabilityClaims(BaseModel):

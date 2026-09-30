@@ -45,6 +45,7 @@ def _make_stub_spawner() -> unittest.mock.MagicMock:
         paths: SlugPaths,
         port: int,
         *,
+        access_token: str = "",
         mode: str = "edit",
         jail_uid: int | None = None,
     ) -> subprocess.Popen[bytes]:
@@ -75,7 +76,7 @@ def _make_test_app(
     settings = load_settings(_env_file=None)
     stub_spawner = _make_stub_spawner()
 
-    async def _fake_wait(port: int, slug: str, timeout_s: float) -> bool:
+    async def _fake_wait(port: int, slug: str, timeout_s: float, *, access_token: str = "") -> bool:
         return True
 
     monkeypatch.setattr(admin_mod, "wait_for_port", _fake_wait)

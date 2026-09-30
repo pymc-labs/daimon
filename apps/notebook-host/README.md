@@ -1,6 +1,6 @@
 # notebook-host
 
-A standalone FastAPI process that spawns one `marimo edit` subprocess per
+A standalone FastAPI process that spawns one marimo subprocess per
 published notebook and reverse-proxies HTTP + WebSocket traffic for
 `/n/<slug>/*` paths. Designed for self-hosting DS teams reaching Daimon
 through chat adapters (Discord/Slack) from inside a trusted network.
@@ -23,10 +23,10 @@ External (untrusted)
    │
    ├── FastAPI host (:8001)
    │     │  bearer-auth on /admin/*
-   │     │  proxy /n/<slug>/* (no auth) — slug-as-secret
+   │     │  proxy /n/<slug>/* (passthrough; marimo checks the token)
    │     ▼
-   ├── marimo edit (localhost:8100) --no-token --base-url /n/slug1
-   ├── marimo edit (localhost:8101) --no-token --base-url /n/slug2
+   ├── marimo run  (localhost:8100) --token (own token, on stdin) --base-url /n/slug1
+   ├── marimo edit (localhost:8101) --token (own token, on stdin) --base-url /n/slug2
    └── ...
 
 Stripped-env: no Anthropic key, no DB creds, no Discord token on this VM.
@@ -39,22 +39,38 @@ credentials, no Discord token, and no Managed Agents vault material. The only
 secret present at runtime is `DAIMON_NOTEBOOK__ADMIN_SECRET`, which is set via
 `fly secrets set` and never committed to source.
 
-**`--no-token` on marimo subprocesses** removes marimo's built-in session token
-auth. This is acceptable only inside a trusted-network position where the host
-is not directly reachable from the public internet. The network is the outer
-perimeter.
+**Every marimo subprocess has its own access token.** Notebook code runs on
+this host, can connect to every other subprocess's localhost port, and can
+read every slug from `ps` (it is in `--base-url`). So neither the port nor the
+slug is an access boundary. Each subprocess runs with marimo's session auth on
+and its own random 256-bit token. The token reaches marimo on stdin
+(`--token-password-file -`), never argv. The URL the host returns is
+`/n/<slug>/?access_token=<token>`; marimo checks the token, sets a session
+cookie scoped to `/n/<slug>` and redirects to the bare path. A request without
+the token, including one from another notebook's cell, gets marimo's login
+redirect or a 401. The proxy forwards only what the browser sends (and, for
+WebSockets, only its `Cookie` and `Authorization` headers). A slug keeps its
+token across re-publishes, and a blog's token is persisted in `blogs.json`
+(0600, host-only) so its link survives restarts. Deleting or reaping a slug
+invalidates its link.
 
-**Bearer auth on `/admin/*`** is the only HTTP auth boundary enforced by the
-host itself. The `/n/<slug>/*` paths are unauthenticated — slug-as-secret is
-the deliberate per-notebook access boundary. The slug is minted as
-`secrets.token_hex(6)` per publish; collision probability is negligible at
-expected volume.
+**Read-only by default.** A scratch notebook is served as a `marimo run` app
+(code hidden, widgets live) unless its upload token asked for the editor
+(`notebook_edit`, minted only for `create_notebook_upload_url(editable=True)`).
+An editor link runs arbitrary code as that notebook's jail uid, so treat it
+as a shell on this host. Blogs are always read-only.
 
-**Operators MUST NOT expose the notebook host to the public internet without
-an upstream auth layer.** Without one, any user who obtains or guesses a slug
-can access that notebook. The intended deployment topology is: Fly's TLS
-termination as the public edge, with the notebook host only reachable from the
-bot VM or from within a trusted network.
+**Bearer auth on `/admin/*`** guards the admin API. The admin bearer is
+scrubbed from every subprocess's environment.
+
+**Known limits.** Notebooks share one host. Subprocesses run as separate
+uids, but there is no per-notebook pid or network namespace. An editor
+notebook can see other notebooks' process list and reach the host's network,
+and it can open any notebook whose link it learns. For client work, run one
+notebook host per client, or don't use editor links. Put the host behind TLS
+and set `allowed_origins` when it is publicly reachable. The token appears
+once in the host's access log (the first request's query string) before
+marimo's redirect strips it.
 
 ## Configuration
 

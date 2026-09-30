@@ -40,6 +40,11 @@ _HOP_BY_HOP = {
 }
 
 
+# The browser headers a WebSocket upgrade forwards to marimo: its session
+# auth, which every subprocess requires (``spawn_marimo``).
+_WS_AUTH_HEADERS = {"cookie", "authorization"}
+
+
 def _filter_request_headers(h: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in h.items() if k.lower() not in _HOP_BY_HOP}
 
@@ -86,8 +91,8 @@ def create_proxy_router(state: AdminState) -> APIRouter:
     async def proxy_ws(  # pyright: ignore[reportUnusedFunction]
         websocket: WebSocket, slug: str, ws_path: str
     ) -> None:
-        # CSRF mitigation for browser-borne WS upgrades. The slug doubles as
-        # an access secret on /n/<slug>/*; if a slug ever leaks into Referer,
+        # CSRF mitigation for browser-borne WS upgrades. marimo's session
+        # cookie authenticates /n/<slug>/*; if a slug ever leaks into Referer,
         # browser history, server logs, or a paste, a page at evil.com could
         # otherwise open `new WebSocket('ws://host/n/<slug>/ws')` and ride
         # the user's network position. When `allowed_origins` is configured,
@@ -116,10 +121,17 @@ def create_proxy_router(state: AdminState) -> APIRouter:
         if query:
             backend_url += "?" + query
 
+        # marimo authenticates the socket with the session cookie it set on
+        # the page load (or an Authorization header), so both must reach the
+        # backend; nothing else of the browser's handshake is forwarded.
+        auth_headers = {k: v for k, v in websocket.headers.items() if k.lower() in _WS_AUTH_HEADERS}
+
         await websocket.accept()
 
         try:
-            async with websockets.connect(backend_url, open_timeout=10.0) as backend:  # type: ignore[attr-defined]
+            async with websockets.connect(  # type: ignore[attr-defined]
+                backend_url, open_timeout=10.0, additional_headers=auth_headers
+            ) as backend:
 
                 async def client_to_backend() -> None:
                     try:

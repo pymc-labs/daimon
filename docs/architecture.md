@@ -547,7 +547,9 @@ If you add another, reuse `admit()` rather than re-deriving the gate order.
 ## Standalone apps
 
 `apps/notebook-host/` serves published marimo notebooks, spawning one
-`marimo edit` subprocess per notebook behind a reverse proxy.
+marimo subprocess per notebook behind a reverse proxy. Each subprocess has
+its own access token, and scratch notebooks are read-only unless the
+publisher asks for the editor.
 `apps/report-host/` serves one published PDF report with a chat sidebar.
 Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach daimon over HTTP with capability tokens, and the

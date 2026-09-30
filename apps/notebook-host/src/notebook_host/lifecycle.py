@@ -7,6 +7,7 @@ import contextlib
 import logging
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -64,12 +65,25 @@ class NotebookProcess:
     public_url_base: str | None = None
     started_at: float = field(default_factory=time.time)
     mode: Literal["edit", "run"] = "edit"
+    # A blog: kept alive forever and respawned from disk. Separate from
+    # ``mode`` because a scratch notebook is read-only (run) by default too.
+    permanent: bool = False
+    # The subprocess's own marimo session token (``new_access_token``). The
+    # port is reachable from every other notebook on the host and the slug is
+    # in ``ps``, so this token is the only thing standing between one
+    # notebook's code and another's kernel. Kept out of ``repr``.
+    access_token: str = field(default="", repr=False)
 
     @property
     def url(self) -> str:
         if self.public_url_base is not None:
-            return f"{self.public_url_base.rstrip('/')}/n/{self.slug}/"
-        return f"http://{self.public_host}:{self.host_port}/n/{self.slug}/"
+            base = f"{self.public_url_base.rstrip('/')}/n/{self.slug}/"
+        else:
+            base = f"http://{self.public_host}:{self.host_port}/n/{self.slug}/"
+        # marimo validates ``access_token`` on the first request, sets its
+        # session cookie and redirects to the bare path, so the token leaves
+        # the address bar after the first load.
+        return f"{base}?access_token={self.access_token}" if self.access_token else base
 
     @property
     def internal_url(self) -> str:
@@ -86,19 +100,25 @@ class NotebookProcess:
 def should_reap(np: NotebookProcess, ttl_seconds: int) -> bool:
     """Whether the sweeper should reclaim this subprocess.
 
-    Run-mode processes are blogs: permanent, never killed-and-deleted by age or
-    death here (their liveness/respawn is the sweep's separate concern). For an
-    edit-mode notebook, a dead subprocess is always reaped; an alive one is
-    reaped only when a *positive* TTL is configured and it has outlived it.
+    Blogs (``permanent``) are never killed-and-deleted by age or death here
+    (their liveness/respawn is the sweep's separate concern). For a scratch
+    notebook, read-only or editor alike, a dead subprocess is always reaped; an
+    alive one is reaped only when a *positive* TTL is configured and it has
+    outlived it.
     ``ttl_seconds <= 0`` disables age-based reaping entirely — the notebook lives
     until its kernel dies or it is explicitly deleted. Shared by the background
     sweep loop and the ``/admin/sweep`` endpoint so the two never diverge.
     """
-    if np.mode == "run":
+    if np.permanent:
         return False
     if not np.is_alive():
         return True
     return ttl_seconds > 0 and np.age_s > ttl_seconds
+
+
+def new_access_token() -> str:
+    """A fresh per-notebook marimo session token (256 bits, URL-safe)."""
+    return secrets.token_urlsafe(32)
 
 
 def allocate_port(processes: dict[str, NotebookProcess], start: int, end: int) -> int:
@@ -192,6 +212,7 @@ def spawn_marimo(
     paths: SlugPaths,
     port: int,
     *,
+    access_token: str,
     mode: Literal["edit", "run"] = "edit",
     sandbox: bool = False,
     rlimit_as_bytes: int | None = None,
@@ -199,6 +220,14 @@ def spawn_marimo(
     jail_uid: int | None = None,
 ) -> subprocess.Popen[bytes]:
     """Spawn ``marimo <mode> <basename>`` on ``port`` from a per-slug workspace.
+
+    marimo's session auth is always on, keyed to ``access_token``. Every
+    notebook's port is reachable from every other notebook's code on this
+    host, so without it one shared link would reach every live kernel. The
+    token goes in on stdin (``--token-password-file -``), not argv, because
+    ``/proc/<pid>/cmdline`` is readable by every uid; with ``--sandbox``
+    marimo's re-exec inherits the same stdin, so the token stays off argv
+    there too.
 
     cwd is ``paths.workspace``, so the basename arg resolves through the
     source symlink. ``--base-url /n/<slug>`` keeps the proxy a straight
@@ -230,7 +259,9 @@ def spawn_marimo(
         cmd.append("--sandbox")
     cmd += [
         paths.notebook.name,
-        "--no-token",
+        "--token",
+        "--token-password-file",
+        "-",
         "--headless",
         "--host",
         "127.0.0.1",
@@ -263,9 +294,10 @@ def spawn_marimo(
                 sys.platform,
             )
     try:
-        return subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(workspace),
+            stdin=subprocess.PIPE,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -274,15 +306,25 @@ def spawn_marimo(
         )
     finally:
         log_fh.close()
+    stdin = proc.stdin
+    if stdin is not None:
+        # A child that died before reading leaves a broken pipe; the ready
+        # wait then times out and the caller reports it.
+        with contextlib.suppress(BrokenPipeError):
+            stdin.write(f"{access_token}\n".encode())
+        with contextlib.suppress(BrokenPipeError):
+            stdin.close()
+    return proc
 
 
-async def wait_for_port(port: int, slug: str, timeout_s: float) -> bool:
+async def wait_for_port(port: int, slug: str, timeout_s: float, *, access_token: str) -> bool:
     deadline = time.monotonic() + timeout_s
     url = f"http://localhost:{port}/n/{slug}/"
+    headers = {"Authorization": f"Bearer {access_token}"}
     async with httpx.AsyncClient(timeout=2.0) as c:
         while time.monotonic() < deadline:
             try:
-                r = await c.get(url)
+                r = await c.get(url, headers=headers)
                 if r.status_code == 200:
                     return True
             except httpx.HTTPError:

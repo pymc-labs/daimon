@@ -19,16 +19,20 @@ from pathlib import Path
 from pydantic import BaseModel
 
 _REGISTRY_MODE = 0o600
-"""Explicit mode for blogs.json. It lists every slug, and per D-04 the slug
-is the only access control on the unauthenticated ``/n/{slug}/*`` proxy — a
-default-umask 0644 would let any jailed process read it and obtain every
-other notebook's URL, now that ``data_dir`` is traversable (0711)."""
+"""Explicit mode for blogs.json. It lists every blog's slug and its marimo
+access token (together, the blog's shareable link) — a default-umask 0644
+would let any jailed process read it and open every other blog, now that
+``data_dir`` is traversable (0711)."""
 
 
 class BlogRecord(BaseModel):
     slug: str
     created_at: float  # unix epoch seconds (matches NotebookProcess.started_at)
     title: str | None = None
+    # The blog's marimo session token, persisted so a respawned blog keeps
+    # the link it was published under. None only for records written before
+    # tokens existed; the respawn mints and records one.
+    access_token: str | None = None
 
 
 def load_blogs(path: Path) -> dict[str, BlogRecord]:

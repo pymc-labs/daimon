@@ -22,7 +22,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Literal
 
-Op = Literal["blog", "notebook", "data", "report"]
+Op = Literal["blog", "notebook", "notebook_edit", "data", "report"]
 
 
 def _b64(raw: bytes) -> str:

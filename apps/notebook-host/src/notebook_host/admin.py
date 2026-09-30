@@ -38,6 +38,7 @@ from notebook_host.lifecycle import (
     ValidationResult,
     allocate_port,
     kill,
+    new_access_token,
     safe_attachment_name,
     safe_slug,
     should_reap,
@@ -53,6 +54,7 @@ class Spawner(Protocol):
         paths: SlugPaths,
         port: int,
         *,
+        access_token: str,
         mode: Literal["edit", "run"] = "edit",
         jail_uid: int | None = None,
     ) -> subprocess.Popen[bytes]: ...
@@ -83,7 +85,9 @@ class AdminState:
         port: int,
         proc: subprocess.Popen[bytes],
         *,
+        access_token: str,
         mode: Literal["edit", "run"] = "edit",
+        permanent: bool = False,
     ) -> NotebookProcess:
         return NotebookProcess(
             slug=slug,
@@ -93,7 +97,24 @@ class AdminState:
             host_port=self.settings.host_port,
             public_url_base=self.settings.public_url_base,
             mode=mode,
+            permanent=permanent,
+            access_token=access_token,
         )
+
+    def access_token_for(self, slug: str) -> str:
+        """The slug's existing token, so re-publishing keeps its link; else a new one.
+
+        A live process's token wins, then a registered blog's persisted one.
+        Deleting or reaping a slug drops both, so its next publish gets a fresh
+        token and every old link stops working.
+        """
+        existing = self.processes.get(slug)
+        if existing is not None and existing.access_token:
+            return existing.access_token
+        record = load_blogs(self.settings.resolved_blogs_file).get(slug)
+        if record is not None and record.access_token:
+            return record.access_token
+        return new_access_token()
 
     def lock_for(self, slug: str) -> asyncio.Lock:
         lock = self.slug_locks.get(slug)
@@ -149,7 +170,12 @@ def _atomic_write_bytes(path: Path, content: bytes, *, owner_uid: int | None = N
 
 
 async def _spawn_tracked(
-    state: AdminState, slug: str, source_bytes: bytes, *, mode: Literal["edit", "run"]
+    state: AdminState,
+    slug: str,
+    source_bytes: bytes,
+    *,
+    mode: Literal["edit", "run"],
+    permanent: bool = False,
 ) -> NotebookProcess:
     """Write source, validate, replace any existing process, spawn, wait ready.
 
@@ -197,6 +223,7 @@ async def _spawn_tracked(
                 },
             )
 
+    access_token = state.access_token_for(slug)
     existing = state.processes.pop(slug, None)
     if existing is not None:
         kill(existing)
@@ -204,12 +231,16 @@ async def _spawn_tracked(
     port = allocate_port(
         state.processes, state.settings.marimo_port_start, state.settings.marimo_port_end
     )
-    proc = state.spawner(slug, paths, port, mode=mode, jail_uid=uid)
-    np = state.make_process(slug, port, proc, mode=mode)
+    proc = state.spawner(slug, paths, port, access_token=access_token, mode=mode, jail_uid=uid)
+    np = state.make_process(
+        slug, port, proc, access_token=access_token, mode=mode, permanent=permanent
+    )
     state.processes[slug] = np
 
     state.snapshot_pids()
-    ready = await wait_for_port(port, slug, state.settings.spawn_timeout_seconds)
+    ready = await wait_for_port(
+        port, slug, state.settings.spawn_timeout_seconds, access_token=access_token
+    )
     if not ready:
         kill(np)
         state.processes.pop(slug, None)
@@ -373,10 +404,10 @@ def create_admin_router(state: AdminState) -> APIRouter:
                 f"{state.settings.max_source_bytes})",
             )
         async with state.lock_for(slug):
-            np = await _spawn_tracked(state, slug, source_bytes, mode="run")
+            np = await _spawn_tracked(state, slug, source_bytes, mode="run", permanent=True)
             register_blog(
                 state.settings.resolved_blogs_file,
-                BlogRecord(slug=slug, created_at=np.started_at),
+                BlogRecord(slug=slug, created_at=np.started_at, access_token=np.access_token),
             )
             return {
                 "slug": slug,
@@ -517,14 +548,18 @@ def create_admin_router(state: AdminState) -> APIRouter:
                     "path": f"data/{name}",
                 }
 
-        mode: Literal["edit", "run"] = "run" if claims.op == "blog" else "edit"
+        # Only an explicit ``notebook_edit`` token gets the editor. A plain
+        # scratch notebook is a read-only app like a blog, so a forwarded link
+        # runs the notebook without handing out a code-executing editor.
+        permanent = claims.op == "blog"
+        mode: Literal["edit", "run"] = "edit" if claims.op == "notebook_edit" else "run"
         async with state.lock_for(slug):
-            np = await _spawn_tracked(state, slug, body, mode=mode)
+            np = await _spawn_tracked(state, slug, body, mode=mode, permanent=permanent)
             size_bytes = get_slug_paths(state.settings.data_dir, slug).notebook.stat().st_size
-            if claims.op == "blog":
+            if permanent:
                 register_blog(
                     state.settings.resolved_blogs_file,
-                    BlogRecord(slug=slug, created_at=np.started_at),
+                    BlogRecord(slug=slug, created_at=np.started_at, access_token=np.access_token),
                 )
                 return {
                     "slug": slug,

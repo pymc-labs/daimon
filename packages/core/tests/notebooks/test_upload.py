@@ -165,3 +165,31 @@ def test_create_notebook_upload_defaults_to_the_ephemeral_op() -> None:
     assert _payload(out["upload_url"])["op"] == "notebook", (
         "omitting permanent must not mint a blog nobody asked to keep forever"
     )
+
+
+def test_create_notebook_upload_editable_mints_the_editor_op() -> None:
+    out = create_notebook_upload(
+        slug="scratch", editable=True, notebook_settings=_settings(), principal_key="a", now=_NOW
+    )
+    assert _payload(out["upload_url"])["op"] == "notebook_edit", (
+        "only an explicit editable=True asks the host for the code editor"
+    )
+
+
+def test_create_notebook_upload_scratch_default_is_not_the_editor() -> None:
+    out = create_notebook_upload(
+        slug="scratch", notebook_settings=_settings(), principal_key="a", now=_NOW
+    )
+    assert _payload(out["upload_url"])["op"] == "notebook", "the default is the read-only app"
+
+
+def test_create_notebook_upload_rejects_an_editable_blog() -> None:
+    with pytest.raises(ValueError, match="editable"):
+        create_notebook_upload(
+            slug="b",
+            permanent=True,
+            editable=True,
+            notebook_settings=_settings(),
+            principal_key="a",
+            now=_NOW,
+        )

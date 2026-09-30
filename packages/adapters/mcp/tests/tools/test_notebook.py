@@ -194,3 +194,19 @@ async def test_list_notebooks_impl_marks_scratch_notebooks_not_permanent() -> No
     entries = cast("list[dict[str, object]]", result["notebooks"])
     assert entries[0]["permanent"] is False, "an unregistered live process is a scratch notebook"
     assert entries[0]["alive"] is True, "host fields are passed through untouched"
+
+
+async def test_create_notebook_upload_impl_editable_mints_editor_op() -> None:
+    runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
+    out = await _create_notebook_upload_impl(
+        runtime, slug="x", permanent=False, editable=True, principal_key="acct-1"
+    )
+    assert _token_payload(out["upload_url"])["op"] == "notebook_edit"
+
+
+async def test_create_notebook_upload_impl_refuses_editable_blog() -> None:
+    runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
+    with pytest.raises(ToolError, match="editable"):
+        await _create_notebook_upload_impl(
+            runtime, slug="x", permanent=True, editable=True, principal_key="acct-1"
+        )

@@ -20,7 +20,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException
 
 from notebook_host.admin import AdminState, create_admin_router
-from notebook_host.blogs_store import load_blogs
+from notebook_host.blogs_store import load_blogs, register_blog
 from notebook_host.config import Settings
 from notebook_host.jail import (
     JailUnavailableError,
@@ -61,6 +61,7 @@ def create_app(settings: Settings) -> FastAPI:
         paths: SlugPaths,
         port: int,
         *,
+        access_token: str,
         mode: Literal["edit", "run"] = "edit",
         jail_uid: int | None = None,
     ) -> subprocess.Popen[bytes]:
@@ -68,6 +69,7 @@ def create_app(settings: Settings) -> FastAPI:
             slug,
             paths,
             port,
+            access_token=access_token,
             mode=mode,
             sandbox=has_inline_script_metadata(paths.notebook.read_text(encoding="utf-8")),
             rlimit_as_bytes=settings.marimo_rlimit_as_bytes or None,
@@ -187,17 +189,28 @@ async def _spawn_blog_process(state: AdminState, slug: str) -> bool:
     if not paths.notebook.exists():
         _log.warning("blog %r has no source at %s; skipping respawn", slug, paths.notebook)
         return False
+    access_token = state.access_token_for(slug)
+    record = load_blogs(state.settings.resolved_blogs_file).get(slug)
+    if record is not None and record.access_token != access_token:
+        # A blog registered before tokens existed: record the one it is about
+        # to be served under, so its link survives the next restart.
+        register_blog(
+            state.settings.resolved_blogs_file,
+            record.model_copy(update={"access_token": access_token}),
+        )
     try:
         port = allocate_port(
             state.processes, state.settings.marimo_port_start, state.settings.marimo_port_end
         )
-        proc = state.spawner(slug, paths, port, mode="run", jail_uid=uid)
+        proc = state.spawner(slug, paths, port, access_token=access_token, mode="run", jail_uid=uid)
     except HTTPException as err:
         _log.warning("blog %r respawn could not start: %s", slug, err.detail)
         return False
-    np = state.make_process(slug, port, proc, mode="run")
+    np = state.make_process(slug, port, proc, access_token=access_token, mode="run", permanent=True)
     state.processes[slug] = np
-    ready = await wait_for_port(port, slug, state.settings.spawn_timeout_seconds)
+    ready = await wait_for_port(
+        port, slug, state.settings.spawn_timeout_seconds, access_token=access_token
+    )
     if not ready:
         kill(np)
         state.processes.pop(slug, None)
@@ -224,8 +237,8 @@ async def _respawn_registered_blogs(state: AdminState) -> list[str]:
 async def _sweep_once(state: AdminState) -> bool:
     """One sweep pass. Returns True if it mutated state.processes.
 
-    Blogs (run mode): never age-reaped; a dead one is respawned from disk
-    (self-heal). Ephemeral notebooks (edit mode): reaped + their whole slug
+    Blogs (permanent): never age-reaped; a dead one is respawned from disk
+    (self-heal). Scratch notebooks (read-only or editor): reaped + their whole slug
     tree (source, attachments, workspace, log) removed when should_reap is
     true — the background sweep and the two delete endpoints share identical
     cleanup semantics by construction.
@@ -233,7 +246,7 @@ async def _sweep_once(state: AdminState) -> bool:
     mutated = False
     for slug in list(state.processes.keys()):
         np = state.processes[slug]
-        if np.mode == "run":
+        if np.permanent:
             if not np.is_alive():
                 _log.warning("blog %r kernel died; respawning from disk", slug)
                 state.processes.pop(slug, None)

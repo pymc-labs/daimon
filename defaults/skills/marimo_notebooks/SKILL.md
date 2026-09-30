@@ -8,9 +8,9 @@ description: Publish interactive marimo notebooks via the daimon MCP server. Min
 Publish an interactive marimo notebook for the user. You mint a one-time upload
 URL, get the notebook's `.py` into a sandbox file, and
 `curl -X PUT --data-binary` it to the URL — the source never goes through a tool
-argument, which truncates large notebooks. The curl response returns a
-slug-as-secret URL the user opens in a browser. Treat that URL as private —
-share it only with the user who asked.
+argument, which truncates large notebooks. The curl response returns a URL
+whose `access_token` is the notebook's only key. Share the whole URL, and only
+with the user who asked.
 
 A notebook is data work, not decoration. The person on the other end is usually
 trying to answer a real question. A polished notebook that answers the *wrong*
@@ -25,7 +25,7 @@ One tool publishes both. `create_notebook_upload_url(slug=..., permanent=...)`:
 
 | | `permanent=False` (default) | `permanent=True` |
 |---|---|---|
-| Shape | edit mode — the editor is visible | run mode — a read-only app, source hidden |
+| Shape | a read-only app, source hidden (`editable=True`: the code editor) | a read-only app, source hidden |
 | Lifetime | reaped after the host's TTL | survives host restarts, never reaped |
 | Slug | optional; omit for a random one | choose a meaningful, stable name — it is part of the URL |
 
@@ -33,6 +33,10 @@ One tool publishes both. `create_notebook_upload_url(slug=..., permanent=...)`:
 at it, and re-upload the *same slug* with `permanent=True` once it is worth
 keeping. Deciding permanence before anyone has seen the notebook is how hosts
 accumulate blogs nobody wanted.
+
+**Pass `editable=True` only when the user asked to edit the notebook.** An editor
+link lets anyone who holds it run arbitrary code on the notebook host. Never
+pass it for a link going to a client or a shared channel.
 
 Both are a live Python kernel, not a WASM export — so PyMC/ArviZ widgets
 genuinely work, sliders re-plot a real posterior, dropdowns switch parameters.

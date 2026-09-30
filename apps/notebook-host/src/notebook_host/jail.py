@@ -72,9 +72,8 @@ _REGISTRY_MODE = 0o600
 in their own modules). Explicit because under ``DATA_DIR_MODE`` the parent no
 longer hides them via its own unlistability, and the file's default-umask
 mode (0644) would otherwise leave it world-readable. ``blogs.json`` in
-particular lists every slug, and per D-04 the slug is the only access control
-on the unauthenticated ``/n/{slug}/*`` proxy — reading it hands out every
-other notebook's URL."""
+particular holds every blog's slug and access token — reading it hands out
+every blog's link."""
 
 
 def lock_data_dir_root(data_dir: Path) -> None:
