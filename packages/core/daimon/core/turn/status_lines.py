@@ -122,11 +122,12 @@ def _tool_line(call: ToolUseBlock) -> str:
         label = narration.finished if is_finished else narration.running
     else:
         icon, label = _humanize(call.name)
+        label = _clip(label)
         if call.mcp_server_name:
             label = f"{label} ({call.mcp_server_name})"
     if is_finished:
         icon = _FAILED_ICON if call.status == "failed" else _DONE_ICON
-    return f"{icon} {_clip(label)}"
+    return f"{icon} {label}"
 
 
 def _humanize(name: str) -> tuple[str, str]:

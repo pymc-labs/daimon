@@ -114,6 +114,12 @@ def test_tool_lines_keep_running_calls_and_fold_older_ones() -> None:
     )
 
 
+def test_a_long_mcp_tool_name_is_clipped_before_its_server() -> None:
+    name = "export_every_quarterly_revenue_report_for_all_regions_and_teams"
+    (line,) = format_tool_lines([_call(name, type="agent.mcp_tool_use", server="finance")])
+    assert line.endswith("… (finance)"), "the clip shortens the name and keeps the server"
+
+
 def test_tool_lines_strip_backticks_so_the_code_block_holds() -> None:
     lines = format_tool_lines([_call("run", type="agent.mcp_tool_use", server="ops`evil")])
     assert "`" not in "".join(lines), "a backtick would close the adapter's code block early"
