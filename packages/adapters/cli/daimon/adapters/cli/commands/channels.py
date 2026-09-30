@@ -39,6 +39,7 @@ _PLATFORMS = ("discord", "slack")
 _CHANNEL_HELP = "Channel id; a thread budgets against its parent channel."
 _DISCORD_API = "https://discord.com/api/v10"
 _DISCORD_THREAD_TYPES = frozenset({10, 11, 12})
+_DISCORD_MISSING = frozenset({403, 404})  # the bot cannot see the channel, or it is gone
 
 
 class BudgetListing(BaseModel):
@@ -78,12 +79,15 @@ async def _discord_budget_channel(
 
     Spend is attributed to parent channels, so a budget saved on a thread id
     would never gate anything; the id is looked up with the bot token. With
-    `missing_ok`, an id the bot cannot see is returned as given, so the budget
-    of a deleted channel can still be cleared.
+    `missing_ok`, an id the bot cannot see (403 or 404), or any id when no bot
+    token is set, is returned as given, so the budget of a deleted channel can
+    still be cleared.
     """
     if not channel_id.isdigit():
         raise typer.BadParameter(f"{channel_id!r} is not a Discord channel id")
     if rt.settings.discord is None:
+        if missing_ok:
+            return channel_id
         raise DaimonError(
             "DAIMON_DISCORD__BOT_TOKEN is not set; it is needed to look the channel up"
         )
@@ -98,10 +102,14 @@ async def _discord_budget_channel(
             response = await http.get(f"/channels/{channel_id}")
     except httpx.HTTPError as exc:
         raise DaimonError(f"could not reach Discord to look up channel {channel_id}") from exc
-    if not response.is_success:
+    if response.status_code in _DISCORD_MISSING:
         if missing_ok:
             return channel_id
         raise DaimonError(f"Discord channel {channel_id} is not visible to daimon")
+    if not response.is_success:
+        raise DaimonError(
+            f"Discord returned HTTP {response.status_code} looking up channel {channel_id}"
+        )
     channel = cast("dict[str, Any]", response.json())
     if str(channel.get("guild_id")) != guild_id:
         raise DaimonError(f"channel {channel_id} is not in server {guild_id}")
