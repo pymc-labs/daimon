@@ -14,7 +14,7 @@ and nowhere else.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from anthropic import AsyncAnthropic
@@ -62,6 +62,7 @@ async def resolve_skill_names(
     entries: list[str | BetaManagedAgentsSkillParams],
     *,
     tenant_id: uuid.UUID,
+    is_owner_hidden: Callable[[str], bool] | None = None,
 ) -> list[BetaManagedAgentsSkillParams]:
     """Resolve a mixed list of skill names and skill-param dicts.
 
@@ -82,13 +83,25 @@ async def resolve_skill_names(
     unresolved skill and lists the CALLER'S OWN available bare names (no
     cross-tenant title leak). The available list is fetched only when at
     least one name failed to resolve.
+
+    ``is_owner_hidden`` names agents whose own skills (``agent/name``) the
+    caller may not see: those resolve as missing and are left out of the
+    available list, so another channel's skills are never revealed.
     """
+
+    def hidden(body: str) -> bool:
+        owner, _, rest = body.partition("/")
+        return bool(rest) and is_owner_hidden is not None and is_owner_hidden(owner)
+
     resolved: list[BetaManagedAgentsSkillParams] = []
     unresolved: list[str] = []
     rejected_dicts: list[Any] = []
 
     for entry in entries:
         if isinstance(entry, str):
+            if hidden(entry):
+                unresolved.append(entry)
+                continue
             canonical = tenant_scoped_display_title(tenant_id=tenant_id, name=entry)
             sk = await find_skill_by_display_title(client, canonical, on_truncation="degrade")
             if sk is None:
@@ -117,7 +130,7 @@ async def resolve_skill_names(
         for sk in rows:
             if sk.source == "custom" and sk.display_title is not None:
                 bare = strip_tenant_prefix(tenant_id=tenant_id, display_title=sk.display_title)
-                if bare is not None:
+                if bare is not None and not hidden(bare):
                     available.append(bare)
             elif sk.source == "anthropic" and sk.display_title is not None:
                 available.append(sk.display_title)

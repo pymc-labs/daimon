@@ -182,6 +182,30 @@ async def list_bound_parent_channel_ids(
     return list(ids.scalars())
 
 
+async def list_handoff_parent_channel_ids(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> dict[str, list[str]]:
+    """Responder name -> sorted parent channels of its live handed-over threads.
+
+    Setup conversations are left out: they answer as the built-in Daimon to
+    configure some other agent, which routes nobody to it.
+    """
+    rows = await session.execute(
+        select(ThreadAgentBinding.responder_name, ThreadAgentBinding.parent_channel_id)
+        .where(
+            ThreadAgentBinding.tenant_id == tenant_id,
+            ThreadAgentBinding.kind == "handoff",
+            ThreadAgentBinding.deleted.is_(False),
+        )
+        .distinct()
+        .order_by(ThreadAgentBinding.responder_name, ThreadAgentBinding.parent_channel_id)
+    )
+    parents: dict[str, list[str]] = {}
+    for responder_name, parent_channel_id in rows.tuples():
+        parents.setdefault(responder_name, []).append(parent_channel_id)
+    return parents
+
+
 async def update_target(
     session: AsyncSession,
     *,

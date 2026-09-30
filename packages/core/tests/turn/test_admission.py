@@ -15,9 +15,12 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.billing import BillingConfig
 from daimon.core.config import McpSettings
+from daimon.core.direct_messages import start_dm
+from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
+from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import FundingMode, Role, TenantRow
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -762,7 +765,6 @@ async def test_handoff_thread_refuses_an_agent_from_another_workspace(
 ) -> None:
     """The concrete lookup is still tenant-checked: a handoff cannot reach across
     workspaces just because a thread row names an id."""
-    from daimon.core.errors import DaimonError
     from daimon.core.stores.thread_agent_bindings import create_binding
 
     tenant = await make_tenant(db_session)
@@ -1071,6 +1073,82 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
     )
 
     assert admission.memory_read_only is expected, "memory_read_only must follow the policy"
+
+
+@pytest.mark.parametrize(
+    ("policy", "thread_id", "expected"),
+    [
+        (None, None, False),
+        (TenantAccessPolicy(isolated_channel_ids=("chan-1",)), None, True),
+        (TenantAccessPolicy(isolated_channel_ids=("chan-1",)), "thr-1", True),
+        (TenantAccessPolicy(isolated_channel_ids=("other",)), None, False),
+    ],
+    ids=["open", "isolated-channel", "thread-under-isolated", "other-channel"],
+)
+async def test_admit_marks_isolated_turns_and_leaves_memory_writable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    policy: TenantAccessPolicy | None,
+    thread_id: str | None,
+    expected: bool,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="anyone",
+        channel_id="chan-1",
+        thread_id=thread_id,
+        now=_NOW,
+        role=Role.USER,
+    )
+
+    assert admission.isolated is expected, "isolated must follow the policy"
+    assert not admission.memory_read_only, "isolation keeps memory writable, unlike sealing"
+
+
+async def test_start_dm_refuses_to_move_an_isolated_conversation(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await _seed_admittable_tenant(
+        db_session, policy=TenantAccessPolicy(isolated_channel_ids=("chan-1",))
+    )
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="anyone",
+        channel_id="chan-1",
+        now=_NOW,
+        role=Role.USER,
+        is_dm=True,
+    )
+
+    with pytest.raises(DaimonError, match="isolated"):
+        await start_dm(
+            deps,
+            admission,
+            tenant_id=tenant.id,
+            platform="discord",
+            workspace_id="guild-1",
+            route_key="dm-1",
+            channel_id="dm-1",
+            external_user_id="anyone",
+            source_url="https://example.invalid/chan-1",
+            context=[],
+        )
 
 
 @pytest.mark.parametrize(

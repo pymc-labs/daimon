@@ -71,6 +71,11 @@ async def start_dm(
     DM history is never replayed into this one.
     """
     await require_dm_enabled(deps, tenant_id=tenant_id)
+    if admission.isolated:
+        # The DM would route this channel's own agent, and its conversation, outside it.
+        raise DaimonError(
+            "This channel is isolated, so its conversations stay here and can't move to a DM."
+        )
     scope_id = f"dm:{uuid.uuid4()}"
     conversation = DirectMessageRow(
         platform=platform,

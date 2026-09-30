@@ -26,7 +26,12 @@ from datetime import datetime
 from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from daimon.core.access_policy import is_invoker_allowed, is_sealed, is_write_protected
+from daimon.core.access_policy import (
+    is_invoker_allowed,
+    is_isolated,
+    is_sealed,
+    is_write_protected,
+)
 from daimon.core.billing import is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
@@ -63,6 +68,9 @@ class Admission:
     private_dm_id: str | None = None
     # Parent channel the turn's spend is attributed to; None in a DM.
     channel_id: str | None = None
+    # Turn from an isolated channel or a thread under one: its conversation
+    # must not move anywhere else (see `daimon.core.channel_isolation`).
+    isolated: bool = False
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 
@@ -291,6 +299,9 @@ async def admit_impl(
 
     return Admission(
         memory_read_only=memory_read_only,
+        isolated=is_isolated(
+            policy, channel_id=thread_id or channel_id, parent_channel_id=channel_id
+        ),
         account_id=principal.account_id,
         agent=agent,
         environment=environment,

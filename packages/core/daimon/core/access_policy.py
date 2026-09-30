@@ -29,6 +29,9 @@ class TenantAccessPolicy(BaseModel):
     sealed_channel_ids: tuple[str, ...] = ()
     # Whether turns started from a DM get read-only memory mounts.
     dm_memory_read_only: bool = False
+    # Channels whose own agents answer, and are seen, only inside them; see
+    # `daimon.core.channel_isolation`. Memory stays writable, unlike sealed.
+    isolated_channel_ids: tuple[str, ...] = ()
 
 
 OPEN_ACCESS_POLICY = TenantAccessPolicy()
@@ -74,3 +77,12 @@ def is_sealed(
     if channel_id in policy.sealed_channel_ids:
         return True
     return parent_channel_id is not None and parent_channel_id in policy.sealed_channel_ids
+
+
+def is_isolated(
+    policy: TenantAccessPolicy, *, channel_id: str, parent_channel_id: str | None = None
+) -> bool:
+    """Whether `channel_id`, or the channel a thread sits under, is isolated."""
+    if channel_id in policy.isolated_channel_ids:
+        return True
+    return parent_channel_id is not None and parent_channel_id in policy.isolated_channel_ids
