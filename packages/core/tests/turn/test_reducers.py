@@ -229,6 +229,16 @@ def test_apply_pairs_custom_tool_result_via_custom_tool_use_id() -> None:
     assert block.status == "complete"
 
 
+def test_apply_records_tool_calls_in_the_order_they_finish() -> None:
+    state = apply(TurnState(), make_tool_use(event_id="tu_1", name="bash"))
+    state = apply(state, make_mcp_tool_use(event_id="tu_m", name="search", mcp_server_name="gh"))
+    state = apply(state, make_mcp_tool_result(event_id="r_m", mcp_tool_use_id="tu_m", text="hit"))
+    state = apply(state, make_tool_result(event_id="r_1", tool_use_id="tu_1", text="ok"))
+    assert state.finished_tool_ids == ("tu_m", "tu_1"), (
+        "results record finish order, not call order"
+    )
+
+
 def test_apply_preserves_mixed_content_blocks_in_tool_result() -> None:
     state = apply(TurnState(), make_tool_use(event_id="tu_1", name="fetch"))
     mixed_content = [

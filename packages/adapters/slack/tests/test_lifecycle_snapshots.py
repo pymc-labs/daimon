@@ -20,7 +20,7 @@ from typing import Any
 
 import yarl
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
-from daimon.core.turn.state import TextBlock, TurnState, UsageTotals
+from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
 from syrupy.assertion import SnapshotAssertion
 
 _POST_URL = yarl.URL("https://slack.com/api/chat.postMessage")
@@ -42,10 +42,6 @@ def _make_clock(times: list[float]) -> Any:
 
 def _thinking_event() -> Any:
     return types.SimpleNamespace(type="agent.thinking")
-
-
-def _tool_use_event(name: str) -> Any:
-    return types.SimpleNamespace(type="agent.tool_use", name=name)
 
 
 def _make_lifecycle(fake: Any, clock: Any) -> SlackTurnLifecycle:
@@ -88,8 +84,8 @@ async def test_thinking_tool_then_success_sequence(
 
     await lc.post_initial()
     await lc.on_sse_event(_thinking_event())
-    await lc.on_sse_event(_tool_use_event("Bash"))
-    await lc.on_render(TurnState())
+    bash = ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+    await lc.on_render(TurnState(content=[bash]))
 
     state = TurnState(
         content=[TextBlock(kind="text", text="Here is the answer.")],

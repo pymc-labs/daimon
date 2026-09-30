@@ -120,6 +120,8 @@ class TurnState:
     termination: TerminationReason | None = None
     """How the turn ended. Every driver exit sets it; `None` means still running
     (the reducer sets it early only when MA terminates the session)."""
+    finished_tool_ids: tuple[str, ...] = ()
+    """Ids of the tool calls that got a result, in the order the results came."""
 
 
 def extract_final_response(content: list[ContentBlock]) -> str:

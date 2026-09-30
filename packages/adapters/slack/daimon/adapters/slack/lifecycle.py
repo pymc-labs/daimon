@@ -57,7 +57,9 @@ from daimon.adapters.slack.blockkit import (
     TurnPhase,
     format_termination_notice,
     to_blocks,
+    to_fallback_text,
     update,
+    update_activity,
 )
 from daimon.adapters.slack.errors import bound_request_id
 from daimon.adapters.slack.feedback import build_feedback_actions_block
@@ -113,18 +115,16 @@ def _notification_text(chunk: str) -> str:
 
 
 def _map_sse_event(event: RawMessageStreamEvent) -> EmbedEvent | None:
-    """Map a Managed Agents session SSE event to an EmbedEvent, or None if irrelevant."""
-    event_type: str = getattr(event, "type", "")
-    if event_type == "agent.thinking":
-        return EmbedEvent(kind="thinking", label="")
-    if event_type == "agent.tool_use":
-        name: str = getattr(event, "name", "tool")
-        return EmbedEvent(kind="tool_use", label=name)
-    if event_type == "agent.message":
-        parts: list[object] = getattr(event, "content", [])
-        text = "".join(getattr(p, "text", "") for p in parts).strip()
-        return EmbedEvent(kind="message", label=text)
-    return None
+    """Map a Managed Agents session SSE event to an EmbedEvent, or None if irrelevant.
+
+    Only the draft rides SSE: tool calls and the Thinking/Working phase are
+    read from the turn state on each render, which sees every tool kind.
+    """
+    if getattr(event, "type", "") != "agent.message":
+        return None
+    parts: list[object] = getattr(event, "content", [])
+    text = "".join(getattr(p, "text", "") for p in parts).strip()
+    return EmbedEvent(kind="message", label=text)
 
 
 class SlackTurnLifecycle:
@@ -286,7 +286,7 @@ class SlackTurnLifecycle:
         else:
             cancel_key = self._status_ts
         blocks = to_blocks(self._state, now=now, cancel_key=cancel_key)
-        text = f"{self._state.phase.value} …"
+        text = to_fallback_text(self._state, now=now)
 
         if self._status_ts is None:
             # First flush — immediate, no debounce.
@@ -417,8 +417,8 @@ class SlackTurnLifecycle:
     async def _repair_terminal_flush(self, text: str) -> None:
         """Best-effort collapse of the status message after a failed terminal flush.
 
-        Replaces whatever the last debounced flush wrote — phase title, tool
-        trail, cancel actions — with a plain failure notice. The cancel Event
+        Replaces whatever the last debounced flush wrote — headline, tool
+        lines, cancel actions — with a plain failure notice. The cancel Event
         is deregistered on every terminal path, so a status message left on the
         live surface shows a running turn with a dead cancel button forever.
         The repair can fail for the same reason as the flush (revoked token,
@@ -687,11 +687,11 @@ class SlackTurnLifecycle:
                 self._pending_registered = False
 
     async def on_render(self, state: TurnState) -> None:
-        """Sole delivery path. `state` is unused: Slack's card is
-        driven by its own Block Kit `State` folded in `on_sse_event` — this
-        hook is the tick that delivers it."""
+        """Sole delivery path. Folds the turn's tool calls into the card, then
+        delivers it; the draft was already folded in `on_sse_event`."""
         if self._terminal:
             return
+        self._state = update_activity(self._state, state)
         await self._maybe_flush()
 
     async def on_reconnect(self, reason: ReconnectReason) -> None:
