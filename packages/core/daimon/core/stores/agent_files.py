@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import structlog
-from cryptography.fernet import MultiFernet
+from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.core._models import AgentFile
 from daimon.core.agent_env_crypto import decode_value, encode_value
 from daimon.core.config import load_crypto_settings
@@ -299,6 +299,27 @@ async def count_plaintext_agent_files(session: AsyncSession) -> dict[uuid.UUID, 
         .group_by(AgentFile.tenant_id)
     )
     return {tenant_id: int(count) for tenant_id, count in result.all()}
+
+
+async def count_undecryptable_agent_files(session: AsyncSession) -> dict[uuid.UUID, int]:
+    """Encrypted agent environment rows per tenant that the current keys can't open.
+
+    Catches a key retired from DAIMON_CRYPTO__KEYS while rows still use it.
+    Without keys every encrypted row counts. Values are never returned.
+    """
+    cipher = _cipher(session)
+    result = await session.execute(
+        select(AgentFile.tenant_id, AgentFile.content).where(AgentFile.encoding == "fernet_v1")
+    )
+    counts: dict[uuid.UUID, int] = {}
+    for tenant_id, content in result.all():
+        try:
+            if cipher is None:
+                raise InvalidToken
+            cipher.decrypt(content.encode("utf-8"))
+        except (InvalidToken, UnicodeDecodeError):
+            counts[tenant_id] = counts.get(tenant_id, 0) + 1
+    return counts
 
 
 async def encrypt_plaintext_agent_files(session: AsyncSession) -> int:

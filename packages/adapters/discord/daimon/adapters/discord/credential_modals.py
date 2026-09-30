@@ -851,7 +851,9 @@ class McpCredentialModal(discord.ui.Modal):
 
         mcp_server_url = consumed_row.mcp_server_url
         if mcp_server_url is None:
-            _log.error("credential_modal.mcp_missing_server_url", token_tail=self._row.token[-4:])
+            _log.error(
+                "credential_modal.mcp_missing_server_url", agent_id=str(consumed_row.agent_id)
+            )
             await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
             await interaction.followup.send(
                 "This request is missing its server URL — please ask again.", ephemeral=True

@@ -84,6 +84,7 @@ def test_verify_fails_without_keys(monkeypatch):
             return {}
 
         monkeypatch.setattr(crypto, "count_plaintext_agent_files", _count)
+        monkeypatch.setattr(crypto, "count_undecryptable_agent_files", _count)
         yield SimpleNamespace(sessionmaker=_Session)
 
     monkeypatch.setattr(crypto, "build_runtime", runtime)
@@ -93,3 +94,42 @@ def test_verify_fails_without_keys(monkeypatch):
     result = CliRunner().invoke(app, ["crypto", "verify"])
     assert result.exit_code == 1
     assert "DAIMON_CRYPTO__KEYS is not set" in result.output
+
+
+async def test_verify_fails_when_a_retired_key_still_encrypts_rows(
+    db_nullpool_engine, db_clean, monkeypatch
+):
+    old, new = Fernet.generate_key().decode(), Fernet.generate_key().decode()
+    with_old = async_sessionmaker(
+        db_nullpool_engine, expire_on_commit=False, info={"crypto_keys": (old,)}
+    )
+    with_new = async_sessionmaker(
+        db_nullpool_engine, expire_on_commit=False, info={"crypto_keys": (new,)}
+    )
+    tenant_id = uuid.uuid4()
+    async with with_old() as session, session.begin():
+        await make_tenant(session, id=tenant_id)
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=uuid.uuid4(),
+            key="CRM_TOKEN",
+            content="old-key-secret",
+            set_by_account_id=None,
+        )
+
+    @asynccontextmanager
+    async def runtime(_settings):
+        yield SimpleNamespace(sessionmaker=with_new)
+
+    monkeypatch.setattr(crypto, "build_runtime", runtime)
+    monkeypatch.setattr(
+        crypto,
+        "load_settings",
+        lambda: SimpleNamespace(crypto=SimpleNamespace(keys=(SecretStr(new),))),
+    )
+
+    result = await asyncio.to_thread(CliRunner().invoke, app, ["crypto", "verify"])
+    assert result.exit_code == 1, result.output
+    assert "1 encrypted agent key(s) can't be decrypted" in result.output
+    assert "old-key-secret" not in result.output and "CRM_TOKEN" not in result.output

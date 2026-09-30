@@ -685,9 +685,17 @@ async def run_env_file_credential_submission(
         )
         return
 
-    consumed, collisions, queued = await _apply_env_file_entries(
-        runtime, token=token, entries=entries, now=datetime.now(UTC)
-    )
+    try:
+        consumed, collisions, queued = await _apply_env_file_entries(
+            runtime, token=token, entries=entries, now=datetime.now(UTC)
+        )
+    except AgentEnvEncryptionRequiredError as err:
+        # Rolled back with the consume: nothing stored, the request stays live.
+        log.error("credential_request.env_file_refused_no_crypto_keys")
+        await post_ephemeral(
+            client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
+        )
+        return
     if consumed is None:
         await post_ephemeral(
             client,
@@ -844,7 +852,7 @@ async def run_mcp_credential_submission(
 
     mcp_server_url = consumed.mcp_server_url
     if mcp_server_url is None:
-        log.error("credential_request.mcp_missing_server_url", token_tail=token[-4:])
+        log.error("credential_request.mcp_missing_server_url", agent_id=str(consumed.agent_id))
         await _refuse_for_unavailable_target(runtime, client, row=consumed, token=token)
         await post_ephemeral(
             client,

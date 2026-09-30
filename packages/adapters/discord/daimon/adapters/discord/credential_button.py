@@ -202,7 +202,7 @@ class CredentialRequestButton(
             async with bot.runtime.sessionmaker() as session:
                 request_row = await peek_credential_request(session, token=token)
         except SQLAlchemyError:
-            _log.exception("credential_button.lookup_failed", token_tail=token[-4:])
+            _log.exception("credential_button.lookup_failed")
             request_row = None
         if request_row is None:
             return cls(token=token, label=_FALLBACK_LABEL, request_row=None)

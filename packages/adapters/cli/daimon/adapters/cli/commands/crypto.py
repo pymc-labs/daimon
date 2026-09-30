@@ -6,6 +6,7 @@ from daimon.adapters.cli.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.stores.agent_files import (
     count_plaintext_agent_files,
+    count_undecryptable_agent_files,
     encrypt_plaintext_agent_files,
 )
 from rich.console import Console
@@ -15,7 +16,10 @@ crypto_app = typer.Typer(help="Verify and enforce encryption of stored agent key
 
 @crypto_app.command("verify")
 def crypto_verify_command() -> None:
-    """Fail unless DAIMON_CRYPTO__KEYS is set and no agent key is stored in plaintext."""
+    """Fail unless DAIMON_CRYPTO__KEYS is set and every agent key is encrypted and readable.
+
+    Prints counts per tenant only, never key names or values.
+    """
     settings = load_settings()
     console = Console(highlight=False)
     failed = False
@@ -27,6 +31,7 @@ def crypto_verify_command() -> None:
             failed = True
         async with build_runtime(settings) as rt, rt.sessionmaker() as session:
             counts = await count_plaintext_agent_files(session)
+            unreadable = await count_undecryptable_agent_files(session)
         total = sum(counts.values())
         if total:
             failed = True
@@ -36,8 +41,20 @@ def crypto_verify_command() -> None:
             )
             for tenant_id, count in sorted(counts.items(), key=lambda item: str(item[0])):
                 console.print(f"  {tenant_id}: {count}")
-        elif not failed:
-            console.print("✓ Encryption keys set; no agent keys stored in plaintext.")
+        unreadable_total = sum(unreadable.values())
+        if unreadable_total:
+            failed = True
+            console.print(
+                f"[red]✗ {unreadable_total} encrypted agent key(s) can't be decrypted with "
+                f"DAIMON_CRYPTO__KEYS across {len(unreadable)} tenant(s).[/red] "
+                "Restore the retired key to the list."
+            )
+            for tenant_id, count in sorted(unreadable.items(), key=lambda item: str(item[0])):
+                console.print(f"  {tenant_id}: {count}")
+        if not failed:
+            console.print(
+                "✓ Encryption keys set; every agent key is encrypted and can be decrypted."
+            )
 
     run_cli(run(), console=console)
     if failed:

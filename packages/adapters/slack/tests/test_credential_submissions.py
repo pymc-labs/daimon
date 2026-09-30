@@ -1462,3 +1462,83 @@ async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_writ
     assert any(
         "connect it with your account" in t for t in _ephemeral_texts(fake_slack_web_client)
     ), "the person is pointed at the OAuth path"
+
+
+# ---------------------------------------------------------------------------
+# No crypto keys: every key form refuses with the operator step
+# ---------------------------------------------------------------------------
+
+
+def _keyless(factory: async_sessionmaker[AsyncSession]) -> async_sessionmaker[AsyncSession]:
+    """The same database, as a deployment with no DAIMON_CRYPTO__KEYS sees it."""
+    return async_sessionmaker(
+        bind=factory.kw["bind"],
+        expire_on_commit=False,
+        info={"crypto_keys": (), "crypto_allow_plaintext": False},
+    )
+
+
+@pytest.mark.asyncio
+async def test_env_submission_without_crypto_keys_tells_the_person_and_keeps_the_request(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
+    token = await _seed_request(
+        db_session,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
+        tenant_id=tenant_id,
+        kind="env",
+    )
+    await db_session.commit()
+    runtime = _build_runtime(
+        fernet_key, _keyless(db_session_factory), anthropic_handler=_agents_handler(live_agent)
+    )
+
+    await run_env_credential_submission(
+        runtime,
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        message_ts=_MESSAGE_TS,
+        token=token,
+        value="s3cr3t-value",
+        dispatch_continuations=_noop_dispatch,
+    )
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        row = await peek_credential_request(s, token=token)
+    assert rows == [], "nothing is stored without encryption keys"
+    assert row is not None and row.used_at is None, "the request stays live for a retry"
+    texts = _ephemeral_texts(fake_slack_web_client)
+    assert texts and "DAIMON_CRYPTO__KEYS" in texts[-1], "the person learns the operator step"
+
+
+@pytest.mark.asyncio
+async def test_env_file_submission_without_crypto_keys_tells_the_person_and_keeps_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_env_file", name="specialist", tenant_id=tenant_id)
+    token = await _seed_env_file_request(db_session, tenant_id=tenant_id, live_agent=live_agent)
+    await db_session.commit()
+    _patch_file_download(monkeypatch, b"ALPHA=alpha-private\n")
+    runtime = _build_runtime(
+        fernet_key, _keyless(db_session_factory), anthropic_handler=_agents_handler(live_agent)
+    )
+
+    await _run_env_file_submission(runtime, token)
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        row = await peek_credential_request(s, token=token)
+    assert rows == [], "nothing is stored without encryption keys"
+    assert row is not None and row.used_at is None, "the request stays live for a retry"
+    texts = _ephemeral_texts(fake_slack_web_client)
+    assert texts and "DAIMON_CRYPTO__KEYS" in texts[-1], "the person learns the operator step"

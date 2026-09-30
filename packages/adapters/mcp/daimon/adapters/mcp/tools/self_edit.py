@@ -162,19 +162,19 @@ async def _self_write_file_impl(
     return row
 
 
-REDACTED_VALUE = "[redacted: a person set this value; it is available in the session .env]"
-LISTED_VALUE = "[not listed: read one key with self_read_file]"
+REDACTED_VALUE = "[redacted: values are available in the session .env, never in tool output]"
+LISTED_VALUE = "[not listed: values are available in the session .env]"
 
 
-def _withhold_value(row: AgentFileRow, *, reader_account_id: uuid.UUID) -> AgentFileRow:
-    """Keep a value a person entered (a credential form, an import) out of tool output.
+def _withhold_value(row: AgentFileRow) -> AgentFileRow:
+    """Keep every value out of tool output.
 
-    Only values this agent key wrote itself come back. Everything else is a
-    credential someone submitted privately; the sandbox already mounts it, and
-    a tool result would put it in the model's context and transcript.
+    Nothing records whether a person submitted a value through a credential
+    form or the agent wrote it itself: both carry the requester's account id.
+    So no value comes back. The sandbox already mounts them in the session
+    `.env`, and a tool result would put a credential in the model's context
+    and transcript.
     """
-    if row.last_set_by_account_id == reader_account_id:
-        return row
     return row.model_copy(update={"content": REDACTED_VALUE})
 
 
@@ -198,7 +198,7 @@ async def _self_read_file_impl(
         agent_id,
         key,
     )
-    return None if row is None else _withhold_value(row, reader_account_id=auth.account_id)
+    return None if row is None else _withhold_value(row)
 
 
 async def _self_list_files_impl(
@@ -554,10 +554,10 @@ def register_self_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         key: str,
     ) -> AgentFileRow | None:
-        """Read a per-agent file by `key`. Returns null if no file exists at that key.
+        """Check a per-agent file by `key`. Returns null if no file exists at that key.
 
-        Values a person entered through a credential form are redacted; use them
-        from the session `.env` without echoing them.
+        The value is always redacted: use it from the session `.env` without
+        echoing it. The result shows when it was last set.
         """
         return await _self_read_file_impl(runtime, await _auth(ctx), key=key)
 

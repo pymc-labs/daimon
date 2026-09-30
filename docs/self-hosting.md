@@ -335,8 +335,10 @@ write (the credential form and `request_agent_key` say so; nothing is saved).
 For local development only, `DAIMON_CRYPTO__ALLOW_PLAINTEXT=true` restores
 plaintext storage and logs `agent_env.encryption_disabled` instead.
 
-`daimon crypto verify` exits non-zero when keys are missing or any agent key is
-stored in plaintext, listing the count per tenant (never names or values).
+`daimon crypto verify` exits non-zero when keys are missing, any agent key is
+stored in plaintext, or an encrypted key can't be decrypted with the current
+keys (a key retired too early), listing the count per tenant (never names or
+values).
 `daimon crypto encrypt-plaintext` encrypts every plaintext row in place with the
 first key, in one transaction, leaving timestamps and attribution unchanged.
 Run it after enabling keys on a deployment that stored keys without them, then
