@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Mapping
+from urllib.parse import urlsplit
 
 import httpx
 import websockets
@@ -53,6 +55,35 @@ def _filter_response_headers(h: httpx.Headers) -> dict[str, str]:
     return {k: v for k, v in h.items() if k.lower() not in _HOP_BY_HOP}
 
 
+def _from_another_notebook(
+    slug: str, headers: Mapping[str, str], *, require_referer: bool = True
+) -> bool:
+    """Whether a same-origin request for ``slug`` came from some other page.
+
+    Every notebook shares this origin, so notebook A's JavaScript (an
+    anywidget runs even in a read-only app) can ``fetch`` or frame ``/n/B/``
+    and the browser attaches B's cookie if the viewer has opened B's link. The
+    browser's ``Sec-Fetch-Site: same-origin`` plus a ``Referer`` outside
+    ``/n/<slug>`` gives that away; a same-origin request that hides its
+    Referer is refused too, since marimo's own requests always send one.
+    Top-level navigation (opening the link from chat) is ``cross-site`` or
+    ``none`` and passes, as do clients that send no fetch metadata at all.
+
+    ``require_referer=False`` is for WebSocket upgrades, which browsers send
+    without a Referer; only a Referer that names another notebook is refused
+    there, so a page that hides its Referer can still open another
+    notebook's socket (see the README's known limits).
+    """
+    if headers.get("sec-fetch-site") != "same-origin":
+        return False
+    referer = headers.get("referer")
+    if not referer:
+        return require_referer
+    path = urlsplit(referer).path
+    own = f"/n/{slug}"
+    return not (path == own or path.startswith(f"{own}/"))
+
+
 def create_proxy_router(state: AdminState) -> APIRouter:
     router = APIRouter()
 
@@ -63,6 +94,8 @@ def create_proxy_router(state: AdminState) -> APIRouter:
     async def proxy_http(  # pyright: ignore[reportUnusedFunction]
         slug: str, path: str, request: Request
     ) -> Response:
+        if _from_another_notebook(slug, request.headers):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "cross-notebook request refused")
         np = state.processes.get(slug)
         if np is None or not np.is_alive():
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no active notebook: {slug}")
@@ -104,6 +137,10 @@ def create_proxy_router(state: AdminState) -> APIRouter:
             if origin not in state.settings.allowed_origins:
                 await websocket.close(code=1008, reason="origin not allowed")
                 return
+
+        if _from_another_notebook(slug, websocket.headers, require_referer=False):
+            await websocket.close(code=1008, reason="cross-notebook request refused")
+            return
 
         np = state.processes.get(slug)
         if np is None or not np.is_alive():

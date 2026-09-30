@@ -312,3 +312,39 @@ def test_uv_and_marimo_run_under_the_dropped_uid(tmp_path: Path) -> None:
     assert "Permission denied" not in combined, (
         f"the dropped-uid run must not hit a permission error: {combined}"
     )
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(os.geteuid() != 0, reason="uid drop requires root")
+def test_releasing_a_slug_kills_a_detached_survivor_before_its_uid_is_reused(
+    tmp_path: Path,
+) -> None:
+    """A cell's `Popen(..., start_new_session=True)` escapes marimo's process group.
+
+    Releasing the slug must kill it, or it would sit under whichever slug is
+    handed the uid next and read that notebook's files.
+    """
+    import signal
+    import subprocess
+    import time
+
+    from notebook_host.jail import build_jailed_preexec, get_or_create_slug_uid, remove_slug_tree
+
+    uids = tmp_path / "uids.json"
+    uid = get_or_create_slug_uid(uids, "slug-a", start=_UID_A, end=_UID_A + 5)
+    ensure_slug_jail(tmp_path, "slug-a", uid=uid)
+    survivor = subprocess.Popen(
+        ["sleep", "123457"],
+        preexec_fn=build_jailed_preexec(uid, rlimit_as_bytes=None, rlimit_cpu_seconds=None),
+        start_new_session=True,
+    )
+    try:
+        remove_slug_tree(tmp_path, "slug-a", uids_file=uids)
+        deadline = time.monotonic() + 5
+        while survivor.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert survivor.poll() is not None, "the detached survivor must be dead"
+        assert survivor.returncode == -signal.SIGKILL
+    finally:
+        if survivor.poll() is None:
+            survivor.kill()

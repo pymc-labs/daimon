@@ -30,6 +30,7 @@ from notebook_host.jail import (
     UidPoolExhaustedError,
     ensure_slug_jail,
     get_slug_paths,
+    kill_uid_processes,
     remove_slug_tree,
     resolve_jail_uid,
 )
@@ -101,18 +102,24 @@ class AdminState:
             access_token=access_token,
         )
 
-    def access_token_for(self, slug: str) -> str:
+    def access_token_for(self, slug: str, mode: Literal["edit", "run"]) -> str:
         """The slug's existing token, so re-publishing keeps its link; else a new one.
 
-        A live process's token wins, then a registered blog's persisted one.
-        Deleting or reaping a slug drops both, so its next publish gets a fresh
-        token and every old link stops working.
+        A token is only reused in the mode it was issued for: switching a slug
+        between the read-only app and the editor mints a new one, so holders of
+        a read-only link never become editors and an editor link stops working
+        once the slug is read-only. A live process's token wins, then a
+        registered blog's persisted one (blogs are always read-only). Deleting
+        or reaping a slug drops both, so its next publish gets a fresh token and
+        every old link stops working.
         """
         existing = self.processes.get(slug)
-        if existing is not None and existing.access_token:
-            return existing.access_token
+        if existing is not None:
+            if existing.access_token and existing.mode == mode:
+                return existing.access_token
+            return new_access_token()
         record = load_blogs(self.settings.resolved_blogs_file).get(slug)
-        if record is not None and record.access_token:
+        if record is not None and record.access_token and mode == "run":
             return record.access_token
         return new_access_token()
 
@@ -184,7 +191,16 @@ async def _spawn_tracked(
     pool exhausted, or notebook isolation unavailable), or 504 (spawn
     timeout). Shared by the notebook and blog PUT handlers so the two never
     drift.
+
+    Raises 409 for the editor on a registered blog: its readers hold a
+    read-only link, and delete-then-republish is the way to turn it back into
+    a scratch notebook.
     """
+    if mode == "edit" and slug in load_blogs(state.settings.resolved_blogs_file):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{slug!r} is a published blog; delete it before publishing an editor there",
+        )
     # This is the request boundary — the one place admin.py is allowed to
     # catch JailUnavailableError/UidPoolExhaustedError. Both mean the host is
     # refusing to serve rather than failing transiently, mirroring
@@ -223,10 +239,15 @@ async def _spawn_tracked(
                 },
             )
 
-    access_token = state.access_token_for(slug)
+    access_token = state.access_token_for(slug, mode)
     existing = state.processes.pop(slug, None)
     if existing is not None:
         kill(existing)
+    if uid is not None:
+        # Anything the previous run or the validator left behind as this
+        # uid (a cell's detached child escapes kill's process group) must not
+        # live alongside the new process and its token.
+        kill_uid_processes(uid)
 
     port = allocate_port(
         state.processes, state.settings.marimo_port_start, state.settings.marimo_port_end

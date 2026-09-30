@@ -36,7 +36,8 @@ accumulate blogs nobody wanted.
 
 **Pass `editable=True` only when the user asked to edit the notebook.** An editor
 link lets anyone who holds it run arbitrary code on the notebook host. Never
-pass it for a link going to a client or a shared channel.
+pass it for a link going to a client or a shared channel. The tool refuses it
+unless the operator has turned editors on; if it does, publish read-only.
 
 Both are a live Python kernel, not a WASM export — so PyMC/ArviZ widgets
 genuinely work, sliders re-plot a real posterior, dropdowns switch parameters.

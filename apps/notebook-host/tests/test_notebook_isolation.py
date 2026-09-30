@@ -178,8 +178,10 @@ def test_each_notebook_gets_a_distinct_token_that_survives_reupload(
     tok_a = state.processes["a"].access_token
     assert len(tok_a) >= 32, "token has real entropy"
     assert tok_a != state.processes["b"].access_token, "one notebook's token opens no other"
-    client.put(f"/upload/{_mint('notebook_edit', 'a', jti='3')}", content=b"# a2\n")
-    assert state.processes["a"].access_token == tok_a, "re-publishing a slug keeps its link working"
+    client.put(f"/upload/{_mint('notebook', 'a', jti='3')}", content=b"# a2\n")
+    assert state.processes["a"].access_token == tok_a, (
+        "re-publishing a slug in the same mode keeps its link working"
+    )
 
 
 def test_ephemeral_run_mode_notebook_is_reaped() -> None:
@@ -248,6 +250,285 @@ def test_legacy_blog_without_token_gets_one_on_respawn(
     tok = calls[-1]["access_token"]
     assert tok, "a pre-token blog is never served without auth"
     assert load_blogs(state.settings.resolved_blogs_file)["old"].access_token == tok
+
+
+def test_switching_a_read_only_slug_to_the_editor_rotates_its_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, state, _ = _make_app(tmp_path, monkeypatch)
+    client.put(f"/upload/{_mint('notebook', 'a', jti='1')}", content=b"# a\n")
+    read_only = state.processes["a"].access_token
+    r = client.put(f"/upload/{_mint('notebook_edit', 'a', jti='2')}", content=b"# a\n")
+    assert r.status_code == 200, r.text
+    assert state.processes["a"].access_token != read_only, (
+        "holders of the read-only link must not become editors"
+    )
+    editor = state.processes["a"].access_token
+    client.put(f"/upload/{_mint('blog', 'a', jti='3')}", content=b"# a\n")
+    assert state.processes["a"].access_token != editor, (
+        "an editor link must not keep working once the slug is a public blog"
+    )
+
+
+def test_editor_upload_over_a_blog_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, state, calls = _make_app(tmp_path, monkeypatch)
+    client.put(f"/upload/{_mint('blog', 'post', jti='1')}", content=b"# blog\n")
+    blog_token = state.processes["post"].access_token
+    spawned = len(calls)
+    r = client.put(f"/upload/{_mint('notebook_edit', 'post', jti='2')}", content=b"# x\n")
+    assert r.status_code == 409, "a blog's readers must never be handed an editor"
+    assert len(calls) == spawned, "nothing is respawned"
+    assert state.processes["post"].access_token == blog_token
+
+
+def test_marimo_is_quiet_so_its_banner_url_never_reaches_the_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """marimo prints its URL, token included, to stdout, which is the slug's log file."""
+    from notebook_host import lifecycle
+
+    monkeypatch.setattr(lifecycle.shutil, "which", lambda _x: "/usr/bin/uv")  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    captured: dict[str, Any] = {}
+    fake = unittest.mock.MagicMock(spec=subprocess.Popen)
+    fake.stdin = unittest.mock.MagicMock()
+
+    def fake_popen(cmd: list[str], **_kwargs: Any) -> object:
+        captured["cmd"] = cmd
+        return fake
+
+    monkeypatch.setattr(lifecycle.subprocess, "Popen", fake_popen)
+    paths = get_slug_paths(tmp_path, "nb")
+    paths.notebook.parent.mkdir(parents=True, exist_ok=True)
+    paths.notebook.write_text("# stub", encoding="utf-8")
+    lifecycle.spawn_marimo("nb", paths, 8100, access_token="t", mode="run")
+    cmd: list[str] = captured["cmd"]
+    exe = len(cmd) - 1 - cmd[::-1].index("marimo")
+    assert cmd[exe + 1] == "-q", "marimo -q suppresses the stdout banner"
+    assert cmd[exe + 2] == "run"
+
+
+def test_marimo_is_pinned_to_the_locked_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import importlib.metadata
+
+    from notebook_host import lifecycle
+
+    monkeypatch.setattr(lifecycle.shutil, "which", lambda _x: "/usr/bin/uv")  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    captured: dict[str, Any] = {}
+    fake = unittest.mock.MagicMock(spec=subprocess.Popen)
+    fake.stdin = unittest.mock.MagicMock()
+
+    def fake_popen(cmd: list[str], **_kwargs: Any) -> object:
+        captured["cmd"] = cmd
+        return fake
+
+    monkeypatch.setattr(lifecycle.subprocess, "Popen", fake_popen)
+    paths = get_slug_paths(tmp_path, "nb")
+    paths.notebook.parent.mkdir(parents=True, exist_ok=True)
+    paths.notebook.write_text("# stub", encoding="utf-8")
+    lifecycle.spawn_marimo("nb", paths, 8100, access_token="t")
+    cmd: list[str] = captured["cmd"]
+    pinned = f"marimo=={importlib.metadata.version('marimo')}"
+    assert cmd[cmd.index("--with") + 1] == pinned, "uv must not resolve a different marimo"
+
+
+# --- uid reuse ------------------------------------------------------------------
+
+
+def test_uid_is_not_handed_straight_to_the_next_slug(tmp_path: Path) -> None:
+    from notebook_host.jail import get_or_create_slug_uid, release_slug_uid
+
+    reg = tmp_path / "uids.json"
+    a = get_or_create_slug_uid(reg, "a", start=100000, end=100009)
+    get_or_create_slug_uid(reg, "b", start=100000, end=100009)
+    release_slug_uid(reg, "a")
+    c = get_or_create_slug_uid(reg, "c", start=100000, end=100009)
+    assert c != a, "a just-released uid is quarantined, not reused first"
+    assert c == 100002
+
+
+def test_uid_allocation_wraps_when_the_top_of_the_range_is_reached(tmp_path: Path) -> None:
+    from notebook_host.jail import get_or_create_slug_uid, release_slug_uid
+
+    reg = tmp_path / "uids.json"
+    for slug in ("a", "b", "c"):
+        get_or_create_slug_uid(reg, slug, start=100000, end=100002)
+    release_slug_uid(reg, "a")
+    assert get_or_create_slug_uid(reg, "d", start=100000, end=100002) == 100000, (
+        "the pool still recycles once every other uid is taken"
+    )
+
+
+def _fake_proc(root: Path, pid: int, uids: tuple[int, int, int, int]) -> None:
+    d = root / str(pid)
+    d.mkdir()
+    (d / "status").write_text(
+        f"Name:\tsleep\nPid:\t{pid}\nUid:\t{uids[0]}\t{uids[1]}\t{uids[2]}\t{uids[3]}\n"
+    )
+
+
+def test_kill_uid_processes_kills_every_process_owned_by_the_uid(tmp_path: Path) -> None:
+    """A cell's own `Popen(..., start_new_session=True)` escapes the pgroup kill."""
+    from notebook_host.jail import kill_uid_processes
+
+    _fake_proc(tmp_path, 10, (100000, 100000, 100000, 100000))  # marimo
+    _fake_proc(tmp_path, 11, (100000, 100000, 100000, 100000))  # detached survivor
+    _fake_proc(tmp_path, 12, (100001, 100001, 100001, 100001))  # another notebook
+    _fake_proc(tmp_path, 13, (0, 100000, 0, 0))  # setuid-ish: any id matching counts
+    (tmp_path / "self").mkdir()
+    killed: list[int] = []
+
+    def fake_kill(pid: int, _sig: int) -> None:
+        killed.append(pid)
+        import shutil
+
+        shutil.rmtree(tmp_path / str(pid))
+
+    kill_uid_processes(100000, proc_root=tmp_path, kill=fake_kill)
+    assert sorted(killed) == [10, 11, 13], "every process of the uid, and nothing else"
+
+
+def test_releasing_a_slug_kills_its_uid_before_the_uid_is_freed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_host import jail
+
+    reg = tmp_path / "uids.json"
+    uid = jail.get_or_create_slug_uid(reg, "a", start=100000, end=100009)
+    order: list[str] = []
+
+    def fake_kill_uid(u: int, **_kw: object) -> None:
+        assert u == uid
+        assert jail.load_uid_registry(reg).get("a") == uid, "still reserved while killing"
+        order.append("killed")
+
+    monkeypatch.setattr(jail, "kill_uid_processes", fake_kill_uid)
+    jail.remove_slug_tree(tmp_path, "a", uids_file=reg)
+    assert order == ["killed"], "a survivor must die before its uid can be handed out"
+    assert "a" not in jail.load_uid_registry(reg)
+
+
+# --- access log ----------------------------------------------------------------
+
+
+def test_uvicorn_access_log_redacts_the_access_token() -> None:
+    import io
+    import logging
+    import logging.config
+
+    from notebook_host.__main__ import uvicorn_log_config
+
+    config = uvicorn_log_config()
+    logging.config.dictConfig(config)
+    buf = io.StringIO()
+    handler = logging.getLogger("uvicorn.access").handlers[0]
+    assert isinstance(handler, logging.StreamHandler)
+    handler.setStream(buf)  # pyright: ignore[reportUnknownMemberType]
+    logging.getLogger("uvicorn.access").info(
+        '%s - "%s %s HTTP/%s" %d',
+        "10.0.0.1:1",
+        "GET",
+        "/n/nb/?access_token=SEKRET-tok&x=1",
+        "1.1",
+        303,
+    )
+    out = buf.getvalue()
+    assert "SEKRET-tok" not in out, "the link's token must not land in the host log"
+    assert "access_token=[redacted]&x=1" in out
+
+
+# --- cross-notebook requests from the same origin ---------------------------------
+
+
+def _proxy_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, Any]:
+    from notebook_host.admin import AdminState
+    from notebook_host.config import load_settings
+    from notebook_host.lifecycle import NotebookProcess
+    from notebook_host.proxy import create_proxy_router
+
+    monkeypatch.setenv("DAIMON_NOTEBOOK__DATA_DIR", str(tmp_path))
+    settings = load_settings(_env_file=None)
+    proc = unittest.mock.MagicMock(spec=subprocess.Popen)
+    proc.poll.return_value = None
+    state = AdminState(settings=settings, processes={}, spawner=unittest.mock.MagicMock())
+    for slug, port in (("a", 9001), ("b", 9002)):
+        state.processes[slug] = NotebookProcess(
+            slug=slug, port=port, process=proc, public_host="h", host_port=1, access_token="t"
+        )
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, text="ok")
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(**kwargs: Any) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr("notebook_host.proxy.httpx.AsyncClient", fake_client)
+    app = FastAPI()
+    app.include_router(create_proxy_router(state))
+    return TestClient(app), seen
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"sec-fetch-site": "same-origin", "referer": "https://nbs.example.com/n/a/"},
+        {"sec-fetch-site": "same-origin"},  # referrerPolicy: 'no-referrer'
+        {
+            "sec-fetch-site": "same-origin",
+            "sec-fetch-dest": "iframe",
+            "referer": "https://nbs.example.com/n/a/x",
+        },
+        {"sec-fetch-site": "same-origin", "referer": "https://nbs.example.com/n/b-evil/"},
+    ],
+)
+def test_proxy_refuses_one_notebook_page_reaching_into_another(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, headers: dict[str, str]
+) -> None:
+    client, seen = _proxy_client(tmp_path, monkeypatch)
+    r = client.get("/n/b/api/status", headers=headers)
+    assert r.status_code == 403, "notebook a's JS must not ride b's cookie"
+    assert seen == [], "nothing reaches b's marimo"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"sec-fetch-site": "same-origin", "referer": "https://nbs.example.com/n/b/"},
+        {"sec-fetch-site": "same-origin", "referer": "https://nbs.example.com/n/b"},
+        {"sec-fetch-site": "cross-site", "referer": "https://discord.com/"},
+        {"sec-fetch-site": "none"},
+        {},
+    ],
+)
+def test_proxy_allows_a_notebooks_own_page_and_opening_its_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, headers: dict[str, str]
+) -> None:
+    client, seen = _proxy_client(tmp_path, monkeypatch)
+    r = client.get("/n/b/api/status", headers=headers)
+    assert r.status_code == 200, r.text
+    assert len(seen) == 1
+
+
+def test_proxy_refuses_a_socket_opened_from_another_notebooks_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from starlette.websockets import WebSocketDisconnect
+
+    client, _ = _proxy_client(tmp_path, monkeypatch)
+    headers = {"sec-fetch-site": "same-origin", "referer": "https://nbs.example.com/n/a/"}
+    with (
+        pytest.raises(WebSocketDisconnect) as exc,
+        client.websocket_connect("/n/b/ws?session_id=x", headers=headers) as ws,
+    ):
+        ws.receive_text()
+    assert exc.value.code == 1008
 
 
 # --- real marimo: a neighbour on localhost is refused -------------------------

@@ -91,6 +91,11 @@ def create_notebook_upload(
     """
     if permanent and editable:
         raise ValueError("a permanent blog cannot be editable; publish it read-only")
+    if editable and not notebook_settings.allow_editable:
+        raise ValueError(
+            "editable notebooks are off on this deployment (notebook.allow_editable); "
+            "publish it read-only"
+        )
     if notebook_settings.host_url is None or notebook_settings.admin_secret is None:
         raise HostNotConfiguredError("notebook host not configured")
     resolved_slug = _resolve_slug(agent_slug=slug, principal_key=principal_key)

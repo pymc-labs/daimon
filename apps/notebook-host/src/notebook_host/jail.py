@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -175,11 +176,61 @@ def remove_slug_tree(data_dir: Path, slug: str, *, uids_file: Path | None = None
     rather than adding a fourth thing each caller must remember. Omitted by
     default so this plan changes no caller's behaviour.
 
+    Before the uid is released, every process still running as it is killed
+    (``kill_uid_processes``). ``lifecycle.kill`` only signals marimo's process
+    group, and a cell can start a detached child that outlives it; that child
+    would otherwise sit under whichever slug is handed the uid next.
+
     ``slug`` must already have passed ``lifecycle.safe_slug``.
     """
+    uid = load_uid_registry(uids_file).get(slug) if uids_file is not None else None
+    if uid is not None:
+        kill_uid_processes(uid)
     shutil.rmtree(get_slug_paths(data_dir, slug).root, ignore_errors=True)
     if uids_file is not None:
         release_slug_uid(uids_file, slug)
+
+
+def _process_uids(status_file: Path) -> tuple[int, ...]:
+    """The real, effective, saved and filesystem uids from ``/proc/<pid>/status``."""
+    try:
+        text = status_file.read_text()
+    except OSError:
+        return ()
+    for line in text.splitlines():
+        if line.startswith("Uid:"):
+            return tuple(int(field) for field in line.split()[1:])
+    return ()
+
+
+def kill_uid_processes(
+    uid: int,
+    *,
+    proc_root: Path = Path("/proc"),
+    kill: Callable[[int, int], None] = os.kill,
+    max_passes: int = 10,
+) -> None:
+    """SIGKILL every process any of whose uids is ``uid``; rescan until none remain.
+
+    Rescanning catches a process that forked while the previous pass ran.
+    ``uid`` is always a jail uid, never the host's own, so the host can't kill
+    itself. Needs root to signal another uid; an unjailed dev host (where it
+    can't) just gets nothing to do, since no jail uid is running there.
+    """
+    for _ in range(max_passes):
+        found = False
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            if uid not in _process_uids(entry / "status"):
+                continue
+            found = True
+            try:
+                kill(int(entry.name), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                continue
+        if not found:
+            return
 
 
 # ─── uid pool ────────────────────────────────────────────────────────────────
@@ -239,20 +290,24 @@ def save_uid_registry(path: Path, records: dict[str, int]) -> None:
     os.replace(tmp, path)
 
 
-def allocate_uid(registry: dict[str, int], slug: str, *, start: int, end: int) -> int:
+def allocate_uid(
+    registry: dict[str, int], slug: str, *, start: int, end: int, after: int | None = None
+) -> int:
     """Return the uid for ``slug``, allocating a new one if needed. Pure.
 
     If ``slug`` is already in ``registry``, its existing uid is returned
     unchanged — idempotency the boot migration depends on. Otherwise the
-    lowest value in ``range(start, end + 1)`` not present in
-    ``registry.values()`` is returned. Does not touch disk and does not
-    mutate ``registry``. Raises ``UidPoolExhaustedError`` if every value in
-    the range is already taken.
+    first value in ``range(start, end + 1)`` not present in
+    ``registry.values()`` is returned, searching upward from ``after + 1``
+    and wrapping to ``start`` (from ``start`` when ``after`` is None). Does
+    not touch disk and does not mutate ``registry``. Raises
+    ``UidPoolExhaustedError`` if every value in the range is already taken.
     """
     if slug in registry:
         return registry[slug]
     used = set(registry.values())
-    for uid in range(start, end + 1):
+    first = start if after is None or not start <= after < end else after + 1
+    for uid in [*range(first, end + 1), *range(start, first)]:
         if uid not in used:
             return uid
     raise UidPoolExhaustedError(f"uid pool exhausted ({start}-{end}, {len(registry)} allocated)")
@@ -263,14 +318,31 @@ def get_or_create_slug_uid(path: Path, slug: str, *, start: int, end: int) -> in
 
     No write on the hit path — an already-registered slug returns without
     rewriting the file.
+
+    Allocation walks the pool round-robin from the last uid handed out
+    (recorded in ``<registry>.cursor``), so a just-released uid is the last
+    one reused, not the first.
     """
     registry = load_uid_registry(path)
     if slug in registry:
         return registry[slug]
-    uid = allocate_uid(registry, slug, start=start, end=end)
+    cursor = _uid_cursor_path(path)
+    try:
+        after: int | None = int(cursor.read_text())
+    except (OSError, ValueError):
+        after = None
+    uid = allocate_uid(registry, slug, start=start, end=end, after=after)
     registry[slug] = uid
     save_uid_registry(path, registry)
+    tmp = cursor.with_suffix(".tmp")
+    tmp.write_text(str(uid))
+    os.chmod(tmp, _REGISTRY_MODE)
+    os.replace(tmp, cursor)
     return uid
+
+
+def _uid_cursor_path(registry_path: Path) -> Path:
+    return registry_path.with_name(registry_path.name + ".cursor")
 
 
 def release_slug_uid(path: Path, slug: str) -> None:
@@ -280,7 +352,8 @@ def release_slug_uid(path: Path, slug: str) -> None:
     create the file if it didn't already exist.
 
     The caller MUST have already killed the slug's process before calling
-    this: the uid becomes reusable the instant this returns, and a
+    this (``remove_slug_tree`` does, via ``kill_uid_processes``): the uid
+    becomes reusable the instant this returns, and a
     surviving process still holding the old uid would otherwise be able to
     reach whichever slug gets allocated it next. Releasing is required
     rather than optional — edit-mode notebooks are TTL-reaped every

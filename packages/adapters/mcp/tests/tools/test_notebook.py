@@ -35,6 +35,7 @@ def _make_settings(
     *,
     host_url: str | None = None,
     admin_secret: str | None = None,
+    allow_editable: bool = False,
 ) -> Settings:
     """Build a minimal Settings with the given notebook sub-config."""
     return Settings(
@@ -45,6 +46,7 @@ def _make_settings(
         notebook=NotebookSettings(
             host_url=HttpUrl(host_url) if host_url else None,
             admin_secret=SecretStr(admin_secret) if admin_secret else None,
+            allow_editable=allow_editable,
         ),
         _env_file=None,  # type: ignore[call-arg]
     )
@@ -197,7 +199,9 @@ async def test_list_notebooks_impl_marks_scratch_notebooks_not_permanent() -> No
 
 
 async def test_create_notebook_upload_impl_editable_mints_editor_op() -> None:
-    runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
+    runtime = _make_runtime(
+        _make_settings(host_url="http://nb:8001", admin_secret="s", allow_editable=True)
+    )
     out = await _create_notebook_upload_impl(
         runtime, slug="x", permanent=False, editable=True, principal_key="acct-1"
     )
@@ -209,4 +213,12 @@ async def test_create_notebook_upload_impl_refuses_editable_blog() -> None:
     with pytest.raises(ToolError, match="editable"):
         await _create_notebook_upload_impl(
             runtime, slug="x", permanent=True, editable=True, principal_key="acct-1"
+        )
+
+
+async def test_create_notebook_upload_impl_refuses_editable_unless_operator_allows() -> None:
+    runtime = _make_runtime(_make_settings(host_url="http://nb:8001", admin_secret="s"))
+    with pytest.raises(ToolError, match="allow_editable"):
+        await _create_notebook_upload_impl(
+            runtime, slug="x", permanent=False, editable=True, principal_key="acct-1"
         )

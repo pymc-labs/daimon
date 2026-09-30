@@ -21,10 +21,11 @@ from pydantic import HttpUrl, SecretStr
 _NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
 
 
-def _settings() -> NotebookSettings:
+def _settings(*, allow_editable: bool = False) -> NotebookSettings:
     return NotebookSettings(
         host_url=HttpUrl("http://notebook-host:8001"),
         admin_secret=SecretStr("test-secret"),
+        allow_editable=allow_editable,
     )
 
 
@@ -169,7 +170,11 @@ def test_create_notebook_upload_defaults_to_the_ephemeral_op() -> None:
 
 def test_create_notebook_upload_editable_mints_the_editor_op() -> None:
     out = create_notebook_upload(
-        slug="scratch", editable=True, notebook_settings=_settings(), principal_key="a", now=_NOW
+        slug="scratch",
+        editable=True,
+        notebook_settings=_settings(allow_editable=True),
+        principal_key="a",
+        now=_NOW,
     )
     assert _payload(out["upload_url"])["op"] == "notebook_edit", (
         "only an explicit editable=True asks the host for the code editor"
@@ -192,4 +197,14 @@ def test_create_notebook_upload_rejects_an_editable_blog() -> None:
             notebook_settings=_settings(),
             principal_key="a",
             now=_NOW,
+        )
+
+
+def test_create_notebook_upload_editable_needs_the_operator_switch() -> None:
+    settings = NotebookSettings(
+        host_url=HttpUrl("http://notebook-host:8001"), admin_secret=SecretStr("s")
+    )
+    with pytest.raises(ValueError, match="allow_editable"):
+        create_notebook_upload(
+            slug="x", editable=True, notebook_settings=settings, principal_key="a", now=_NOW
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.metadata
 import logging
 import os
 import re
@@ -34,6 +35,16 @@ _ATTACHMENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
 # them. We match the spec's opening line so our detection agrees with marimo's
 # own parser (https://peps.python.org/pep-0723/).
 _INLINE_SCRIPT_METADATA = re.compile(r"^# /// script$", re.MULTILINE)
+
+
+def _marimo_requirement() -> str:
+    """``marimo==<version>`` for the marimo locked into this host's venv.
+
+    A bare ``uv run --with marimo`` may resolve a newer (or cached older)
+    marimo than the one this host was built and tested against, including
+    its session-auth behaviour.
+    """
+    return f"marimo=={importlib.metadata.version('marimo')}"
 
 
 def has_inline_script_metadata(source: str) -> bool:
@@ -254,7 +265,9 @@ def spawn_marimo(
     if uv is None:
         raise RuntimeError("uv not on PATH")
     workspace = _prepare_workspace(paths)
-    cmd = [uv, "run", "--with", "marimo", "marimo", mode]
+    # -q: marimo prints its URL, token included, to stdout, which is the
+    # slug's log file.
+    cmd = [uv, "run", "--with", _marimo_requirement(), "marimo", "-q", mode]
     if sandbox:
         cmd.append("--sandbox")
     cmd += [
@@ -421,7 +434,7 @@ def validate_notebook(
             # the export fails for every notebook the moment the jail is on,
             # looking like a marimo export error rather than a permissions bug.
             os.chown(tmp, jail_uid, jail_uid)
-        cmd = [uv, "run", "--with", "marimo", "marimo", "export", "html"]
+        cmd = [uv, "run", "--with", _marimo_requirement(), "marimo", "export", "html"]
         if sandbox:
             cmd.append("--sandbox")
         cmd += [paths.notebook.name, "-o", str(Path(tmp) / "check.html")]

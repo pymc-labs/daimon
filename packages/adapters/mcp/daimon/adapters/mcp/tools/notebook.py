@@ -48,6 +48,8 @@ async def _create_notebook_upload_impl(
         raise ToolError("notebook host not configured") from err
     except (InvalidSlugError, NotebookRateLimitError) as err:
         raise ToolError(str(err)) from err
+    except ValueError as err:  # editable refused by the operator setting
+        raise ToolError(str(err)) from err
 
 
 async def _create_attachment_upload_impl(
@@ -143,9 +145,10 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         with permanent=True once the notebook is worth keeping.
 
         Both are read-only apps by default: code hidden, interactive widgets live.
-        editable=True (scratch only) serves the marimo code editor instead. Anyone
-        holding that link can run arbitrary code on the notebook host, so pass it
-        only when the person you are sharing with asked to edit the notebook.
+        editable=True (scratch only, and only where the operator has turned it on)
+        serves the marimo code editor instead. Anyone holding that link can run
+        arbitrary code on the notebook host, so pass it only when the person you
+        are sharing with asked to edit the notebook.
 
         Returns {upload_url, slug, upload_expires_at}. upload_expires_at is when the
         URL stops working (~5 min); use it promptly. Pass slug to reuse a stable URL

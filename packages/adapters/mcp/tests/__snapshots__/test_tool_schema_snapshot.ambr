@@ -1437,9 +1437,10 @@
         with permanent=True once the notebook is worth keeping.
         
         Both are read-only apps by default: code hidden, interactive widgets live.
-        editable=True (scratch only) serves the marimo code editor instead. Anyone
-        holding that link can run arbitrary code on the notebook host, so pass it
-        only when the person you are sharing with asked to edit the notebook.
+        editable=True (scratch only, and only where the operator has turned it on)
+        serves the marimo code editor instead. Anyone holding that link can run
+        arbitrary code on the notebook host, so pass it only when the person you
+        are sharing with asked to edit the notebook.
         
         Returns {upload_url, slug, upload_expires_at}. upload_expires_at is when the
         URL stops working (~5 min); use it promptly. Pass slug to reuse a stable URL

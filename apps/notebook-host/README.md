@@ -50,27 +50,49 @@ cookie scoped to `/n/<slug>` and redirects to the bare path. A request without
 the token, including one from another notebook's cell, gets marimo's login
 redirect or a 401. The proxy forwards only what the browser sends (and, for
 WebSockets, only its `Cookie` and `Authorization` headers). A slug keeps its
-token across re-publishes, and a blog's token is persisted in `blogs.json`
-(0600, host-only) so its link survives restarts. Deleting or reaping a slug
-invalidates its link.
+token across re-publishes in the same mode; switching between read-only and
+editor mints a new one, and the editor is refused (409) on a published blog.
+A blog's token is persisted in `blogs.json` (0600, host-only) so its link
+survives restarts. Deleting or reaping a slug invalidates its link. marimo runs
+with `-q`, so its startup banner (which prints the tokenized URL) never reaches
+the slug's log, and the host's access log redacts `access_token=`. marimo is
+pinned to the version locked into the host's venv.
+
+**Leftover processes and uids.** Before a slug's uid is released, the host
+SIGKILLs every process running as that uid, not just marimo's process group,
+so a detached child a cell started can't outlive its notebook. The same
+happens before a slug is respawned. Uids are handed out round-robin, so a
+just-released uid is the last one reused.
+
+**Cross-notebook requests from the browser.** Every notebook is served from
+the same origin, so one notebook's JavaScript (an anywidget runs even in a
+read-only app) could send requests to another notebook with that notebook's
+cookie, if the viewer has opened both links. The proxy refuses HTTP requests
+whose `Sec-Fetch-Site` is `same-origin` unless the `Referer` is inside the
+same `/n/<slug>`, and WebSocket upgrades whose `Referer` names another slug.
+A WebSocket opened with no Referer can't be told apart and is let through.
 
 **Read-only by default.** A scratch notebook is served as a `marimo run` app
 (code hidden, widgets live) unless its upload token asked for the editor
-(`notebook_edit`, minted only for `create_notebook_upload_url(editable=True)`).
+(`notebook_edit`, minted only for `create_notebook_upload_url(editable=True)`,
+which the bot refuses unless the operator set `DAIMON_NOTEBOOK__ALLOW_EDITABLE`
+on the bot, not this host).
 An editor link runs arbitrary code as that notebook's jail uid, so treat it
 as a shell on this host. Blogs are always read-only.
 
 **Bearer auth on `/admin/*`** guards the admin API. The admin bearer is
 scrubbed from every subprocess's environment.
 
-**Known limits.** Notebooks share one host. Subprocesses run as separate
-uids, but there is no per-notebook pid or network namespace. An editor
-notebook can see other notebooks' process list and reach the host's network,
-and it can open any notebook whose link it learns. For client work, run one
-notebook host per client, or don't use editor links. Put the host behind TLS
-and set `allowed_origins` when it is publicly reachable. The token appears
-once in the host's access log (the first request's query string) before
-marimo's redirect strips it.
+**Known limits: one notebook host serves one client.** This is a hard
+requirement for client work, not a recommendation. Notebooks share one host
+and one browser origin. Subprocesses run as separate uids, but there is no
+per-notebook pid or network namespace, so an editor notebook can see other
+notebooks' process list and reach the host's network. In the browser, the
+same-origin checks above rely on fetch metadata that old browsers don't send,
+and a WebSocket opened without a Referer gets through them. Per-slug origins
+(a subdomain per notebook) would close that; they are not built. Put the host
+behind TLS, set `public_url_base` to its `https://` origin and set
+`allowed_origins` when it is publicly reachable.
 
 ## Configuration
 

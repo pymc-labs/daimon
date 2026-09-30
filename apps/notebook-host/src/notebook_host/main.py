@@ -189,7 +189,7 @@ async def _spawn_blog_process(state: AdminState, slug: str) -> bool:
     if not paths.notebook.exists():
         _log.warning("blog %r has no source at %s; skipping respawn", slug, paths.notebook)
         return False
-    access_token = state.access_token_for(slug)
+    access_token = state.access_token_for(slug, "run")
     record = load_blogs(state.settings.resolved_blogs_file).get(slug)
     if record is not None and record.access_token != access_token:
         # A blog registered before tokens existed: record the one it is about

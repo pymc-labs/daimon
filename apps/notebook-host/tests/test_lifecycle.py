@@ -138,14 +138,14 @@ def _make_fake_popen(alive: bool = True) -> subprocess.Popen[bytes]:
 def _marimo_subcommand(argv: list[str]) -> str:
     """Return the marimo subcommand (``edit``/``run``) from a captured argv.
 
-    The command is ``uv run --with marimo marimo <subcommand> ...`` — ``marimo``
+    The command is ``uv run --with marimo==<v> marimo -q <subcommand> ...`` — ``marimo``
     appears twice (the ``--with`` arg and the executable), so we anchor off the
     LAST occurrence; a forward ``index('marimo')`` would hit the ``--with`` arg.
     A bare ``argv.index('run')`` is also wrong here because ``uv run`` injects
     its own ``run``.
     """
     last_marimo = len(argv) - 1 - argv[::-1].index("marimo")
-    return argv[last_marimo + 1]
+    return next(arg for arg in argv[last_marimo + 1 :] if not arg.startswith("-"))
 
 
 def test_allocate_port_returns_first_free_port_when_no_processes_used() -> None:
@@ -1201,7 +1201,9 @@ def test_spawn_marimo_run_mode_with_sandbox_places_flag_after_run(
     lifecycle.spawn_marimo("myslug", paths, 8100, access_token="t", mode="run", sandbox=True)
 
     assert _marimo_subcommand(captured) == "run", "marimo subcommand must be `run`"
-    marimo_subcommand_idx = len(captured) - 1 - captured[::-1].index("marimo") + 1
+    marimo_subcommand_idx = captured.index(
+        "run", len(captured) - 1 - captured[::-1].index("marimo")
+    )
     assert captured[marimo_subcommand_idx + 1] == "--sandbox", (
         "--sandbox must immediately follow `run`"
     )
