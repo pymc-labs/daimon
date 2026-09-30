@@ -44,14 +44,14 @@ async def _record_1m_opus_tokens(
     tenant_id: uuid.UUID,
     event_id: str,
 ) -> None:
-    """1M input tokens at claude-opus-4-7 input rate ($15/M) = $15.00."""
+    """3M input tokens at claude-opus-4-7 input rate ($5/M) = $15.00."""
     await usage_events.record(
         session,
         tenant_id=tenant_id,
         platform_user_id=user_id,
         managed_session_id=f"s_{event_id}",
         model="claude-opus-4-7",
-        model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
+        model_usage=ma_model_usage(input_tokens=3_000_000, output_tokens=0),
         event_id=event_id,
     )
 
@@ -209,7 +209,7 @@ async def test_is_over_cap_period_boundary_utc_first_of_month(
                 platform_user_id="u1",
                 managed_session_id="s_old",
                 model="claude-opus-4-7",
-                input_tokens=1_000_000,
+                input_tokens=3_000_000,
                 output_tokens=0,
                 cache_creation_input_tokens=0,
                 cache_read_input_tokens=0,

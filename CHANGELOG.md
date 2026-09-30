@@ -223,6 +223,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Sonnet 5 and Opus 4.7 are metered at list price.** Sonnet 5 was charged at
+  $3/$15 per million tokens, the rise Anthropic announced and then withdrew;
+  its standard price stayed $2/$10. Opus 4.7 was charged Opus 4.1's $15/$75
+  instead of $5/$25. Every row in the pricing table is now the provider's list
+  price. Deployments that want a margin set `DAIMON_BILLING__MARKUP`, which
+  applies the same multiplier to every model and leaves the cost reports
+  showing provider cost.
+
 - Stop retrying Anthropic's monthly spend-cap response and show a clear model usage limit notice in Discord and Slack.
 
 - Avoid repeated Managed Agents event reads for unchanged sessions during the usage sweep, with hourly full passes.

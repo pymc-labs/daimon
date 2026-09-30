@@ -65,6 +65,19 @@ def test_model_pricing_includes_opus_sonnet_haiku() -> None:
         assert isinstance(rates, ModelRates), f"{key} must hold a ModelRates instance"
 
 
+def test_sonnet_5_and_opus_4_7_are_metered_at_list_price() -> None:
+    """Both rows once overcharged: Sonnet 5 at its withdrawn $3/$15, Opus 4.7 at Opus 4.1's $15/$75.
+
+    Reports read this table as provider cost, so margin belongs in the markup setting.
+    """
+    assert MODEL_PRICING["claude-sonnet-5"] == ModelRates(
+        input=2.0, output=10.0, cache_write=2.50, cache_read=0.20
+    ), "sonnet 5's $2/$10 launch price became its standard price"
+    assert MODEL_PRICING["claude-opus-4-7"] == ModelRates(
+        input=5.0, output=25.0, cache_write=6.25, cache_read=0.50
+    ), "opus 4.7 is priced like opus 4.8"
+
+
 def test_allowed_model_ids_holds_agent_models_only() -> None:
     assert "claude-opus-5-5" in ALLOWED_MODEL_IDS, "opus 5.5 must be selectable"
     assert "claude-sonnet-5-5" in ALLOWED_MODEL_IDS, "sonnet 5.5 must be selectable"
