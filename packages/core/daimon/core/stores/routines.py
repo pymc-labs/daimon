@@ -131,8 +131,9 @@ async def update_routine(
     channel_id: str | None = None,
 ) -> RoutineRow | None:
     """PATCH: `None` leaves a field alone. A destination is set as a pair, with
-    the `channel_id` it resolves to; `clear_destination=True` removes both (and
-    any pending delivery)."""
+    the `channel_id` it resolves to; `clear_destination=True` removes the pair
+    (and any pending delivery) but keeps `channel_id`, so the routine's spend
+    still counts toward the same budget."""
     values: dict[str, str | bool | datetime | None] = {}
     if clear_destination:
         if destination_kind is not None or destination_id is not None:
@@ -143,7 +144,6 @@ async def update_routine(
             delivery_status=None,
             delivery_payload=None,
             delivery_note=None,
-            channel_id=None,
         )
     elif destination_kind is not None or destination_id is not None:
         _check_destination(destination_kind, destination_id)

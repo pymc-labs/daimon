@@ -1149,7 +1149,8 @@ async def test_update_routine_sets_and_clears_a_destination(
 
     assert (set_.destination_kind, set_.destination_id, set_.channel_id) == ("channel", "55", "55")
     assert set_.trigger_message == "orig"
-    assert (cleared.destination_kind, cleared.destination_id, cleared.channel_id) == (None,) * 3
+    assert (cleared.destination_kind, cleared.destination_id) == (None, None), "destination gone"
+    assert cleared.channel_id == "55", "clearing the destination keeps the budget channel"
 
 
 @pytest.mark.parametrize(

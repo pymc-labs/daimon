@@ -5113,7 +5113,8 @@
         PATCH-update a routine. Only provided fields are changed.
         
         ``destination_kind`` + ``destination_id`` set where results go (see
-        ``create_routine``); ``clear_destination=true`` removes it.
+        ``create_routine``); ``clear_destination=true`` removes it, and the
+        routine's spend still counts toward the same channel's budget.
         
         ``catch_up_policy`` selects ``skip`` or one coalesced ``run-once`` after downtime.
         
