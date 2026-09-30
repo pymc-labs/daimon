@@ -4105,6 +4105,51 @@
         'type': 'object',
       }),
     }),
+    'set_channel_isolation': dict({
+      'description': '''
+        Isolate one channel, or end its isolation. For example, give #team-alpha an
+        agent nobody outside it can see or reach. Requires Manage Server (admin).
+        
+        An isolated channel needs an agent of its own: its default agent, answering
+        nowhere else and not built in. If it has none, pass ``fork_from`` (an agent
+        name, usually the one answering there now): that agent is copied under a name
+        taken from the channel and becomes the channel's default. Without it the call
+        is refused and says why. Repeating the call copies nothing again.
+        
+        While isolated, the channel's own agents can't be set as the default anywhere
+        else, don't appear in agent, skill or routine lists outside it, and can't be
+        handed tasks from elsewhere; inside it only they appear. Its messages are
+        readable only from inside it. ``channel_id`` MUST be the parent channel's id,
+        never a thread's.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'fork_from': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'isolated': dict({
+            'type': 'boolean',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'isolated',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'set_display_identity': dict({
       'description': '''
         Change how daimon appears in this Discord server: its display name,

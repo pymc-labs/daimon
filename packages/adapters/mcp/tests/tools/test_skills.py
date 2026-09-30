@@ -32,18 +32,23 @@ from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-def _runtime(client: AsyncAnthropic) -> McpRuntime:
+def _runtime(
+    client: AsyncAnthropic, *, session_factory: async_sessionmaker[AsyncSession] | None = None
+) -> McpRuntime:
     return McpRuntime(
-        session_factory=MagicMock(),
+        session_factory=session_factory if session_factory is not None else MagicMock(),
         client=client,  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
     )
 
 
-async def test_list_impl_returns_skill_info_list() -> None:
+async def test_list_impl_returns_skill_info_list(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -68,14 +73,16 @@ async def test_list_impl_returns_skill_info_list() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    result = await _list_impl(_runtime(client), auth)
+    result = await _list_impl(_runtime(client, session_factory=db_session_factory), auth)
     assert isinstance(result, list), "should return a list"
     assert len(result) == 1, "should return one skill"
     assert isinstance(result[0], SkillInfo), "should return SkillInfo items"
     assert result[0].name == "my-skill", "should return bare name stripped of tenant prefix"
 
 
-async def test_get_impl_returns_skill_detail_with_version_count() -> None:
+async def test_get_impl_returns_skill_detail_with_version_count(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -105,7 +112,7 @@ async def test_get_impl_returns_skill_detail_with_version_count() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    result = await _get_impl(_runtime(client), auth, "found")
+    result = await _get_impl(_runtime(client, session_factory=db_session_factory), auth, "found")
     assert isinstance(result, SkillDetail), "should return a SkillDetail"
     assert result.name == "found", "should return the bare skill name"
     assert result.version_count == 3, "should count all versions"
@@ -124,7 +131,9 @@ async def test_get_impl_raises_tool_error_not_found() -> None:
         await _get_impl(_runtime(client), auth, "nope")
 
 
-async def test_list_impl_excludes_foreign_tenant_skill_and_includes_own_and_builtins() -> None:
+async def test_list_impl_excludes_foreign_tenant_skill_and_includes_own_and_builtins(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """list_skills returns only the caller's namespace + anthropic built-ins."""
     tenant_a = uuid.uuid4()
     tenant_b = uuid.uuid4()
@@ -172,7 +181,7 @@ async def test_list_impl_excludes_foreign_tenant_skill_and_includes_own_and_buil
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_a, role=Role.ADMIN, is_admin=True)
-    result = await _list_impl(_runtime(client), auth)
+    result = await _list_impl(_runtime(client, session_factory=db_session_factory), auth)
 
     result_names = [r.name for r in result]
     assert "my-skill" in result_names, "own-namespace skill must appear with bare name"
@@ -185,7 +194,9 @@ async def test_list_impl_excludes_foreign_tenant_skill_and_includes_own_and_buil
     )
 
 
-async def test_list_impl_synced_shaped_skill_displays_as_agent_slash_name() -> None:
+async def test_list_impl_synced_shaped_skill_displays_as_agent_slash_name(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Synced skills are stored as `{agent}/{name}` body — strip returns `{agent}/{name}`."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -211,7 +222,7 @@ async def test_list_impl_synced_shaped_skill_displays_as_agent_slash_name() -> N
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    result = await _list_impl(_runtime(client), auth)
+    result = await _list_impl(_runtime(client, session_factory=db_session_factory), auth)
 
     assert len(result) == 1, "synced skill must appear in list"
     assert result[0].name == "daimon/tool-x", (
@@ -251,7 +262,9 @@ async def test_get_impl_foreign_tenant_bare_name_raises_not_found() -> None:
         await _get_impl(_runtime(client), auth, "their-skill")
 
 
-async def test_delete_impl_calls_delete_skill_and_versions() -> None:
+async def test_delete_impl_calls_delete_skill_and_versions(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -287,7 +300,7 @@ async def test_delete_impl_calls_delete_skill_and_versions() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    await _delete_impl(_runtime(client), auth, "doomed")
+    await _delete_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
     assert deleted == ["sk_d"], "should delete the correct skill ID"
 
@@ -643,6 +656,7 @@ async def test_register_skill_tools_uses_only_canonical_names() -> None:
 
 async def test_sync_impl_attaches_to_the_named_agent_and_preserves_its_existing_skills(
     tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """``agent_name`` closes the import/attach gap in one call.
 
@@ -705,7 +719,7 @@ async def test_sync_impl_attaches_to_the_named_agent_and_preserves_its_existing_
             account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
         )
         result = await _sync_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             url="https://github.com/org/repo",
             branch="main",
@@ -789,6 +803,7 @@ async def test_sync_impl_404_with_a_token_does_not_blame_credentials() -> None:
 
 async def test_sync_impl_refuses_attach_when_registry_skill_collides_with_scoped_mount(
     tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Attaching a registry skill to an agent owning a same-named scoped skill is refused.
 
@@ -877,7 +892,7 @@ async def test_sync_impl_refuses_attach_when_registry_skill_collides_with_scoped
             account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
         )
         result = await _sync_impl(
-            _runtime(client),
+            _runtime(client, session_factory=db_session_factory),
             auth,
             url="https://github.com/org/repo",
             branch="main",

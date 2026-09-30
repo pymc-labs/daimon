@@ -1,0 +1,256 @@
+"""Channel isolation through the MCP tools: the admin tool and every filtered surface.
+
+C (``ROOM``) is isolated and its default agent ``local`` answers nowhere else;
+``shared`` answers in another channel. A call is inside C when it executes as
+``local``.
+"""
+
+from __future__ import annotations
+
+import uuid
+from unittest.mock import MagicMock
+
+import httpx
+import pytest
+from anthropic import AsyncAnthropic
+from anthropic.types.beta import SkillListResponse
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools.agents import (
+    _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
+    _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.channel_isolation import (
+    _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.propagation import (
+    _clear_agent_default_impl,  # pyright: ignore[reportPrivateUsage]
+    _set_agent_default_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.routines import (
+    _create_routine_impl,  # pyright: ignore[reportPrivateUsage]
+    _list_routines_impl,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools.skills import _list_impl  # pyright: ignore[reportPrivateUsage]
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.defaults.metadata import tenant_scoped_display_title
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores import routines as routines_store
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
+from daimon.core.stores.domain import Role
+from daimon.core.stores.scoped_config_read import get_scope
+from daimon.core.stores.scoped_config_write import set_fields
+from daimon.testing import ma_agent
+from daimon.testing.crypto import make_fernet
+from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma import (
+    FakeMAState,
+    NotHandled,
+    build_fake_anthropic,
+    combine_handlers,
+    list_response,
+    make_fake_ma_handler,
+)
+from fastmcp.exceptions import ToolError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+ROOM = "111111111111111111"
+OTHER = "222222222222222222"
+NEW_ROOM = "333333333333333333"
+
+
+class _World:
+    def __init__(self, tenant_id: uuid.UUID, account_id: uuid.UUID, state: FakeMAState) -> None:
+        self.tenant_id, self.account_id, self.state = tenant_id, account_id, state
+
+    def auth(self, *, admin: bool = True, executing: str | None = None) -> AuthIdentity:
+        return AuthIdentity(
+            account_id=self.account_id,
+            tenant_id=self.tenant_id,
+            role=Role.ADMIN if admin else Role.USER,
+            platform="discord",
+            platform_user_id="444444444444444444",
+            is_admin=admin,
+            chat_agent_id=None
+            if executing is None
+            else derive_agent_uuid(tenant_id=self.tenant_id, ma_agent_id=executing),
+        )
+
+
+def _runtime(sessionmaker: async_sessionmaker[AsyncSession], client: AsyncAnthropic) -> McpRuntime:
+    settings = MagicMock()
+    settings.mcp.public_url = None
+    settings.github.oauth_scopes = ()
+    return McpRuntime(
+        session_factory=sessionmaker,
+        client=client,
+        settings=settings,  # type: ignore[arg-type]
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+        fernet=make_fernet(),
+    )
+
+
+async def _world(
+    sessionmaker: async_sessionmaker[AsyncSession], *, isolate: bool = True
+) -> tuple[_World, McpRuntime]:
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        for channel, agent in ((ROOM, "local"), (OTHER, "shared")):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel),
+                tenant_id=tenant.id,
+                agent_name=agent,
+                mode="agent",
+            )
+        if isolate:
+            await set_access_policy(
+                session,
+                tenant_id=tenant.id,
+                policy=TenantAccessPolicy(isolated_channel_ids=(ROOM,)),
+            )
+    state = FakeMAState()
+    for agent_id, name in (("agent_local", "local"), ("agent_shared", "shared")):
+        agent = ma_agent(id=agent_id, name=name, tenant_id=tenant.id)
+        state.agents[agent.id] = agent.model_dump(mode="json")
+    skills = [
+        SkillListResponse(
+            id=f"skill_{owner}",
+            type="custom",
+            display_title=tenant_scoped_display_title(tenant_id=tenant.id, name=f"{owner}/notes"),
+            latest_version="1",
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+            source="custom",
+        ).model_dump(mode="json")
+        for owner in ("local", "shared")
+    ]
+
+    def skills_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/skills":
+            return list_response(skills)
+        raise NotHandled
+
+    client = build_fake_anthropic(combine_handlers(skills_handler, make_fake_ma_handler(state)))
+    return _World(tenant.id, account.id, state), _runtime(sessionmaker, client)
+
+
+async def test_nothing_changes_until_a_channel_is_isolated(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker, isolate=False)
+    names = {a.name for a in await _list_agents_impl(runtime, world.auth(), None)}
+    assert names == {"local", "shared"}, "with nothing isolated every agent is listed"
+    inside = {
+        a.name for a in await _list_agents_impl(runtime, world.auth(executing="agent_local"), None)
+    }
+    assert inside == {"local", "shared"}, "and every caller sees the same"
+
+
+async def test_agents_and_skills_split_at_the_isolation_line(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    outside, inside = world.auth(), world.auth(executing="agent_local")
+
+    assert [a.name for a in await _list_agents_impl(runtime, outside, None)] == ["shared"]
+    assert [a.name for a in await _list_agents_impl(runtime, inside, None)] == ["local"]
+    with pytest.raises(ToolError, match="not found"):
+        await _get_agent_impl(runtime, outside, "local")
+    with pytest.raises(ToolError, match="not found"):
+        await _get_agent_impl(runtime, inside, "shared")
+    assert [s.name for s in await _list_impl(runtime, outside)] == ["shared/notes"]
+    assert [s.name for s in await _list_impl(runtime, inside)] == ["local/notes"]
+
+
+async def test_routing_writes_keep_local_agents_in_and_shared_ones_out(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    admin = world.auth()
+    with pytest.raises(ToolError, match="isolated"):
+        await _set_agent_default_impl(runtime, admin, "shared", ROOM, "agent_shared")
+    with pytest.raises(ToolError, match="isolated"):
+        await _clear_agent_default_impl(runtime, admin, ROOM)
+    with pytest.raises(ToolError, match="missing"):
+        await _set_agent_default_impl(runtime, admin, "local", OTHER, "agent_local")
+    async with committing_sessionmaker() as session:
+        scope = await get_scope(
+            session, scope=ChannelScopeRef(tenant_id=world.tenant_id, channel_id=ROOM)
+        )
+    assert scope is not None and scope.agent_name == "local", "a refusal writes nothing"
+
+
+async def test_routines_of_an_isolated_channel_show_only_inside_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        for agent_id, name, channel in (
+            ("agent_local", "local", None),
+            ("agent_shared", "shared", ROOM),
+            ("agent_shared", "shared", OTHER),
+        ):
+            await routines_store.create_routine(
+                session,
+                tenant_id=world.tenant_id,
+                created_by_user_id="444444444444444444",
+                agent_id=agent_id,
+                agent_name=name,
+                cron_expr="0 * * * *",
+                timezone_="UTC",
+                trigger_message="hi",
+                enabled=True,
+                next_fire_at=None,
+                channel_id=channel,
+            )
+
+    outside = await _list_routines_impl(runtime, world.auth())
+    assert [(r.agent_name, r.channel_id) for r in outside] == [("shared", OTHER)], (
+        "outside, neither the local agent's routine nor one posting into the room shows"
+    )
+    inside = await _list_routines_impl(runtime, world.auth(executing="agent_local"))
+    assert [(r.agent_name, r.channel_id) for r in inside] == [("local", None)]
+    with pytest.raises(ToolError, match="no agent named"):
+        await _create_routine_impl(
+            runtime,
+            world.auth(),
+            agent_name="local",
+            cron_expr="0 * * * *",
+            timezone="UTC",
+            trigger_message="hi",
+        )
+
+
+async def test_set_channel_isolation_refuses_or_forks_and_ends(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker, isolate=False)
+    with pytest.raises(ToolError, match="admin"):
+        await _set_channel_isolation_impl(
+            runtime, world.auth(admin=False), channel_id=ROOM, isolated=True
+        )
+    with pytest.raises(ToolError, match="no agent of its own"):
+        await _set_channel_isolation_impl(runtime, world.auth(), channel_id=NEW_ROOM, isolated=True)
+
+    kept = await _set_channel_isolation_impl(runtime, world.auth(), channel_id=ROOM, isolated=True)
+    assert (kept.agent_name, kept.forked_from, kept.changed) == ("local", None, True)
+
+    forked = await _set_channel_isolation_impl(
+        runtime, world.auth(), channel_id=NEW_ROOM, isolated=True, fork_from="shared"
+    )
+    assert forked.forked_from == "shared" and forked.agent_name == "channel-333333", (
+        "without a readable channel name the copy is named from the id"
+    )
+    names = {str(agent["name"]) for agent in world.state.agents.values()}
+    assert "channel-333333" in names, "the copy exists"
+    async with committing_sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=world.tenant_id)
+    assert set(policy.isolated_channel_ids) == {ROOM, NEW_ROOM}
+
+    ended = await _set_channel_isolation_impl(
+        runtime, world.auth(), channel_id=ROOM, isolated=False
+    )
+    assert ended.changed and not ended.isolated, "ending isolation reports the change"

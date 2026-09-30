@@ -378,6 +378,28 @@ def test_read_policy_allows_a_sealed_channel_only_from_inside_it(
     assert read_policy.allows(channel_id, parent_channel_id) is expected
 
 
+@pytest.mark.parametrize(
+    ("channel_id", "parent_channel_id", "inside", "expected"),
+    [
+        ("room", None, None, False),
+        ("thread", "room", None, False),
+        ("room", None, "room", True),
+        ("thread", "room", "room", True),
+        ("room", None, "elsewhere", False),
+        ("open", None, None, True),
+    ],
+    ids=["outside", "thread-outside", "own-agent", "own-agent-thread", "other", "open"],
+)
+def test_read_policy_allows_an_isolated_channel_only_to_its_own_agents(
+    channel_id: str, parent_channel_id: str | None, inside: str | None, expected: bool
+) -> None:
+    read_policy = ChannelReadPolicy(
+        policy=TenantAccessPolicy(isolated_channel_ids=("room",)), inside_channel_id=inside
+    )
+    assert read_policy.allows(channel_id, parent_channel_id) is expected, "isolation gates reads"
+    assert read_policy.restricts_any, "an isolated channel makes counts inexact"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "chat_agent", ["agent_other", None], ids=["foreign-responder", "unbound-token"]

@@ -19,12 +19,15 @@ from daimon.adapters.mcp.tools.task_continuity import (
     _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
     _start_fresh_task_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
-from daimon.core.scope import DeploymentDefault
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.session_snapshot import SessionSnapshot
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.task_continuations import list_pending_continuations
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
@@ -922,3 +925,61 @@ async def test_handoff_with_an_answer_and_no_live_session_still_switches_the_res
     assert binding is not None and binding.kind == "handoff", (
         "the responder switch is the part that must not depend on a session existing"
     )
+
+
+@pytest.mark.parametrize(
+    ("parent", "reachable"),
+    [("C_ROOM", False), ("C_PARENT", True)],
+    ids=["inside-isolated", "outside"],
+)
+async def test_handoff_stays_on_its_side_of_an_isolated_channel(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    parent: str,
+    reachable: bool,
+) -> None:
+    """research-bot is shared (the deployment default), so a thread under the
+    isolated C_ROOM can't hand to it, while one elsewhere still can."""
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="C_ROOM"),
+        tenant_id=tenant.id,
+        agent_name="room-bot",
+        mode="agent",
+    )
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(isolated_channel_ids=("C_ROOM",))
+    )
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
+    )
+
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id=parent,
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="room-bot",
+        role=Role.USER,
+    ) as origin:
+        if reachable:
+            result = await _hand_off_task_impl(
+                runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+            )
+            assert result.destination_name == _DESTINATION_NAME, "outside, shared agents stay"
+        else:
+            with pytest.raises(ToolError, match="not in this workspace"):
+                await _hand_off_task_impl(
+                    runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+                )

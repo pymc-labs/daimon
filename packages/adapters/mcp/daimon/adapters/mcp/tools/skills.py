@@ -23,6 +23,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import (
@@ -414,6 +415,7 @@ async def _list_impl(
     auth: AuthIdentity,
 ) -> list[SkillInfo]:
     rows, _truncated = await list_skills_lenient(runtime.client)
+    caller = await load_caller_isolation(runtime, auth)
     result: list[SkillInfo] = []
     for row in rows:
         if row.source == "anthropic":
@@ -424,7 +426,7 @@ async def _list_impl(
             bare = strip_tenant_prefix(
                 tenant_id=auth.tenant_id, display_title=row.display_title or ""
             )
-            if bare is not None:
+            if bare is not None and not caller.hides_skill(bare):
                 # Own-namespace skill: display the bare name.
                 result.append(SkillInfo.from_ma(row, display_name=bare))
             # Foreign-tenant skills are excluded from the result.
@@ -438,7 +440,7 @@ async def _get_impl(
 ) -> SkillDetail:
     canonical = tenant_scoped_display_title(tenant_id=auth.tenant_id, name=name)
     skill = await find_skill_by_display_title(runtime.client, canonical, on_truncation="degrade")
-    if skill is None:
+    if skill is None or (await load_caller_isolation(runtime, auth)).hides_skill(name):
         raise ToolError(f"skill '{name}' not found in this server's skills")
     version_count = 0
     async for _ in runtime.client.beta.skills.versions.list(skill.id):
@@ -459,7 +461,7 @@ async def _delete_impl(
     _require_admin(auth)
     canonical = tenant_scoped_display_title(tenant_id=auth.tenant_id, name=name)
     skill = await find_skill_by_display_title(runtime.client, canonical, on_truncation="degrade")
-    if skill is None:
+    if skill is None or (await load_caller_isolation(runtime, auth)).hides_skill(name):
         raise ToolError(f"skill '{name}' not found in this server's skills")
     await delete_skill_and_versions(runtime.client, skill.id)
 

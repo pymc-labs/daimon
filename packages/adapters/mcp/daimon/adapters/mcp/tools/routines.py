@@ -20,6 +20,7 @@ import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._isolation import CallerIsolation, load_caller_isolation
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -256,6 +257,29 @@ async def _check_destination(
     return parent_channel_id or channel_id
 
 
+def _sees_routine(caller: CallerIsolation, row: RoutineRow) -> bool:
+    """An isolated channel's routines, and its own agents', show only inside it."""
+    place = caller.isolation.isolated_channel(row.channel_id)
+    return caller.sees(row.agent_name) and place in (None, caller.inside_channel_id)
+
+
+def _require_placement(caller: CallerIsolation, *, agent_name: str, channel_id: str | None) -> None:
+    """Refuse an agent the caller can't see, or a destination across an isolation line."""
+    if not caller.sees(agent_name):
+        raise ToolError(f"no agent named {agent_name!r} found for this tenant")
+    owner = caller.isolation.channel_of(agent_name)
+    if channel_id is None or caller.isolation.isolated_channel(channel_id) == owner:
+        return
+    if owner is not None:
+        raise ToolError(
+            f"{agent_name} belongs to an isolated channel, so its routines post only there. "
+            "Nothing was saved."
+        )
+    raise ToolError(
+        "That channel is isolated, so only its own agents post there. Nothing was saved."
+    )
+
+
 async def _create_routine_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -276,6 +300,8 @@ async def _create_routine_impl(
         runtime, auth, kind=destination_kind, destination_id=destination_id
     )
 
+    caller = await load_caller_isolation(runtime, auth)
+    _require_placement(caller, agent_name=agent_name, channel_id=budget_channel_id)
     match = await find_agent_by_daimon_tag(
         runtime.client,
         tenant_id=tenant_id,
@@ -309,8 +335,10 @@ async def _list_routines_impl(
     auth: AuthIdentity,
 ) -> list[RoutineRow]:
     tenant_id = auth.tenant_id
+    caller = await load_caller_isolation(runtime, auth)
     async with runtime.session_factory() as session:
-        return await routines_store.list_routines_for_tenant(session, tenant_id=tenant_id)
+        rows = await routines_store.list_routines_for_tenant(session, tenant_id=tenant_id)
+    return [row for row in rows if _sees_routine(caller, row)]
 
 
 async def _get_routine_impl(
@@ -322,7 +350,7 @@ async def _get_routine_impl(
     tenant_id = auth.tenant_id
     async with runtime.session_factory() as session:
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
-    if row is None:
+    if row is None or not _sees_routine(await load_caller_isolation(runtime, auth), row):
         raise ToolError("routine not found")
     return row
 
@@ -348,11 +376,18 @@ async def _update_routine_impl(
     budget_channel_id = await _check_destination(
         runtime, auth, kind=destination_kind, destination_id=destination_id
     )
+    caller = await load_caller_isolation(runtime, auth)
     async with runtime.session_factory() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
-        if row is None:
+        if row is None or not _sees_routine(caller, row):
             raise ToolError("routine not found")
         _require_routine_owner(auth, row)
+        channel_id = budget_channel_id if destination_id is not None else row.channel_id
+        _require_placement(
+            caller,
+            agent_name=agent_name or row.agent_name,
+            channel_id=None if clear_destination else channel_id,
+        )
 
         # Recompute next_fire_at only when cron or timezone is being changed.
         next_fire_at: datetime | None = None
@@ -404,9 +439,10 @@ async def _delete_routine_impl(
     routine_id: UUID,
 ) -> DeleteResult:
     tenant_id = auth.tenant_id
+    caller = await load_caller_isolation(runtime, auth)
     async with runtime.session_factory() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
-        if row is None:
+        if row is None or not _sees_routine(caller, row):
             raise ToolError("routine not found")
         _require_routine_owner(auth, row)
         deleted = await routines_store.delete_routine(session, routine_id, tenant_id=tenant_id)

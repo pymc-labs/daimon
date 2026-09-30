@@ -10,7 +10,9 @@ Reads go through `ChannelReadPolicy`, which the channel dispatcher
 (`tools/channels.py`) loads once per call and hands to the platform impl. A
 sealed channel -- or a thread under one -- is readable only when the call
 names the origin of a turn inside that same channel; with no origin, or a
-foreign one, it is refused and its search hits are withheld.
+foreign one, it is refused and its search hits are withheld. An isolated
+channel reads the same way, except that its own agents are inside it
+wherever they run (`tools/_isolation.py`).
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from datetime import UTC, datetime
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
@@ -73,6 +76,12 @@ async def require_channel_writable(
         raise ToolError(_PROTECTED_MSG)
 
 
+_ISOLATED_MSG = (
+    "this channel is isolated: only a conversation inside it, or its own agents, can read "
+    "it. Tell the caller. Do not retry."
+)
+
+
 class SealedChannelError(ToolError):
     """A read of a sealed channel from outside it. Not an access problem the
     caller can fix by connecting an account, so no connect hint follows it."""
@@ -84,8 +93,15 @@ class ChannelReadPolicy:
 
     policy: TenantAccessPolicy
     origin_channel_ids: frozenset[str] = frozenset()
+    inside_channel_id: str | None = None
+    """The isolated channel whose own agent executes the call, if any."""
 
-    def allows(self, channel_id: str, parent_channel_id: str | None = None) -> bool:
+    @property
+    def restricts_any(self) -> bool:
+        """Whether some channel is sealed or isolated, so counts may include withheld hits."""
+        return bool(self.policy.sealed_channel_ids or self.policy.isolated_channel_ids)
+
+    def _sealed_allows(self, channel_id: str, parent_channel_id: str | None) -> bool:
         sealed = self.policy.sealed_channel_ids
         if channel_id in sealed:
             return channel_id in self.origin_channel_ids
@@ -93,12 +109,25 @@ class ChannelReadPolicy:
             return parent_channel_id in self.origin_channel_ids
         return True
 
+    def _isolated_allows(self, channel_id: str, parent_channel_id: str | None) -> bool:
+        for candidate in (channel_id, parent_channel_id):
+            if candidate is not None and candidate in self.policy.isolated_channel_ids:
+                return candidate == self.inside_channel_id or candidate in self.origin_channel_ids
+        return True
+
+    def allows(self, channel_id: str, parent_channel_id: str | None = None) -> bool:
+        return self._sealed_allows(channel_id, parent_channel_id) and self._isolated_allows(
+            channel_id, parent_channel_id
+        )
+
     def require(self, channel_id: str, parent_channel_id: str | None = None) -> None:
-        """Raise ToolError for a sealed target outside the calling turn.
+        """Raise ToolError for a sealed or isolated target outside the calling turn.
 
         Call after the platform's caller-permission check."""
-        if not self.allows(channel_id, parent_channel_id):
+        if not self._sealed_allows(channel_id, parent_channel_id):
             raise SealedChannelError(_SEALED_MSG)
+        if not self._isolated_allows(channel_id, parent_channel_id):
+            raise SealedChannelError(_ISOLATED_MSG)
 
 
 # What an impl reads with when no dispatcher loaded a policy (direct test calls).
@@ -117,10 +146,13 @@ async def load_read_policy(
     expired, another account's or another responder's counts as none too.
     """
     policy = await load_channel_policy(runtime, auth)
-    outside = ChannelReadPolicy(policy=policy)
+    inside_channel_id = None
+    if policy.isolated_channel_ids:
+        inside_channel_id = (await load_caller_isolation(runtime, auth)).inside_channel_id
+    outside = ChannelReadPolicy(policy=policy, inside_channel_id=inside_channel_id)
     executing_agent = auth.agent_id or auth.chat_agent_id
     if (
-        not policy.sealed_channel_ids
+        not (policy.sealed_channel_ids or policy.isolated_channel_ids)
         or not origin_context_id
         or auth.platform is None
         or executing_agent is None
@@ -147,4 +179,6 @@ async def load_read_policy(
     if auth.platform == "slack":
         # A Slack thread is sealed by its channel_id:thread_ts form.
         inside.add(f"{origin.parent_channel_id}:{origin.thread_id}")
-    return ChannelReadPolicy(policy=policy, origin_channel_ids=frozenset(inside))
+    return ChannelReadPolicy(
+        policy=policy, origin_channel_ids=frozenset(inside), inside_channel_id=inside_channel_id
+    )

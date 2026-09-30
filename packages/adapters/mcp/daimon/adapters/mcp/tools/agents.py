@@ -31,6 +31,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
@@ -325,6 +326,8 @@ async def _list_agents_impl(
 ) -> list[AgentInfo]:
     del page
     rows = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    caller = await load_caller_isolation(runtime, auth, agents=rows)
+    rows = [row for row in rows if caller.sees_agent(row)]
     skill_titles, _truncated = await resolve_custom_skill_titles(
         runtime.client, agents=rows, tenant_id=auth.tenant_id
     )
@@ -573,8 +576,12 @@ async def _update_agent_impl(
     resolved_skills: list[BetaManagedAgentsSkillParams] | None = None
     if skills is not None:
         try:
+            caller = await load_caller_isolation(runtime, auth)
             resolved_skills = await resolve_skill_names(
-                runtime.client, skills, tenant_id=auth.tenant_id
+                runtime.client,
+                skills,
+                tenant_id=auth.tenant_id,
+                is_owner_hidden=lambda owner: not caller.sees(owner),
             )
         except DefaultsError as exc:
             raise ToolError(str(exc)) from exc

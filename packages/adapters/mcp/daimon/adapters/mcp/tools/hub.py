@@ -36,6 +36,7 @@ from daimon.adapters.mcp.hub.identity import (
 )
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._isolation import agent_name_of, load_isolation
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import session_belongs_to_caller
 from daimon.adapters.mcp.tools.agent_chat import (
@@ -93,10 +94,29 @@ def _summary(tenant: HubTenant, hub: HubIdentity, agent: BetaManagedAgentsAgent)
 async def _agents_by_tenant(
     runtime: McpRuntime, hub: HubIdentity
 ) -> list[tuple[HubTenant, list[BetaManagedAgentsAgent]]]:
+    """Each tenant's agents, less those an isolated channel keeps to itself.
+
+    A hub call runs outside every channel, so an isolated channel's own agents
+    are neither listed nor resolvable here.
+    """
     by_id = await list_agents_by_tenants(
         runtime.client, tenant_ids=[t.tenant_id for t in hub.tenants]
     )
-    return [(tenant, by_id[tenant.tenant_id]) for tenant in hub.tenants]
+    out: list[tuple[HubTenant, list[BetaManagedAgentsAgent]]] = []
+    for tenant in hub.tenants:
+        isolation = await load_isolation(runtime, tenant.tenant_id)
+        agents = by_id[tenant.tenant_id]
+        out.append(
+            (
+                tenant,
+                [
+                    a
+                    for a in agents
+                    if isolation.is_visible(agent_name_of(a), inside_channel_id=None)
+                ],
+            )
+        )
+    return out
 
 
 async def _list_daimons_impl(runtime: McpRuntime, hub: HubIdentity) -> list[DaimonSummary]:

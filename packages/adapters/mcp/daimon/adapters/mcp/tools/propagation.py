@@ -21,11 +21,13 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._isolation import load_isolation, refuse, require_bindable
 from daimon.adapters.mcp.tools.reachability import (
     require_bindable_by_channel_admin,
     require_channel_admin,
 )
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.routing_facts import (
     build_clear_default_note,
@@ -108,6 +110,13 @@ async def _set_agent_default_impl(
             is_daimon_managed=agent is not None
             and agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
         )
+    isolation = await load_isolation(runtime, auth.tenant_id)
+    if isolation.is_active:
+        if agent is None:
+            agent = await find_agent_by_daimon_tag(
+                runtime.client, tenant_id=auth.tenant_id, name=agent_name
+            )
+        require_bindable(isolation, agent_name, agent=agent, channel_id=channel_id)
 
     tenant_id: uuid.UUID = auth.tenant_id
     if channel_id is not None:
@@ -145,6 +154,9 @@ async def _clear_agent_default_impl(
     channel_id: str | None,
 ) -> ClearDefaultResult:
     await _require_scope_admin(runtime, auth, channel_id)
+    if channel_id is not None:
+        isolation = await load_isolation(runtime, auth.tenant_id)
+        refuse(isolation.clear_refusal(channel_id=channel_id), agent_name=None)
 
     tenant_id: uuid.UUID = auth.tenant_id
     if channel_id is not None:

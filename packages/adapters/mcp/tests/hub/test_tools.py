@@ -15,10 +15,14 @@ from daimon.adapters.mcp.tools.hub import (  # pyright: ignore[reportPrivateUsag
     _list_daimons_impl,
     _resolve_daimon,
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.loader import DeploymentDefault
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.scope import ChannelScopeRef
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_platform_principal, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
@@ -106,6 +110,34 @@ async def test_list_daimons_spans_every_tenant_and_disambiguates_same_names(
         str(derive_agent_uuid(tenant_id=t2.tenant_id, ma_agent_id="ag_2")),
     }, f"ids must be the derived per-agent UUIDs, got {[d.id for d in daimons]!r}"
     assert daimons[0].platform == "discord" and daimons[0].role_summary.startswith("Answers ops")
+
+
+async def test_hub_never_lists_or_resolves_an_isolated_channels_own_agent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    hub = await _two_tenant_hub(db_session)
+    t1 = hub.tenants[0]
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=t1.tenant_id, channel_id="room"),
+        tenant_id=t1.tenant_id,
+        agent_name="local",
+        mode="agent",
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=t1.tenant_id,
+        policy=TenantAccessPolicy(isolated_channel_ids=("room",)),
+    )
+    await db_session.commit()
+    router = _agents_router({t1.tenant_id: [("ag_1", "helper"), ("ag_2", "local")]})
+    runtime = _runtime(build_fake_anthropic(router.dispatch), db_session_factory)
+
+    daimons = await _list_daimons_impl(runtime, hub)
+    assert [d.name for d in daimons] == ["helper"], "the isolated channel's agent stays hidden"
+    hidden = str(derive_agent_uuid(tenant_id=t1.tenant_id, ma_agent_id="ag_2"))
+    with pytest.raises(ToolError, match="not found"):
+        await _resolve_daimon(runtime, hub, hidden)
 
 
 async def test_list_daimons_pages_the_org_once_however_many_tenants_the_caller_has(

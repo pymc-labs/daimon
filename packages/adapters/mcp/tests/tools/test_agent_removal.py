@@ -193,7 +193,9 @@ async def test_detach_mcp_server_impl_removes_server_and_matching_toolset(
     assert ("agent_toolset_20260401", None) in tool_types_and_names, "other tools must be preserved"
 
 
-async def test_detach_mcp_server_impl_raises_when_not_attached_and_issues_no_update() -> None:
+async def test_detach_mcp_server_impl_raises_when_not_attached_and_issues_no_update(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     _captured, request_log, client = _spec_agent_router(
@@ -205,7 +207,12 @@ async def test_detach_mcp_server_impl_raises_when_not_attached_and_issues_no_upd
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="other"):
-        await _detach_mcp_server_impl(_runtime(client), auth, agent_name="demo", server_name="ctx7")
+        await _detach_mcp_server_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            agent_name="demo",
+            server_name="ctx7",
+        )
     assert "POST /v1/agents/{id}" not in request_log, (
         "a typo'd server name must not issue an update"
     )
@@ -435,7 +442,9 @@ async def test_detach_mcp_server_impl_retries_once_on_version_conflict(
 # ---------------------------------------------------------------------------
 
 
-async def test_remove_skill_impl_detaches_by_raw_skill_id_preserving_others() -> None:
+async def test_remove_skill_impl_detaches_by_raw_skill_id_preserving_others(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     captured, _log, client = _spec_agent_router(
@@ -449,14 +458,21 @@ async def test_remove_skill_impl_detaches_by_raw_skill_id_preserving_others() ->
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    result = await _remove_skill_impl(_runtime(client), auth, agent_name="demo", skill_id="skill_x")
+    result = await _remove_skill_impl(
+        _runtime(client, session_factory=db_session_factory),
+        auth,
+        agent_name="demo",
+        skill_id="skill_x",
+    )
 
     assert isinstance(result, AgentInfo)
     assert captured.get("skills") == [{"skill_id": "skill_y", "type": "anthropic"}]
     assert "tools" not in captured, "remove_skill must not touch the base tool set"
 
 
-async def test_remove_skill_impl_detaches_by_resolved_display_name() -> None:
+async def test_remove_skill_impl_detaches_by_resolved_display_name(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     metadata = {
@@ -523,13 +539,18 @@ async def test_remove_skill_impl_detaches_by_resolved_display_name() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     result = await _remove_skill_impl(
-        _runtime(client), auth, agent_name="demo", skill_id="build-models"
+        _runtime(client, session_factory=db_session_factory),
+        auth,
+        agent_name="demo",
+        skill_id="build-models",
     )
     assert isinstance(result, AgentInfo)
     assert captured.get("skills") == [], "resolved display name must match and detach the skill"
 
 
-async def test_remove_skill_impl_raises_when_nothing_matches_listing_attached() -> None:
+async def test_remove_skill_impl_raises_when_nothing_matches_listing_attached(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     _captured, _log, client = _spec_agent_router(
@@ -542,11 +563,16 @@ async def test_remove_skill_impl_raises_when_nothing_matches_listing_attached() 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="skill_x"):
         await _remove_skill_impl(
-            _runtime(client), auth, agent_name="demo", skill_id="does-not-exist"
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            agent_name="demo",
+            skill_id="does-not-exist",
         )
 
 
-async def test_remove_skill_impl_rejects_system_agent_no_daimon_account() -> None:
+async def test_remove_skill_impl_rejects_system_agent_no_daimon_account(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     _captured, _log, client = _spec_agent_router(
         tenant_id=tenant_id,
@@ -559,7 +585,12 @@ async def test_remove_skill_impl_rejects_system_agent_no_daimon_account() -> Non
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
     with pytest.raises(ToolError, match="system agent"):
-        await _remove_skill_impl(_runtime(client), auth, agent_name="daimon", skill_id="skill_x")
+        await _remove_skill_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            agent_name="daimon",
+            skill_id="skill_x",
+        )
 
 
 async def test_remove_skill_impl_rejects_non_admin_when_agent_reachable(

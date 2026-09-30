@@ -21,6 +21,7 @@ from typing import Annotated, Literal, cast
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.continuity.continuation import (
     MAX_REQUESTED_WORK,
@@ -117,15 +118,14 @@ async def _hand_off_task_impl(
     # `require_turn_origin` already refused any platform but these two.
     platform = cast(Literal["discord", "slack"], origin.platform)
 
-    destination = next(
-        (
-            agent
-            for agent in await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
-            if agent.id == agent_id
-        ),
-        None,
+    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    # A thread under an isolated channel hands off only to that channel's own
+    # agents; anywhere else, never to them.
+    caller = await load_caller_isolation(
+        runtime, auth, agents=agents, location_channel_id=origin.parent_channel_id
     )
-    if destination is None:
+    destination = next((agent for agent in agents if agent.id == agent_id), None)
+    if destination is None or not caller.sees_agent(destination):
         raise ToolError(
             "That agent is not in this workspace, or it was recreated and has a new id. "
             "Look it up with list_agents and pass the id it reports now. Nothing was changed."
