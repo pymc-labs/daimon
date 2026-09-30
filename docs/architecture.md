@@ -189,6 +189,7 @@ and skips the policy, as it skips billing. Ids are the platform's own (Discord s
 | `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord and Slack write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
 | `sealed_channel_ids` | nothing is sealed | the channel read tools (`read_channel`, `read_thread`, `get_message`, `list_threads`, `search_messages`) via `ChannelReadPolicy`, which the dispatcher in `tools/channels.py` loads per call; `admit()` also sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
+| `agent_channel_pins` | every agent runs wherever the cascade sends it | `admit()` after the agent is retrieved (every turn path: mention, follow-up, wizard submit, continuation, handoff thread, DM), the MCP and hub turn tools (`_admit` in `tools/_ctx.py`: `start_turn`, `ask`, `continue_turn`, new or resumed), `hand_off_task` via `decide_handoff`, `fork_agent` (a pinned agent can't be copied), and routines at save (`_check_agent_pin`) and at every fire (scheduler) |
 
 Protection covers threads under a protected channel and, on Discord, channels
 in a protected category; it applies to admins too, and runs after the caller's
@@ -220,11 +221,57 @@ daimon tenants access-policy get discord GUILD_ID [--json]
 daimon tenants access-policy set discord GUILD_ID --invoker USER_ID --invoker USER_ID \
     --protected-channel CHANNEL_ID --protected-category CATEGORY_ID \
     --sealed-channel CHANNEL_ID [--dm-memory-read-only]
+daimon tenants access-policy set discord GUILD_ID \
+    --add-pin-agent AGENT=CHANNEL_ID --add-pin-agent AGENT=CHANNEL_ID
+daimon tenants access-policy set discord GUILD_ID --remove-pin-agent AGENT[=CHANNEL_ID]
+daimon tenants access-policy set discord GUILD_ID \
+    --pin-agent AGENT=CHANNEL_ID [--replace-pins]   # replace every pin
 daimon tenants access-policy set discord GUILD_ID --clear   # back to open
 ```
 
+A pinned agent runs only in its listed channels and the threads under them.
+The pin is keyed by agent name and checked against both the cascade's name and
+the agent's own metadata name, so a thread handed to the agent by id is
+covered. A turn anywhere else is refused with `agent_pinned_elsewhere`, a DM
+included, and admins get no exemption: the pin exists because of what the
+agent's credentials reach, not who is asking. `hand_off_task` refuses to bring
+a pinned agent into another channel before anything is written. A pinned
+agent's routine must post straight into a pinned channel (a channel
+destination, not a thread or none), because the scheduler cannot resolve a
+Discord thread's parent at fire time; it is refused at save and skipped at
+fire otherwise.
+
+`fork_agent` is admin-only and refuses a pinned source: a copy would be the
+agent's prompt, skills and connectors under a name with no pin. A fork also
+starts with no credentials (no GitHub access, repo binding or proof, and no
+agent-wide MCP token), so copying an agent never hands out another project's
+access; MCP servers that only work with a stored token are left off the copy.
+
+An MCP or hub turn (`start_turn`, `ask`, `continue_turn`, on a new session or
+a resumed one) runs in no channel, so it is outside every pin, as a DM is: the
+policy is read on every call, and a pinned agent is refused before any session
+is created or message sent. Only the operator's internal tokens, which carry
+no platform user, bypass it.
+
+Pins are not the only boundary between projects in one workspace. Whatever an
+agent can reach (its repo, keys, connectors and memory) is also guarded where
+a member could otherwise borrow it:
+
+- `hand_off_task` lets a member hand a thread only to the agent the channel
+  itself answers with; any other destination needs an admin.
+- `create_routine` and `update_routine` let a member schedule only the agent
+  they are talking to, or the agent the destination channel answers with.
+  Routines are listed and read only by their creator and admins.
+- `fork_agent` is admin-only and forks start credential-less (above).
+
 Each flag given replaces that whole field (repeat it for several ids);
 fields not given keep their stored value, including concurrent CLI edits.
+Pins are edited in place instead: `--add-pin-agent` adds channels to one
+agent's pin and `--remove-pin-agent` drops one channel or the whole pin, and
+every other agent's pin is kept, so onboarding a second client never unpins
+the first. Removing a pin that isn't stored is refused. `--pin-agent` still
+replaces the whole map, but refuses to drop an agent it doesn't name unless
+`--replace-pins` is given. Every `set` prints the resulting policy.
 Edits and clears lock the tenant row for their transaction, even when no policy
 row exists yet. Every supplied id is validated before writing: Discord ids are
 15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with
@@ -348,6 +395,10 @@ lifecycle hook carries it -- the reason rides on the state every lifecycle
 already receives -- so the CLI, headless routines and any new adapter keep
 their existing failure path, and `TerminationNotice.plain_text()` is the
 fallback wording for a surface without markup.
+Anthropic's monthly spend-cap response stops SDK retries at the HTTP transport.
+If Anthropic reports that cap or a user-set spend limit, Discord and Slack
+show a model usage limit notice and log `anthropic.spend_limit_reached` with
+the tenant and limit type.
 
 ### Outside text is data
 

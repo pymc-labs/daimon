@@ -88,11 +88,14 @@ four token counts by those rates and returns USD. The table is split in two:
 configured with (`ALLOWED_MODEL_IDS` in
 `packages/core/daimon/core/constants.py` is literally its keys), while
 `TOOL_MODEL_PRICING` covers models pinned by individual MCP tools and never
-selectable by an agent.
+selectable by an agent. Every agent-model row is the provider's list price.
+Put any margin in `DAIMON_BILLING__MARKUP` (below), not in the table, because
+reports read the table as provider cost.
 
 Opus 5.5 is priced at $4 input, $20 output, $5 five-minute cache write, and
-$0.20 cache read per million tokens. The four-field ledger cannot distinguish
-one-hour cache writes, which Anthropic prices at $8 per million tokens; it
+$0.20 cache read per million tokens; Sonnet 5.5 at $2, $10, $2.50 and $0.20.
+The four-field ledger cannot distinguish one-hour cache writes, which
+Anthropic prices at $8 (Opus 5.5) and $4 (Sonnet 5.5) per million tokens; it
 currently treats all cache writes as five-minute writes.
 
 Two consequences worth knowing before you add a model:
@@ -381,10 +384,13 @@ after their Stripe events.
 **The sweep.** An MCP `start_turn` creates a session and sends a message but
 never drives the stream, so the inline hook never fires for it.
 `packages/core/daimon/core/usage_sweep.py` closes that hole: each scheduler
-tick it walks Managed Agents sessions, skips any without a `daimon_tenant`
+tick it lists Managed Agents sessions, skips any without a `daimon_tenant`
 stamp, belonging to a tenant this deployment does not own, or stamped
 `daimon_billing_exempt`, and replays the rest's `span.model_request_end`
-events through the same recorder. It is safe to run
+events through the same recorder. After a successful pass, it skips event
+reads for sessions last updated before that pass started minus 15 minutes.
+The watermark stays in scheduler memory; startup and hourly passes read all
+stamped sessions, and a failed pass leaves the watermark in place. It is safe to run
 against already-metered sessions precisely because the idempotency grain is
 the same.
 
@@ -414,9 +420,9 @@ counts, `cost_usd` (the raw price) and `would_be_debit_usd` (with
 `usage_sweep.completed` line carrying `recorded`, `exempt_sessions`,
 `exempt_model_calls`, `exempt_cost_usd` and `exempt_would_be_debit_usd`.
 
-Nothing is written to the database for these sessions, and the sweep has no
-watermark, so an exempt session is logged again on every tick for as long as
-Managed Agents lists it. Total the absorbed spend by distinct
+Nothing is written to the database for these sessions. An exempt session is
+logged again when its events are read, including the hourly full pass. Total
+the absorbed spend by distinct
 `managed_session_id` (taking its latest line), not by summing every line or
 the per-pass totals.
 

@@ -69,6 +69,7 @@ import anthropic as _anthropic
 import sentry_sdk
 import structlog
 from daimon.adapters.discord.bot import (
+    AGENT_PINNED_ELSEWHERE_NOTICE,
     CHANNEL_BUDGET_NOTICE,
     INVOKER_NOT_ALLOWED_NOTICE,
     DaimonBot,
@@ -509,6 +510,11 @@ async def run_wizard_submit_turn_observed(
                     "wizard_submit.skipped.invoker_not_allowed", user_id=str(interaction.user.id)
                 )
                 await channel.send("Your answers were recorded, but " + INVOKER_NOT_ALLOWED_NOTICE)
+            elif err.reason == "agent_pinned_elsewhere":
+                _log.info("wizard_submit.skipped.agent_pinned_elsewhere", short_id=row.id)
+                await channel.send(
+                    "Your answers were recorded, but " + AGENT_PINNED_ELSEWHERE_NOTICE
+                )
             elif err.reason == "balance_depleted":
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
                 await channel.send(
@@ -584,6 +590,7 @@ async def run_wizard_submit_turn_observed(
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
                 sessionmaker=bot.runtime.sessionmaker,
+                alert_webhook_url=bot.runtime.settings.ops.alert_webhook_url,
                 tenant_id=row.tenant_id,
                 render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
                 is True,
@@ -618,6 +625,7 @@ async def run_wizard_submit_turn_observed(
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
                 sessionmaker=bot.runtime.sessionmaker,
+                alert_webhook_url=bot.runtime.settings.ops.alert_webhook_url,
                 tenant_id=row.tenant_id,
                 render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
                 is True,

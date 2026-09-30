@@ -7,8 +7,9 @@ frozen `Admission` or raising a typed error. No boolean gate result crosses this
 
 Gate ORDER is load-bearing and must not be reordered: identity -> channel
 protection -> invoker policy -> cascade -> missing-config -> resolve/retrieve
--> balance -> cap -> channel budget. A tenant that is both over-balance and mis-configured must
-see the config error (matches both adapters' inline sequences today). The
+-> agent pin -> balance -> cap -> channel budget. A tenant that is both
+over-balance and mis-configured must see the config error (matches both
+adapters' inline sequences today). The
 access policy gates run before the cascade so a refused turn learns nothing
 about the tenant's configuration and never reaches an MA call.
 
@@ -25,9 +26,15 @@ from datetime import datetime
 from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from daimon.core.access_policy import is_invoker_allowed, is_sealed, is_write_protected
+from daimon.core.access_policy import (
+    is_invoker_allowed,
+    is_outside_agent_pin,
+    is_sealed,
+    is_write_protected,
+)
 from daimon.core.billing import is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
 from daimon.core.scope import ResolvedConfig, ScopeContext
@@ -253,6 +260,19 @@ async def admit_impl(
         async with deps.sessionmaker() as session, session.begin():
             await clear_agent_references(session, tenant_id=tenant_id, agent_name=config.agent_name)
         raise MAResolverMissError(kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name)
+
+    # --- Agent pin: an operator can tie an agent to named channels because of
+    # what its credentials reach. It runs after the cascade because it depends
+    # on which agent answers, and it checks both the cascade's name and the
+    # agent's own, so a handed-off thread (resolved by id) is covered too. A DM
+    # has no channel, so it is outside every pin. Admins get no exemption. ---
+    if is_outside_agent_pin(
+        policy,
+        agent_names=(config.agent_name, agent.metadata.get(MA_METADATA_KEY_NAME)),
+        channel_id=None if is_dm else (thread_id or channel_id),
+        parent_channel_id=None if is_dm else channel_id,
+    ):
+        raise AdmissionDenied(reason="agent_pinned_elsewhere")
 
     # --- Admission gate: per-tenant balance -- independent of Stripe config ---
     if await is_over_balance(sessionmaker=deps.sessionmaker, tenant_id=tenant_id):

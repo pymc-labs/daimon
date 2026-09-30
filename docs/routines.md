@@ -299,8 +299,8 @@ and queued work, recording `scheduler_shutdown` for cancelled tasks.
 
 | Action | MCP | Discord | Slack |
 | --- | --- | --- | --- |
-| create | any caller with a platform user identity | via the agent calling the tool | workspace admin only |
-| list / read last output | any caller in the tenant | `Manage Server`, and only the command's invoker | admin or the routine's creator |
+| create | a caller with a platform user identity, for the agent they are talking to or the one the destination channel answers with; any agent for an admin | via the agent calling the tool | workspace admin only |
+| list / read last output | admin or the routine's creator | `Manage Server`, and only the command's invoker | admin or the routine's creator |
 | pause / resume | `update_routine`: admin or creator | admin or creator, re-checked at click | admin or creator |
 | delete | admin or creator | not offered | admin or creator |
 
@@ -311,9 +311,11 @@ routine is indistinguishable from one that does not exist. The Slack panel
 holds reading `last_result_tail` to the same bar as pausing, on the grounds
 that a scheduled run's output routinely carries business data.
 
-One asymmetry worth knowing: the MCP `list_routines` and `get_routine` tools
-are tenant-wide and ungated, so any authenticated caller in the tenant can
-read every routine, including other people's last output.
+The MCP `list_routines` and `get_routine` tools show a non-admin only the
+routines they created, so another member's trigger and last output (often a
+client's work) stay private. A routine runs with its agent's repo, keys,
+connectors and memory, which is why a member may only schedule the agent they
+are talking to or the one the destination channel answers with.
 
 ## When a run fails
 

@@ -207,7 +207,12 @@ class DirectMessageCog(commands.Cog):
             anthropic.APIError,
             SQLAlchemyError,
         ) as exc:
-            log_anthropic_overload(exc, tenant_id=conversation.tenant_id, path="dm")
+            log_anthropic_overload(
+                exc,
+                tenant_id=conversation.tenant_id,
+                path="dm",
+                alert_webhook_url=self.bot.runtime.settings.ops.alert_webhook_url,
+            )
             log.warning("discord.dm.turn_failed", error_type=type(exc).__name__)
             error = _error_text(
                 exc, "Couldn't verify or complete this private conversation. Please retry."

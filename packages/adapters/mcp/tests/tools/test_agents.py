@@ -33,7 +33,12 @@ from daimon.adapters.mcp.tools.agents import (
     _update_agent_impl,
     register_agent_tools,
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK
+from daimon.core.agent_mcp_credentials import (
+    resolve_agent_mcp_credentials,
+    save_agent_mcp_credential,
+)
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
@@ -43,8 +48,9 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routing_facts import UNROUTED_LINE
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.specs import AgentSpec, SkillRef, SkillRepo
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
-from daimon.core.stores.agent_repo_binding import set_binding
+from daimon.core.stores.agent_repo_binding import get_binding, set_binding
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing import ma_agent
@@ -1852,12 +1858,12 @@ def _fork_agent_router(
     return router
 
 
-async def test_fork_agent_impl_rekeys_source_credential_onto_fork(
+async def test_fork_agent_impl_copies_no_credential_binding_or_mcp_token(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """After _fork_agent_impl, get_pat(agent_id=fork) resolves the source's token,
-    re-keyed under the fork's OWN principal."""
+    """A fork starts credential-less: no GitHub PAT, no repo binding or proof and no
+    agent-wide MCP token, so copying an agent never hands out another's access."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     await make_tenant(db_session, platform="discord", workspace_id=str(tenant_id), id=tenant_id)
@@ -1888,6 +1894,14 @@ async def test_fork_agent_impl_rekeys_source_credential_onto_fork(
             ma_secret_ref=f"inline-pat:{source_agent_uuid}",
             proof=None,
         )
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        tenant_id=tenant_id,
+        agent_id=source_agent_uuid,
+        mcp_server_url="https://crm.example.com/mcp",
+        plaintext_token="tok_client_a",
+    )
 
     router = _fork_agent_router(
         tenant_id=tenant_id,
@@ -1912,100 +1926,18 @@ async def test_fork_agent_impl_rekeys_source_credential_onto_fork(
         sessionmaker=db_session_factory,
         fernet=fernet,
     )
-    assert fork_pat == plaintext, "fork's credential must resolve the source's token"
-
-
-async def test_fork_agent_impl_raises_tool_error_on_undecryptable_source_credential(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """An undecryptable inline-pat source binding must fail loud as a
-    ToolError (the core DaimonError converted at the MCP call site)."""
-    tenant_id = uuid.uuid4()
-    account_id = uuid.uuid4()
-    await make_tenant(db_session, platform="discord", workspace_id=str(tenant_id), id=tenant_id)
-    source_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_src_nocred")
-
-    # Binding exists (inline-pat:) but no github_credentials row backs it.
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=tenant_id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/repo",
-            default_branch="main",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
+    assert fork_pat is None, "the fork must not hold the source's GitHub token"
+    async with db_session_factory() as s:
+        assert await get_binding(s, tenant_id=tenant_id, agent_id=fork_agent_uuid) is None, (
+            "the fork must not inherit the source's repo binding or its proof"
         )
-
-    router = _fork_agent_router(
+    forked_tokens = await resolve_agent_mcp_credentials(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
         tenant_id=tenant_id,
-        source_id="ag_src_nocred",
-        source_name="source",
-        fork_id="ag_fork_nocred",
-        fork_name="myfork2",
+        agent_id=fork_agent_uuid,
     )
-    client = build_fake_anthropic(router.dispatch)
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-
-    with pytest.raises(ToolError, match="github git-proxy"):
-        await _fork_agent_impl(
-            _runtime(client, session_factory=db_session_factory, fernet=fernet),
-            auth,
-            source_name="source",
-            new_name="myfork2",
-        )
-
-
-async def test_fork_agent_impl_raises_tool_error_when_fernet_none() -> None:
-    """McpRuntime.fernet is None (no crypto keys configured) must raise
-    a clean ToolError before any partial write, not crash with an AttributeError."""
-    tenant_id = uuid.uuid4()
-    account_id = uuid.uuid4()
-
-    def on_create(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        raise AssertionError("fork must not POST create before the fernet-None guard fires")
-
-    router = MARouter()
-    router.add(
-        "GET",
-        r"/v1/agents",
-        lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_src",
-                    name="source",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
-                ).model_dump(mode="json")
-            ]
-        ),
-    )
-    router.add(
-        "GET",
-        r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_src", name="source").model_dump(mode="json")
-        ),
-    )
-    router.add("POST", r"/v1/agents", on_create)
-    client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-
-    with pytest.raises(ToolError, match="operator must finish setup") as refused:
-        await _fork_agent_impl(
-            _runtime(client, fernet=None),
-            auth,
-            source_name="source",
-            new_name="myfork3",
-        )
-
-    assert "source" in str(refused.value) and "myfork3" in str(refused.value), (
-        "refusal must preserve source and requested copy"
-    )
-    assert "DAIMON_" not in str(refused.value), (
-        "chat caller must not receive deployment variable names"
-    )
+    assert forked_tokens == (), "the fork must not hold the source's MCP tokens"
 
 
 async def test_update_agent_impl_passes_skills_to_ma_when_provided() -> None:
@@ -4885,11 +4817,11 @@ async def test_attach_mcp_server_impl_allows_non_admin_when_agent_unreachable(
     assert "mcp_servers" in captured, "an unreachable agent's MCP attachment is not gated"
 
 
-async def test_fork_agent_impl_allows_non_admin_source_with_no_daimon_account(
+async def test_fork_agent_impl_refuses_a_non_admin_even_for_the_seeded_agent(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Forking the seeded (unstamped) agent is the sanctioned escape hatch — it
-    must work for a non-admin caller exactly as it does for an admin."""
+    """Forking is admin-only for every source: a fork routes nowhere and carries
+    no pin, so a member could otherwise run a copy anywhere."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -4921,15 +4853,103 @@ async def test_fork_agent_impl_allows_non_admin_source_with_no_daimon_account(
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
-    result = await _fork_agent_impl(
-        _runtime(client, session_factory=db_session_factory, fernet=fernet),
-        auth,
-        source_name="daimon",
-        new_name="my-fork",
+    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+        await _fork_agent_impl(
+            _runtime(client, session_factory=db_session_factory, fernet=fernet),
+            auth,
+            source_name="daimon",
+            new_name="my-fork",
+        )
+
+
+async def test_fork_agent_impl_refuses_to_copy_a_pinned_agent_even_for_an_admin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A copy would be the pinned agent's prompt, skills and connectors with no pin."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"acme-project": ("C_ACME",)}),
     )
-    assert isinstance(result, AgentInfo), (
-        "non-admin fork of the unstamped seeded agent must succeed"
+    await db_session.commit()
+    router = _fork_agent_router(
+        tenant_id=tenant.id,
+        source_id="ag_acme",
+        source_name="acme-project",
+        fork_id="ag_copy",
+        fork_name="acme-copy",
     )
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
+    )
+
+    with pytest.raises(ToolError, match="pinned to specific channels"):
+        await _fork_agent_impl(
+            _runtime(
+                build_fake_anthropic(router.dispatch),
+                session_factory=db_session_factory,
+                fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            ),
+            auth,
+            source_name="acme-project",
+            new_name="acme-copy",
+        )
+
+
+async def test_fork_agent_impl_refuses_a_non_admin_copying_a_project_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fork carries the source's repo binding and tokens and is pinned nowhere, so a
+    member copying another client's agent would walk off with its credentials."""
+    tenant_id = uuid.uuid4()
+    created: list[dict[str, Any]] = []
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        return httpx.Response(200, json=ma_agent(id="ag_new", name="loot").model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                ma_agent(
+                    id="ag_src",
+                    name="acme-project",
+                    metadata={
+                        "daimon_tenant": str(tenant_id),
+                        "daimon_name": "acme-project",
+                        "daimon_account": str(uuid.uuid4()),
+                    },
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_agent(id="ag_src", name="acme-project").model_dump(mode="json")
+        ),
+    )
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
+    )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+        await _fork_agent_impl(
+            _runtime(client, session_factory=db_session_factory, fernet=fernet),
+            auth,
+            source_name="acme-project",
+            new_name="loot",
+        )
+    assert created == [], "a refused fork must create nothing"
 
 
 # ---------------------------------------------------------------------------
@@ -5189,7 +5209,7 @@ def test_create_spec_accepts_the_current_generation_models() -> None:
         _build_create_spec,  # pyright: ignore[reportPrivateUsage]
     )
 
-    for model in ("claude-sonnet-5", "claude-opus-5"):
+    for model in ("claude-sonnet-5-5", "claude-opus-5-5"):
         spec = _build_create_spec(
             name="a",
             model=model,
@@ -5282,7 +5302,7 @@ async def test_fork_agent_returns_unrouted_note_when_not_reachable(
         ),
     )
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
 
     result = await _fork_agent_impl(
