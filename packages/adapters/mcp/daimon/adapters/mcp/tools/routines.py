@@ -205,7 +205,7 @@ async def _check_destination(
     *,
     kind: RoutineDestinationKind | None,
     destination_id: str | None,
-) -> None:
+) -> str | None:
     """Refuse a destination that could never be posted to, before it is saved.
 
     The pair must come together; the id must have the platform's shape; the
@@ -214,11 +214,14 @@ async def _check_destination(
     it, checked with the parent channel and category resolved here. The
     adapter re-checks all of it at post time, so a channel protected or
     removed later is still honoured.
+
+    Returns the channel the routine's spend is budgeted against: the
+    destination's parent channel, or None without a destination.
     """
     if (kind is None) != (destination_id is None):
         raise ToolError("destination_kind and destination_id must be given together")
     if kind is None or destination_id is None:
-        return
+        return None
     platform = auth.platform or ""
     shape_error = destination_shape_error(platform, kind, destination_id)
     if shape_error is not None:
@@ -250,6 +253,7 @@ async def _check_destination(
             f"{channel_id} is a protected channel: daimon does not post there, so a routine "
             "cannot deliver to it. Pick another channel. Nothing was saved."
         )
+    return parent_channel_id or channel_id
 
 
 async def _create_routine_impl(
@@ -268,7 +272,9 @@ async def _create_routine_impl(
     tenant_id = auth.tenant_id
     platform_user_id = _require_platform_user_id(auth)
     next_fire_at = _compute_next_fire_at(cron_expr, timezone)
-    await _check_destination(runtime, auth, kind=destination_kind, destination_id=destination_id)
+    budget_channel_id = await _check_destination(
+        runtime, auth, kind=destination_kind, destination_id=destination_id
+    )
 
     match = await find_agent_by_daimon_tag(
         runtime.client,
@@ -294,6 +300,7 @@ async def _create_routine_impl(
             next_fire_at=next_fire_at,
             destination_kind=destination_kind,
             destination_id=destination_id,
+            channel_id=budget_channel_id,
         )
 
 
@@ -338,7 +345,9 @@ async def _update_routine_impl(
     tenant_id = auth.tenant_id
     if clear_destination and (destination_kind is not None or destination_id is not None):
         raise ToolError("clear_destination cannot be combined with a new destination")
-    await _check_destination(runtime, auth, kind=destination_kind, destination_id=destination_id)
+    budget_channel_id = await _check_destination(
+        runtime, auth, kind=destination_kind, destination_id=destination_id
+    )
     async with runtime.session_factory() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
         if row is None:
@@ -381,6 +390,7 @@ async def _update_routine_impl(
             destination_kind=destination_kind,
             destination_id=destination_id,
             clear_destination=clear_destination,
+            channel_id=budget_channel_id,
         )
         if updated is None:
             raise ToolError("routine not found")
@@ -427,7 +437,9 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         and if the agent does not post there itself, daimon posts the end of
         its final reply there. On Slack a thread is ``<channel id>:<thread
         ts>``. A protected channel is refused. Without a destination the
-        result is only recorded (``last_result_tail``), as before.
+        result is only recorded (``last_result_tail``), as before. A run's
+        spend counts toward the destination channel's budget, and a run is
+        skipped while that budget is used up.
 
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,

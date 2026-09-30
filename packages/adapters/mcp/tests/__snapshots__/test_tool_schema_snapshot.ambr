@@ -499,6 +499,21 @@
         'type': 'object',
       }),
     }),
+    'clear_channel_budget': dict({
+      'description': "Remove a channel's spending budget, so only the balance and caps apply. Admin-only.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'clear_repo_binding': dict({
       'description': '''
         Remove the repo binding for your agent.
@@ -1477,7 +1492,9 @@
         and if the agent does not post there itself, daimon posts the end of
         its final reply there. On Slack a thread is ``<channel id>:<thread
         ts>``. A protected channel is refused. Without a destination the
-        result is only recorded (``last_result_tail``), as before.
+        result is only recorded (``last_result_tail``), as before. A run's
+        spend counts toward the destination channel's budget, and a run is
+        skipped while that budget is used up.
         
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
@@ -1971,6 +1988,33 @@
         'type': 'object',
       }),
     }),
+    'get_channel_budget': dict({
+      'description': '''
+        Show a channel's spending budget: its limit, window and what it has spent.
+        
+        ``channel_id`` from ``<channel role="parent_channel">``, or a channel
+        the user named; a thread id resolves to its parent channel. Any
+        member may read the budget of a channel they can see. ``budget`` is
+        null when the channel has none. Read ``summary`` back to the user.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'get_cli_token': dict({
       'description': '''
         Mint a short-lived CLI access token for the named service.
@@ -2316,6 +2360,15 @@
             ]),
             'default': None,
           }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_channel_budgets': dict({
+      'description': 'List every channel budget in this server or workspace with its spend. Admin-only.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
         }),
         'type': 'object',
       }),
@@ -3896,6 +3949,69 @@
         }),
         'required': list([
           'agent_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_channel_budget': dict({
+      'description': '''
+        Set or replace a channel's spending budget. Admin-only.
+        
+        Once the channel's spend in the window reaches ``limit_usd`` (a
+        decimal string such as ``"25.00"``; ``"0"`` stops the channel), new
+        turns there are refused, including routines that post there. Spend
+        is the tenant's debits for the channel, markup included.
+        
+        ``window``: ``monthly`` resets each UTC calendar month and takes no
+        dates; ``total`` counts everything since ``starts_at`` (or ever);
+        ``fixed`` counts only between ``starts_at`` and ``ends_at`` and gates
+        nothing outside them. Dates are ISO 8601, read as UTC without an
+        offset. A thread id resolves to its parent channel.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'ends_at': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'limit_usd': dict({
+            'type': 'string',
+          }),
+          'starts_at': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'window': dict({
+            'enum': list([
+              'monthly',
+              'total',
+              'fixed',
+            ]),
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'limit_usd',
+          'window',
         ]),
         'type': 'object',
       }),

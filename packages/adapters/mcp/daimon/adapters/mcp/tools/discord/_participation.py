@@ -1,4 +1,4 @@
-"""Discord-side check for the thread-participation tools: caller ids must be real and visible.
+"""Discord-side checks for the participation and budget tools: caller ids must be real and visible.
 
 Lives here, next to the read tools' visibility checks, because it is the same
 permission model: the same REST client, the same member resolution, the same
@@ -58,3 +58,22 @@ async def verify_participation_scope(
             raise ToolError("channel_id names a thread — pass it as thread_id instead")
         _check_view_permission(target, member)
         return None
+
+
+async def resolve_visible_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
+    """The channel a budget applies to, once the caller is confirmed to see it.
+
+    A thread resolves to its parent channel, which is what spend is attributed
+    to; a private thread still needs the caller's membership (or Manage
+    Threads) to be named here.
+    """
+    guild_id = _require_guild_id(auth)
+    user_id = _require_discord_identity(auth)
+    async with rest_client(_require_bot_token(runtime)) as client:
+        _, member = await _resolve_member(client, guild_id, user_id)
+        target = _require_guild_channel(await _resolve_channel(client, channel_id), guild_id)
+        if isinstance(target, discord.Thread):
+            await _check_thread_view(client, target, member, user_id)
+            return str(target.parent_id)
+        _check_view_permission(target, member)
+        return str(target.id)

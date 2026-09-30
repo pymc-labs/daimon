@@ -1096,6 +1096,7 @@ async def test_create_routine_saves_a_slack_thread_destination(
         destination_id="C0123ABC:1717.5",
     )
     assert row.destination_id == "C0123ABC:1717.5"  # type: ignore[attr-defined]
+    assert row.channel_id == "C0123ABC", "spend is budgeted against the thread's channel"  # type: ignore[attr-defined]
 
 
 async def test_create_routine_needs_both_destination_fields(
@@ -1144,9 +1145,9 @@ async def test_update_routine_sets_and_clears_a_destination(
         runtime, auth, routine_id=created.id, clear_destination=True
     )
 
-    assert (set_.destination_kind, set_.destination_id) == ("channel", "55")
+    assert (set_.destination_kind, set_.destination_id, set_.channel_id) == ("channel", "55", "55")
     assert set_.trigger_message == "orig"
-    assert (cleared.destination_kind, cleared.destination_id) == (None, None)
+    assert (cleared.destination_kind, cleared.destination_id, cleared.channel_id) == (None,) * 3
 
 
 @pytest.mark.parametrize(
@@ -1212,6 +1213,7 @@ async def test_create_routine_accepts_a_private_thread_the_caller_is_in(
         destination_id="1234",
     )
     assert row.destination_kind == "thread"  # type: ignore[attr-defined]
+    assert row.channel_id == "444", "spend is budgeted against the thread's parent"  # type: ignore[attr-defined]
 
 
 async def test_create_routine_refuses_a_private_slack_channel_the_caller_is_not_in(

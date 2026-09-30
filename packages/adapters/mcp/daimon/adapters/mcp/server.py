@@ -49,6 +49,7 @@ from daimon.adapters.mcp.tools import (
     vault,
 )
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
+from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
@@ -324,6 +325,7 @@ def create_mcp_app(
     register_propagation_tools(mcp, runtime)  # set/clear agent default
     register_promo_code_tools(mcp, runtime)  # redeem a promo code for tenant credit
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
+    register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
 
     register_upload_tool(mcp, runtime=runtime)
 
