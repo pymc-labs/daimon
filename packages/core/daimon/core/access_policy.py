@@ -79,6 +79,17 @@ def is_sealed(
     return parent_channel_id is not None and parent_channel_id in policy.sealed_channel_ids
 
 
+def is_sealed_source(policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None) -> bool:
+    """Whether a turn from `channel_id` (optionally `thread_id` under it) is inside a seal.
+
+    Covers a sealed channel, a thread under one, a sealed Discord thread by its
+    own id, and a Slack thread sealed on its own as ``channel_id:thread_ts``.
+    """
+    return is_sealed(policy, channel_id=thread_id or channel_id, parent_channel_id=channel_id) or (
+        thread_id is not None and f"{channel_id}:{thread_id}" in policy.sealed_channel_ids
+    )
+
+
 def is_outside_agent_pin(
     policy: TenantAccessPolicy,
     *,
