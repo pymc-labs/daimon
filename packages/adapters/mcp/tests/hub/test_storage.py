@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from cryptography.fernet import Fernet, MultiFernet
-from daimon.adapters.mcp.hub.storage import asyncpg_dsn, build_hub_kv_base, hub_kv_for
+from daimon.adapters.mcp.hub.storage import (
+    HUB_KV_POOL_MAX,
+    asyncpg_dsn,
+    build_hub_kv_base,
+    hub_kv_for,
+)
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -42,3 +47,16 @@ async def test_platforms_share_the_table_but_not_keys(
     assert all("slack" not in r[1] and "discord" not in r[1] for r in rows), (
         f"values must be encrypted at rest, got {rows!r}"
     )
+
+
+async def test_store_pool_stays_small(db_engine: AsyncEngine, db_schema: str) -> None:
+    fernet = MultiFernet([Fernet(Fernet.generate_key())])
+    dsn = asyncpg_dsn(str(db_engine.url.render_as_string(hide_password=False)))
+    dsn = f"{dsn}?options=-csearch_path%3D{db_schema}"
+    store, _ = build_hub_kv_base(database_url=dsn, fernet=fernet)
+
+    async with store:
+        pool = store._initialized_pool  # pyright: ignore[reportPrivateUsage]
+        assert pool.get_min_size() == 1
+        assert pool.get_max_size() == HUB_KV_POOL_MAX
+        assert pool.get_size() == 1, "only one connection is opened at startup"
