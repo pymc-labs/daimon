@@ -78,6 +78,7 @@ class EmbedState:
     usage_in: int = 0
     usage_out: int = 0
     cost_str: str | None = None
+    balance_str: str | None = None
     text_preview: str | None = None
     error_reason: str = ""
     """Why the turn failed; leads the ERROR card's footer."""
@@ -185,6 +186,8 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         parts = [state.agent_name, f"{elapsed}s", tokens]
         if state.cost_str is not None:
             parts.append(state.cost_str)
+        if state.balance_str is not None:
+            parts.append(state.balance_str)
         summary = " · ".join(parts)
         description = ""
         if state.phase is TurnPhase.ERROR:

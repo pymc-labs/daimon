@@ -10,7 +10,9 @@ from __future__ import annotations
 import dataclasses
 import time
 import types
+import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, NoReturn
 
 import daimon.adapters.discord.lifecycle as lifecycle_module
@@ -27,10 +29,14 @@ from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.stores import tenant_ledger
+from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
+from daimon.testing.factories import make_tenant
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,6 +51,8 @@ def _make_lifecycle(
     model_id: str = "claude-sonnet-4-6",
     notify_on_completion: bool = False,
     render_tables: bool = False,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
     """Create lifecycle with recorder callables.
 
@@ -71,6 +79,8 @@ def _make_lifecycle(
         agent_name=agent_name,
         model_id=model_id,
         cancel_view=cancel_view,
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
     )
     return lc, sends, edits
 
@@ -900,6 +910,36 @@ def _terminal_embed(edits: list[tuple[Any, dict[str, Any]]]) -> discord.Embed:
         if embeds:
             return embeds[0]
     raise AssertionError("no terminal embed was flushed")
+
+
+@pytest.mark.asyncio
+async def test_terminal_footer_shows_prepaid_balance_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    async with db_session_factory() as s, s.begin():
+        await tenant_ledger.insert_entry(
+            s,
+            tenant_id=tenant.id,
+            delta_usd=Decimal("12.50"),
+            reason="test",
+            idempotency_key=f"test:{tenant.id}",
+        )
+    lc, _sends, edits = _make_lifecycle(sessionmaker=db_session_factory, tenant_id=tenant.id)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_render(TurnState())
+    await lc.on_terminal_success(_make_success_state())
+    assert _terminal_embed(edits).footer.text.endswith("· $12.50 left")
+
+    async with db_session_factory() as s, s.begin():
+        await set_funding_mode(s, tenant_id=tenant.id, funding_mode="operator_funded")
+    lc, _sends, edits = _make_lifecycle(sessionmaker=db_session_factory, tenant_id=tenant.id)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_render(TurnState())
+    await lc.on_terminal_success(_make_success_state())
+    assert "$12.50 left" not in _terminal_embed(edits).footer.text
 
 
 class TestWasAnswered:

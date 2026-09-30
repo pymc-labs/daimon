@@ -102,6 +102,7 @@ class State:
     usage_in: int = 0
     usage_out: int = 0
     cost_str: str | None = None
+    balance_str: str | None = None
     text_preview: str | None = None
     error_reason: str = ""
     """Why the turn failed; leads the ERROR summary."""
@@ -215,6 +216,8 @@ def to_blocks(
         parts: list[str] = [state.agent_name, f"{elapsed}s", tokens]
         if state.cost_str is not None:
             parts.append(state.cost_str)
+        if state.balance_str is not None:
+            parts.append(state.balance_str)
         summary = " · ".join(parts)
         if state.phase is TurnPhase.ERROR:
             summary_text = f"{_EMOJI_CROSS} {state.error_reason or 'error'} · {summary}"

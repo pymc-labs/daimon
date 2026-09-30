@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
@@ -39,6 +40,7 @@ from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.stores import tenant_ledger
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import render_termination_notice
@@ -49,6 +51,7 @@ from daimon.core.turn.state import (
     extract_sealed_responses,
 )
 from daimon.core.turn.termination import termination_reason
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 
@@ -137,6 +140,8 @@ class DiscordTurnLifecycle:
         unprompted: bool = False,
         on_first_post: Callable[[discord.Message], Awaitable[None]] | None = None,
         request_id: Callable[[], str] = bound_request_id,
+        sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+        tenant_id: uuid.UUID | None = None,
     ) -> None:
         self._requester_id = requester_id
         self._trigger_message = trigger_message
@@ -144,6 +149,8 @@ class DiscordTurnLifecycle:
         self._render_tables = render_tables
         self._send = send
         self._request_id = request_id
+        self._sessionmaker = sessionmaker
+        self._tenant_id = tenant_id
         self._edit = edit
         self._delete = delete
         # Nobody asked for an unprompted turn, so it stays invisible until it
@@ -311,6 +318,18 @@ class DiscordTurnLifecycle:
     async def _flush_terminal(self) -> None:
         """Unconditionally flush terminal state as a single collapsed embed,
         bypassing debounce."""
+        if self._sessionmaker is not None and self._tenant_id is not None:
+            try:
+                async with self._sessionmaker() as session:
+                    balance = await tenant_ledger.get_prepaid_balance(
+                        session, tenant_id=self._tenant_id
+                    )
+                if balance is not None:
+                    self._state = dataclasses.replace(
+                        self._state, balance_str=f"${balance:.2f} left"
+                    )
+            except Exception:
+                log.warning("turn.balance_footer_failed", exc_info=True)
         self._terminal = True
         now = self._clock()
         data = to_embed_data(self._state, now=now)

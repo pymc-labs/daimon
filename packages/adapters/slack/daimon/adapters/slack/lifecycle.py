@@ -68,6 +68,7 @@ from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.tables import render_slack_tables
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.stores import tenant_ledger
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import fit_notice, render_termination_notice
@@ -80,6 +81,7 @@ from daimon.core.turn.state import (
 from daimon.core.turn.termination import termination_reason
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = ["SlackTurnLifecycle"]
 
@@ -162,6 +164,8 @@ class SlackTurnLifecycle:
         adopt_status_ts: str | None = None,
         intent_id: UUID | None = None,
         request_id: Callable[[], str] = bound_request_id,
+        sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+        tenant_id: UUID | None = None,
     ) -> None:
         self._trigger_ts = trigger_ts
         self._notify_on_completion = notify_on_completion
@@ -169,6 +173,8 @@ class SlackTurnLifecycle:
         self._render_tables = render_tables
         self._client = client
         self._request_id = request_id
+        self._sessionmaker = sessionmaker
+        self._tenant_id = tenant_id
         self._channel = channel
         self._thread_ts = thread_ts
         self._cancel = cancel
@@ -368,6 +374,20 @@ class SlackTurnLifecycle:
                 text=text,
             )
 
+    async def _apply_balance(self) -> None:
+        if self._sessionmaker is not None and self._tenant_id is not None:
+            try:
+                async with self._sessionmaker() as session:
+                    balance = await tenant_ledger.get_prepaid_balance(
+                        session, tenant_id=self._tenant_id
+                    )
+                if balance is not None:
+                    self._state = dataclasses.replace(
+                        self._state, balance_str=f"${balance:.2f} left"
+                    )
+            except Exception:
+                log.warning("turn.balance_footer_failed", exc_info=True)
+
     async def _flush_terminal(self, fallback_text: str | None = None) -> None:
         """Unconditionally flush the terminal Block Kit surface, bypassing debounce.
 
@@ -436,6 +456,7 @@ class SlackTurnLifecycle:
         # running and the footer would never appear.
         self._state = update(self._state, EmbedEvent(kind="done", label=""))
         self._apply_usage(state)
+        await self._apply_balance()
         # Flipped after the status message is successfully replaced with final
         # content — past that point a repair would overwrite answer text the
         # user can already read, so the except branch skips it.
@@ -652,6 +673,7 @@ class SlackTurnLifecycle:
             self._state = update(self._state, EmbedEvent(kind="error", label=label))
             self._state = dataclasses.replace(self._state, notice=body)
             self._apply_usage(state)
+            await self._apply_balance()
             await self._flush_terminal(fallback_text)
             self.final_ts = self._status_ts
         except Exception:
