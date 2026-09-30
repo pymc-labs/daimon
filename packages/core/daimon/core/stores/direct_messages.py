@@ -34,6 +34,7 @@ class DirectMessageRow(BaseModel):
     history: list[dict[str, str]]
     recent_message_ids: list[str]
     active_until: datetime | None
+    source_channel_id: str | None = None
 
 
 async def get_conversation(

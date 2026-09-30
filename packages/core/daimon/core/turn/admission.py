@@ -60,7 +60,8 @@ class Admission:
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
     private_dm_id: str | None = None
-    # Parent channel the turn's spend is attributed to; None in a DM.
+    # Parent channel the turn's spend is attributed to; in a DM, the channel it
+    # was moved from, or None.
     channel_id: str | None = None
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
@@ -76,6 +77,7 @@ async def admit(
     thread_id: str | None = None,
     role: Role | None = None,
     is_dm: bool = False,
+    dm_source_channel_id: str | None = None,
     category_id: str | None = None,
     category_unresolved: bool = False,
 ) -> Admission:
@@ -96,6 +98,7 @@ async def admit(
                 thread_id=thread_id,
                 role=role,
                 is_dm=is_dm,
+                dm_source_channel_id=dm_source_channel_id,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
             )
@@ -118,6 +121,7 @@ async def admit_impl(
     thread_id: str | None = None,
     role: Role | None = None,
     is_dm: bool = False,
+    dm_source_channel_id: str | None = None,
     category_id: str | None = None,
     category_unresolved: bool = False,
 ) -> Admission:
@@ -264,8 +268,8 @@ async def admit_impl(
     ):
         raise AdmissionDenied(reason="cap_exceeded")
 
-    # --- Admission gate: channel budget; a DM belongs to no channel ---
-    budget_channel_id = None if is_dm else channel_id
+    # --- Admission gate: channel budget; a DM counts toward the channel it came from ---
+    budget_channel_id = dm_source_channel_id if is_dm else channel_id
     if await is_over_channel_budget(
         sessionmaker=deps.sessionmaker,
         tenant_id=tenant_id,

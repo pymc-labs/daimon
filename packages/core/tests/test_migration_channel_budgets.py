@@ -65,7 +65,16 @@ async def test_downgrade_then_upgrade_backfills_known_routine_channels(
         "222": None,  # a Discord thread's parent needs a platform call
         "C1:1717.5": "C1",
         "None": None,
-    }
+    }, "known routine channels are backfilled"
+    source = await db_session.execute(
+        text(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_schema = current_schema() "
+            "AND table_name = 'direct_message_conversations' "
+            "AND column_name = 'source_channel_id'"
+        )
+    )
+    assert source.scalar_one() == "YES", "a DM's source channel is nullable, with no backfill"
     with pytest.raises(IntegrityError):
         async with db_session.begin_nested():
             await db_session.execute(

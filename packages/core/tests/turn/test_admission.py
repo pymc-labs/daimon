@@ -262,7 +262,7 @@ async def test_admit_refuses_a_turn_in_a_channel_over_its_budget(
     )
 
 
-async def test_admit_attributes_the_channel_and_never_gates_a_dm(
+async def test_admit_attributes_the_channel_and_a_dm_to_its_source(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -279,8 +279,17 @@ async def test_admit_attributes_the_channel_and_never_gates_a_dm(
 
     await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("0"))
     await db_session.commit()
-    dm = await admit(deps, **args, channel_id="chan-1", is_dm=True, now=_NOW)
-    assert dm.channel_id is None, "a DM belongs to no channel"
+    dm = await admit(deps, **args, channel_id="dm-chan", is_dm=True, now=_NOW)
+    assert dm.channel_id is None, "a DM with no source channel is unattributed"
+    moved = await admit(
+        deps, **args, channel_id="dm-chan", is_dm=True, dm_source_channel_id="chan-2", now=_NOW
+    )
+    assert moved.channel_id == "chan-2", "a moved DM counts toward the channel it came from"
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps, **args, channel_id="dm-chan", is_dm=True, dm_source_channel_id="chan-1", now=_NOW
+        )
+    assert exc_info.value.reason == "channel_budget_exceeded", "and is gated by its budget"
 
 
 async def test_admit_gate_order_cap_wins_over_channel_budget(
