@@ -792,6 +792,19 @@ async def run_env_file_credential_submission(
             client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
         )
         return
+    except Exception:
+        # Handled here, not in the spawned task: an escaped error would reach
+        # Sentry with the parsed values in its frames and leave the person
+        # without a reply. Rolled back with the consume, so the request stays live.
+        log.exception("credential_request.env_file_write_failed", key_count=len(entries))
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text="Something went wrong — please try again.",
+        )
+        return
     if consumed is None:
         await post_ephemeral(
             client,

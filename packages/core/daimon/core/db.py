@@ -33,7 +33,11 @@ def build_engine(url: str, *, echo: bool = False) -> AsyncEngine:
     Pre-ping only covers checkout, so a connection that dies mid-statement
     (a failover, say) still raises — that needs retry at the adapter boundary.
     """
-    return create_async_engine(url, echo=echo, pool_pre_ping=True, pool_recycle=1800)
+    # hide_parameters keeps bound values (agent keys, tokens) out of the
+    # SQL text that database errors carry into logs and error reports.
+    return create_async_engine(
+        url, echo=echo, pool_pre_ping=True, pool_recycle=1800, hide_parameters=True
+    )
 
 
 def build_session_factory(

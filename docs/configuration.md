@@ -631,11 +631,11 @@ storage for local development.
 
 `tuple[SecretStr, ...]` · optional · default unset · secret
 
-Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. Required to
-save agent keys: without keys, saving an agent environment value is refused unless
-`allow_plaintext` is set. The first key encrypts new values; older keys remain valid for
-decrypting existing ciphertext during rotation. Run `daimon crypto verify` to confirm no
-plaintext rows remain.
+Ordered Fernet keys used to encrypt/decrypt stored credentials: a single key, a comma-
+separated list, or a JSON list. Required to save agent keys: without keys, saving an
+agent environment value is refused unless `allow_plaintext` is set. The first key
+encrypts new values; older keys remain valid for decrypting existing ciphertext during
+rotation. Run `daimon crypto verify` to confirm no plaintext rows remain.
 
 ### `DAIMON_CRYPTO__ALLOW_PLAINTEXT`
 

@@ -8,17 +8,18 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import os
 import uuid
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class DatabaseSettings(BaseModel):
@@ -683,17 +684,42 @@ class CryptoSettings(BaseModel):
     development.
     """
 
-    keys: tuple[SecretStr, ...] = Field(
+    keys: Annotated[tuple[SecretStr, ...], NoDecode] = Field(
         default=(),
         description=(
-            "Ordered tuple of Fernet keys used to encrypt/decrypt stored "
-            "credentials. Required to save agent keys: without keys, saving an "
-            "agent environment value is refused unless `allow_plaintext` is set. "
-            "The first key encrypts new values; older keys "
-            "remain valid for decrypting existing ciphertext during rotation. "
-            "Run `daimon crypto verify` to confirm no plaintext rows remain."
+            "Ordered Fernet keys used to encrypt/decrypt stored credentials: a "
+            "single key, a comma-separated list, or a JSON list. Required to save "
+            "agent keys: without keys, saving an agent environment value is "
+            "refused unless `allow_plaintext` is set. The first key encrypts new "
+            "values; older keys remain valid for decrypting existing ciphertext "
+            "during rotation. Run `daimon crypto verify` to confirm no plaintext "
+            "rows remain."
         ),
     )
+
+    @field_validator("keys", mode="before")
+    @classmethod
+    def _split_keys(cls, value: object) -> object:
+        """Accept a bare key or a comma-separated list as well as a JSON list.
+
+        The environment hands this field a raw string. Fernet keys are
+        base64-urlsafe, so they never contain a comma, a quote or a bracket.
+        """
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if not text:
+            return ()
+        if text.startswith("["):
+            parsed = json.loads(text)
+            if not isinstance(parsed, list):
+                raise ValueError(
+                    "DAIMON_CRYPTO__KEYS must be a key, a comma-separated list or a JSON list"
+                )
+            items = [str(item).strip() for item in cast("list[object]", parsed)]
+            return tuple(item for item in items if item)
+        return tuple(part.strip() for part in text.split(",") if part.strip())
+
     allow_plaintext: bool = Field(
         default=False,
         description=(

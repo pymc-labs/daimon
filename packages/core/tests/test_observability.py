@@ -10,6 +10,7 @@ Tests cover:
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
@@ -219,3 +220,47 @@ def test_event_scrubber_redacts_a_token_nested_in_a_frame_local(
 
     headers = frame_vars["request"]["headers"]  # type: ignore[index]
     assert headers["authorization"] != "Bearer abc", "a nested secret must not ship to Sentry"
+
+
+def test_scrub_event_drops_frame_locals_holding_a_decrypted_value(
+    recording_sentry: _RecordingTransport,
+) -> None:
+    """A secret held in a local variable never ships, even with locals capture on."""
+    # Built at runtime so the value is not also in the captured source lines.
+    canary = "canary-" + uuid.uuid4().hex
+
+    def _fails_holding_a_secret() -> None:
+        value = canary  # noqa: F841 - the local under test
+        raise RuntimeError("upload failed")
+
+    try:
+        _fails_holding_a_secret()
+    except RuntimeError as exc:
+        sentry_sdk.capture_exception(exc)
+    sentry_sdk.flush()
+
+    assert len(recording_sentry.events) == 1
+    assert canary not in repr(recording_sentry.events[0])
+    assert "'vars'" not in repr(recording_sentry.events[0])
+
+
+def test_init_sentry_turns_off_local_variable_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Frame locals can hold decrypted keys under any name, so none are captured."""
+    seen: dict[str, object] = {}
+
+    def _recording_init(*args: object, **kwargs: object) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr(sentry_sdk, "init", _recording_init)
+    monkeypatch.setattr(sentry_sdk, "set_tag", lambda *a, **k: None)
+
+    init_sentry(
+        dsn="https://public@o0.ingest.sentry.io/0",
+        environment="production",
+        process="mcp",
+        release=None,
+        traces_sample_rate=0.0,
+        integrations=[],
+    )
+
+    assert seen.get("include_local_variables") is False

@@ -93,8 +93,8 @@ services:
 
   # Opt-in: `docker compose --profile slack up -d`. Needs DAIMON_SLACK__* and
   # DAIMON_CRYPTO__KEYS in .env — no `:?` guards here, or Discord-only
-  # deployments would fail to interpolate the file. Agent environment storage
-  # remains plaintext without keys; configured keys enable its encryption.
+  # deployments would fail to interpolate the file. Without keys, every agent
+  # key write is refused (DAIMON_CRYPTO__ALLOW_PLAINTEXT opts in for local dev).
   # Setup: docs/slack-app-manifest.yaml.
   slack:
     build: .

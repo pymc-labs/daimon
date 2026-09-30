@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from daimon.core.session_snapshot import SessionSnapshot
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
@@ -491,7 +491,9 @@ class AgentFileRow(BaseModel):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     key: str
-    content: str
+    # repr=False: the value is a decrypted agent key; keep it out of reprs,
+    # logs and error-tracker frame dumps.
+    content: str = Field(repr=False)
     created_by_account_id: uuid.UUID | None = None
     last_set_by_account_id: uuid.UUID | None = None
     created_at: datetime
@@ -638,7 +640,7 @@ class CredentialRequestRow(BaseModel):
 
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
-    token: str
+    token: str = Field(repr=False)
     kind: str
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
@@ -669,7 +671,7 @@ class McpOAuthFlowRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
     state: str
-    request_token: str
+    request_token: str = Field(repr=False)
     tenant_id: uuid.UUID
     account_id: uuid.UUID
     agent_id: uuid.UUID

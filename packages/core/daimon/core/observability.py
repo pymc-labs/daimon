@@ -10,7 +10,7 @@ Adapters call init_sentry once at their entrypoint (Plan 02).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import sentry_sdk
 import structlog
@@ -41,6 +41,27 @@ _SECRET_KEYS: frozenset[str] = frozenset(
 )
 
 
+def _drop_frame_vars(section: object) -> None:
+    """Remove ``vars`` from every stack frame under an exception/threads section."""
+    if not isinstance(section, dict):
+        return
+    values = cast("dict[str, object]", section).get("values")
+    if not isinstance(values, list):
+        return
+    for value in cast("list[object]", values):
+        if not isinstance(value, dict):
+            continue
+        stacktrace = cast("dict[str, object]", value).get("stacktrace")
+        if not isinstance(stacktrace, dict):
+            continue
+        frames = cast("dict[str, object]", stacktrace).get("frames")
+        if not isinstance(frames, list):
+            continue
+        for frame in cast("list[object]", frames):
+            if isinstance(frame, dict):
+                cast("dict[str, object]", frame).pop("vars", None)
+
+
 def _scrub_event(event: Event, hint: Hint) -> Event | None:
     """Pure before_send callback: redact secrets and drop message-body fields.
 
@@ -56,6 +77,12 @@ def _scrub_event(event: Event, hint: Hint) -> Event | None:
     # Drop extra fields entirely — arbitrary payload, too risky.
     if "extra" in event:
         del event["extra"]
+
+    # Drop captured frame locals: a frame can hold decrypted agent keys or
+    # submitted form values under any variable name. init_sentry also turns
+    # include_local_variables off; this covers any other client config.
+    for section in ("exception", "threads"):
+        _drop_frame_vars(event.get(section))
 
     # Redact secret-keyed values anywhere in the event tags mapping.
     tags = event.get("tags")
@@ -127,6 +154,7 @@ def init_sentry(
         environment=environment,
         release=release,
         send_default_pii=False,
+        include_local_variables=False,
         traces_sample_rate=traces_sample_rate,
         before_send=_scrub_event,
         event_scrubber=_event_scrubber(),
