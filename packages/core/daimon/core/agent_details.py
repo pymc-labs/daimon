@@ -20,14 +20,17 @@ from datetime import datetime
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.channel_isolation import load_isolation_viewer
 from daimon.core.constants import MODEL_DISPLAY_NAMES
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
     account_id_from_metadata,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.skills import resolve_custom_skill_titles
+from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import RepoAccess, derive_repo_access
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routing_facts import build_unrouted_note
@@ -251,9 +254,23 @@ async def load_agent_details(
 
     `channel_id` is what makes `answers_here` answerable; passing the thread
     with it lets a bound thread report its own responder rather than the
-    channel's.
+    channel's. A non-admin is refused an agent an isolated channel hides from
+    `channel_id`, as if it did not exist.
     """
     agent = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+    viewer = await load_isolation_viewer(
+        session,
+        tenant_id=tenant_id,
+        default=deployment_default,
+        channel_id=channel_id,
+        is_admin=is_admin,
+    )
+    if viewer is not None and not viewer.sees(
+        agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
+    ):
+        raise DaimonError(
+            "That agent is no longer available in this workspace. Choose another agent."
+        )
     tenant_row, channel_rows = await scoped_config_read.list_propagations_for_tenant(
         session, tenant_id=tenant_id
     )

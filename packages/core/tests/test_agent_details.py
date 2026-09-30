@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_details import (
     AgentDetails,
     GitHubDeploymentFacts,
@@ -33,6 +34,7 @@ from daimon.core.scope import (
     ResolvedConfig,
 )
 from daimon.core.stores import scoped_config_write
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.thread_agent_bindings import create_binding
@@ -441,5 +443,38 @@ async def test_load_agent_details_refuses_an_agent_from_another_install(
             github=_NO_GITHUB,
             public_mcp_url=None,
             is_admin=True,
+            channel_label="#general",
+        )
+
+
+async def test_load_agent_details_hides_an_isolated_channels_agent_from_a_member_outside(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await scoped_config_write.set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="room"),
+        tenant_id=tenant.id,
+        agent_name="local",
+    )
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(isolated_channel_ids=("room",))
+    )
+    router = MARouter()
+    router.add_agent(ma_agent(id="ag_local", name="local", tenant_id=tenant.id))
+
+    with pytest.raises(DaimonError, match="no longer available"):
+        await load_agent_details(
+            db_session,
+            build_fake_anthropic(router.dispatch),
+            tenant_id=tenant.id,
+            ma_agent_id="ag_local",
+            platform="discord",
+            channel_id="c1",
+            thread_id=None,
+            deployment_default=DeploymentDefault(),
+            github=_NO_GITHUB,
+            public_mcp_url=None,
+            is_admin=False,
             channel_label="#general",
         )
