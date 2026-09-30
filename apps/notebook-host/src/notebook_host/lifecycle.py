@@ -24,7 +24,7 @@ from typing import Literal
 import httpx
 from fastapi import HTTPException, status
 
-from notebook_host.jail import SlugPaths, build_jailed_preexec
+from notebook_host.jail import SlugPaths, build_jailed_preexec, open_log_nofollow, remove_path
 
 _log = logging.getLogger(__name__)
 
@@ -218,9 +218,12 @@ def _prepare_workspace(paths: SlugPaths) -> Path:
     Idempotent: stale links/files are replaced so a mid-spawn crash doesn't
     wedge the next attempt.
     """
-    paths.data.mkdir(parents=True, exist_ok=True)
-    paths.workspace.mkdir(parents=True, exist_ok=True)
-    paths.tmp.mkdir(parents=True, exist_ok=True)
+    for d in (paths.data, paths.workspace, paths.tmp):
+        # mkdir(exist_ok) is satisfied by a symlink to a directory, and the
+        # links below would then be created wherever it points, as root.
+        if d.is_symlink():
+            raise RuntimeError(f"refusing to use symlinked {d.name} in slug tree {paths.root}")
+        d.mkdir(parents=True, exist_ok=True)
 
     # Relative symlinks so the workspace dir is location-independent.
     data_link = paths.workspace / "data"
@@ -230,8 +233,9 @@ def _prepare_workspace(paths: SlugPaths) -> Path:
         (source_link, Path("..") / paths.notebook.name),
     )
     for link, target in targets:
-        if link.is_symlink() or link.exists():
-            link.unlink()
+        # The workspace belongs to the jail uid: whatever it left at these
+        # names (a file, a directory, a link) is removed without following.
+        remove_path(link)
         link.symlink_to(target)
     return paths.workspace
 
@@ -303,13 +307,13 @@ def spawn_marimo(
     ]
     log_path = paths.log
     # Opened here, in the host process, before the fork — so the file is
-    # created root-owned even though it lives inside the uid-owned 0700 slug
-    # root. That's correct and needs no chown: the child inherits this
+    # created root-owned (0600) in the host-owned slug root, and never through
+    # a planted symlink (O_NOFOLLOW). That's correct and needs no chown: the child inherits this
     # already-open file descriptor, and POSIX does not re-check permissions on
     # an inherited fd. Do not chown this file, and do not move the open()
     # after the privilege drop — the dropped-uid child would then be opening a
     # path it has no rights to, breaking log writes outright.
-    log_fh = open(log_path, "ab")  # noqa: SIM115 — owned by subprocess
+    log_fh = open_log_nofollow(log_path)
     env = scrub_env(dict(os.environ))
     env["HOME"] = str(paths.home)
     env["TMPDIR"] = str(paths.tmp)
@@ -337,7 +341,7 @@ def spawn_marimo(
             preexec_fn=preexec,
         )
     finally:
-        log_fh.close()
+        os.close(log_fh)
     stdin = proc.stdin
     if stdin is not None:
         # A child that died before reading leaves a broken pipe; the ready

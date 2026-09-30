@@ -61,6 +61,16 @@ image installs from without `uv.lock`. The host refuses to boot if links would
 go out over plain http to anything but localhost: set `public_url_base` to the
 `https://` origin, or `allow_http_links` on a trusted private network.
 
+**The host never follows a link the jail uid planted.** The slug root is owned
+by the host (0711), so the jail uid can't rename or replace `home`,
+`workspace`, `data`, `tmp`, `notebook.py` or `marimo.log`; only the
+subdirectories are the uid's (0700). The host opens every directory it chowns
+`O_NOFOLLOW | O_DIRECTORY` and changes it through the fd. It writes files
+(`notebook.py`, attachments) `O_CREAT | O_EXCL | O_NOFOLLOW` and renames them
+into place, and opens `marimo.log` `O_NOFOLLOW`. A symlink found where a
+directory or file should be (possible in trees from older releases) is
+unlinked, never followed. `notebook.py`, attachments and the log are 0600.
+
 **Leftover processes and uids.** Before a slug's uid is released, and before a
 slug or a blog is respawned, the host kills every process running as that uid,
 not just marimo's process group: it becomes the uid and calls `kill(-1,
@@ -105,7 +115,15 @@ rotates with the token and can't be guessed. The proxy:
   cross-origin, so its fetches, form posts and frames are all refused;
 - accepts a WebSocket only when `Origin` is exactly the notebook's own origin;
 - strips any `Domain` from `Set-Cookie`, so every cookie is host-only, and
-  sends `Content-Security-Policy: frame-ancestors 'self'`.
+  sends `Content-Security-Policy: frame-ancestors 'self'`;
+- over https, renames marimo's cookies to `__Host-` cookies (`Secure`,
+  `Path=/`, no `Domain`), forwards only `__Host-` cookies to marimo (so a
+  cookie tossed from another subdomain is dropped), and sends HSTS.
+
+`ORIGIN_BASE` must be a **dedicated registrable domain** (e.g.
+`daimon-notebooks.example`, not `nb.yourcompany.com`), or be listed on the
+Public Suffix List. Otherwise every other site under the same registrable
+domain is same-site with the notebooks.
 
 A real-browser test (`tests/test_notebook_origin_browser.py`) opens B's link,
 then runs attacker JS on A's page: credentialed fetch, `no-cors` POST and

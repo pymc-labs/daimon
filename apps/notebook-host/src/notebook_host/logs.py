@@ -23,10 +23,22 @@ class RedactAccessToken(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # Arg-wise first: uvicorn's AccessFormatter reads ``record.args`` by
+        # position, so its records must keep their args.
         if isinstance(record.args, tuple):
             record.args = tuple(
                 redact_access_token(arg) if isinstance(arg, str) else arg for arg in record.args
             )
         if isinstance(record.msg, str):
             record.msg = redact_access_token(record.msg)
+        # Anything still leaking came from a non-str arg (httpx logs an
+        # ``httpx.URL``): redact the formatted message and drop the args.
+        try:
+            message = record.getMessage()
+        except (TypeError, ValueError):
+            return True
+        redacted = redact_access_token(message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = None
         return True

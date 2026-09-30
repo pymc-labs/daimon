@@ -52,16 +52,63 @@ def _filter_request_headers(h: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in h.items() if k.lower() not in _HOP_BY_HOP}
 
 
-_COOKIE_DOMAIN = re.compile(r";\s*domain=[^;]*", re.IGNORECASE)
+_COOKIE_DOMAIN = re.compile(r";\s*domain\s*=[^;]*", re.IGNORECASE)
+_HOST_PREFIX = "__Host-"
+_HSTS = b"max-age=31536000"
 
 
-def _response_headers(h: httpx.Headers, *, own_origin: bool) -> list[tuple[bytes, bytes]]:
+def _host_prefixed_cookie(cookie: str) -> str:
+    """``name=v; attrs`` -> ``__Host-name=v; attrs; Path=/; Secure``, no Domain.
+
+    The browser only accepts a ``__Host-`` cookie from a secure origin, with
+    ``Path=/`` and no ``Domain``, so no sibling ``<label>.<origin_base>`` (or
+    anything else on the parent domain) can set or overwrite it. marimo's own
+    ``Path=/n/<slug>`` is dropped: the whole origin is this one notebook.
+    """
+    first, _, rest = cookie.partition(";")
+    name, _, value = first.partition("=")
+    attrs = [
+        a.strip()
+        for a in rest.split(";")
+        if a.strip() and a.split("=", 1)[0].strip().lower() not in ("domain", "path", "secure")
+    ]
+    return "; ".join([f"{_HOST_PREFIX}{name.strip()}={value}", *attrs, "Path=/", "Secure"])
+
+
+def _unprefixed_cookies(header: str) -> str:
+    """Forward only the ``__Host-`` cookies, under marimo's own names.
+
+    A cookie without the prefix may have been set by another origin on the
+    parent domain (cookie tossing), so it never reaches marimo.
+    """
+    kept: list[str] = []
+    for pair in header.split(";"):
+        name, eq, value = pair.strip().partition("=")
+        if eq and name.startswith(_HOST_PREFIX):
+            kept.append(f"{name[len(_HOST_PREFIX) :]}={value}")
+    return "; ".join(kept)
+
+
+def _backend_request_headers(h: Mapping[str, str], *, secure: bool) -> dict[str, str]:
+    out = _filter_request_headers(dict(h))
+    if secure:
+        for key in [k for k in out if k.lower() == "cookie"]:
+            cookies = _unprefixed_cookies(out.pop(key))
+            if cookies:
+                out["cookie"] = cookies
+    return out
+
+
+def _response_headers(
+    h: httpx.Headers, *, own_origin: str | None, secure: bool
+) -> list[tuple[bytes, bytes]]:
     """Backend headers to relay, every ``Set-Cookie`` kept and host-only.
 
     A ``Domain`` attribute would share a notebook's cookie with every sibling
     ``<label>.<origin_base>``, so it is stripped: each cookie stays on the
-    exact origin that set it. On its own origin a notebook may only be framed
-    by itself.
+    exact origin that set it. Over https (``secure``) cookies are also
+    ``__Host-`` prefixed and ``Secure``, and HSTS is sent. On its own origin a
+    notebook may only be framed by itself.
     """
     out: list[tuple[bytes, bytes]] = []
     for k, v in h.multi_items():
@@ -69,10 +116,12 @@ def _response_headers(h: httpx.Headers, *, own_origin: bool) -> list[tuple[bytes
         if name in _HOP_BY_HOP:
             continue
         if name == "set-cookie":
-            v = _COOKIE_DOMAIN.sub("", v)
+            v = _host_prefixed_cookie(v) if secure else _COOKIE_DOMAIN.sub("", v)
         out.append((k.encode("latin-1"), v.encode("latin-1")))
-    if own_origin:
+    if own_origin is not None:
         out.append((b"content-security-policy", b"frame-ancestors 'self'"))
+    if secure:
+        out.append((b"strict-transport-security", _HSTS))
     return out
 
 
@@ -141,7 +190,8 @@ def create_proxy_router(state: AdminState) -> APIRouter:
         if request.url.query:
             backend_url += "?" + request.url.query
 
-        headers = _filter_request_headers(dict(request.headers))
+        secure = own_origin is not None and own_origin.startswith("https://")
+        headers = _backend_request_headers(request.headers, secure=secure)
         body = await request.body()
 
         async with httpx.AsyncClient(timeout=60.0) as c:
@@ -152,7 +202,9 @@ def create_proxy_router(state: AdminState) -> APIRouter:
                 content=body,
             )
         response = Response(content=r.content, status_code=r.status_code)
-        response.raw_headers.extend(_response_headers(r.headers, own_origin=own_origin is not None))
+        response.raw_headers.extend(
+            _response_headers(r.headers, own_origin=own_origin, secure=secure)
+        )
         return response
 
     @router.websocket("/n/{slug}/{ws_path:path}")
@@ -199,7 +251,12 @@ def create_proxy_router(state: AdminState) -> APIRouter:
         # marimo authenticates the socket with the session cookie it set on
         # the page load (or an Authorization header), so both must reach the
         # backend; nothing else of the browser's handshake is forwarded.
-        auth_headers = {k: v for k, v in websocket.headers.items() if k.lower() in _WS_AUTH_HEADERS}
+        secure = own_origin is not None and own_origin.startswith("https://")
+        auth_headers = {
+            k: v
+            for k, v in _backend_request_headers(websocket.headers, secure=secure).items()
+            if k.lower() in _WS_AUTH_HEADERS
+        }
 
         await websocket.accept()
 

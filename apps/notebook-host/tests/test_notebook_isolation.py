@@ -917,6 +917,175 @@ def test_origin_mode_boot_check_wants_https() -> None:
     )  # pyright: ignore[reportArgumentType]
 
 
+# --- log redaction through a real httpx request -----------------------------------
+
+
+def test_httpx_request_logs_never_carry_the_token() -> None:
+    """httpx logs its URL as an ``httpx.URL`` arg, which arg-wise redaction skipped."""
+    import io
+    import logging
+    import logging.config
+
+    from notebook_host.__main__ import uvicorn_log_config
+
+    logging.config.dictConfig(uvicorn_log_config())
+    buf = io.StringIO()
+    for handler in logging.getLogger().handlers:
+        assert isinstance(handler, logging.StreamHandler)
+        handler.setStream(buf)  # pyright: ignore[reportUnknownMemberType]
+    transport = httpx.MockTransport(lambda _r: httpx.Response(200))
+    with httpx.Client(transport=transport) as c:
+        c.get("http://127.0.0.1:1/n/nb/?access_token=HTTPX-tok")
+    # Even if httpx is turned back up to INFO, a non-str arg is redacted.
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    with httpx.Client(transport=transport) as c:
+        c.get("http://127.0.0.1:1/n/nb/?access_token=HTTPX-tok2")
+    logging.getLogger("notebook_host").warning(
+        "url %s", httpx.URL("http://h/n/nb/?access_token=URL-tok")
+    )
+    out = buf.getvalue()
+    assert "HTTPX-tok" not in out and "URL-tok" not in out, out
+    assert "access_token=[redacted]" in out, "the records are still logged, redacted"
+
+
+# --- root must never follow a symlink the jail uid planted --------------------------
+
+
+def test_ensure_slug_jail_never_chowns_or_chmods_through_a_planted_symlink(
+    tmp_path: Path,
+) -> None:
+    """A cell renames home away and plants home -> /etc; the next spawn must not chown /etc."""
+    from notebook_host.jail import ensure_slug_jail
+
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim.chmod(0o755)
+    (victim / "passwd").write_text("root:x:0:0")
+    data_dir = tmp_path / "nbs"
+    paths = ensure_slug_jail(data_dir, "s")
+    # Legacy tree: the slug root was owned by the jail uid, so it could swap.
+    paths.root.chmod(0o700)
+    paths.home.rename(paths.root / "h2")
+    paths.home.symlink_to(victim)
+    paths.log.symlink_to(victim / "passwd")
+    paths.notebook.symlink_to(victim / "passwd")
+
+    ensure_slug_jail(data_dir, "s")
+
+    assert victim.stat().st_mode & 0o777 == 0o755, "the symlink target is untouched"
+    assert (victim / "passwd").read_text() == "root:x:0:0"
+    assert paths.home.is_dir() and not paths.home.is_symlink(), "home is a real dir again"
+    assert not paths.log.is_symlink() and not paths.notebook.is_symlink()
+    assert paths.root.stat().st_mode & 0o777 == 0o711
+    assert paths.root.stat().st_uid == os.geteuid(), "the slug root belongs to the host"
+
+
+def test_host_file_writes_never_follow_a_planted_symlink(tmp_path: Path) -> None:
+    from notebook_host.admin import _atomic_write_bytes  # pyright: ignore[reportPrivateUsage]
+    from notebook_host.jail import ensure_slug_jail
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("original")
+    paths = ensure_slug_jail(tmp_path / "nbs", "s")
+    # The data dir belongs to the jail uid: it can plant both names.
+    (paths.data / ".x.csv.tmp").symlink_to(victim)
+    (paths.data / "y.csv").symlink_to(victim)
+    _atomic_write_bytes(paths.data / "x.csv", b"attached")
+    _atomic_write_bytes(paths.data / "y.csv", b"attached")
+    assert victim.read_text() == "original", "root wrote through no link"
+    assert (paths.data / "x.csv").read_bytes() == b"attached"
+    assert not (paths.data / "y.csv").is_symlink()
+    assert (paths.data / "x.csv").stat().st_mode & 0o777 == 0o600
+
+
+def test_marimo_log_is_opened_without_following_a_symlink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from notebook_host import lifecycle
+    from notebook_host.jail import ensure_slug_jail
+
+    monkeypatch.setattr(lifecycle.shutil, "which", lambda _x: "/usr/bin/uv")  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    fake = unittest.mock.MagicMock(spec=subprocess.Popen)
+    fake.stdin = unittest.mock.MagicMock()
+    monkeypatch.setattr(lifecycle.subprocess, "Popen", lambda *_a, **_k: fake)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    victim = tmp_path / "victim.txt"
+    victim.write_text("original")
+    paths = ensure_slug_jail(tmp_path / "nbs", "s")
+    paths.notebook.write_text("# nb")
+    paths.log.symlink_to(victim)
+    with pytest.raises(OSError):
+        lifecycle.spawn_marimo("s", paths, 8100, access_token="t")
+    assert victim.read_text() == "original", "the host never appends through a planted link"
+
+
+def test_mode_wipe_removes_a_symlinked_home_instead_of_leaving_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _, _ = _make_app(tmp_path, monkeypatch, allow_editable=True)
+    client.put(f"/upload/{_mint('notebook_edit', 'a', jti='1')}", content=b"# a\n")
+    paths = get_slug_paths(tmp_path, "a")
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep").write_text("k")
+    paths.root.chmod(0o700)  # a legacy, uid-owned root
+    import shutil
+
+    shutil.rmtree(paths.home)
+    paths.home.symlink_to(victim)
+    r = client.put(f"/upload/{_mint('notebook', 'a', jti='2')}", content=b"# a\n")
+    assert r.status_code == 200, r.text
+    assert (victim / "keep").exists(), "the wipe never recursed through the link"
+    assert paths.home.is_dir() and not paths.home.is_symlink()
+
+
+# --- origin-mode cookie hardening and tenant fail-closed ---------------------------
+
+
+def test_https_origin_cookies_are_host_prefixed_secure_and_hsts_is_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _, seen, hosts = _origin_client(tmp_path, monkeypatch)
+    r = client.get(
+        "/n/b/",
+        headers={"host": hosts["b"], "cookie": "__Host-session_1=abc; session_1=tossed; x=y"},
+    )
+    cookies = r.headers.get_list("set-cookie")
+    assert cookies[0].startswith("__Host-session_1=x"), cookies
+    for c in cookies:
+        attrs = [a.strip().lower() for a in c.split(";")[1:]]
+        assert "secure" in attrs, "cookies only ever travel over https"
+        assert "path=/" in attrs and not any(a.startswith("domain") for a in attrs), (
+            "__Host- requires Path=/ and no Domain: no sibling origin can set or read it"
+        )
+    assert r.headers["strict-transport-security"].startswith("max-age=")
+    forwarded = seen[-1].headers.get("cookie")
+    assert forwarded == "session_1=abc", (
+        "only the host-prefixed cookie reaches marimo; a cookie a sibling tossed is dropped"
+    )
+
+
+def test_cookie_domain_strip_tolerates_spaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_host.proxy import _response_headers  # pyright: ignore[reportPrivateUsage]
+
+    h = httpx.Headers([("set-cookie", "a=1; Domain = nb.example.com ; Path=/n/b")])
+    out = dict(_response_headers(h, own_origin=None, secure=False))
+    assert b"domain" not in out[b"set-cookie"].lower()
+
+
+def test_unreadable_tenant_file_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DAIMON_NOTEBOOK__PUBLIC_URL_BASE", "https://nbs.example.com")
+    client, _, calls = _make_app(tmp_path, monkeypatch)
+    (tmp_path / "tenant.json").write_text("{not json")
+    r = client.put(f"/upload/{_mint('notebook', 'a', tenant='t-2')}", content=b"#\n")
+    assert r.status_code == 503, "a damaged claim must never be re-claimed by a new tenant"
+    assert calls == []
+    assert (tmp_path / "tenant.json").read_text() == "{not json"
+
+
 # --- real marimo: a neighbour on localhost is refused -------------------------
 
 _NB = """import marimo

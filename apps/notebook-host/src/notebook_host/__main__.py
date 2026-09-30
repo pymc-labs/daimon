@@ -23,6 +23,10 @@ def uvicorn_log_config() -> dict[str, Any]:
     # The host's own loggers (and marimo's, if it logs in-process) propagate
     # to root; route root through the same redacting handler.
     config["root"] = {"handlers": ["default"], "level": "INFO"}
+    # httpx logs every request URL at INFO, and the host's own requests to
+    # marimo carry the notebook's token.
+    for name in ("httpx", "httpcore"):
+        config["loggers"][name] = {"level": "WARNING"}
     return config
 
 

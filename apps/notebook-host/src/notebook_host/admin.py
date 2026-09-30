@@ -6,7 +6,6 @@ import asyncio
 import hmac
 import json
 import os
-import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -34,9 +33,11 @@ from notebook_host.jail import (
     ensure_slug_jail,
     get_slug_paths,
     kill_uid_processes,
+    remove_path,
     remove_slug_tree,
     remove_uid_files,
     resolve_jail_uid,
+    write_file_nofollow,
 )
 from notebook_host.lifecycle import (
     NotebookProcess,
@@ -182,9 +183,20 @@ def _admit_tenant(settings: Settings, tenant: str | None) -> None:
         )
     path = settings.data_dir / _TENANT_FILE
     try:
-        owner = json.loads(path.read_text())["tenant"]
-    except (OSError, ValueError, KeyError, TypeError):
+        raw = path.read_text()
+    except FileNotFoundError:
         owner = None
+    except OSError as err:
+        raise _tenant_claim_unusable() from err
+    else:
+        # A claim that exists but can't be read must never be re-claimed by
+        # whoever uploads next: refuse until an operator repairs it.
+        try:
+            owner = json.loads(raw)["tenant"]
+        except (ValueError, KeyError, TypeError) as err:
+            raise _tenant_claim_unusable() from err
+        if not isinstance(owner, str):
+            raise _tenant_claim_unusable()
     if owner is None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
@@ -198,6 +210,13 @@ def _admit_tenant(settings: Settings, tenant: str | None) -> None:
             "this notebook host serves another tenant; notebooks share one browser origin "
             "here (set DAIMON_NOTEBOOK__ORIGIN_BASE for per-notebook origins)",
         )
+
+
+def _tenant_claim_unusable() -> HTTPException:
+    return HTTPException(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        f"{_TENANT_FILE} is unreadable; refusing uploads until an operator repairs it",
+    )
 
 
 def _kill_uid_or_503(uid: int) -> None:
@@ -231,16 +250,9 @@ def _atomic_write_bytes(path: Path, content: bytes, *, owner_uid: int | None = N
     owner_uid)`` before the replace, so the file is never visible at its final
     path with the wrong owner.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    try:
-        tmp.write_bytes(content)
-        if owner_uid is not None:
-            os.chown(tmp, owner_uid, owner_uid)
-        os.replace(tmp, path)
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        raise
+    # The data dir is owned by the jail uid, so its code can plant a symlink
+    # at the tmp or final name; write_file_nofollow never writes through one.
+    write_file_nofollow(path, content, owner_uid=owner_uid)
 
 
 async def _spawn_tracked(
@@ -304,7 +316,7 @@ async def _spawn_tracked(
             _kill_uid_or_503(uid)
             remove_uid_files(uid)
         for d in (paths.home, paths.workspace, paths.tmp):
-            shutil.rmtree(d, ignore_errors=True)
+            remove_path(d)
         paths = ensure_slug_jail(state.settings.data_dir, slug, uid=uid)
     _atomic_write_bytes(paths.notebook, source_bytes, owner_uid=uid)
 

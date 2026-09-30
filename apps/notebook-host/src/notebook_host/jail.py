@@ -58,10 +58,21 @@ from pathlib import Path
 _log = logging.getLogger(__name__)
 
 SLUG_TREE_MODE = 0o700
-"""Mode for each slug's four owned directories (root, data, workspace, home).
+"""Mode for each slug's uid-owned directories (data, workspace, home, tmp).
 
 This is the real isolation boundary: only the slug's own uid (chowned by
 ``ensure_slug_jail``) can read, write, or traverse it.
+"""
+
+SLUG_ROOT_MODE = 0o711
+"""Mode for the slug root itself, owned by the host (root), not the jail uid.
+
+The host writes ``notebook.py`` and ``marimo.log`` there and chowns and wipes
+the subdirectories as root. If the jail uid owned the root, a cell could
+rename ``home`` away and plant ``home -> /etc``, and the host's next chown
+would hand ``/etc`` to the jail uid. Owned by the host, its entries can't be
+swapped. 0711 lets the uid traverse into its own subdirectories; the files
+the host keeps here are 0600.
 """
 
 DATA_DIR_MODE = 0o711
@@ -151,28 +162,100 @@ def get_slug_paths(data_dir: Path, slug: str) -> SlugPaths:
 
 
 def ensure_slug_jail(data_dir: Path, slug: str, *, uid: int | None = None) -> SlugPaths:
-    """Create (or repair) a slug's whole directory tree at mode 0700.
+    """Create (or repair) a slug's tree without ever following a symlink.
 
-    Creates ``root``, ``data``, ``workspace``, ``home``, ``tmp`` and chmods each to
-    0700 unconditionally — ``mkdir``'s ``mode`` argument is masked by umask,
-    so an explicit ``chmod`` is required. When ``uid`` is given, each of those
-    four directories is also chowned to ``(uid, uid)``.
+    ``root`` is owned by the host at ``SLUG_ROOT_MODE`` (0711); ``data``,
+    ``workspace``, ``home`` and ``tmp`` are 0700 and, when ``uid`` is given,
+    owned by it. Every directory is opened ``O_NOFOLLOW | O_DIRECTORY`` and
+    changed through the fd, so a symlink planted where a directory should be
+    (possible in trees from before the root was host-owned) is removed, never
+    chowned through. A symlinked ``notebook.py`` or ``marimo.log`` is unlinked
+    for the same reason.
 
     Idempotent: safe to call repeatedly on an existing, already-owned tree.
-    Does NOT touch ``notebook.py``, ``marimo.log``, or anything already inside
-    ``data/`` — file ownership is the write site's job, and files created by
-    the jailed marimo process are already owned correctly by construction.
+    Does NOT touch anything inside the subdirectories — files the jailed
+    marimo process creates are already owned correctly by construction.
 
     ``slug`` must already have passed ``lifecycle.safe_slug``.
     """
     paths = get_slug_paths(data_dir, slug)
-    dirs = (paths.root, paths.data, paths.workspace, paths.home, paths.tmp)
-    for d in dirs:
-        d.mkdir(parents=True, exist_ok=True)
-        os.chmod(d, SLUG_TREE_MODE)
-        if uid is not None:
-            os.chown(d, uid, uid)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    _secure_dir(paths.root, SLUG_ROOT_MODE, owner=(os.geteuid(), os.getegid()))
+    for f in (paths.notebook, paths.log):
+        if f.is_symlink():
+            f.unlink()
+    for d in (paths.data, paths.workspace, paths.home, paths.tmp):
+        _secure_dir(d, SLUG_TREE_MODE, owner=(uid, uid) if uid is not None else None)
     return paths
+
+
+def _secure_dir(path: Path, mode: int, *, owner: tuple[int, int] | None) -> None:
+    """Make ``path`` a real directory with ``mode`` and ``owner``, symlinks refused."""
+    remove_path(path, keep_real_dir=True)
+    with contextlib.suppress(FileExistsError):
+        path.mkdir()
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if owner is not None:
+            os.fchown(fd, *owner)
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
+def remove_path(path: Path, *, keep_real_dir: bool = False) -> None:
+    """Remove ``path`` without following it: unlink links and files, rmtree dirs.
+
+    ``shutil.rmtree`` refuses a symlink (and ``ignore_errors`` would leave it
+    in place), so a link is always unlinked. ``keep_real_dir`` leaves a real
+    directory alone and removes anything else in its place.
+    """
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(st.st_mode):
+        if not keep_real_dir:
+            shutil.rmtree(path)
+        return
+    path.unlink()
+
+
+def write_file_nofollow(
+    path: Path, content: bytes, *, owner_uid: int | None, mode: int = 0o600
+) -> None:
+    """Atomically write ``path`` as root without following any link an attacker planted.
+
+    The tmp file is created ``O_CREAT | O_EXCL | O_NOFOLLOW`` next to ``path``
+    (a stale one is unlinked first, never opened), written and chowned through
+    its fd, then renamed over ``path``; a rename replaces a symlink at the
+    destination rather than writing through it.
+    """
+    tmp = path.with_name(f".{path.name}.tmp")
+    remove_path(tmp)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    try:
+        try:
+            view = memoryview(content)
+            while view:
+                view = view[os.write(fd, view) :]
+            if owner_uid is not None:
+                os.fchown(fd, owner_uid, owner_uid)
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def open_log_nofollow(path: Path) -> int:
+    """Open the slug's host-owned log for append, refusing a symlink. Returns an fd."""
+    return os.open(
+        path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
+    )
 
 
 def remove_slug_tree(data_dir: Path, slug: str, *, uids_file: Path | None = None) -> None:

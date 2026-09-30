@@ -371,3 +371,36 @@ def test_jailed_child_has_no_new_privs_and_a_process_cap() -> None:
     ).stdout
     assert "NoNewPrivs:\t1" in out, "setuid binaries can't hand the notebook privilege back"
     assert out.strip().splitlines()[-1].split()[2] == str(JAIL_RLIMIT_NPROC)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(os.geteuid() != 0, reason="uid drop requires root")
+def test_jail_uid_cannot_swap_entries_in_its_host_owned_slug_root() -> None:
+    """Renaming home away and planting home -> /etc must fail for the jail uid.
+
+    If it succeeded, the host's next chown of ``home`` would hand ``/etc`` to
+    the jail uid. The data dir is in its own 0711 dir under /tmp so the jail
+    uid can reach it at all (pytest's tmp_path is root-only).
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    from notebook_host.jail import build_jailed_preexec
+
+    base = Path(tempfile.mkdtemp(dir="/tmp"))
+    try:
+        base.chmod(0o711)
+        paths = ensure_slug_jail(base, "slug-a", uid=_UID_A)
+        preexec = build_jailed_preexec(_UID_A, rlimit_as_bytes=None, rlimit_cpu_seconds=None)
+
+        def as_uid(*argv: str) -> int:
+            return subprocess.run(list(argv), preexec_fn=preexec, cwd="/", check=False).returncode
+
+        assert as_uid("/bin/touch", str(paths.home / "ok")) == 0, "its own home is writable"
+        assert as_uid("/bin/mv", str(paths.home), str(paths.root / "h2")) != 0
+        assert as_uid("/bin/ln", "-s", "/etc", str(paths.root / "home2")) != 0
+        assert as_uid("/bin/rm", "-rf", str(paths.log)) != 0 or not paths.log.exists()
+        assert paths.home.is_dir() and not paths.home.is_symlink()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
