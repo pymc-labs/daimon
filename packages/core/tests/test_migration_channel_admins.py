@@ -35,9 +35,19 @@ async def test_channel_admins_migration_round_trips(db_session: AsyncSession) ->
 
         return inner
 
+    async def table_exists() -> bool:
+        found = await db_session.execute(
+            text(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = current_schema() AND table_name = 'channel_admins'"
+            )
+        )
+        return found.first() is not None
+
     await conn.run_sync(run("downgrade"))
-    assert (await db_session.execute(text("SELECT to_regclass('channel_admins')"))).scalar() is None
+    assert not await table_exists(), "downgrade drops channel_admins"
     await conn.run_sync(run("upgrade"))
+    assert await table_exists(), "upgrade recreates channel_admins"
 
     role_ids = await db_session.execute(
         text("SELECT platform_role_ids FROM accounts WHERE id = :id"), {"id": account.id}
