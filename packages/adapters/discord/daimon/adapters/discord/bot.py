@@ -747,10 +747,19 @@ class DaimonBot(commands.Bot):
                     clear_reason=True,
                 )
                 if not was_ready:
-                    async with self.runtime.sessionmaker() as session:
-                        promo_codes = await has_redeemable_promo_code(
-                            session, now=datetime.now(UTC)
+                    try:
+                        async with self.runtime.sessionmaker() as session:
+                            promo_codes = await has_redeemable_promo_code(
+                                session, now=datetime.now(UTC)
+                            )
+                    except SQLAlchemyError as exc:
+                        # The guild is ready; a failed lookup only drops the promo line.
+                        log.warning(
+                            "guild_seed_promo_lookup_failed",
+                            tenant_id=str(tenant_id),
+                            error=str(exc),
                         )
+                        promo_codes = False
                     await self._post_to_guild(guild, _build_ready_embed(promo_codes=promo_codes))
             else:
                 reason = roster_failure_reason or compose_failure_reason(report)
