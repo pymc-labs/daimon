@@ -10,6 +10,7 @@ describing a state that no longer exists.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -1118,11 +1119,34 @@ def test_routing_view_lists_channel_admins_and_offers_edit_to_admins_only() -> N
         updated_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     admin = _routing(channel_admins=[grant])
-    assert f"<#{_OTHER_CHANNEL_ID}> → <@U0LEAD1>, <@U0LEAD2>" in "\n".join(_texts(admin))
-    assert ACTION_CHANNEL_ADMINS in _action_ids(admin)
+    assert f"<#{_OTHER_CHANNEL_ID}> → <@U0LEAD1>, <@U0LEAD2>" in "\n".join(_texts(admin)), (
+        "each channel lists its members"
+    )
+    assert ACTION_CHANNEL_ADMINS in _action_ids(admin), "admins may edit this channel"
     member = _routing(channel_admins=None)
     assert ACTION_CHANNEL_ADMINS not in _action_ids(member), "members see no channel admins"
     assert not any("Channel admins" in text for text in _texts(member))
+
+
+def test_channel_admins_listing_fits_one_section_without_clipping() -> None:
+    users = tuple(f"U{n:060d}" for n in range(25))
+    grants = [
+        ChannelAdminsRow(
+            tenant_id=uuid.uuid4(),
+            platform="slack",
+            channel_id=f"C{n:010d}",
+            role_ids=(),
+            user_ids=users,
+            updated_by_account_id=None,
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        for n in range(40)
+    ]
+    (section,) = [t for t in _texts(_routing(channel_admins=grants)) if "*Channel admins*" in t]
+    assert len(section) <= 3000, f"{len(section)} characters exceed Slack's section cap"
+    assert not section.endswith("…"), "the listing is budgeted, not clipped mid-mention"
+    assert "+20 more" in section, "extra members fold per channel"
+    assert re.search(r"_and \d+ more_$", section), "channels left out are counted"
 
 
 def test_channel_admins_form_prefills_members_and_keeps_the_ids_the_submission_reads() -> None:

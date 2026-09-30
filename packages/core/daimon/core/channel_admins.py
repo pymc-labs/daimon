@@ -97,6 +97,29 @@ def normalize_channel_admin_ids(
     return channel, roles, users
 
 
+MAX_LISTED_MENTIONS = 5
+"""Mentions shown per channel in a listing; the rest fold into "+N more"."""
+
+
+def fold_mentions(mentions: Sequence[str]) -> str:
+    """The first `MAX_LISTED_MENTIONS` mentions, comma-joined, then "+N more"."""
+    shown = ", ".join(mentions[:MAX_LISTED_MENTIONS])
+    rest = len(mentions) - MAX_LISTED_MENTIONS
+    return f"{shown} +{rest} more" if rest > 0 else shown
+
+
+def fit_lines(lines: Iterable[str], *, max_chars: int) -> list[str]:
+    """The leading `lines` whose newline-joined text stays within `max_chars`."""
+    kept: list[str] = []
+    used = -1
+    for line in lines:
+        used += len(line) + 1
+        if used > max_chars:
+            break
+        kept.append(line)
+    return kept
+
+
 async def load_administered_channel_ids(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, caller: ChannelAdminCaller
 ) -> frozenset[str]:
@@ -109,9 +132,12 @@ async def load_administered_channel_ids(
 
 __all__ = [
     "MAX_CHANNEL_ADMIN_IDS",
+    "MAX_LISTED_MENTIONS",
     "ChannelAdminCaller",
     "InvalidChannelAdminIds",
     "administered_channel_ids",
+    "fit_lines",
+    "fold_mentions",
     "is_channel_admin",
     "load_administered_channel_ids",
     "normalize_channel_admin_ids",

@@ -37,7 +37,7 @@ from daimon.adapters.slack.setup_conversations import setup_button
 from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap, ChannelAnswer
-from daimon.core.channel_admins import MAX_CHANNEL_ADMIN_IDS
+from daimon.core.channel_admins import MAX_CHANNEL_ADMIN_IDS, fit_lines, fold_mentions
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.roster import Page, Roster, RosterAgent
@@ -164,6 +164,8 @@ ROUTING_LABEL: Final = "📍 Who answers where"
 CODING_TOOLS_LABEL: Final = "🧰 Use from your coding tools"
 CHANNEL_ADMINS_LABEL: Final = "Channel admins"
 MAX_CHANNEL_ADMIN_LINES: Final = 15
+CHANNEL_ADMINS_LISTING_MAX_CHARS: Final = 2_800
+"""Room for the listing, its heading and "and N more" in one section's 3000 characters."""
 CHANNEL_ADMINS_NOTE: Final = (
     "Workspace admins run every channel. A channel's admins may change agents that answer "
     "only in channels they run, and pick those channels' default agent. Built-in agents and "
@@ -626,12 +628,15 @@ def build_routing_view(
 def _channel_admins_blocks(
     grants: Sequence[ChannelAdminsRow], *, channel_id: str
 ) -> list[dict[str, Any]]:
-    lines = [
-        f"<#{row.channel_id}> → {', '.join(f'<@{uid}>' for uid in row.user_ids)}"
-        for row in grants[:MAX_CHANNEL_ADMIN_LINES]
-    ]
-    if len(grants) > MAX_CHANNEL_ADMIN_LINES:
-        lines.append(f"_and {len(grants) - MAX_CHANNEL_ADMIN_LINES} more_")
+    lines = fit_lines(
+        (
+            f"<#{row.channel_id}> → {fold_mentions([f'<@{uid}>' for uid in row.user_ids])}"
+            for row in grants[:MAX_CHANNEL_ADMIN_LINES]
+        ),
+        max_chars=CHANNEL_ADMINS_LISTING_MAX_CHARS,
+    )
+    if len(lines) < len(grants):
+        lines.append(f"_and {len(grants) - len(lines)} more_")
     listing = "\n".join(lines) or "_no channel has its own admins yet_"
     edit = (
         _button(action_id=ACTION_CHANNEL_ADMINS, label="Edit this channel") if channel_id else None

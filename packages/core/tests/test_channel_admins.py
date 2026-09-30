@@ -11,6 +11,8 @@ from daimon.core.channel_admins import (
     ChannelAdminCaller,
     InvalidChannelAdminIds,
     administered_channel_ids,
+    fit_lines,
+    fold_mentions,
     is_channel_admin,
     normalize_channel_admin_ids,
 )
@@ -84,6 +86,15 @@ def test_normalize_ids_checks_platform_formats() -> None:
     ):
         with pytest.raises(InvalidChannelAdminIds):
             normalize_channel_admin_ids(platform, **kwargs)
+
+
+def test_listing_helpers_fold_mentions_and_stop_at_the_character_budget() -> None:
+    assert fold_mentions(["a", "b"]) == "a, b", "few mentions are listed in full"
+    assert fold_mentions([str(n) for n in range(8)]) == "0, 1, 2, 3, 4 +3 more", "the rest fold"
+    assert fit_lines(["aaa", "bbb", "ccc"], max_chars=7) == ["aaa", "bbb"], (
+        "newlines count toward the budget"
+    )
+    assert fit_lines(["x" * 10, "y"], max_chars=5) == [], "an oversized first line stops it"
 
 
 def _channel(channel_id: str, agent: str) -> ChannelConfigRow:
