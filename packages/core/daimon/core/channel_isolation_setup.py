@@ -19,11 +19,21 @@ from typing import Literal
 
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.channel_isolation import BindingRefusal, build_channel_isolation
+from daimon.core.channel_isolation import (
+    BindingRefusal,
+    ChannelIsolation,
+    build_channel_isolation,
+)
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault, pick_agent
+from daimon.core.scope import (
+    ChannelConfigRow,
+    ChannelScopeRef,
+    DeploymentDefault,
+    TenantConfigRow,
+    pick_agent,
+)
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
@@ -125,6 +135,71 @@ async def _write_policy(
     return True
 
 
+@dataclass(frozen=True)
+class _ChannelFacts:
+    isolation: ChannelIsolation
+    row: ChannelConfigRow | None
+    tenant: TenantConfigRow | None
+    agent_name: str | None
+    """The agent set as the channel's default, if any."""
+    refusal: IsolationRefusal | None
+
+
+async def _channel_facts(
+    anthropic: AsyncAnthropic,
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    isolated_ids: Collection[str],
+    default: DeploymentDefault,
+) -> _ChannelFacts:
+    tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
+    parents = await list_handoff_parent_channel_ids(session, tenant_id=tenant_id)
+    row = next((row for row in channels if row.channel_id == channel_id), None)
+    agent_name = row.agent_name if row is not None and row.mode == "agent" else None
+    isolation = build_channel_isolation(
+        isolated_ids,
+        tenant=tenant,
+        channels=channels,
+        default=default,
+        thread_parent_channel_ids=parents,
+    )
+    refusal: IsolationRefusal | None = "no_channel_agent"
+    if agent_name is not None:
+        agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=agent_name)
+        if agent is None:
+            refusal = "no_channel_agent"
+        elif agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+            refusal = "managed_channel_agent"
+        elif isolation.channel_of(agent_name) != channel_id:
+            refusal = "shared_channel_agent"
+        else:
+            refusal = None
+    return _ChannelFacts(isolation, row, tenant, agent_name, refusal)
+
+
+async def isolation_refusal(
+    anthropic: AsyncAnthropic,
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    isolated_ids: Collection[str],
+    default: DeploymentDefault,
+) -> tuple[IsolationRefusal | None, str | None]:
+    """Why `channel_id` can't be isolated alongside `isolated_ids` (None: it can), and its agent."""
+    facts = await _channel_facts(
+        anthropic,
+        session,
+        tenant_id=tenant_id,
+        channel_id=channel_id,
+        isolated_ids={*isolated_ids, channel_id},
+        default=default,
+    )
+    return facts.refusal, facts.agent_name
+
+
 async def set_channel_isolation(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -151,38 +226,24 @@ async def set_channel_isolation(
         return IsolationChange(channel_id, False, None, None, changed)
     async with sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
-        parents = await list_handoff_parent_channel_ids(session, tenant_id=tenant_id)
-    row = next((row for row in channels if row.channel_id == channel_id), None)
-    channel_agent = row.agent_name if row is not None and row.mode == "agent" else None
-    isolation = build_channel_isolation(
-        {*policy.isolated_channel_ids, channel_id},
-        tenant=tenant,
-        channels=channels,
-        default=default,
-        thread_parent_channel_ids=parents,
-    )
-    refusal: IsolationRefusal | None = "no_channel_agent"
-    if channel_agent is not None:
-        agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=channel_agent)
-        if agent is None:
-            refusal = "no_channel_agent"
-        elif agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
-            refusal = "managed_channel_agent"
-        elif isolation.channel_of(channel_agent) != channel_id:
-            refusal = "shared_channel_agent"
-        else:
-            refusal = None
-    if refusal is None:
+        facts = await _channel_facts(
+            anthropic,
+            session,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            isolated_ids={*policy.isolated_channel_ids, channel_id},
+            default=default,
+        )
+    if facts.refusal is None:
         async with sessionmaker.begin() as session:
             changed = await _write_policy(
                 session, tenant_id=tenant_id, channel_id=channel_id, isolated=True
             )
-        return IsolationChange(channel_id, True, channel_agent, None, changed)
-    source = fork_from or pick_agent(row, tenant, default)[0]
+        return IsolationChange(channel_id, True, facts.agent_name, None, changed)
+    source = fork_from or pick_agent(facts.row, facts.tenant, default)[0]
     if fork is None or source is None:
-        raise ChannelIsolationRefused(refusal, agent_name=channel_agent or source)
-    owner = isolation.channel_of(source)
+        raise ChannelIsolationRefused(facts.refusal, agent_name=facts.agent_name or source)
+    owner = facts.isolation.channel_of(source)
     if owner is not None and owner != channel_id:
         raise ChannelIsolationRefused("agent_confined", agent_name=source)
     taken = {
@@ -210,6 +271,7 @@ __all__ = [
     "IsolationChange",
     "IsolationRefusal",
     "isolated_agent_name",
+    "isolation_refusal",
     "render_isolation_refusal",
     "set_channel_isolation",
 ]

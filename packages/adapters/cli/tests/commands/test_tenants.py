@@ -615,6 +615,7 @@ def test_access_policy_set_is_registered_with_its_flags() -> None:
         "--protected-channel",
         "--protected-category",
         "--sealed-channel",
+        "--isolated-channel",
         "--dm-memory-read-only",
         "--clear",
     ):
@@ -658,6 +659,9 @@ async def test_access_policy_get_refuses_null_row(
         ("slack", "sealed_channel", "C123ABC:"),
         ("slack", "sealed_channel", "C123ABC:yesterday"),
         ("slack", "protected_channel", "C123ABC:1700000000.000100"),
+        ("discord", "isolated_channel", "#general"),
+        ("slack", "isolated_channel", "D123ABC"),
+        ("slack", "isolated_channel", "C123ABC:1700000000.000100"),
         ("cli", "invoker", " "),
         ("discord", "invoker", ""),
     ],
@@ -849,3 +853,61 @@ async def test_access_policy_seals_a_single_slack_thread(
     )
     async with db_session_factory() as session:
         assert await load_access_policy(session, tenant_id=tenant.id) == OPEN_ACCESS_POLICY
+
+
+@pytest.mark.asyncio
+async def test_access_policy_isolates_only_a_channel_with_its_own_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.scope import ChannelScopeRef
+    from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+    from daimon.testing.ma_models import ma_agent
+
+    tenant = await provision_tenant(db_session_factory, platform="discord", workspace_id="iso")
+    local, shared = "111111111111111111", "222222222222222222"
+    async with db_session_factory() as session, session.begin():
+        for channel, agent in (
+            (local, "local"),
+            (shared, "shared"),
+            ("333333333333333333", "shared"),
+        ):
+            await scoped_config_write.set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant.tenant_id, channel_id=channel),
+                tenant_id=tenant.tenant_id,
+                agent_name=agent,
+                mode="agent",
+            )
+    state = FakeMAState()
+    for agent_id, name in (("agent_local", "local"), ("agent_shared", "shared")):
+        agent = ma_agent(id=agent_id, name=name, tenant_id=tenant.tenant_id)
+        state.agents[agent.id] = agent.model_dump(mode="json")
+    rt = build_cli_runtime(
+        db_session_factory,
+        anthropic=build_fake_anthropic(make_fake_ma_handler(state)),
+        settings=_FakeSettings(),
+    )
+
+    console = _make_console()
+    with pytest.raises(typer.Exit):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=console,
+            platform="discord",
+            external_id="iso",
+            isolated_channel=[local, shared],
+        )
+    assert "also answers outside this channel" in _output(console), _output(console)
+    assert await _policy(db_session_factory, workspace_id="iso") == OPEN_ACCESS_POLICY, (
+        "a refusal writes nothing"
+    )
+
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="iso",
+        isolated_channel=[local],
+    )
+    policy = await _policy(db_session_factory, workspace_id="iso")
+    assert policy.isolated_channel_ids == (local,), "its own agent answers only there"
