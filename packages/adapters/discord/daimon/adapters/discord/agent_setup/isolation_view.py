@@ -15,19 +15,13 @@ from typing import Final
 import structlog
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.agent_setup.write import (
-    _build_fork_fernet,  # pyright: ignore[reportPrivateUsage]
-)
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import is_isolated
 from daimon.core.agent_fork import fork_agent
-from daimon.core.channel_isolation_setup import (
-    ChannelIsolationRefused,
-    ForkAgent,
-    set_channel_isolation,
-)
+from daimon.core.channel_isolation_setup import ForkAgent, set_channel_isolation
+from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import load_access_policy
 
@@ -85,8 +79,6 @@ def _fork(runtime: DiscordRuntime, tenant_id: uuid.UUID) -> ForkAgent:
             source_name=source,
             new_name=new_name,
             public_url=str(public_url) if public_url is not None else None,
-            fernet=_build_fork_fernet(runtime),
-            oauth_scopes=tuple(runtime.settings.github.oauth_scopes),
         )
 
     return fork
@@ -146,7 +138,7 @@ class IsolationView(PanelViewBase):
                 channel_label=state.channel_name,
                 fork=_fork(self.runtime, tenant_id) if copy else None,
             )
-        except ChannelIsolationRefused as exc:
+        except DaimonError as exc:  # a refusal, or a copy that can't be made
             notice = f"-# {exc} Nothing was changed."
         else:
             log.info(

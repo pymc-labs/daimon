@@ -318,6 +318,7 @@ thread under C, answering nowhere else, never built in. Isolating needs one, so
 `set_channel_isolation` (`channel_isolation_setup.py`) refuses a channel
 without it unless given a fork: it copies `fork_from`, or whoever answers in C,
 under a name from the channel and makes the copy C's default in the same step.
+Like every fork the copy carries no credentials, and a pinned agent is not copied.
 A call runs inside C when the agent executing it is one of C's, or when a
 handoff runs from a thread under C; the hub runs outside. From outside, C's
 agents are missing from `list_agents` and every by-name lookup (get, update,

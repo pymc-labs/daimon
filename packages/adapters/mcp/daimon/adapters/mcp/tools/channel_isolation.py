@@ -94,12 +94,6 @@ async def _set_channel_isolation_impl(
     fork: ForkAgent | None = None
     label: str | None = None
     if isolated and fork_from is not None:
-        fernet = runtime.fernet
-        if fernet is None:
-            raise ToolError(
-                "This deployment is not fully configured to copy agents. Tell the user an "
-                "operator must finish setup. Nothing was changed."
-            )
         public_url = runtime.settings.mcp.public_url
 
         async def fork_copy(source: str, new_name: str) -> None:
@@ -110,8 +104,6 @@ async def _set_channel_isolation_impl(
                 source_name=source,
                 new_name=new_name,
                 public_url=str(public_url) if public_url is not None else None,
-                fernet=fernet,
-                oauth_scopes=tuple(runtime.settings.github.oauth_scopes),
             )
 
         fork = fork_copy
@@ -155,7 +147,8 @@ def register_channel_isolation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         An isolated channel needs an agent of its own: its default agent, answering
         nowhere else and not built in. If it has none, pass ``fork_from`` (an agent
         name, usually the one answering there now): that agent is copied under a name
-        taken from the channel and becomes the channel's default. Without it the call
+        taken from the channel and becomes the channel's default. The copy carries no
+        credentials, and an agent pinned to channels can't be copied. Without it the call
         is refused and says why. Repeating the call copies nothing again.
 
         While isolated, the channel's own agents can't be set as the default anywhere

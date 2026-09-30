@@ -50,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Channel isolation.** Server admins can isolate a channel whose default
   agent answers only there, with `set_channel_isolation`, from Who answers
   where in the setup panel, or with `--isolated-channel`; `fork_from` or the
-  panel's copy option makes that agent from the one answering now. Its agents
+  panel's copy option makes that agent from the one answering now (with no
+  credentials; a pinned agent isn't copied). Its agents
   then can't be bound or handed tasks elsewhere and are hidden outside it in
   agent, skill, routine and hub listings and `/memory`; inside it only they
   show. Its messages are readable only from inside it, and `/dm` there is
