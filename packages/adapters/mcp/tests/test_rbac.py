@@ -565,8 +565,16 @@ async def test_channel_admin_discovers_channel_default_tools_but_not_admin_ones(
     app = _make_app(sessionmaker)
     channel_admin, member = tokens
 
-    assert "### set_agent_default" in await _search(app, channel_admin, "set agent default")
-    assert "### set_agent_default" not in await _search(app, member, "set agent default")
-    assert "### set_channel_admins" not in await _search(app, channel_admin, "channel admins")
+    assert "### set_agent_default" in await _search(app, channel_admin, "set agent default"), (
+        "a channel admin discovers the channel default tools"
+    )
+    assert "### set_agent_default" not in await _search(app, member, "set agent default"), (
+        "a member without a grant does not"
+    )
+    assert "### set_channel_admins" not in await _search(app, channel_admin, "channel admins"), (
+        "naming channel admins stays with server admins"
+    )
     admin_token = make_jwt(account_id=admin.id)
-    assert "### set_channel_admins" in await _search(app, admin_token, "channel admins")
+    assert "### set_channel_admins" in await _search(app, admin_token, "channel admins"), (
+        "a server admin discovers the channel admin tools"
+    )

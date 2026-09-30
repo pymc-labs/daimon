@@ -71,6 +71,7 @@ def test_normalize_ids_checks_platform_formats() -> None:
         ("discord", {"channel_id": SNOWFLAKE, "role_ids": ["<@&1>"], "user_ids": []}),
         ("slack", {"channel_id": "C0123", "role_ids": ["S1"], "user_ids": []}),
         ("slack", {"channel_id": "C0123", "role_ids": [], "user_ids": ["C0123"]}),
+        ("slack", {"channel_id": "D0123", "role_ids": [], "user_ids": ["U0456"]}),
         ("cli", {"channel_id": "c", "role_ids": [], "user_ids": []}),
         (
             "discord",

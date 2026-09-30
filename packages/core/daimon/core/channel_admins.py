@@ -22,7 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 MAX_CHANNEL_ADMIN_IDS = 25
 """Per list and channel; matches the largest Discord or Slack multi-select."""
 
-_CHANNEL_ID = {"discord": r"[0-9]{15,21}", "slack": r"[CGD][A-Z0-9]+"}
+# Slack DM ids (`D...`) are refused: nobody administers a DM.
+_CHANNEL_ID = {"discord": r"[0-9]{15,21}", "slack": r"[CG][A-Z0-9]+"}
 _USER_ID = {"discord": r"[0-9]{15,21}", "slack": r"[UW][A-Z0-9]+"}
 _ROLE_ID = {"discord": r"[0-9]{15,21}"}
 
