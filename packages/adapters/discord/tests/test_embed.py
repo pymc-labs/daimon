@@ -58,10 +58,10 @@ class TestUpdate:
         result = update(with_draft, EmbedEvent(kind="message", label=""))
         assert result.text_preview == "earlier reasoning", "empty message must not clear the draft"
 
-    def test_message_event_clips_draft_at_250_chars(self) -> None:
+    def test_message_event_clips_draft_at_300_chars(self) -> None:
         result = update(_make_state(), EmbedEvent(kind="message", label="x" * 400))
         assert result.text_preview is not None
-        assert len(result.text_preview) == 251, "250 chars + ellipsis"
+        assert len(result.text_preview) == 301, "300 chars + ellipsis"
         assert result.text_preview.endswith("…")
 
     def test_done_event_transitions_to_done(self) -> None:

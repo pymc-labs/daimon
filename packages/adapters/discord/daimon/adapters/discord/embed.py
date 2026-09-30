@@ -127,7 +127,7 @@ _NOTICE_MAX_CHARS = 4000
 
 def _escape_markdown(text: str) -> str:
     """Escape Discord markdown so truncated preview text renders literally
-    (a 250-char cut can otherwise leave unclosed code fences / bold markers)."""
+    (a clipped draft can otherwise leave unclosed code fences / bold markers)."""
     for char in r"\`*_~|>[]()#":
         text = text.replace(char, f"\\{char}")
     return text

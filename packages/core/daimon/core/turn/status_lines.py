@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from daimon.core.turn.state import ContentBlock, ToolUseBlock
 
 MAX_TOOL_LINES = 6
-DRAFT_MAX_CHARS = 250
+DRAFT_MAX_CHARS = 300
 _LABEL_MAX_CHARS = 48
 
 _DONE_ICON = "✔️"

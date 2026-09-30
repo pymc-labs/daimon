@@ -71,15 +71,15 @@ class TestUpdate:
         assert result.text_preview == "hello there", "message text becomes the draft"
         assert result.phase == TurnPhase.TOOL_RUNNING, "the phase comes from the turn state only"
 
-    def test_message_event_with_300_char_label_caps_preview_at_250_plus_ellipsis(
+    def test_message_event_with_400_char_label_caps_preview_at_300_plus_ellipsis(
         self,
     ) -> None:
-        """A 300-char message label is capped to 250 chars + '…'."""
+        """A 400-char message label is capped to 300 chars + '…'."""
         state = _make_state()
-        long_label = "x" * 300
+        long_label = "x" * 400
         result = update(state, EmbedEvent(kind="message", label=long_label))
         assert result.text_preview is not None
-        assert len(result.text_preview) == 251, "250 chars + ellipsis == 251 total"
+        assert len(result.text_preview) == 301, "300 chars + ellipsis == 301 total"
         assert result.text_preview.endswith("…")
 
     def test_message_event_with_empty_label_keeps_the_draft(self) -> None:

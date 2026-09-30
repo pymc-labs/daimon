@@ -56,7 +56,7 @@ def test_format_draft_flattens_whitespace_and_clips() -> None:
         "one line, so a single quote marker covers the draft"
     )
     clipped = format_draft("x" * 400)
-    assert len(clipped) == 251 and clipped.endswith("…"), "clipped to 250 chars plus an ellipsis"
+    assert len(clipped) == 301 and clipped.endswith("…"), "clipped to 300 chars plus an ellipsis"
 
 
 def test_has_running_tool_only_when_a_call_is_pending() -> None:

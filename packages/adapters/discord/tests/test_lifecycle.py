@@ -853,7 +853,7 @@ class TestMessageEventMapping:
         assert "\n" not in description, "no tool lines and no draft for a bare thinking ping"
 
     async def test_message_event_truncates_long_text(self) -> None:
-        """Long agent.message text is capped at 250 chars in the draft."""
+        """Long agent.message text is capped at 300 chars in the draft."""
         lc, sends, edits = _make_lifecycle()
         long_text = "A" * 400
         await lc.on_sse_event(_message_event(text=long_text))
