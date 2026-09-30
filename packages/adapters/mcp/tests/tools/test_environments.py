@@ -321,11 +321,12 @@ async def test_update_and_archive_refuse_a_managed_environment() -> None:
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
 
-    with pytest.raises(ToolError, match="managed by defaults"):
+    with pytest.raises(ToolError, match="managed by defaults.*create_environment"):
         await _update_environment_impl(
             runtime, auth, name="python", config=None, description="changed"
         )
-    with pytest.raises(ToolError, match="managed by defaults"):
+    with pytest.raises(ToolError, match="managed by defaults.*cannot archive") as refused:
         await _archive_environment_impl(runtime, auth, "python")
+    assert "create_environment" not in str(refused.value), "a new one does not replace it"
 
     assert writes == [], "neither the update nor the archive may reach the provider"
