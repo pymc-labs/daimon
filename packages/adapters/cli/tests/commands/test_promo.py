@@ -164,3 +164,20 @@ async def test_revoke(db_session_factory: Factory) -> None:
         await promo_redemptions(
             rt=rt, console=_console(), promo_code_id=uuid.uuid4(), as_json=False
         )
+
+
+async def test_list_table_shows_the_redemption_window(db_session_factory: Factory) -> None:
+    """Both ends of the redemption window appear in the table, not only in --json."""
+    rt = build_cli_runtime(db_session_factory)
+    await promo_create(
+        rt=rt,
+        console=_console(),
+        amount="5",
+        redeem_from="2026-06-01T09:00",
+        redeem_until="2026-06-02T09:00",
+    )
+    table = _console()
+    await promo_list(rt=rt, console=table, as_json=False)
+    out = _out(table)
+    assert "redeem_starts_at" in out, "the table should have a redemption start column"
+    assert "2026-06-01" in out and "2026-06-02" in out, "both window ends should be listed"

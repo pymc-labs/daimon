@@ -159,6 +159,7 @@ async def promo_list(*, rt: CliRuntime, console: Console, as_json: bool) -> None
             "max_redemptions",
             "credit_starts_at",
             "credit_ends_at",
+            "redeem_starts_at",
             "redeem_ends_at",
             "revoked_at",
             "note",
