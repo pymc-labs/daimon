@@ -21,7 +21,13 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._isolation import load_isolation, refuse, require_bindable
+from daimon.adapters.mcp.tools._isolation import (
+    CallerIsolation,
+    load_caller_isolation,
+    load_isolation,
+    refuse,
+    require_bindable,
+)
 from daimon.adapters.mcp.tools.reachability import (
     require_bindable_by_channel_admin,
     require_channel_admin,
@@ -235,6 +241,22 @@ def _thread_explanation(binding: ThreadAgentBindingRow) -> str:
     )
 
 
+_ACROSS_LINE_MSG = (
+    "{place} is across an isolated channel's line from this conversation, so its "
+    "routing can't be shown here."
+)
+
+
+_NO_OWN_AGENT_NOTE = (
+    "None of this isolated channel's own agents answers here, so a mention is refused "
+    "until an admin sets the channel's agent."
+)
+
+
+def _visible(caller: CallerIsolation, agent_name: str | None) -> str | None:
+    return agent_name if agent_name is not None and caller.sees(agent_name) else None
+
+
 async def _explain_agent_resolution_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -247,8 +269,14 @@ async def _explain_agent_resolution_impl(
     already infer from a turn's footer, and the people most often confused about
     which agent answers are ordinary members. Gating it would leave the question
     unanswerable by exactly the callers who ask it.
+
+    Isolation still applies: a channel across an isolated channel's line from
+    the caller is refused, and agents the caller can't see are left out.
     """
     tenant_id: uuid.UUID = auth.tenant_id
+    caller = await load_caller_isolation(runtime, auth)
+    if caller.isolation.isolated_channel(channel_id) != caller.inside_channel_id:
+        raise ToolError(_ACROSS_LINE_MSG.format(place=f"channel '{channel_id}'"))
 
     async with runtime.session_factory() as session:
         channel_row = await get_scope(
@@ -287,25 +315,34 @@ async def _explain_agent_resolution_impl(
                         f"({binding.responder_ma_agent_id}); configuration target: {target}. "
                         f"{next_step}"
                     )
-            recent = await list_active_bindings(
-                session,
-                tenant_id=tenant_id,
-                platform=auth.platform,
-                parent_channel_id=channel_id,
-                limit=10,
-            )
+            if binding is not None and not caller.sees(binding.responder_name):
+                raise ToolError(_ACROSS_LINE_MSG.format(place=f"thread '{thread_id}'"))
+            recent = [
+                row
+                for row in await list_active_bindings(
+                    session,
+                    tenant_id=tenant_id,
+                    platform=auth.platform,
+                    parent_channel_id=channel_id,
+                    limit=10,
+                )
+                if caller.sees(row.responder_name)
+            ]
 
     channel_cfg = channel_row if isinstance(channel_row, ChannelConfigRow) else None
     tenant_cfg = tenant_row if isinstance(tenant_row, TenantConfigRow) else None
     resolved = merge(channel=channel_cfg, tenant=tenant_cfg, default=runtime.deployment_default)
+    hidden_winner = binding is None and _visible(caller, resolved.agent_name) is None
 
     return AgentResolutionExplanation(
         channel_id=channel_id,
-        effective_agent_name=binding.responder_name if binding else resolved.agent_name,
+        effective_agent_name=binding.responder_name
+        if binding
+        else _visible(caller, resolved.agent_name),
         winning_tier="thread" if binding else resolved.agent_name_tier,
         channel_default=channel_cfg.agent_name if channel_cfg is not None else None,
-        tenant_default=tenant_cfg.agent_name if tenant_cfg is not None else None,
-        deployment_default=runtime.deployment_default.agent_name,
+        tenant_default=_visible(caller, tenant_cfg.agent_name if tenant_cfg is not None else None),
+        deployment_default=_visible(caller, runtime.deployment_default.agent_name),
         effective_environment_name=resolved.environment_name,
         environment_winning_tier=resolved.environment_name_tier,
         responder_ma_agent_id=binding.responder_ma_agent_id if binding else None,
@@ -316,6 +353,8 @@ async def _explain_agent_resolution_impl(
         recent_setup_conversations=tuple(recent),
         explanation=_thread_explanation(binding)
         if binding
+        else _NO_OWN_AGENT_NOTE
+        if hidden_winner and resolved.agent_name is not None
         else build_resolution_note(
             agent_name=resolved.agent_name,
             tier=resolved.agent_name_tier,
