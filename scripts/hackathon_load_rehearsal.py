@@ -8,7 +8,9 @@ Run from the staging worker's Discord container (copy this file there first):
       --staging-marker-id "$STAGING_MARKER_TENANT_ID" --i-am-staging
 
 The marker must be an existing, staging-only tenant UUID, confirmed by the
-operator before the run. First use --dry-run (no settings, DB, or API access).
+operator before the run. The configured MCP public URL host must contain
+"staging" (the staging runbook uses staging-daimon-mcp-*.run.app/mcp).
+First use --dry-run (no settings, DB, or API access).
 Use the same --run-id and --tenants with --cleanup to recover after interruption.
 The budget gate checks posted ledger debits before starting each turn; turns
 already in flight can still incur charges. Trial credit is split across the
@@ -61,8 +63,20 @@ def budget_allows(debits_usd: Decimal, max_usd: Decimal) -> bool:
     return max_usd > 0 and debits_usd < max_usd
 
 
-def staging_guard(*, acknowledged: bool, marker_exists: bool, marker_is_synthetic: bool) -> bool:
-    return acknowledged and marker_exists and not marker_is_synthetic
+def staging_guard(
+    *,
+    acknowledged: bool,
+    mcp_host: str | None,
+    marker_exists: bool,
+    marker_is_synthetic: bool,
+) -> bool:
+    return (
+        acknowledged
+        and mcp_host is not None
+        and "staging" in mcp_host.lower()
+        and marker_exists
+        and not marker_is_synthetic
+    )
 
 
 def external_id(run_id: str, index: int) -> str:
@@ -177,21 +191,28 @@ async def _debits(sm: async_sessionmaker[AsyncSession], ids: list[uuid.UUID]) ->
 
 
 async def _check_staging(
-    sm: async_sessionmaker[AsyncSession], *, acknowledged: bool, marker_id: uuid.UUID | None
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    acknowledged: bool,
+    mcp_host: str | None,
+    marker_id: uuid.UUID | None,
 ) -> None:
     from daimon.core.stores.tenants import get_tenant
 
+    print(f"staging guard MCP host: {mcp_host or '(unset)'}", flush=True)
     marker = None
     if marker_id is not None:
         async with sm() as session:
             marker = await get_tenant(session, marker_id)
     if not staging_guard(
         acknowledged=acknowledged,
+        mcp_host=mcp_host,
         marker_exists=marker is not None,
         marker_is_synthetic=marker is not None and marker.external_id.startswith(SYNTHETIC_PREFIX),
     ):
         raise RuntimeError(
-            "staging guard failed: require --i-am-staging and a staging-only marker tenant"
+            "staging guard failed: require --i-am-staging, a staging MCP host, "
+            "and a staging-only marker tenant"
         )
 
 
@@ -407,7 +428,12 @@ async def _run(args: argparse.Namespace) -> None:
     names = [external_id(args.run_id, i) for i in range(args.tenants)]
     ids = [derive_tenant_uuid(platform="discord", workspace_id=name) for name in names]
     try:
-        await _check_staging(sm, acknowledged=args.i_am_staging, marker_id=args.staging_marker_id)
+        await _check_staging(
+            sm,
+            acknowledged=args.i_am_staging,
+            mcp_host=settings.mcp.public_url.host if settings.mcp.public_url else None,
+            marker_id=args.staging_marker_id,
+        )
         transport = CountingTransport(
             SkillsRateLimitedTransport(settings.anthropic.skills_requests_per_minute)
         )

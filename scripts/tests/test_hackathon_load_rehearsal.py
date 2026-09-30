@@ -18,7 +18,28 @@ def test_budget_stops_at_limit() -> None:
 
 
 def test_staging_requires_acknowledgement_and_real_marker() -> None:
-    assert staging_guard(acknowledged=True, marker_exists=True, marker_is_synthetic=False)
-    assert not staging_guard(acknowledged=False, marker_exists=True, marker_is_synthetic=False)
-    assert not staging_guard(acknowledged=True, marker_exists=False, marker_is_synthetic=False)
-    assert not staging_guard(acknowledged=True, marker_exists=True, marker_is_synthetic=True)
+    staging = "staging-daimon-mcp-123.us-east4.run.app"
+    assert staging_guard(
+        acknowledged=True, mcp_host=staging, marker_exists=True, marker_is_synthetic=False
+    )
+    assert not staging_guard(
+        acknowledged=False, mcp_host=staging, marker_exists=True, marker_is_synthetic=False
+    )
+    assert not staging_guard(
+        acknowledged=True, mcp_host=staging, marker_exists=False, marker_is_synthetic=False
+    )
+    assert not staging_guard(
+        acknowledged=True, mcp_host=staging, marker_exists=True, marker_is_synthetic=True
+    )
+
+
+def test_staging_refuses_production_mcp_host_even_with_marker() -> None:
+    assert not staging_guard(
+        acknowledged=True,
+        mcp_host="daimon-mcp.decision.ai",
+        marker_exists=True,
+        marker_is_synthetic=False,
+    )
+    assert not staging_guard(
+        acknowledged=True, mcp_host=None, marker_exists=True, marker_is_synthetic=False
+    )
