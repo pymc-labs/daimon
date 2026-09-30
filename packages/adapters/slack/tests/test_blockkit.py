@@ -1,10 +1,8 @@
 """Tests for the Block Kit pure state machine (blockkit.py).
 
-Tasks 2 and 3.
-
-Task 2: state machine (TurnPhase / EmbedEvent / State / update / update_activity)
-Task 3: to_blocks renderer (headline, tool lines, draft, cancel button,
-        terminal collapse with cost footer, no color anywhere)
+State machine: TurnPhase / EmbedEvent / State / update / update_activity.
+to_blocks renderer: headline, tool lines, draft, cancel button, terminal
+collapse with cost footer, no color anywhere.
 
 Mirrors discord/tests/test_embed.py structure with the _make_state helper
 pattern. No DB required.
@@ -55,7 +53,7 @@ def _make_state(
 
 
 # ---------------------------------------------------------------------------
-# Task 2: update() state machine
+# update() state machine
 # ---------------------------------------------------------------------------
 
 
@@ -123,7 +121,7 @@ class TestUpdateActivity:
 
 
 # ---------------------------------------------------------------------------
-# Task 3: to_blocks renderer
+# to_blocks renderer
 # ---------------------------------------------------------------------------
 
 
