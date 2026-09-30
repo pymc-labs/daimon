@@ -4,12 +4,15 @@ An agent answers through the config cascade (a channel default, the tenant
 default, the deployment fall-through; see `daimon.core.scope.answering_places`)
 and through threads bound to it. It is *local to channels S* for a caller when
 it is not a tenant-wide default, every channel default and bound thread lies
-in S (a thread counts as its parent channel) and no routine running it was
-made by someone else with rights beyond the caller's: a server admin, or a
-channel admin of a channel outside S. A routine fires with its creator's
-rights, so such a routine would run what the caller writes with those rights;
-a plain member's routine gains nothing. An agent that answers nowhere is local
-to any S.
+in S (a thread counts as its parent channel) and no unattended run of it is
+owed to someone else with rights beyond the caller's: a server admin, or a
+channel admin of a channel outside S. Unattended runs are routines and queued
+wakes (timers, handoffs, applied private input); each fires with its
+requester's rights, so a stronger requester's would run what the caller writes
+with those rights. A plain member's carries only that member's own reach, as
+their chat does. Rights are read when the caller edits: a requester promoted
+later runs earlier edits with the new rights. An agent that answers nowhere is
+local to any S.
 
 A private conversation counts as the channel `/dm` ran in: its DM channel's
 row and its `dm:` scope answer only while it is the tenant's live conversation
@@ -36,12 +39,13 @@ from daimon.core.scope import (
 )
 from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.direct_messages import DmOrigin, list_dm_origins
-from daimon.core.stores.domain import ChannelAdminsRow
-from daimon.core.stores.routines import RoutineCreator, list_routine_creators
+from daimon.core.stores.domain import ChannelAdminsRow, UnattendedRequester
+from daimon.core.stores.routines import list_routine_creators
 from daimon.core.stores.scoped_config_read import (
     is_agent_reachable_in_tenant,
     list_propagations_for_tenant,
 )
+from daimon.core.stores.task_continuations import list_waiting_requesters
 from daimon.core.stores.thread_agent_bindings import (
     list_bound_parent_channel_ids,
     list_dm_bindings,
@@ -50,8 +54,8 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-class RoutineCreatorRights(BaseModel):
-    """The rights a routine's fires run with: its creator's stored role and grants."""
+class UnattendedRights(BaseModel):
+    """The rights an unattended run fires with: its requester's stored role and grants."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -72,7 +76,7 @@ class AgentReach(BaseModel):
     agent_name: str
     places: tuple[AnsweringPlace, ...] = ()
     thread_parent_channel_ids: frozenset[str] = frozenset()
-    routine_creators: tuple[RoutineCreatorRights, ...] = ()
+    unattended_runs: tuple[UnattendedRights, ...] = ()
 
     @property
     def is_tenant_wide(self) -> bool:
@@ -85,15 +89,22 @@ class AgentReach(BaseModel):
         defaults = {place.channel_id for place in self.places if place.channel_id is not None}
         return frozenset(defaults) | self.thread_parent_channel_ids
 
+    def stays_inside(self, channel_ids: Collection[str]) -> bool:
+        """Whether every place the agent answers lies in `channel_ids`."""
+        return not self.is_tenant_wide and self.channel_ids <= frozenset(channel_ids)
+
+    def runs_unattended_beyond(
+        self, channel_ids: Collection[str], *, platform_user_id: str | None
+    ) -> bool:
+        """Whether someone else with rights beyond `channel_ids` has an unattended run of it."""
+        return any(
+            run.platform_user_id != platform_user_id and run.exceeds(channel_ids)
+            for run in self.unattended_runs
+        )
+
     def is_local_to(self, channel_ids: Collection[str], *, platform_user_id: str | None) -> bool:
-        """Whether the agent stays inside `channel_ids`, run by no stronger creator's routine."""
-        return (
-            not self.is_tenant_wide
-            and self.channel_ids <= frozenset(channel_ids)
-            and not any(
-                creator.platform_user_id != platform_user_id and creator.exceeds(channel_ids)
-                for creator in self.routine_creators
-            )
+        return self.stays_inside(channel_ids) and not self.runs_unattended_beyond(
+            channel_ids, platform_user_id=platform_user_id
         )
 
 
@@ -104,12 +115,12 @@ def build_agent_reach(
     channels: Sequence[ChannelConfigRow],
     default: DeploymentDefault,
     thread_parent_channel_ids: Iterable[str] = (),
-    routine_creators: Iterable[RoutineCreator] = (),
+    unattended_requesters: Iterable[UnattendedRequester] = (),
     grants: Sequence[ChannelAdminsRow] = (),
     dm_origins: Sequence[DmOrigin] = (),
     dm_bindings: Iterable[tuple[str, str, str]] = (),
 ) -> AgentReach:
-    """`grants` are the tenant's channel admin rows, read for routine creators' rights.
+    """`grants` are the tenant's channel admin rows, read for requesters' rights.
 
     `dm_bindings` are the tenant's `(dm_channel_id, scope_id, responder_name)` rows.
 
@@ -137,19 +148,19 @@ def build_agent_reach(
         agent_name=agent_name,
         places=tuple(places),
         thread_parent_channel_ids=frozenset(thread_parent_channel_ids) | dm_parents,
-        routine_creators=tuple(
-            RoutineCreatorRights(
-                platform_user_id=creator.platform_user_id,
-                is_server_admin=creator.is_admin,
+        unattended_runs=tuple(
+            UnattendedRights(
+                platform_user_id=requester.platform_user_id,
+                is_server_admin=requester.is_admin,
                 administered_channel_ids=administered_channel_ids(
                     ChannelAdminCaller(
-                        platform_user_id=creator.platform_user_id,
-                        role_ids=frozenset(creator.role_ids),
+                        platform_user_id=requester.platform_user_id,
+                        role_ids=frozenset(requester.role_ids),
                     ),
                     grants,
                 ),
             )
-            for creator in routine_creators
+            for requester in dict.fromkeys(unattended_requesters)
         ),
     )
 
@@ -162,7 +173,7 @@ async def load_agent_reach(
     agent_name: str,
     default: DeploymentDefault,
 ) -> AgentReach:
-    """Shell half of `build_agent_reach`: read the cascade, bindings, DMs and routines."""
+    """Shell half of `build_agent_reach`: read the cascade, bindings, DMs and unattended runs."""
     tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
     parents = await list_bound_parent_channel_ids(
         session, tenant_id=tenant_id, responder_name=agent_name
@@ -173,13 +184,39 @@ async def load_agent_reach(
         channels=channels,
         default=default,
         thread_parent_channel_ids=parents,
-        routine_creators=await list_routine_creators(
-            session, tenant_id=tenant_id, platform=platform, agent_name=agent_name
-        ),
+        unattended_requesters=[
+            *await list_routine_creators(
+                session, tenant_id=tenant_id, platform=platform, agent_name=agent_name
+            ),
+            *await list_waiting_requesters(session, tenant_id=tenant_id, target_name=agent_name),
+        ],
         grants=await list_channel_admins(session, tenant_id=tenant_id, platform=platform),
         dm_origins=await list_dm_origins(session, tenant_id=tenant_id),
         dm_bindings=await list_dm_bindings(session, tenant_id=tenant_id),
     )
+
+
+async def _caller_locality(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    agent_name: str,
+    default: DeploymentDefault,
+    caller: ChannelAdminCaller,
+) -> tuple[bool, bool]:
+    """`(local, held_back_by_unattended_run)`; both False without a grant, reading no reach."""
+    administered = await load_administered_channel_ids(
+        session, tenant_id=tenant_id, platform=platform, caller=caller
+    )
+    if not administered:
+        return False, False
+    reach = await load_agent_reach(
+        session, tenant_id=tenant_id, platform=platform, agent_name=agent_name, default=default
+    )
+    inside = reach.stays_inside(administered)
+    beyond = reach.runs_unattended_beyond(administered, platform_user_id=caller.platform_user_id)
+    return inside and not beyond, inside and beyond
 
 
 async def is_agent_local_to_caller(
@@ -191,20 +228,20 @@ async def is_agent_local_to_caller(
     default: DeploymentDefault,
     caller: ChannelAdminCaller,
 ) -> bool:
-    """True when the caller administers some channels and the agent stays inside them.
+    """True when the caller administers some channels and the agent is local to them.
 
     False for a caller with no channel admin grant, without reading the reach,
     so a tenant with no channel admins pays one indexed read and nothing else.
     """
-    administered = await load_administered_channel_ids(
-        session, tenant_id=tenant_id, platform=platform, caller=caller
+    local, _ = await _caller_locality(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        agent_name=agent_name,
+        default=default,
+        caller=caller,
     )
-    if not administered:
-        return False
-    reach = await load_agent_reach(
-        session, tenant_id=tenant_id, platform=platform, agent_name=agent_name, default=default
-    )
-    return reach.is_local_to(administered, platform_user_id=caller.platform_user_id)
+    return local
 
 
 async def may_bind_as_channel_default(
@@ -261,24 +298,29 @@ async def load_target_facts(
     reachable = await is_agent_reachable_in_tenant(
         session, tenant_id=tenant_id, agent_name=agent_name, default=default
     )
-    local = reachable and await is_agent_local_to_caller(
-        session,
-        tenant_id=tenant_id,
-        platform=platform,
-        agent_name=agent_name,
-        default=default,
-        caller=caller,
+    local, held_back = (
+        await _caller_locality(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            agent_name=agent_name,
+            default=default,
+            caller=caller,
+        )
+        if reachable
+        else (False, False)
     )
     return TargetFacts(
         is_daimon_managed=is_daimon_managed,
         is_reachable_in_tenant=reachable,
         is_local_to_caller_channels=local,
+        runs_unattended_beyond_caller=held_back,
     )
 
 
 __all__ = [
     "AgentReach",
-    "RoutineCreatorRights",
+    "UnattendedRights",
     "build_agent_reach",
     "is_agent_local_to_caller",
     "load_agent_reach",

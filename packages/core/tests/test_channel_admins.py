@@ -18,8 +18,7 @@ from daimon.core.channel_admins import (
 )
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.direct_messages import DmOrigin
-from daimon.core.stores.domain import ChannelAdminsRow
-from daimon.core.stores.routines import RoutineCreator
+from daimon.core.stores.domain import ChannelAdminsRow, UnattendedRequester
 
 TENANT = uuid.uuid4()
 SNOWFLAKE = "123456789012345678"
@@ -125,28 +124,30 @@ def test_agent_reach_is_local_only_inside_the_given_channels() -> None:
     )
 
 
-def test_only_a_stronger_creators_routine_makes_an_agent_not_local() -> None:
+def test_only_a_stronger_requesters_unattended_run_makes_an_agent_not_local() -> None:
     default = DeploymentDefault(agent_name="daimon")
     grants = [_grant("c1", users=("u1", "co")), _grant("c2", roles=("r9",))]
 
-    def local(creator: RoutineCreator) -> bool:
+    def local(creator: UnattendedRequester) -> bool:
         reach = build_agent_reach(
             "helper",
             tenant=None,
             channels=[_channel("c1", "helper")],
             default=default,
-            routine_creators=[creator],
+            unattended_requesters=[creator],
             grants=grants,
         )
         return reach.is_local_to({"c1"}, platform_user_id="u1")
 
-    assert local(RoutineCreator(platform_user_id="u1")), "the caller's own routine"
-    assert local(RoutineCreator(platform_user_id="member")), "a plain member's gains nothing"
-    assert local(RoutineCreator(platform_user_id="co")), "a co-admin of c1 holds no more"
-    assert not local(RoutineCreator(platform_user_id="boss", is_admin=True)), (
-        "a server admin's routine would run the caller's edits with admin rights"
+    assert local(UnattendedRequester(platform_user_id="u1")), "the caller's own run"
+    assert local(UnattendedRequester(platform_user_id="member")), (
+        "a member's run carries only their own reach"
     )
-    assert not local(RoutineCreator(platform_user_id="other", role_ids=("r9",))), (
+    assert local(UnattendedRequester(platform_user_id="co")), "a co-admin of c1 holds no more"
+    assert not local(UnattendedRequester(platform_user_id="boss", is_admin=True)), (
+        "a server admin's run would carry the caller's edits with admin rights"
+    )
+    assert not local(UnattendedRequester(platform_user_id="other", role_ids=("r9",))), (
         "so would one by c2's admin, granted by role"
     )
 

@@ -289,8 +289,8 @@ live role ids on the account (`accounts.platform_role_ids`) beside the role, so
 MCP tools test a grant without asking the platform; Slack has no roles, so a
 Slack grant is by user id. A channel admin may do what a server admin may for
 an agent local to their channels -- not the tenant default, every
-channel-scope row and thread binding in a channel they run, and no routine
-running it made by a server admin or another channel's admin
+channel-scope row and thread binding in a channel they run, and no unattended
+run of it owed to a server admin or another channel's admin
 (`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
 channels' default agent. A `/dm` conversation counts as the channel it was
 started from. A channel admin binds only a shared agent (managed or
@@ -298,11 +298,14 @@ tenant-wide), one answering nowhere, or one already local to them,
 never another channel's own agent. Managed agents and the tenant default stay with server
 admins, and a tenant with no grant behaves as before. Stored role ids refresh on
 the member's next chat turn; until then MCP calls, a coding-tools token
-included, keep the old grant. A routine fires with its creator's rights, so a
-channel admin's edits reach the routines running that agent, as they reach
-anyone chatting with it: a server admin who chats with an agent a channel admin
+included, keep the old grant. Unattended runs are routines and queued wakes
+(timers, handoffs, applied private input); each fires with its requester's
+rights, so a channel admin's edits reach them as they reach anyone chatting
+with the agent. A member's run carries that member's own read visibility, as
+their chat does, and a server admin who chats with an agent a channel admin
 edited runs its instructions with their own rights, as with any agent someone
-else wrote. Server admins edit grants
+else wrote. The check reads requesters' rights at edit time: a requester
+promoted later runs earlier edits with the new rights. Server admins edit grants
 with the `*_channel_admins` MCP tools, from Who answers where in the setup
 panel, or with the CLI:
 

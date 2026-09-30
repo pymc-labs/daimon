@@ -102,8 +102,9 @@ async def require_bindable_by_channel_admin(
         )
     if not allowed:
         raise ToolError(
-            f"'{agent_name}' answers in channels this caller does not administer, so only a "
-            "workspace or server admin can make it this channel's default. A channel admin may "
+            f"'{agent_name}' answers in channels this caller does not administer, or runs "
+            "unattended for someone with wider rights, so only a workspace or server admin can "
+            "make it this channel's default. A channel admin may "
             "pick a built-in agent, the workspace default, an agent that answers nowhere yet, "
             "or one that answers only in their channels. Nothing was changed. Do not retry."
         )
@@ -133,10 +134,16 @@ async def require_admin_for_reachable_agent(
     )
     outcome = decide_operation("agent_spec_edit", is_admin=False, target=facts)
     if outcome == "needs_admin":
+        why = (
+            "runs unattended (a routine or queued wake) for someone with wider rights than "
+            "this caller"
+            if facts.runs_unattended_beyond_caller
+            else "is currently the default agent for this workspace or a channel"
+        )
         raise ToolError(
-            f"'{agent_name}' is currently the default agent for this workspace or a "
-            "channel, so an admin must change its setup. Tell the caller to ask a workspace "
-            f"or server admin to make the requested change to '{agent_name}'; carry the "
+            f"'{agent_name}' {why}, so an admin must change its setup. Tell the caller to "
+            f"ask a workspace or server admin to make the requested change to '{agent_name}'; "
+            "carry the "
             "specific action from the conversation into that handoff. Do not retry. "
             "Creating or forking your own agent is not gated."
         )
