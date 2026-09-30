@@ -3543,3 +3543,54 @@ async def test_sync_duplicate_name_across_repos_still_uploads_every_other_skill(
         f"the losing duplicate must be reported once; got {report.failed_uploads}"
     )
     assert url_b in dupes[0][1], f"reason must name the losing repo; got {dupes[0][1]!r}"
+
+
+async def test_sync_never_replaces_a_skill_added_by_hand(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A repo skill named like an uploaded one fails that skill; the upload is untouched."""
+    cli = await make_cli_principal(db_session, os_user="alice")
+    await db_session.commit()
+    fernet = make_fernet()
+    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
+    async with db_session_factory() as s, s.begin():
+        await upsert_user_skill(
+            s,
+            tenant_id=cli.tenant_id,
+            principal_id=cli.id,
+            agent_name="agent",
+            name="o-r",
+            source_repo_url="",
+            source_repo_branch="",
+            source_path="",
+            content_hash="uploaded",
+            anthropic_id="sk_up",
+            anthropic_latest_version="1",
+            source="upload",
+        )
+    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, content=tarball))
+    )
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+
+    report = await sync_agent_skills(
+        principal_id=cli.id,
+        tenant_id=cli.tenant_id,
+        agent_name="agent",
+        repos=[SkillRepo(url="https://github.com/o/r", branch="main", split=False)],
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        http_client=http_client,
+        anthropic_client=build_fake_anthropic(router.dispatch),
+    )
+
+    assert [name for name, _ in report.failed_uploads] == ["o-r"]
+    assert "added to this agent by hand" in report.failed_uploads[0][1]
+    async with db_session_factory() as s:
+        row = await load_user_skill(
+            s, tenant_id=cli.tenant_id, principal_id=cli.id, agent_name="agent", name="o-r"
+        )
+    assert row is not None and (row.source, row.content_hash) == ("upload", "uploaded")

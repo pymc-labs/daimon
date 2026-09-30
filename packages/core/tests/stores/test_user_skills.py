@@ -6,6 +6,7 @@ import uuid
 
 from daimon.core.stores.user_skills import (
     count_user_skills_for_principal,
+    delete_uploaded_user_skills,
     delete_user_skill,
     delete_user_skills_for_principal,
     delete_user_skills_for_repo,
@@ -15,7 +16,7 @@ from daimon.core.stores.user_skills import (
     load_user_skill,
     upsert_user_skill,
 )
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -497,3 +498,49 @@ async def test_delete_user_skills_for_repo_removes_only_that_repo_and_returns_co
         db_session, tenant_id=tenant.id, principal_id=p1, agent_name="agent"
     )
     assert [r.name for r in remaining] == ["keeper"], "the other repo's row must survive"
+
+
+async def test_uploaded_skill_keeps_its_source_and_only_it_is_forgotten(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    principal = uuid.uuid4()
+    common = {
+        "tenant_id": tenant.id,
+        "principal_id": principal,
+        "agent_name": "agent",
+        "source_repo_branch": "",
+        "source_path": "",
+        "content_hash": "h",
+        "anthropic_latest_version": "1",
+    }
+    row = await upsert_user_skill(
+        db_session,
+        **common,
+        name="added",
+        source_repo_url="",
+        anthropic_id="skill_up",
+        source="upload",
+        origin="pasted",
+        added_by_account_id=account.id,
+    )
+    assert (row.source, row.origin, row.added_by_account_id) == ("upload", "pasted", account.id)
+    await upsert_user_skill(
+        db_session,
+        **common,
+        name="synced",
+        source_repo_url="https://github.com/a/b",
+        anthropic_id="skill_repo",
+    )
+
+    for skill_id in ("skill_up", "skill_repo"):
+        await delete_uploaded_user_skills(
+            db_session, tenant_id=tenant.id, agent_name="agent", anthropic_id=skill_id
+        )
+    remaining = await list_user_skills_for_agent(
+        db_session, tenant_id=tenant.id, principal_id=principal, agent_name="agent"
+    )
+    assert [(r.name, r.source) for r in remaining] == [("synced", "repo")], (
+        "only the added skill is forgotten; a repo row defaults to source='repo'"
+    )

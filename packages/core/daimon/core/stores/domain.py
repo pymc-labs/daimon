@@ -32,6 +32,7 @@ PreparationStage = Literal["decided", "checkpointed", "uploaded", "created", "co
 UnsavedWorkChoice = Literal["copy", "leave"]
 ContinuationReason = Literal["task_handoff", "private_input_applied", "timer"]
 ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
+UserSkillSource = Literal["repo", "upload"]
 
 
 class Role(enum.StrEnum):
@@ -574,6 +575,9 @@ class UserSkillRow(BaseModel):
     content_hash: str
     anthropic_id: str | None
     anthropic_latest_version: str | None
+    source: UserSkillSource = "repo"
+    origin: str = ""
+    added_by_account_id: uuid.UUID | None = None
     updated_at: datetime
 
 

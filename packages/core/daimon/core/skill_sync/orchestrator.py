@@ -324,6 +324,13 @@ async def _process_one(
             name=pending.name,
         )
 
+    if existing is not None and existing.source == "upload":
+        # Pushing this repo's copy would overwrite the skill someone added by
+        # hand, and the next upload would overwrite it back.
+        raise DefaultsError(
+            f"skill name {pending.name!r} was added to this agent by hand; rename the "
+            f"repo's copy (e.g. {pending.name}-2) or remove the added one, then re-sync."
+        )
     if (
         existing is not None
         and existing.content_hash == new_hash
