@@ -194,6 +194,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fresh Discord installs and boot reconciles share a bounded seed queue. Skills API
+  calls are paced across the adapter process and retry temporary rate limits;
+  defaults reconciliation lists workspace skills once per tenant instead of once
+  per skill.
+
 - Direct-message policies normalize tenant UUID keys and reject invalid keys at
   settings load, so restrictive policies cannot silently miss their tenant.
 

@@ -32,7 +32,7 @@ from decimal import Decimal
 import anthropic
 import httpx
 import structlog
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core.access_policy import is_invoker_allowed, is_write_protected
@@ -70,6 +70,7 @@ from daimon.core.routine_delivery import (
 from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
+from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
@@ -517,6 +518,9 @@ async def run(
             api_key=settings.anthropic.api_key.get_secret_value(),
             base_url=str(settings.anthropic.base_url),
             max_retries=MA_MAX_RETRIES,
+            http_client=DefaultAsyncHttpxClient(
+                transport=SkillsRateLimitedTransport(settings.anthropic.skills_requests_per_minute)
+            ),
         )
     )
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)

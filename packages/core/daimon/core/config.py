@@ -50,6 +50,15 @@ class AnthropicSettings(BaseModel):
             "a proxy or a non-default API endpoint."
         ),
     )
+    skills_requests_per_minute: int = Field(
+        default=80,
+        ge=1,
+        description=(
+            "Maximum Anthropic Skills API requests per minute in this process. "
+            "Default 80 leaves headroom below the 100 requests/minute organization limit. "
+            "Other deployments in the same organization share that limit."
+        ),
+    )
 
 
 class CLISettings(BaseModel):
