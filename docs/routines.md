@@ -321,8 +321,10 @@ Channel isolation narrows the MCP tools. A routine of an isolated channel's own
 agent, or one whose `channel_id` is that channel, is visible (list, read,
 update, delete) only from inside it, and a routine is created or moved only
 where its agent may answer: an isolated channel's agent posts only into its
-channel, and other agents never post there. The admin panels are unchanged. See
-[architecture.md](architecture.md) (Channel isolation).
+channel, and other agents never post there. Routing can change after a routine
+is saved, so a run that would cross the line is skipped (`channel_isolated`),
+and a routine of an isolated channel never falls back to a DM. The admin panels
+are unchanged. See [architecture.md](architecture.md) (Channel isolation).
 
 ## When a run fails
 

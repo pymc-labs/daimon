@@ -53,10 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   panel's copy option makes that agent from the one answering now (with no
   credentials; a pinned agent isn't copied). Its agents
   then can't be bound or handed tasks elsewhere and are hidden outside it in
-  agent, skill, routine and hub listings and `/memory`; inside it only they
-  show. Its messages are readable only from inside it, and `/dm` there is
-  refused. Nothing changes until a channel is isolated. Clear isolation before
-  rolling back: an older release rejects the new policy field.
+  agent, skill, session, routine and hub listings, the setup panel (for
+  members) and `/memory`; inside it only they show. Its messages are readable
+  only from inside it, posts and routines don't cross its line, and a turn
+  there answers only with its own agent. `/dm` there is refused. Ending
+  isolation warns that memory built meanwhile becomes visible. Nothing changes
+  until a channel is isolated. Clear isolation before rolling back: an older
+  release rejects the new policy field.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.
