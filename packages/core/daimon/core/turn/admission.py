@@ -20,6 +20,7 @@ their pre-turn gate.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Literal
@@ -33,7 +34,7 @@ from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.accounts import set_role
+from daimon.core.stores.accounts import set_platform_role_ids, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
@@ -75,6 +76,7 @@ async def admit(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
+    platform_role_ids: Sequence[str] | None = None,
     is_dm: bool = False,
     category_id: str | None = None,
     category_unresolved: bool = False,
@@ -95,6 +97,7 @@ async def admit(
                 now=now,
                 thread_id=thread_id,
                 role=role,
+                platform_role_ids=platform_role_ids,
                 is_dm=is_dm,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
@@ -117,6 +120,7 @@ async def admit_impl(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
+    platform_role_ids: Sequence[str] | None = None,
     is_dm: bool = False,
     category_id: str | None = None,
     category_unresolved: bool = False,
@@ -132,6 +136,9 @@ async def admit_impl(
         )
         if role is not None:
             await set_role(session, principal.account_id, role)
+        # Kept like the role so MCP calls can match channel admin role grants.
+        if platform_role_ids is not None:
+            await set_platform_role_ids(session, principal.account_id, platform_role_ids)
         await session.commit()
         # Read after the role commit, so a refused turn still records the role.
         policy = await load_access_policy(session, tenant_id=tenant_id)

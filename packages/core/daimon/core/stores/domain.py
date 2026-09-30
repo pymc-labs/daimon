@@ -46,6 +46,7 @@ class AccountRow(BaseModel):
     tenant_id: uuid.UUID
     role: Role
     created_at: datetime
+    platform_role_ids: tuple[str, ...] = ()
 
 
 class AccountIdentityRow(BaseModel):
@@ -64,6 +65,22 @@ class AccountIdentityRow(BaseModel):
     platform_user_id: (
         str | None
     )  # platform_principals.external_id (LEFT JOIN on tenant's platform; null when none)
+    # accounts.platform_role_ids as of the account's last chat turn.
+    platform_role_ids: tuple[str, ...] = ()
+
+
+class ChannelAdminsRow(BaseModel):
+    """One channel's admins beyond the server admins: role ids and user ids."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    platform: str
+    channel_id: str
+    role_ids: tuple[str, ...]
+    user_ids: tuple[str, ...]
+    updated_by_account_id: uuid.UUID | None
+    updated_at: datetime
 
 
 class CliPrincipalRow(BaseModel):
