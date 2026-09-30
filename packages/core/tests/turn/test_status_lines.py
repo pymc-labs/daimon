@@ -93,8 +93,20 @@ def test_mcp_and_custom_tools_get_humanized_names_and_verb_icons() -> None:
 
 def test_tool_lines_never_show_arguments() -> None:
     """T-13-01: the card names tools only."""
-    lines = format_tool_lines([_call("bash", input={"command": "cat /etc/secret-token"})])
-    assert "secret-token" not in "".join(lines), "tool arguments must never reach the card"
+    lines = format_tool_lines(
+        [
+            _call(
+                "search_issues",
+                type="agent.mcp_tool_use",
+                server="tracker",
+                input={"query": "mcp-secret"},
+            ),
+            _call("create_page", type="agent.custom_tool_use", input={"title": "custom-secret"}),
+        ]
+    )
+    shown = "".join(lines)
+    assert "mcp-secret" not in shown, "an MCP call's arguments must never reach the card"
+    assert "custom-secret" not in shown, "a custom call's arguments must never reach the card"
 
 
 def test_finished_tool_lines_follow_the_order_calls_finished() -> None:

@@ -859,7 +859,7 @@ class TestMessageEventMapping:
         await lc.on_render(TurnState())
 
         embeds = sends[0].get("embeds")
-        assert embeds is not None and len(embeds) == 1
+        assert embeds is not None and len(embeds) == 1, "the draft rides the one status embed"
         description = embeds[0].description
         assert len(description) < 400, "draft must be truncated, not the full text"
         assert "…" in description, "truncated text should end with ellipsis"
