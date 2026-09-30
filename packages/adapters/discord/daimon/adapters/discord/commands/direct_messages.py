@@ -13,7 +13,6 @@ from daimon.adapters.discord.bot import (
     log_anthropic_overload,
 )
 from daimon.adapters.discord.checks import is_member_guild_admin, require_registered_guild
-from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.direct_messages import reply_to_dm, require_dm_enabled, start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
@@ -22,6 +21,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set_dm_enabled
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
+from daimon.core.turn.errors import AdmissionDenied
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -29,6 +29,12 @@ from discord import app_commands
 from discord.ext import commands
 
 log = structlog.get_logger(__name__)
+
+
+def _error_text(exc: Exception, fallback: str) -> str:
+    if isinstance(exc, AdmissionDenied) and exc.reason == "channel_budget_exceeded":
+        return "Sorry, " + CHANNEL_BUDGET_NOTICE
+    return str(exc) if isinstance(exc, DaimonError) else fallback
 
 
 class DirectMessageCog(commands.Cog):
@@ -86,17 +92,9 @@ class DirectMessageCog(commands.Cog):
                 thread_id=str(channel.id) if isinstance(channel, discord.Thread) else None,
                 role=Role.ADMIN if is_admin else Role.USER,
                 is_dm=True,
+                dm_source_channel_id=source_channel_id,
                 now=datetime.now(UTC),
             )
-            # A DM's spend is not the channel's, but a used-up channel cannot open one.
-            if await is_over_channel_budget(
-                sessionmaker=runtime.sessionmaker,
-                tenant_id=tenant_id,
-                platform="discord",
-                channel_id=source_channel_id,
-                now=datetime.now(UTC),
-            ):
-                raise DaimonError("Sorry, " + CHANNEL_BUDGET_NOTICE)
             messages = [message async for message in channel.history(limit=12)]
             context = [
                 TranscriptTurn(
@@ -118,6 +116,7 @@ class DirectMessageCog(commands.Cog):
                 workspace_id=str(guild.id),
                 route_key=str(dm_channel.id),
                 channel_id=str(dm_channel.id),
+                source_channel_id=source_channel_id,
                 external_user_id=str(member.id),
                 source_url=source_url,
                 context=context,
@@ -136,10 +135,8 @@ class DirectMessageCog(commands.Cog):
             SQLAlchemyError,
         ) as exc:
             log.warning("discord.dm.move_failed", error_type=type(exc).__name__)
-            message = (
-                str(exc)
-                if isinstance(exc, DaimonError)
-                else "Couldn't open the conversation. Check that your DMs are open and retry."
+            message = _error_text(
+                exc, "Couldn't open the conversation. Check that your DMs are open and retry."
             )
             await interaction.followup.send(message, ephemeral=True)
 
@@ -212,10 +209,8 @@ class DirectMessageCog(commands.Cog):
         ) as exc:
             log_anthropic_overload(exc, tenant_id=conversation.tenant_id, path="dm")
             log.warning("discord.dm.turn_failed", error_type=type(exc).__name__)
-            error = (
-                str(exc)
-                if isinstance(exc, DaimonError)
-                else "Couldn't verify or complete this private conversation. Please retry."
+            error = _error_text(
+                exc, "Couldn't verify or complete this private conversation. Please retry."
             )
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(error, allowed_mentions=discord.AllowedMentions.none())
