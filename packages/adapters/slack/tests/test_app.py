@@ -50,7 +50,7 @@ from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token, upsert_slack_bot_token
-from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.tenants import get_tenant, set_turn_cap
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
     get_live_thread_session,
@@ -1597,6 +1597,7 @@ async def test_orchestrate_queue_coalesce_when_thread_in_flight_adds_hourglass_a
             "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
         ) as mock_create_session,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+        patch("daimon.adapters.slack.app.get_turn_cap", new_callable=AsyncMock, return_value=3),
         patch(
             "daimon.adapters.slack.app.deliver_session_outputs", new_callable=AsyncMock
         ) as mock_deliver_outputs,
@@ -1676,6 +1677,76 @@ async def test_orchestrate_queue_coalesce_when_thread_in_flight_adds_hourglass_a
         "a delivery failure is isolated inside a detached sweep task, so the "
         "queued turn never waited for it and both turns still swept"
     )
+
+
+async def test_second_event_during_cap_read_queues_on_one_thread(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    app, _ = make_orchestrate_app(db_session_factory)
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id="T_CAP_READ_RACE")
+    thread_id = "9000000010.000001"
+    cap_read = asyncio.Event()
+    release_cap = asyncio.Event()
+    turn_started = asyncio.Event()
+    release_turn = asyncio.Event()
+    cap_calls = 0
+    active = 0
+    max_active = 0
+    turns = 0
+
+    async def delayed_cap(*args: Any, **kwargs: Any) -> int:
+        nonlocal cap_calls
+        cap_calls += 1
+        if cap_calls == 1:
+            cap_read.set()
+            await release_cap.wait()
+        return 3
+
+    async def turn(*args: Any, **kwargs: Any) -> None:
+        nonlocal active, max_active, turns
+        active += 1
+        max_active = max(max_active, active)
+        turns += 1
+        try:
+            if turns == 1:
+                turn_started.set()
+                await release_turn.wait()
+        finally:
+            active -= 1
+
+    def event(ts: str) -> dict[str, Any]:
+        return {"ts": ts, "thread_ts": thread_id, "user": "U_TEST", "text": "hi"}
+
+    async def orchestrate(ts: str) -> None:
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event(ts),
+            team_id="T_CAP_READ_RACE",
+            channel="C_TEST",
+            event_ts=ts,
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+    with (
+        patch("daimon.adapters.slack.app.get_turn_cap", side_effect=delayed_cap),
+        patch.object(app, "_run_thread_turn", side_effect=turn),
+    ):
+        first = asyncio.create_task(orchestrate("9000000010.000001"))
+        await asyncio.wait_for(cap_read.wait(), timeout=2)
+        second = asyncio.create_task(orchestrate("9000000010.000002"))
+        try:
+            await asyncio.wait_for(turn_started.wait(), timeout=2)
+            release_cap.set()
+            await asyncio.wait_for(first, timeout=2)
+            assert app._pending[thread_id] == [event("9000000010.000001")]  # pyright: ignore[reportPrivateUsage]
+        finally:
+            release_cap.set()
+            release_turn.set()
+            await asyncio.gather(first, second)
+
+    assert turns == 2
+    assert max_active == 1
 
 
 async def test_drain_partitions_queued_mentions_by_author_when_two_users_queue_in_one_thread(
@@ -1789,6 +1860,7 @@ async def test_drain_partitions_queued_mentions_by_author_when_two_users_queue_i
             "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
         ) as mock_create_session,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+        patch("daimon.adapters.slack.app.get_turn_cap", new_callable=AsyncMock, return_value=3),
         patch(
             "daimon.adapters.slack.app.deliver_session_outputs", new_callable=AsyncMock
         ) as mock_deliver_outputs,
@@ -1924,30 +1996,32 @@ async def _drive_drain(
 
     app._run_thread_turn = _spy_turn  # type: ignore[method-assign]
 
-    task = asyncio.create_task(
-        app._orchestrate(  # pyright: ignore[reportPrivateUsage]
-            root_event,
-            team_id=team_id,
-            channel=channel,
-            event_ts=str(root_event["event_ts"]),
-            web_client=web_client,
-            tenant_id=tenant_id,
+    # These queue tests use one test connection; cap lookup is covered separately.
+    with patch("daimon.adapters.slack.app.get_turn_cap", new=AsyncMock(return_value=3)):
+        task = asyncio.create_task(
+            app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                root_event,
+                team_id=team_id,
+                channel=channel,
+                event_ts=str(root_event["event_ts"]),
+                web_client=web_client,
+                tenant_id=tenant_id,
+            )
         )
-    )
-    await asyncio.sleep(0)  # let task reach the gate inside the first turn
+        await asyncio.sleep(0)  # let task reach the gate inside the first turn
 
-    for ev in queued_events:
-        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
-            ev,
-            team_id=team_id,
-            channel=channel,
-            event_ts=str(ev["event_ts"]),
-            web_client=web_client,
-            tenant_id=tenant_id,
-        )
+        for ev in queued_events:
+            await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                ev,
+                team_id=team_id,
+                channel=channel,
+                event_ts=str(ev["event_ts"]),
+                web_client=web_client,
+                tenant_id=tenant_id,
+            )
 
-    first_turn_gate.set()
-    await task
+        first_turn_gate.set()
+        await task
     return calls
 
 
@@ -2725,7 +2799,10 @@ async def test_orchestrate_tenant_cap_when_exhausted_sends_ephemeral_and_skips_t
 
     await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
 
-    app, _ = make_orchestrate_app(db_session_factory, max_concurrent_turns_per_tenant=cap)
+    async with db_session_factory() as session, session.begin():
+        await set_turn_cap(session, tenant_id=tenant_id, cap=cap)
+
+    app, _ = make_orchestrate_app(db_session_factory, max_concurrent_turns_per_tenant=3)
 
     # Saturate the tenant in-flight count.
     app._inflight[tenant_id] = cap  # pyright: ignore[reportPrivateUsage]

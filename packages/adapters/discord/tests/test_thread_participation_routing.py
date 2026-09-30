@@ -32,6 +32,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import thread_participation as store
+from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.thread_classifier import ClassifierOutcome
 from daimon.core.thread_participation import (
     ClassifierVerdict,
@@ -404,14 +405,17 @@ async def test_concurrency_shed_is_silent(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON, cap=0))
+    async with db_session_factory() as session, session.begin():
+        await set_turn_cap(session, tenant_id=tenant_id, cap=1)
+    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON, cap=100))
+    bot._inflight[tenant_id] = 1  # pyright: ignore[reportPrivateUsage]
     turns = _stub_turn(bot)
     message = _thread_message(_make_thread(), content="anyone?")
 
     await bot.on_message(message)
     await _drain_timer(bot)
 
-    assert turns == [], "over the cap the unasked-for turn is dropped"
+    assert turns == [], "the tenant override sheds the unasked-for turn"
     message.channel.send.assert_not_called()
 
 
@@ -491,6 +495,54 @@ async def test_a_drain_that_starts_while_the_classifier_runs_stops_the_turn(
     await _drain_timer(bot)
 
     assert turns == [] and recorded == [], "no new turn may start against a closing gateway"
+
+
+async def test_mention_claiming_thread_during_cap_read_stops_participation(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+    classifier: _FakeClassifier,
+) -> None:
+    await _follow_thread(db_session_factory, tenant_id)
+    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
+    turns: list[bool] = []
+    cap_read = asyncio.Event()
+    release_cap = asyncio.Event()
+    release_mention = asyncio.Event()
+
+    async def delayed_cap(*args: Any, **kwargs: Any) -> int:
+        cap_read.set()
+        await release_cap.wait()
+        return 3
+
+    async def turn(message: Any, guild_id: str, tenant_id: uuid.UUID, **kw: Any) -> None:
+        unprompted = bool(kw.get("unprompted"))
+        turns.append(unprompted)
+        if not unprompted:
+            await release_mention.wait()
+
+    monkeypatch.setattr(bot_module, "get_turn_cap", delayed_cap)
+    bot._handle_mention = turn  # type: ignore[method-assign]
+    thread = _make_thread()
+    await bot.on_message(_thread_message(thread, content="anyone?"))
+    timer = bot._participation_pending[THREAD_ID].timer  # pyright: ignore[reportPrivateUsage]
+    assert timer is not None
+    await asyncio.wait_for(cap_read.wait(), timeout=2)
+
+    mention = asyncio.create_task(
+        bot.on_message(_thread_message(thread, content="<@999> help", mentions_bot=True))
+    )
+    try:
+        async with asyncio.timeout(2):
+            while THREAD_ID not in bot._processing:  # pyright: ignore[reportPrivateUsage]
+                await asyncio.sleep(0)
+        release_cap.set()
+        await timer
+        assert turns == [False], "the mention owns the thread; participation must not start"
+    finally:
+        release_cap.set()
+        release_mention.set()
+        await mention
 
 
 async def test_a_batch_keeps_only_the_newest_messages(

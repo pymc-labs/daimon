@@ -45,6 +45,7 @@ class Tenant(Base):
         CheckConstraint(
             "funding_mode IN ('prepaid', 'operator_funded')", name="ck_tenants_funding_mode"
         ),
+        CheckConstraint("turn_cap IS NULL OR turn_cap > 0", name="ck_tenants_turn_cap"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -60,6 +61,7 @@ class Tenant(Base):
     funding_mode: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'prepaid'")
     )
+    turn_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_reconcile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     registered_at: Mapped[datetime] = mapped_column(

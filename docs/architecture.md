@@ -135,6 +135,12 @@ Unprompted replies follow their existing silent-refusal policy. Continuation
 wakes retain their existing admission path. The limit is unset by default and
 applies only to this Discord process.
 
+Discord and Slack also limit simultaneous chat turns per tenant before admission.
+`daimon tenants turn-cap PLATFORM WORKSPACE_ID N` stores a tenant override;
+`default` clears it and restores the adapter's deployment setting (3 by default).
+The check covers Discord mentions, thread participation and wizard submits,
+and Slack mentions. It does not limit MCP or routine turns.
+
 A protected channel hears nothing from the agent, not even a refusal or an
 error. Each turn entry decides FIRST, before tenant liveness, provisioning or
 any other read that can fail, whether the agent may post there:
@@ -256,9 +262,16 @@ user message, and runs a consume loop and a render loop concurrently until the
 session goes idle or errors. Adapters plug in through the `TurnLifecycle`
 protocol in `packages/core/daimon/core/turn/lifecycle.py`, which documents a
 per-hook cost contract:
-`on_render` is the sole content-delivery path and may talk to the network,
+`on_render` is the answer-text delivery path and may talk to the network,
 because it runs on its own task and cannot stall the pump; `on_sse_event` is
 awaited inline in the consume loop and must stay a cheap local tap.
+
+After a tool-using Discord or Slack turn, the adapter starts a detached,
+per-MA-session-chained sweep of downloadable session files through
+`daimon.core.output_delivery`. It posts each file into the conversation thread
+before deleting its MA listing entry. Failed posts stay listed for a later
+sweep. Discord uses the guild's upload limit, skips oversize files with an
+in-thread notice, and checks channel protection before posting.
 
 Reconnection is two loops for two failure modes. The outer loop handles
 eventless cycles — the server closes cleanly roughly every ten minutes by

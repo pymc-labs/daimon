@@ -9,8 +9,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql as pg
 
-revision: str = "0031_promo_codes"
-down_revision: str | None = "0030_feat085_routine_destination"
+revision: str = "0032_promo_codes"
+down_revision: str | None = "0031_tenant_turn_cap"
 branch_labels: str | None = None
 depends_on: str | None = None
 

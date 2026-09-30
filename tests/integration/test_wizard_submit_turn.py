@@ -553,6 +553,43 @@ async def test_a_submit_over_the_per_tenant_cap_runs_no_turn_and_says_so(
     assert usage_rows == [], "an over-cap refusal must write zero usage_events rows"
 
 
+async def test_mention_claiming_last_slot_during_submit_cap_read_sheds_submit(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await _seed_funded_tenant(db_session, workspace_id="800007002")
+    row = await _seed_review_row(db_session_factory, tenant=tenant)
+    channel = _make_channel(thread_id=5017, parent_id=4017)
+    stream_hits: list[str] = []
+    router = _build_router(str(tenant.id), sent_events=[], stream_hits=stream_hits)
+    runtime = _make_runtime(db_session_factory, router)
+    runtime.settings.discord.max_concurrent_turns_per_tenant = 1
+    bot = _make_bot(runtime)
+    interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+    cap_read = asyncio.Event()
+    release_cap = asyncio.Event()
+
+    async def delayed_cap(*args: Any, **kwargs: Any) -> int:
+        cap_read.set()
+        await release_cap.wait()
+        return 1
+
+    with patch("daimon.adapters.discord.wizard_submit.get_turn_cap", side_effect=delayed_cap):
+        item = await WizardSubmitButton.from_custom_id(
+            interaction, MagicMock(), _submit_match(row.id)
+        )
+        assert await item.interaction_check(interaction) is True
+        await item.callback(interaction)
+        try:
+            await asyncio.wait_for(cap_read.wait(), timeout=2)
+            bot._inflight[tenant.id] = 1  # pyright: ignore[reportPrivateUsage]  # a mention claims the last slot while the submit waits
+        finally:
+            release_cap.set()
+        await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+
+    assert stream_hits == []
+    assert bot._inflight == {tenant.id: 1}  # pyright: ignore[reportPrivateUsage]
+
+
 # --- post-hoc admission refusal -------------------------------------------------
 
 

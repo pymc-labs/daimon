@@ -113,6 +113,7 @@ class TenantRow(BaseModel):
     external_id: str  # = folded workspace_id
     provision_status: str  # "ready" | "pending" | "failed"
     funding_mode: FundingMode = "prepaid"
+    turn_cap: int | None = None
     last_reconcile_error: str | None = None
     archived_at: datetime | None = None
     registered_at: datetime

@@ -17,12 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Discord delivers files generated during tool-using turns into the chat thread,
+  with upload-limit notices and protected-channel checks.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.
 - Operators can credit tenants with `daimon tenants credit --note` and set default
   or per-person monthly caps with `daimon tenants cap`. Caps apply without Stripe;
   prepaid Discord and Slack turn footers show the remaining balance.
+- Operators can set a tenant's concurrent chat-turn cap with
+  `daimon tenants turn-cap`, or clear it to use the deployment default.
 - Promo codes: operators create credit or timed codes with `daimon promo`, and
   admins redeem them from `/billing` on Discord and Slack or with the MCP tool
   `redeem_promo_code`. Timed credit is spent first inside its window and the

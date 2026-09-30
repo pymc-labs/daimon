@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import types
 import uuid
@@ -246,6 +247,66 @@ async def _setup_workspace_and_config(
 
 class TestNewThreadCreation:
     """Channel mentions create threads and run turns."""
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_tool_turn_starts_output_sweep_in_its_thread(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.return_value = ma_session(id="sess-output")
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        message = _make_channel_message()
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 9999
+        thread.send = AsyncMock(return_value=types.SimpleNamespace(id=1000, edit=AsyncMock()))
+        message.create_thread.return_value = thread  # pyright: ignore[reportAttributeAccessIssue]
+
+        from daimon.core.turn.lifecycle import acknowledge
+        from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+
+        async def finish_turn(*, lifecycle, **kwargs):
+            await acknowledge(lifecycle, "accepted")
+            state = TurnState(
+                content=[
+                    ToolUseBlock(
+                        kind="tool_use",
+                        id="tu_output",
+                        type="agent.tool_use",
+                        name="bash",
+                        input={},
+                    ),
+                    TextBlock(kind="text", text="Done"),
+                ]
+            )
+            await lifecycle.on_terminal_success(state)
+            await acknowledge(lifecycle, "done")
+            return state
+
+        mock_run_turn.side_effect = finish_turn
+        with patch(
+            "daimon.adapters.discord.bot.deliver_session_outputs", new_callable=AsyncMock
+        ) as deliver:
+            await bot.on_message(message)
+            await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+
+        deliver.assert_awaited_once()
+        assert deliver.await_args.args[1] is thread
+        assert deliver.await_args.kwargs["session_id"] == "sess-output"
 
     # TODO: migrate to MARouter transport-level fake
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
