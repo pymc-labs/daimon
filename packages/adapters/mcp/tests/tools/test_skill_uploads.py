@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import re
@@ -20,10 +21,13 @@ from daimon.adapters.mcp.tools import skill_uploads
 from daimon.adapters.mcp.tools.skill_uploads import (
     _add_skill_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.skills import _list_impl  # pyright: ignore[reportPrivateUsage]
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.slack_file_token import mint_file_token
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
@@ -337,3 +341,48 @@ async def test_a_discord_attachment_zip_is_previewed(
     assert fetched == [url]
     assert (result.preview.files, result.preview.scripts) == (["SKILL.md", "run.sh"], ["run.sh"])
     assert json.loads(result.model_dump_json())["status"] == "preview"
+
+
+async def test_an_isolated_channels_agent_keeps_its_added_skill_inside_the_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=world.tenant_id, channel_id=ROOM),
+            tenant_id=world.tenant_id,
+            agent_name="helper",
+            mode="agent",
+        )
+        await set_access_policy(
+            session,
+            tenant_id=world.tenant_id,
+            policy=TenantAccessPolicy(isolated_channel_ids=(ROOM,)),
+        )
+    inside = dataclasses.replace(
+        world.auth(),
+        chat_agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_helper"),
+    )
+    with pytest.raises(ToolError, match="not found|no agent"):
+        await _add_skill_impl(
+            world.runtime,
+            world.auth(),
+            agent_name="helper",
+            expected_ma_agent_id=None,
+            skill_md=_MD,
+        )
+    preview = await _add_skill_impl(
+        world.runtime, inside, agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
+    )
+    await _add_skill_impl(
+        world.runtime,
+        inside,
+        agent_name="helper",
+        expected_ma_agent_id=None,
+        skill_md=_MD,
+        content_hash=preview.preview.content_hash,
+    )
+
+    assert [s.name for s in await _list_impl(world.runtime, inside)] == ["helper/notes"]
+    assert await _list_impl(world.runtime, world.auth()) == [], "hidden outside the channel"
