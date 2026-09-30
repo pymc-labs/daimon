@@ -219,16 +219,21 @@ A session transcript holds everything its turns saw, so the transcript tools
 apply the same seal. `admit()` records the turn's channel and thread on the
 `Admission`, with the id that seals it (its channel, else a thread sealed on
 its own), and `create_session` stamps them on the session (`daimon_channel`,
-`daimon_thread`, `daimon_sealed=<that id>`); a sealed turn that reuses an
-older session writes the same stamp onto it (`bind_session`). Each read or
-follow-up judges the stamp against the current policy, as a channel read of
-that channel and thread: the main MCP server's session tools take the calling
-turn's `origin_context_id`, claimable only by a chat turn's own credential;
-agent-chat keys and the hub run outside every channel, so they never list,
-read or continue a sealed conversation. Sealing a channel later covers its
-existing sessions, and a session that ran sealed stays inside the id that
-sealed it after an unseal -- only that thread, when the thread was sealed on
-its own. A session from before the stamp that a thread ran on
+`daimon_thread`, `daimon_sealed=<ids>`; `daimon.core.session_seal`). The
+recorded seal only grows: a sealed turn that reuses a session adds its id
+(`bind_session`, which waits rather than run the turn if Managed Agents
+refuses the update mid-turn), and a session that replaces another -- by
+transcript, checkpoint, bundle, handoff or dead-session recovery -- inherits
+its predecessor's ids, or is sealed to its own thread when the predecessor
+can't be read. Each read or follow-up requires the calling turn's origin to be
+inside every recorded id, whatever the current policy, and judges the channel
+and thread against the current policy as a channel read would: the main MCP
+server's session tools take the calling turn's `origin_context_id`, claimable
+only by a chat turn's own credential; agent-chat keys and the hub run outside
+every channel, so they never list, read or continue a sealed conversation.
+Sealing a channel later covers its existing sessions, and unsealing never
+releases a session that ran sealed -- only that thread, when the thread was
+sealed on its own. A session from before the stamp that a thread ran on
 (`thread_sessions`) has no known
 parent channel: while the tenant seals anything it is shown only to a turn in
 that same thread. Nor can a sealed turn open or drive another session to carry

@@ -295,6 +295,13 @@ async def test_bind_session_stamps_the_seal_on_a_session_reused_after_sealing(
 
     router = MARouter()
     router.add("POST", r"/v1/sessions/sess_existing$", _update)
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_existing$",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_existing").model_dump(mode="json")
+        ),
+    )
     deps = _deps(sessionmaker=db_session_factory, router=router)
     agent = ma_agent(id="ag_1", tenant_id=tenant.id)
     env = ma_environment(id="env_1", tenant_id=tenant.id)
@@ -324,6 +331,71 @@ async def test_bind_session_stamps_the_seal_on_a_session_reused_after_sealing(
         assert [u.get("metadata") for u in updates] == [
             {"daimon_channel": "vault", "daimon_thread": "thread-1", "daimon_sealed": "vault"}
         ]
+
+
+async def test_bind_session_blocks_a_sealed_turn_ma_will_not_stamp_mid_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Running the turn unstamped is the leak; wait for the session instead."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _make_snapshotted_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        thread_id="thread-1",
+        ma_session_id="sess_existing",
+        ma_agent_id="ag_1",
+        watermark_message_id="msg-99",
+    )
+    await db_session.commit()
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_existing$",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_existing").model_dump(mode="json")
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/sess_existing$",
+        lambda _r, _m: httpx.Response(
+            400,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Cannot update session while session is running",
+                },
+            },
+        ),
+    )
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    admission = dataclasses.replace(
+        _admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        origin_channel_id="vault",
+        origin_thread_id="thread-1",
+        origin_seal_id="vault",
+        memory_read_only=True,
+    )
+
+    with pytest.raises(SessionBusyError):
+        await bind_session(
+            deps,
+            admission,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            thread_id="thread-1",
+            session_account_id=account.id,
+            reuse_existing=True,
+        )
 
 
 async def test_bind_session_creates_session_and_writes_mapping_when_no_live_row(

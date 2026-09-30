@@ -611,7 +611,7 @@ async def test_create_session_stamps_the_channel_turn_it_is_opened_for(
         tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000022"),
         origin_channel_id="chan-1",
         origin_thread_id=thread_id,
-        origin_seal_id=sealed,
+        origin_seal_ids=() if sealed is None else (sealed,),
     )
 
     metadata = captured_bodies[0]["metadata"]

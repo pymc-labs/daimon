@@ -12,9 +12,9 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
-    MA_METADATA_KEY_SEALED,
     MA_METADATA_KEY_THREAD,
 )
+from daimon.core.session_seal import seal_ids
 from daimon.core.stores.thread_sessions import thread_ids_for_sessions
 from fastmcp.exceptions import ToolError
 
@@ -51,19 +51,19 @@ def _seal_allows(
 
     A stamped session is judged like a channel read of the channel and thread it
     ran in, against the current policy -- so sealing a channel later covers its
-    old conversations -- and one that ran sealed stays inside the id that
-    sealed it after an unseal: the channel, or only the thread when the thread
-    was sealed on its own. An unstamped session a thread ran on predates the stamp and its
-    parent channel is unknown: while the tenant seals anything it is shown only
-    inside that same thread. An unstamped session no thread ran on is a
+    old conversations -- and one that ran sealed stays inside every id that
+    sealed it (`daimon.core.session_seal.seal_ids`) after an unseal: the
+    channel, or only the thread when the thread was sealed on its own. An
+    unstamped session a thread ran on predates the stamp and its parent channel
+    is unknown: while the tenant seals anything it is shown only inside that
+    same thread. An unstamped session no thread ran on is a
     headless one and carries no channel content.
     """
     metadata = session.metadata or {}
     channel = metadata.get(MA_METADATA_KEY_CHANNEL)
     if channel is not None:
         thread = metadata.get(MA_METADATA_KEY_THREAD)
-        seal_id = metadata.get(MA_METADATA_KEY_SEALED)
-        if seal_id is not None and seal_id not in read.origin_channel_ids:
+        if not seal_ids(metadata) <= read.origin_channel_ids:
             return False
         if thread is None:
             return read.allows(channel)
@@ -106,7 +106,9 @@ async def sessions_outside_seals(
         return []
     if auth.agent_id is not None or auth.chat_agent_id is None:
         origin_context_id = None
-    read = await load_read_policy(runtime, auth, origin_context_id=origin_context_id)
+    read = await load_read_policy(
+        runtime, auth, origin_context_id=origin_context_id, resolve_without_seals=True
+    )
     legacy = await _legacy_threads(runtime, auth, read, sessions)
     return [s for s in sessions if _seal_allows(s, read, legacy.get(s.id))]
 

@@ -481,3 +481,70 @@ async def test_a_chat_turn_token_does_not_reach_the_agent_chat_turn_tools(
     assert payload.get("isError") or "error" in result, f"{tool} must be refused: {result!r}"
     assert "Unknown tool" in str(result) or "not found" in str(result).lower(), result
     assert world.sent == []
+
+
+# --- a recorded seal holds with nothing sealed any more ----------------------
+
+
+async def test_with_every_seal_removed_the_recorded_seal_still_decides(world: _World) -> None:
+    """No seal left in the policy: the inside reader still reads, others don't."""
+    world.add_session(
+        "ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1", daimon_sealed="thr-1"
+    )
+    same = await world.origin(_SEALED, "thr-1")
+    sibling = await world.origin(_SEALED, "thr-2")
+    outside = await world.origin(_OPEN, "thr-b")
+
+    page = await _list_session_events_impl(
+        world.runtime(), world.auth(), "ses_acme", None, None, None, same
+    )
+    assert _SEALED_TOPIC in _events_text(page)
+    for origin in (sibling, outside, None):
+        with pytest.raises(ToolError, match="sealed channel"):
+            await _list_session_events_impl(
+                world.runtime(), world.auth(), "ses_acme", None, None, None, origin
+            )
+
+
+async def test_a_successor_stamped_with_an_inherited_seal_is_refused_outside(
+    world: _World,
+) -> None:
+    """The stamp a replacement inherits (see test_session_preparation), with the
+    channel unsealed since: list, get, events and continue all refuse."""
+    from daimon.core.session_seal import origin_stamp
+
+    world.add_session(
+        "ses_successor", **origin_stamp(channel_id=_SEALED, thread_id="thr-1", seal={_SEALED})
+    )
+    outside = await world.origin(_OPEN, "thr-b")
+    runtime = world.runtime()
+
+    assert await _list_sessions_impl(runtime, world.auth(), None, None, outside) == []
+    with pytest.raises(ToolError, match="sealed channel"):
+        await _get_session_impl(runtime, world.auth(), "ses_successor", outside)
+    with pytest.raises(ToolError, match="sealed channel"):
+        await _list_session_events_impl(
+            runtime, world.auth(), "ses_successor", None, None, None, outside
+        )
+    with pytest.raises(ToolError, match="sealed channel"):
+        await _continue_turn_impl(runtime, world.agent_key_auth(), "ses_successor", "hi")
+    assert world.sent == []
+
+
+async def test_a_session_stamped_sealed_by_the_first_release_stays_sealed_to_its_channel(
+    world: _World,
+) -> None:
+    """#337 wrote a bare "true": it means the stamped channel."""
+    world.add_session(
+        "ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1", daimon_sealed="true"
+    )
+    inside = await world.origin(_SEALED, "thr-2")
+    outside = await world.origin(_OPEN, "thr-b")
+
+    await _list_session_events_impl(
+        world.runtime(), world.auth(), "ses_acme", None, None, None, inside
+    )
+    with pytest.raises(ToolError, match="sealed channel"):
+        await _list_session_events_impl(
+            world.runtime(), world.auth(), "ses_acme", None, None, None, outside
+        )

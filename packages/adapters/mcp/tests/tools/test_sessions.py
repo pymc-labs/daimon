@@ -54,10 +54,10 @@ def _open_seal_policy_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
 
     real = _session_access.load_read_policy
 
-    async def load(runtime: Any, auth: Any, *, origin_context_id: str | None) -> Any:
+    async def load(runtime: Any, auth: Any, **kwargs: Any) -> Any:
         if isinstance(runtime.session_factory, MagicMock):
             return OPEN_READ_POLICY
-        return await real(runtime, auth, origin_context_id=origin_context_id)
+        return await real(runtime, auth, **kwargs)
 
     monkeypatch.setattr(_session_access, "load_read_policy", load)
 

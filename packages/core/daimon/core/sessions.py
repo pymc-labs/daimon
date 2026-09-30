@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import anthropic as anthropic_pkg
@@ -37,11 +37,8 @@ from daimon.core.credential_env import upload_env_and_mount
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
-    MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
-    MA_METADATA_KEY_SEALED,
     MA_METADATA_KEY_TENANT,
-    MA_METADATA_KEY_THREAD,
 )
 from daimon.core.errors import StoreError
 from daimon.core.github_credentials import get_pat
@@ -54,6 +51,7 @@ from daimon.core.mcp_vault import (
 )
 from daimon.core.memory_resource import ensure_memory_store_and_mount
 from daimon.core.repo_resource import build_repo_resource
+from daimon.core.session_seal import origin_stamp
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.tool_safety import (
     OPEN_TOOL_SAFETY,
@@ -98,21 +96,6 @@ def _session_metadata(
     return metadata
 
 
-def origin_stamp(*, channel_id: str, thread_id: str | None, seal_id: str | None) -> dict[str, str]:
-    """Where a channel conversation runs, for the transcript tools' seal check.
-
-    `seal_id` is the sealed id that seals the turn, when one does. Written at
-    creation, and again on a reused session when a turn runs sealed
-    (`daimon.core.turn.prepare.bind_session`).
-    """
-    stamp = {MA_METADATA_KEY_CHANNEL: channel_id}
-    if thread_id is not None:
-        stamp[MA_METADATA_KEY_THREAD] = thread_id
-    if seal_id is not None:
-        stamp[MA_METADATA_KEY_SEALED] = seal_id
-    return stamp
-
-
 async def create_session(
     anthropic: AsyncAnthropic,
     *,
@@ -136,7 +119,7 @@ async def create_session(
     private_dm_id: str | None = None,
     origin_channel_id: str | None = None,
     origin_thread_id: str | None = None,
-    origin_seal_id: str | None = None,
+    origin_seal_ids: Collection[str] = (),
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -152,7 +135,7 @@ async def create_session(
     ``slack_turn_context_id`` selects an isolated execution credential for private
     Slack turns. It is absent for channel, headless and MCP-created sessions.
 
-    ``origin_channel_id``/``origin_thread_id``/``origin_seal_id`` name the channel
+    ``origin_channel_id``/``origin_thread_id``/``origin_seal_ids`` name the channel
     turn a session is opened for; they are stamped on it so the transcript tools
     can refuse a sealed conversation's transcript outside its channel.
 
@@ -476,7 +459,7 @@ async def create_session(
             origin_stamp(
                 channel_id=origin_channel_id,
                 thread_id=origin_thread_id,
-                seal_id=origin_seal_id,
+                seal=origin_seal_ids,
             )
         )
 
