@@ -14,6 +14,7 @@ import uuid
 
 from daimon.core._models import SeededSkill
 from daimon.core.stores.domain import SeededSkillRow
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +29,14 @@ async def load_seeded_skill(
     if orm is None:
         return None
     return SeededSkillRow.model_validate(orm)
+
+
+async def list_seeded_skill_names(session: AsyncSession, *, tenant_id: uuid.UUID) -> frozenset[str]:
+    """Names of every skill `defaults apply` has seeded into this tenant."""
+    result = await session.execute(
+        select(SeededSkill.name).where(SeededSkill.tenant_id == tenant_id)
+    )
+    return frozenset(result.scalars())
 
 
 async def record_seeded_skill(

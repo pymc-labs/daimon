@@ -46,6 +46,7 @@ from daimon.core.stores.agent_skill_repo_credentials import (
     list_skill_repo_credentials_for_repo,
 )
 from daimon.core.stores.domain import RepoProofKind
+from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, SecretStr
@@ -326,6 +327,8 @@ async def _sync_impl(
             runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
         )
         expected_ma_agent_id = agent.id
+    async with runtime.session_factory() as session:
+        seeded_skill_names = await list_seeded_skill_names(session, tenant_id=auth.tenant_id)
     async with httpx.AsyncClient(timeout=30.0) as http:
         token = await _resolve_sync_token(runtime, auth, url, http)
         try:
@@ -336,6 +339,7 @@ async def _sync_impl(
                 branch=branch,
                 path=path,
                 tenant_id=auth.tenant_id,
+                seeded_skill_names=seeded_skill_names,
                 token=token,
                 max_tarball_bytes=runtime.settings.github.max_tarball_bytes,
                 max_tarball_decompressed_bytes=(

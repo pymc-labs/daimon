@@ -81,6 +81,7 @@ from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.stores.task_continuations import record_continuation
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -1327,6 +1328,9 @@ async def run_skill_repo_credential_submission(
                 ma_secret_ref=ma_secret_ref,
                 proof=proof,
             )
+            seeded_skill_names = await list_seeded_skill_names(
+                session, tenant_id=consumed.tenant_id
+            )
         outcomes = await run_skill_sync(
             runtime.anthropic,
             runtime.http_client,
@@ -1334,6 +1338,7 @@ async def run_skill_repo_credential_submission(
             branch=branch,
             path=path,
             tenant_id=consumed.tenant_id,
+            seeded_skill_names=seeded_skill_names,
             token=value,
         )
     except DaimonError as err:

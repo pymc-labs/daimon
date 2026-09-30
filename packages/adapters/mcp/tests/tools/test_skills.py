@@ -32,11 +32,14 @@ from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-def _runtime(client: AsyncAnthropic) -> McpRuntime:
+def _runtime(
+    client: AsyncAnthropic, session_factory: async_sessionmaker[AsyncSession] | None = None
+) -> McpRuntime:
     return McpRuntime(
-        session_factory=MagicMock(),
+        session_factory=session_factory if session_factory is not None else MagicMock(),
         client=client,  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
@@ -305,7 +308,9 @@ async def test_delete_impl_raises_tool_error_not_found() -> None:
         await _delete_impl(_runtime(client), auth, "nope")
 
 
-async def test_sync_impl_returns_outcomes(tmp_path: Path) -> None:
+async def test_sync_impl_returns_outcomes(
+    tmp_path: Path, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -337,7 +342,7 @@ async def test_sync_impl_returns_outcomes(tmp_path: Path) -> None:
             account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
         )
         result = await _sync_impl(
-            _runtime(client),
+            _runtime(client, sessionmaker),
             auth,
             url="https://github.com/org/repo",
             branch="main",
@@ -355,7 +360,9 @@ async def test_sync_impl_returns_outcomes(tmp_path: Path) -> None:
     assert not cleanup_dir.exists(), "should clean up the temp directory"
 
 
-async def test_sync_impl_raises_tool_error_for_invalid_path(tmp_path: Path) -> None:
+async def test_sync_impl_raises_tool_error_for_invalid_path(
+    tmp_path: Path, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -374,7 +381,7 @@ async def test_sync_impl_raises_tool_error_for_invalid_path(tmp_path: Path) -> N
         )
         with pytest.raises(ToolError, match="not found in fetched repository"):
             await _sync_impl(
-                _runtime(client),
+                _runtime(client, sessionmaker),
                 auth,
                 url="https://github.com/org/repo",
                 branch="main",
@@ -385,7 +392,9 @@ async def test_sync_impl_raises_tool_error_for_invalid_path(tmp_path: Path) -> N
     assert not cleanup_dir.exists(), "should clean up temp directory even on error"
 
 
-async def test_sync_impl_rejects_path_traversal(tmp_path: Path) -> None:
+async def test_sync_impl_rejects_path_traversal(
+    tmp_path: Path, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -404,7 +413,7 @@ async def test_sync_impl_rejects_path_traversal(tmp_path: Path) -> None:
         )
         with pytest.raises(ToolError, match="escapes the repository root"):
             await _sync_impl(
-                _runtime(client),
+                _runtime(client, sessionmaker),
                 auth,
                 url="https://github.com/org/repo",
                 branch="main",
@@ -432,6 +441,7 @@ def _agent_json(*, agent_id: str, tenant_id: uuid.UUID, skill_ids: list[str]) ->
 
 async def test_sync_impl_reports_zero_attached_when_no_agent_attaches_synced_skills(
     tmp_path: Path,
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """Three skills synced into the registry; the tenant's one agent attaches
     none of them — the observed failure case (D-11/D-21) must read
@@ -474,7 +484,11 @@ async def test_sync_impl_reports_zero_attached_when_no_agent_attaches_synced_ski
             account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
         )
         result = await _sync_impl(
-            _runtime(client), auth, url="https://github.com/org/repo", branch="main", path=""
+            _runtime(client, sessionmaker),
+            auth,
+            url="https://github.com/org/repo",
+            branch="main",
+            path="",
         )
 
     assert result.registry_count == 3, "all three synced skills land in the tenant registry"
@@ -492,6 +506,7 @@ async def test_sync_impl_reports_zero_attached_when_no_agent_attaches_synced_ski
 
 async def test_sync_impl_reports_one_attached_when_an_existing_agent_already_has_it(
     tmp_path: Path,
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -526,7 +541,11 @@ async def test_sync_impl_reports_one_attached_when_an_existing_agent_already_has
             account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
         )
         result = await _sync_impl(
-            _runtime(client), auth, url="https://github.com/org/repo", branch="main", path=""
+            _runtime(client, sessionmaker),
+            auth,
+            url="https://github.com/org/repo",
+            branch="main",
+            path="",
         )
 
     assert result.registry_count == 1
@@ -540,7 +559,9 @@ async def test_sync_impl_reports_one_attached_when_an_existing_agent_already_has
     )
 
 
-async def test_sync_impl_excludes_failed_outcome_from_both_counts(tmp_path: Path) -> None:
+async def test_sync_impl_excludes_failed_outcome_from_both_counts(
+    tmp_path: Path, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -571,7 +592,11 @@ async def test_sync_impl_excludes_failed_outcome_from_both_counts(tmp_path: Path
             account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
         )
         result = await _sync_impl(
-            _runtime(client), auth, url="https://github.com/org/repo", branch="main", path=""
+            _runtime(client, sessionmaker),
+            auth,
+            url="https://github.com/org/repo",
+            branch="main",
+            path="",
         )
 
     assert result.registry_count == 1, "the failed outcome must not inflate the registry count"
@@ -643,6 +668,7 @@ async def test_register_skill_tools_uses_only_canonical_names() -> None:
 
 async def test_sync_impl_attaches_to_the_named_agent_and_preserves_its_existing_skills(
     tmp_path: Path,
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """``agent_name`` closes the import/attach gap in one call.
 
@@ -705,7 +731,7 @@ async def test_sync_impl_attaches_to_the_named_agent_and_preserves_its_existing_
             account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
         )
         result = await _sync_impl(
-            _runtime(client),
+            _runtime(client, sessionmaker),
             auth,
             url="https://github.com/org/repo",
             branch="main",
@@ -728,7 +754,9 @@ async def test_sync_impl_attaches_to_the_named_agent_and_preserves_its_existing_
     )
 
 
-async def test_sync_impl_anonymous_404_names_the_credential_remedy() -> None:
+async def test_sync_impl_anonymous_404_names_the_credential_remedy(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     """An anonymous 404 must read as "no credential", not "no such repo".
 
     GitHub 404s a private repo rather than 403ing it, so the bare status is
@@ -750,7 +778,7 @@ async def test_sync_impl_anonymous_404_names_the_credential_remedy() -> None:
         )
         with pytest.raises(ToolError, match="request_skill_repo_token") as excinfo:
             await _sync_impl(
-                _runtime(build_fake_anthropic(MARouter().dispatch)),
+                _runtime(build_fake_anthropic(MARouter().dispatch), sessionmaker),
                 auth,
                 url="https://github.com/org/private-repo",
                 branch="main",
@@ -760,7 +788,9 @@ async def test_sync_impl_anonymous_404_names_the_credential_remedy() -> None:
     assert "no github credential was available" in str(excinfo.value).lower()
 
 
-async def test_sync_impl_404_with_a_token_does_not_blame_credentials() -> None:
+async def test_sync_impl_404_with_a_token_does_not_blame_credentials(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     """With a token that GitHub accepted, a 404 really is a bad url/branch."""
     from daimon.core.skills.fetch import GitHubFetchError
 
@@ -775,7 +805,7 @@ async def test_sync_impl_404_with_a_token_does_not_blame_credentials() -> None:
         )
         with pytest.raises(ToolError) as excinfo:
             await _sync_impl(
-                _runtime(build_fake_anthropic(MARouter().dispatch)),
+                _runtime(build_fake_anthropic(MARouter().dispatch), sessionmaker),
                 auth,
                 url="https://github.com/org/repo",
                 branch="typo",
@@ -789,6 +819,7 @@ async def test_sync_impl_404_with_a_token_does_not_blame_credentials() -> None:
 
 async def test_sync_impl_refuses_attach_when_registry_skill_collides_with_scoped_mount(
     tmp_path: Path,
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """Attaching a registry skill to an agent owning a same-named scoped skill is refused.
 
@@ -877,7 +908,7 @@ async def test_sync_impl_refuses_attach_when_registry_skill_collides_with_scoped
             account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
         )
         result = await _sync_impl(
-            _runtime(client),
+            _runtime(client, sessionmaker),
             auth,
             url="https://github.com/org/repo",
             branch="main",

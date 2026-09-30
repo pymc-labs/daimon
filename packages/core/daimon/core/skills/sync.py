@@ -14,6 +14,12 @@ Matching is by CANONICAL tenant-prefixed display_title (``{t8}-{name}``),
 produced via :func:`~daimon.core.defaults.metadata.tenant_scoped_display_title`
 with ``agent_name=None`` (seeded/registry shape). This ensures stack-B skills
 are tenant-isolated and distinct across guilds sharing one MA Workspace.
+
+Seeded skills (`defaults/skills/**`) share that exact title shape, so a
+same-named import would push a new version onto the seeded skill. The
+reconciler's fingerprint would still match the defaults tree and skip it on
+every later `defaults apply`, making the overwrite permanent. Those names are
+refused instead.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ async def sync_skills(
     skills: list[DiscoveredSkill],
     *,
     tenant_id: uuid.UUID,
+    seeded_skill_names: frozenset[str],
 ) -> list[ResourceOutcome]:
     """Create or update each skill in *skills* on MA.
 
@@ -58,11 +65,15 @@ async def sync_skills(
 
     Any exception raised while processing a single skill is caught; a
     ``FAILED`` outcome is recorded and the batch continues with the next skill.
+    A skill named in ``seeded_skill_names`` is recorded as ``FAILED`` without
+    touching MA (see the module docstring).
 
     Args:
         client: Anthropic SDK client for MA API calls.
         skills: Discovered skills to sync.
         tenant_id: Owning tenant — determines the canonical title prefix.
+        seeded_skill_names: This tenant's seeded skill names
+            (``list_seeded_skill_names``), which an import may not reuse.
 
     Returns:
         One :class:`~daimon.core.defaults.report.ResourceOutcome` per input
@@ -70,6 +81,21 @@ async def sync_skills(
     """
     outcomes: list[ResourceOutcome] = []
     for skill in skills:
+        if skill.spec.name in seeded_skill_names:
+            _log.warning("sync.seeded_skill_refused", name=skill.spec.name)
+            outcomes.append(
+                ResourceOutcome(
+                    kind="skill",
+                    name=skill.spec.name,
+                    action=Action.FAILED,
+                    error=(
+                        f"skill name {skill.spec.name!r} belongs to a default skill and "
+                        f"cannot be replaced by an import. Rename the skill (e.g. "
+                        f"{skill.spec.name}-2) and re-sync."
+                    ),
+                )
+            )
+            continue
         try:
             canonical = tenant_scoped_display_title(tenant_id=tenant_id, name=skill.spec.name)
             ma_match = await find_skill_by_display_title(client, canonical, on_truncation="raise")
