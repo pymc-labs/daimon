@@ -820,6 +820,10 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Billing carve-outs retained for integrity.
             "usage_events",
             "tenant_user_caps",
+            # Tenant-scoped billing record; the only accounts.id FK is the nullable
+            # redeemed_by_account_id with ON DELETE SET NULL, so erasure severs who
+            # redeemed a code while the tenant keeps its credit history.
+            "promo_redemptions",
         }
     )
 

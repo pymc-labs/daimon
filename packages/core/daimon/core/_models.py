@@ -860,7 +860,7 @@ class TenantLedger(Base):
     delta_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
     reason: Mapped[str] = mapped_column(
         Text, nullable=False
-    )  # topup|manual_credit|trial|turn_debit|charge.refunded|charge.dispute.created
+    )  # topup|manual_credit|trial|promo_credit|promo_expiry|*_debit|charge.*; see billing.md
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
     payment_event_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("payment_events.id", ondelete="SET NULL"), nullable=True
@@ -869,6 +869,114 @@ class TenantLedger(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class PromoCode(Base):
+    """Deployment-level promo code an admin redeems for tenant credit.
+
+    Only the sha256 of the normalized code is stored: the operator sees the
+    code once, at creation. A `timed` code's credit exists only inside its
+    credit window; a `credit` code's does not expire.
+    """
+
+    __tablename__ = "promo_codes"
+    __table_args__ = (
+        Index("promo_codes_code_hash_idx", "code_hash", unique=True),
+        CheckConstraint("amount_usd > 0", name="ck_promo_codes_amount_positive"),
+        CheckConstraint("kind IN ('credit', 'timed')", name="ck_promo_codes_kind"),
+        CheckConstraint(
+            "(kind = 'credit' AND credit_starts_at IS NULL AND credit_ends_at IS NULL)"
+            " OR (kind = 'timed' AND credit_starts_at < credit_ends_at)",
+            name="ck_promo_codes_credit_window",
+        ),
+        CheckConstraint(
+            "redeem_starts_at IS NULL OR redeem_ends_at IS NULL"
+            " OR redeem_starts_at < redeem_ends_at",
+            name="ck_promo_codes_redeem_window",
+        ),
+        CheckConstraint(
+            "max_redemptions IS NULL OR max_redemptions > 0",
+            name="ck_promo_codes_max_redemptions",
+        ),
+        CheckConstraint(
+            "redeemed_count >= 0"
+            " AND (max_redemptions IS NULL OR redeemed_count <= max_redemptions)",
+            name="ck_promo_codes_redeemed_count",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    code_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    credit_starts_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    credit_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    redeem_starts_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    redeem_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    max_redemptions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    redeemed_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PromoRedemption(Base):
+    """One tenant's redemption of one promo code, and its grant/expiry state.
+
+    `granted_at` is when the credit reached the ledger (a timed code redeemed
+    before its window waits for the scheduler); `expired_at`/`expired_usd`
+    record the unspent remainder a timed code removed at its window's end.
+    The redeeming account is attribution only, severed by account erasure.
+    """
+
+    __tablename__ = "promo_redemptions"
+    __table_args__ = (
+        UniqueConstraint("promo_code_id", "tenant_id", name="uq_promo_redemptions_code_tenant"),
+        Index("promo_redemptions_tenant_idx", "tenant_id"),
+        CheckConstraint(
+            "expired_usd IS NULL OR expired_usd >= 0", name="ck_promo_redemptions_expired_usd"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    promo_code_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("promo_codes.id", ondelete="RESTRICT"), nullable=False
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    redeemed_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expired_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+
+
+class PromoRedeemFailure(Base):
+    """One refused redemption attempt, counted to throttle guessing per tenant."""
+
+    __tablename__ = "promo_redeem_failures"
+    __table_args__ = (Index("promo_redeem_failures_tenant_idx", "tenant_id", "attempted_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class AgentFile(Base):

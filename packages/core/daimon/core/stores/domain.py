@@ -453,6 +453,63 @@ class TenantLedgerRow(BaseModel):
     occurred_at: datetime
 
 
+# `credit` codes add credit that never expires; `timed` codes add credit that
+# exists only inside their credit window. Column is Text + CHECK.
+PromoCodeKind = Literal["credit", "timed"]
+
+
+class PromoCodeRow(BaseModel):
+    """A promo code as operators see it. The code hash never leaves the store."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    note: str | None
+    amount_usd: Decimal
+    kind: PromoCodeKind
+    credit_starts_at: datetime | None
+    credit_ends_at: datetime | None
+    redeem_starts_at: datetime | None
+    redeem_ends_at: datetime | None
+    max_redemptions: int | None
+    redeemed_count: int
+    created_at: datetime
+    revoked_at: datetime | None
+
+
+class PromoRedemptionRow(BaseModel):
+    """One tenant's redemption of a promo code, with the tenant's platform identity."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    promo_code_id: uuid.UUID
+    tenant_id: uuid.UUID
+    tenant_platform: Platform
+    tenant_external_id: str
+    redeemed_by_account_id: uuid.UUID | None
+    redeemed_at: datetime
+    granted_at: datetime | None
+    expired_at: datetime | None
+    expired_usd: Decimal | None
+
+
+class PromoGrantRow(BaseModel):
+    """A redemption joined with the code terms the scheduler and allocation need."""
+
+    model_config = ConfigDict(frozen=True)
+
+    redemption_id: uuid.UUID
+    promo_code_id: uuid.UUID
+    tenant_id: uuid.UUID
+    kind: PromoCodeKind
+    amount_usd: Decimal
+    credit_starts_at: datetime | None
+    credit_ends_at: datetime | None
+    granted_at: datetime | None
+    expired_at: datetime | None
+
+
 class SeededSkillRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

@@ -55,6 +55,8 @@ Deliberate carve-outs:
   account purge; operators must enforce retention with a bucket lifecycle rule.
 - `usage_events` and `tenant_user_caps` rows are retained for billing integrity.
   Their `delete_all_for_user` helpers exist and are deliberately uncalled here.
+  `promo_redemptions` rows stay with the tenant too; account deletion only
+  clears who redeemed the code, through ON DELETE SET NULL.
 - Uploaded MA skill files (user_skills rows) are our DB ledger: the DB row is
   deleted as part of purge, but the uploaded file content inside Anthropic's
   Managed Agents is retained — guild-shared agents may still reference the
