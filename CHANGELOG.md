@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channel's own agent; built-in agents and the server default stay with server
   admins. Slack grants are by member only.
   Nothing changes until a channel admin is named.
+- **Channel environments.** Admins can pick the environment a Discord or
+  Slack channel's turns run in, or the workspace default, with
+  `set_channel_environment` and `clear_channel_environment`; an admin of a
+  channel can pick that channel's. Who answers where in the setup panel lists
+  each channel's environment and offers a select for it, and
+  `explain_agent_resolution` names the environment and the tier that chose it.
+  A conversation switches from its next message and keeps its files. The
+  missing-environment notice now points at the panel instead of the operator.
+  Nothing changes until an environment is picked.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.

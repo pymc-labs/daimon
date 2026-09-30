@@ -256,6 +256,19 @@ daimon channels admins set discord GUILD_ID CHANNEL_ID --role ROLE_ID --user USE
 daimon channels admins clear discord GUILD_ID CHANNEL_ID
 ```
 
+**Channel environments.** The environment a turn runs in resolves over the
+same tiers as the agent but on its own (`packages/core/daimon/core/channel_environments.py`),
+so a channel can keep its agent and run it with the packages one team needs.
+Server admins set any channel's environment, or the tenant default by omitting
+the channel, with `set_channel_environment` and `clear_channel_environment`;
+a channel admin sets the channels they run. Who answers where in both setup
+panels lists each channel's environment and gives server admins and this
+channel's admins a select for it. The name must match an existing environment
+in the tenant; conversations pick it up from their next message, keeping their
+files, and `explain_agent_resolution` reports each tier's environment. A
+channel with no environment of its own falls through, so nothing changes until
+one is set. Chat over MCP has no channel, so it uses the tenant or deployment default.
+
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA
 session, assembles every `create_session` argument (credential env mount, MCP
