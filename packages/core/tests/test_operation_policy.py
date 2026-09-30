@@ -42,7 +42,7 @@ def test_attachment_allows_admin_on_managed_agent() -> None:
 
 def test_posted_token_operations_allow_non_admin_on_shared_agent() -> None:
     shared = _facts(managed=True, reachable=True)
-    for operation in ("key_add", "keys_import", "mcp_connect", "skill_repo_connect"):
+    for operation in ("key_add", "keys_import", "mcp_connect"):
         outcome = decide_operation(operation, is_admin=False, target=shared)
         assert outcome == "allow", (
             f"{operation} is a posted-token contribution scoped to the "
@@ -52,12 +52,32 @@ def test_posted_token_operations_allow_non_admin_on_shared_agent() -> None:
 
 def test_key_replace_and_remove_need_admin_on_shared_agent() -> None:
     reachable_not_managed = _facts(managed=False, reachable=True)
-    for operation in ("key_replace", "key_remove", "mcp_remove", "repo_bind"):
+    for operation in ("key_replace", "key_remove", "mcp_remove", "repo_bind", "skill_repo_connect"):
         outcome = decide_operation(operation, is_admin=False, target=reachable_not_managed)
         assert outcome == "needs_admin", (
             f"{operation} is a destructive attachment write on a reachable "
             "agent, so a non-admin must be refused"
         )
+
+
+def test_skill_repo_connect_refuses_non_admin_on_managed_agent() -> None:
+    outcome = decide_operation(
+        "skill_repo_connect", is_admin=False, target=_facts(managed=True, reachable=False)
+    )
+    assert outcome == "managed_agent", (
+        "a skill-repo import attaches skills to the agent, so a member must not "
+        "be able to point one at the seeded agent"
+    )
+
+
+def test_skill_repo_connect_allows_non_admin_on_private_agent() -> None:
+    outcome = decide_operation(
+        "skill_repo_connect", is_admin=False, target=_facts(managed=False, reachable=False)
+    )
+    assert outcome == "allow", (
+        "an agent that answers nowhere is the member's own, so importing skills "
+        "onto it needs no admin"
+    )
 
 
 def test_unreachable_attachment_write_is_open_to_non_admin() -> None:

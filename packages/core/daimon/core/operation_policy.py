@@ -21,21 +21,25 @@ There are three rule families, each a fixed short-circuit order:
   `managed_agent` (admin included); admin -> `allow`; reachable ->
   `needs_admin`; else `allow`.
 
-- **attachment** (`key_replace`, `key_remove`, `mcp_remove`, `repo_bind`):
-  attachments never enter the agent spec, so the managed-agent absolutism
-  above does not apply, and an admin attaching to a shared or managed agent
-  is the first-run onboarding step this family exists to allow. Order: admin
-  -> `allow` (checked BEFORE the managed check — this is the one step
-  ordered differently from the spec family, and it is what keeps an admin
-  able to bind a repo or replace a key on the seeded agent); managed ->
-  `managed_agent`; reachable -> `needs_admin`; else `allow`.
+- **attachment** (`key_replace`, `key_remove`, `mcp_remove`, `repo_bind`,
+  `skill_repo_connect`): attachments never enter the agent spec, so the
+  managed-agent absolutism above does not apply, and an admin attaching to a
+  shared or managed agent is the first-run onboarding step this family exists
+  to allow. Order: admin -> `allow` (checked BEFORE the managed check — this
+  is the one step ordered differently from the spec family, and it is what
+  keeps an admin able to bind a repo or replace a key on the seeded agent);
+  managed -> `managed_agent`; reachable -> `needs_admin`; else `allow`.
+  `skill_repo_connect` imports skills and attaches them to the agent, which
+  changes what it runs for everyone it answers, so it gates like the other
+  attachment writes. The attach itself still refuses a managed agent for
+  everyone, admins included: skills are part of the agent spec.
 
-- **posted-token exception** (`key_add`, `keys_import`, `mcp_connect`,
-  `skill_repo_connect`): always `allow`. A single-use posted-token write is
-  scoped to one value the requester alone holds, on one key, on one agent —
-  a new contribution never overwrites or removes existing shared state, so
-  it needs no admin and no reachability read. Only the destructive
-  attachment writes (replace, remove) need an admin.
+- **posted-token exception** (`key_add`, `keys_import`, `mcp_connect`):
+  always `allow`. A single-use posted-token write is scoped to one value the
+  requester alone holds, on one key, on one agent — a new contribution never
+  overwrites or removes existing shared state, so it needs no admin and no
+  reachability read. Only the destructive attachment writes (replace,
+  remove) and the skill-repo import need an admin.
 """
 
 from __future__ import annotations
@@ -62,11 +66,11 @@ PolicyOutcome = Literal["allow", "needs_admin", "managed_agent"]
 _SPEC_OPERATIONS: frozenset[OperationKind] = frozenset({"agent_spec_edit"})
 
 _ATTACHMENT_OPERATIONS: frozenset[OperationKind] = frozenset(
-    {"key_replace", "key_remove", "mcp_remove", "repo_bind"}
+    {"key_replace", "key_remove", "mcp_remove", "repo_bind", "skill_repo_connect"}
 )
 
 _POSTED_TOKEN_OPERATIONS: frozenset[OperationKind] = frozenset(
-    {"key_add", "keys_import", "mcp_connect", "skill_repo_connect"}
+    {"key_add", "keys_import", "mcp_connect"}
 )
 
 
