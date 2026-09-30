@@ -26,6 +26,7 @@ from daimon.adapters.mcp.tools.routines import (
     _create_routine_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.routines import claim_due_fireable, create_routine
@@ -79,13 +80,16 @@ def _auth_identity(
     external_id: str | None = "g_test",
     tenant_id: uuid.UUID | None = None,
 ) -> AuthIdentity:
+    tenant_id = tenant_id if tenant_id is not None else uuid.uuid4()
     return AuthIdentity(
         account_id=uuid.uuid4(),
-        tenant_id=tenant_id if tenant_id is not None else uuid.uuid4(),
+        tenant_id=tenant_id,
         role=Role.USER,
         platform=platform,
         external_id=external_id,
         platform_user_id="u_test",
+        # A member in a chat turn with the agent the routine schedules.
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent_a"),
     )
 
 

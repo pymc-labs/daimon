@@ -48,6 +48,7 @@ from daimon.adapters.mcp.tools.agent_chat import (
     _list_events_impl,  # pyright: ignore[reportPrivateUsage]
     _start_turn_impl,  # pyright: ignore[reportPrivateUsage]
     _verify_agent_owns_session,  # pyright: ignore[reportPrivateUsage]
+    agent_pin_names,
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core.billing import BillingConfig
@@ -195,12 +196,17 @@ def register_hub_tools(
     mcp: FastMCP, runtime: McpRuntime, *, billing_config: BillingConfig | None
 ) -> None:
     async def _admitted(ctx: Context, daimon_id: str, tool_name: str) -> AuthIdentity:
-        _, _, auth = await _identity(runtime, ctx, daimon_id)
+        _, agent, auth = await _identity(runtime, ctx, daimon_id)
+
+        async def names() -> tuple[str | None, ...]:
+            return agent_pin_names(agent)
+
         return await _admit(
             auth,
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
             tool_name=tool_name,
+            agent_names=names,
         )
 
     @mcp.tool

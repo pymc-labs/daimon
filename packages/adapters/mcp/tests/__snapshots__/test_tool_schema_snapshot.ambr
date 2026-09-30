@@ -1490,7 +1490,8 @@
         
         The tool resolves ``agent_name`` to a live MA agent id at the call
         boundary; an unknown name raises ``ToolError`` and the
-        routine is not created.
+        routine is not created. A non-admin may only name the agent they are
+        talking to, or the agent the destination channel answers with.
         
         If you are the calling agent and do not know which agent to bind the
         routine to, DEFAULT to your own name (the one you were addressed as
@@ -2079,7 +2080,10 @@
       }),
     }),
     'get_routine': dict({
-      'description': 'Get a routine by id (tenant-scoped; raises if not found or cross-tenant).',
+      'description': '''
+        Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
+        are not an admin.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -2207,7 +2211,8 @@
         
         `set_setup_target` changes your configuration target; `set_agent_default`
         changes who answers a channel; neither does this. The destination must
-        already answer in this workspace.
+        already answer in this workspace. Only an admin may hand to an agent other
+        than the one this channel answers with.
         
         From the next message here, that agent answers, with its own keys,
         connections and memory; conversation, decisions and files move with the
@@ -2485,7 +2490,7 @@
       }),
     }),
     'list_routines': dict({
-      'description': "List all routines in the caller's tenant partition.",
+      'description': 'List the routines you created (an admin sees every routine in the workspace).',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({

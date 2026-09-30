@@ -5,8 +5,10 @@ this group; each closure delegates to a module-private ``_*_impl`` function
 that can be unit-tested without a FastMCP Context.
 
 Partition scope: all five tools operate within the tenant from the caller's
-JWT claims. Cross-partition access raises ``ToolError("routine not found")``
-— same message for unknown vs. forbidden IDs so existence is not leaked.
+JWT claims, and a non-admin sees and changes only the routines they created.
+Cross-partition or someone else's access raises ``ToolError("routine not
+found")`` — same message for unknown vs. forbidden IDs so existence is not
+leaked.
 """
 
 from __future__ import annotations
@@ -41,10 +43,13 @@ from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
 from daimon.core.access_policy import TenantAccessPolicy, is_outside_agent_pin, is_write_protected
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routine_delivery import destination_shape_error
+from daimon.core.scope import ScopeContext
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
+from daimon.core.stores.scoped_config_read import resolve
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
@@ -70,7 +75,7 @@ def _require_platform_user_id(auth: AuthIdentity) -> str:
 
 
 def _require_routine_owner(auth: AuthIdentity, row: RoutineRow) -> None:
-    """Owner-or-admin gate for routine mutation. Reads stay tenant-wide.
+    """Owner-or-admin gate for routine mutation. Reads use the same rule (``_may_read``).
 
     Raises the same ``"routine not found"`` text an unknown id produces, so a
     non-owner probe cannot distinguish "forbidden" from "does not exist".
@@ -89,6 +94,18 @@ def _require_routine_owner(auth: AuthIdentity, row: RoutineRow) -> None:
         raise ToolError("routine not found")
     if auth.platform_user_id != row.created_by_user_id:
         raise ToolError("routine not found")
+
+
+def _may_read(auth: AuthIdentity, row: RoutineRow) -> bool:
+    """Owner-or-admin gate for routine reads.
+
+    A routine's trigger and the tail of its last result are what its agent
+    was asked and answered, which for a client project agent is that
+    client's work. Other members see neither, nor that the routine exists.
+    """
+    if auth.is_admin:
+        return True
+    return auth.platform_user_id is not None and auth.platform_user_id == row.created_by_user_id
 
 
 def _compute_next_fire_at(cron_expr: str, tz: str) -> datetime:
@@ -206,8 +223,11 @@ async def _check_destination(
     *,
     kind: RoutineDestinationKind | None,
     destination_id: str | None,
-) -> None:
+) -> str | None:
     """Refuse a destination that could never be posted to, before it is saved.
+
+    Returns the channel the destination sits in (a thread's parent), or None
+    when there is no destination.
 
     The pair must come together; the id must have the platform's shape; the
     channel (and thread) must exist in the caller's own server or workspace
@@ -219,7 +239,7 @@ async def _check_destination(
     if (kind is None) != (destination_id is None):
         raise ToolError("destination_kind and destination_id must be given together")
     if kind is None or destination_id is None:
-        return
+        return None
     platform = auth.platform or ""
     shape_error = destination_shape_error(platform, kind, destination_id)
     if shape_error is not None:
@@ -251,6 +271,7 @@ async def _check_destination(
             f"{channel_id} is a protected channel: daimon does not post there, so a routine "
             "cannot deliver to it. Pick another channel. Nothing was saved."
         )
+    return parent_channel_id or channel_id
 
 
 async def _load_policy_for_save(session: AsyncSession, *, tenant_id: UUID) -> TenantAccessPolicy:
@@ -291,6 +312,62 @@ def _check_agent_pin(
         )
 
 
+def _saved_destination_channel(auth: AuthIdentity, row: RoutineRow) -> str | None:
+    """The channel a saved destination sits in, where that is known without a lookup.
+
+    A Discord thread's parent needs the Discord API, so it reads as unknown:
+    the scope check then falls back to the agent the caller is talking to.
+    """
+    if row.destination_kind is None or row.destination_id is None:
+        return None
+    if row.destination_kind == "channel":
+        return row.destination_id
+    if auth.platform == "slack":
+        return row.destination_id.partition(":")[0]
+    return None
+
+
+async def _require_agent_in_scope(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    agent_name: str,
+    ma_agent_id: str,
+    destination_channel_id: str | None,
+) -> None:
+    """Refuse a non-admin scheduling an agent that isn't theirs to drive here.
+
+    A fired routine runs as its agent, with that agent's repo, keys,
+    connectors and memory, so naming any agent in the workspace would let a
+    member of one client's channel drive another client's agent. A member may
+    schedule the agent they are talking to (the one this call executes as),
+    or the agent the destination channel itself answers with. Anything else
+    is an admin's call.
+    """
+    if auth.is_admin:
+        return
+    executing = auth.agent_id or auth.chat_agent_id
+    if executing is not None and executing == derive_agent_uuid(
+        tenant_id=auth.tenant_id, ma_agent_id=ma_agent_id
+    ):
+        return
+    if destination_channel_id is not None:
+        async with runtime.session_factory() as session:
+            config = await resolve(
+                session,
+                context=ScopeContext(tenant_id=auth.tenant_id, channel_id=destination_channel_id),
+                default=runtime.deployment_default,
+            )
+        if config.agent_name == agent_name:
+            return
+    raise ToolError(
+        f"{agent_name} is neither the agent you are talking to nor the one the destination "
+        "channel answers with, and a routine runs with its agent's repository, keys and "
+        "connectors, so only a workspace or server admin can schedule it. Tell the caller "
+        "who can. Nothing was saved."
+    )
+
+
 async def _create_routine_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -307,7 +384,9 @@ async def _create_routine_impl(
     tenant_id = auth.tenant_id
     platform_user_id = _require_platform_user_id(auth)
     next_fire_at = _compute_next_fire_at(cron_expr, timezone)
-    await _check_destination(runtime, auth, kind=destination_kind, destination_id=destination_id)
+    destination_channel_id = await _check_destination(
+        runtime, auth, kind=destination_kind, destination_id=destination_id
+    )
     async with runtime.session_factory() as session:
         policy = await _load_policy_for_save(session, tenant_id=tenant_id)
     _check_agent_pin(
@@ -326,6 +405,13 @@ async def _create_routine_impl(
     if match is None:
         raise ToolError(f"no agent named {agent_name!r} found for this tenant")
     agent_id = match.id
+    await _require_agent_in_scope(
+        runtime,
+        auth,
+        agent_name=agent_name,
+        ma_agent_id=agent_id,
+        destination_channel_id=destination_channel_id,
+    )
 
     async with runtime.session_factory() as session, session.begin():
         return await routines_store.create_routine(
@@ -351,7 +437,8 @@ async def _list_routines_impl(
 ) -> list[RoutineRow]:
     tenant_id = auth.tenant_id
     async with runtime.session_factory() as session:
-        return await routines_store.list_routines_for_tenant(session, tenant_id=tenant_id)
+        rows = await routines_store.list_routines_for_tenant(session, tenant_id=tenant_id)
+    return [row for row in rows if _may_read(auth, row)]
 
 
 async def _get_routine_impl(
@@ -363,7 +450,7 @@ async def _get_routine_impl(
     tenant_id = auth.tenant_id
     async with runtime.session_factory() as session:
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
-    if row is None:
+    if row is None or not _may_read(auth, row):
         raise ToolError("routine not found")
     return row
 
@@ -386,7 +473,9 @@ async def _update_routine_impl(
     tenant_id = auth.tenant_id
     if clear_destination and (destination_kind is not None or destination_id is not None):
         raise ToolError("clear_destination cannot be combined with a new destination")
-    await _check_destination(runtime, auth, kind=destination_kind, destination_id=destination_id)
+    new_destination_channel_id = await _check_destination(
+        runtime, auth, kind=destination_kind, destination_id=destination_id
+    )
     async with runtime.session_factory() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
         if row is None:
@@ -426,6 +515,19 @@ async def _update_routine_impl(
             if match is None:
                 raise ToolError(f"no agent named {agent_name!r} found for this tenant")
             new_agent_id = match.id
+        if clear_destination:
+            effective_channel_id = None
+        elif destination_kind is not None:
+            effective_channel_id = new_destination_channel_id
+        else:
+            effective_channel_id = _saved_destination_channel(auth, row)
+        await _require_agent_in_scope(
+            runtime,
+            auth,
+            agent_name=agent_name if agent_name is not None and new_agent_id else row.agent_name,
+            ma_agent_id=new_agent_id if new_agent_id is not None else row.agent_id,
+            destination_channel_id=effective_channel_id,
+        )
 
         updated = await routines_store.update_routine(
             session,
@@ -501,7 +603,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         The tool resolves ``agent_name`` to a live MA agent id at the call
         boundary; an unknown name raises ``ToolError`` and the
-        routine is not created.
+        routine is not created. A non-admin may only name the agent they are
+        talking to, or the agent the destination channel answers with.
 
         If you are the calling agent and do not know which agent to bind the
         routine to, DEFAULT to your own name (the one you were addressed as
@@ -528,12 +631,13 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def list_routines(ctx: Context) -> list[RoutineRow]:  # pyright: ignore[reportUnusedFunction]
-        """List all routines in the caller's tenant partition."""
+        """List the routines you created (an admin sees every routine in the workspace)."""
         return await _list_routines_impl(runtime, await _auth(ctx))
 
     @mcp.tool
     async def get_routine(ctx: Context, routine_id: UUID) -> RoutineRow:  # pyright: ignore[reportUnusedFunction]
-        """Get a routine by id (tenant-scoped; raises if not found or cross-tenant)."""
+        """Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
+        are not an admin."""
         return await _get_routine_impl(runtime, await _auth(ctx), routine_id=routine_id)
 
     @mcp.tool

@@ -22,11 +22,12 @@ from daimon.adapters.mcp.tools.task_continuity import (
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
-from daimon.core.scope import DeploymentDefault
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.task_continuations import list_pending_continuations
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
@@ -1013,3 +1014,68 @@ async def test_handoff_admits_a_pinned_agent_inside_its_own_channel(
         )
 
     assert result.destination_name == _DESTINATION_NAME
+
+
+@pytest.mark.parametrize("role", [Role.USER, Role.ADMIN])
+async def test_handoff_to_another_channels_agent_is_admin_only(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    role: Role,
+) -> None:
+    """research-bot answers in another client's channel, not here. Handing this
+    thread to it would run the thread with that client's repo, keys and memory."""
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="C_ACME"),
+        tenant_id=tenant.id,
+        agent_name=_DESTINATION_NAME,
+        mode="agent",
+    )
+    await db_session.commit()
+    runtime = _runtime(
+        committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
+    )
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=role,
+        platform="discord",
+        platform_user_id="42",
+        is_admin=role is Role.ADMIN,
+    )
+
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_CLIENTB",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=role,
+    ) as origin:
+        if role is Role.USER:
+            with pytest.raises(ToolError, match="only a workspace or server admin can do it"):
+                await _hand_off_task_impl(
+                    runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+                )
+        else:
+            await _hand_off_task_impl(
+                runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+            )
+
+    async with committing_sessionmaker() as session:
+        binding = await get_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="C_CLIENTB",
+            thread_id="T_THREAD",
+        )
+    if role is Role.USER:
+        assert binding is None, "a refused handoff must leave the thread unbound"
+    else:
+        assert binding is not None and binding.responder_ma_agent_id == _DESTINATION_ID
