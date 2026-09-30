@@ -43,6 +43,18 @@ from daimon.core.skills.discover import DiscoveredSkill
 _log = structlog.get_logger(__name__)
 
 
+class _ImportRefusedError(DaimonError):
+    """A deliberate refusal; `refusal` is the reason as the person who asked reads it."""
+
+    def __init__(self, error: str, *, refusal: str) -> None:
+        super().__init__(error)
+        self.refusal = refusal
+
+
+def _rename_hint(name: str) -> str:
+    return f"Rename it in the repo (e.g. {name}-2), then ask again to import."
+
+
 async def sync_skills(
     client: AsyncAnthropic,
     skills: list[DiscoveredSkill],
@@ -102,6 +114,10 @@ async def sync_skills(
                         f"cannot be replaced by an import. Rename the skill (e.g. "
                         f"{skill.spec.name}-2) and re-sync."
                     ),
+                    refusal=(
+                        f"`{skill.spec.name}` is a default skill's name. "
+                        f"{_rename_hint(skill.spec.name)}"
+                    ),
                 )
             )
             continue
@@ -111,10 +127,14 @@ async def sync_skills(
             pkg = build_skill_zip(skill.skill_dir, name=skill.spec.name)
             try:
                 if ma_match is not None and not is_admin:
-                    raise DaimonError(
+                    raise _ImportRefusedError(
                         f"skill name {skill.spec.name!r} is already taken in this library, "
                         f"and only an admin can replace it. Rename the skill (e.g. "
-                        f"{skill.spec.name}-2) and re-sync."
+                        f"{skill.spec.name}-2) and re-sync.",
+                        refusal=(
+                            f"`{skill.spec.name}` is already in this library, and only an "
+                            f"admin can replace it. {_rename_hint(skill.spec.name)}"
+                        ),
                     )
                 if ma_match is not None:
                     with pkg.path.open("rb") as fh:
@@ -135,11 +155,15 @@ async def sync_skills(
                         client, tenant_id=tenant_id, name=skill.spec.name, agent_name=None
                     )
                     if conflict is not None:
-                        raise DaimonError(
+                        raise _ImportRefusedError(
                             f"skill name {skill.spec.name!r} is already taken by "
                             f"{conflict.display_title!r} — the two would mount at the same "
                             f"path on an agent. Rename the skill (e.g. "
-                            f"{skill.spec.name}-2) and re-sync."
+                            f"{skill.spec.name}-2) and re-sync.",
+                            refusal=(
+                                f"`{skill.spec.name}` would share a path on an agent with "
+                                f"another skill. {_rename_hint(skill.spec.name)}"
+                            ),
                         )
                     with pkg.path.open("rb") as fh:
                         created = await client.beta.skills.create(
@@ -164,16 +188,23 @@ async def sync_skills(
                     name=skill.spec.name,
                     action=Action.FAILED,
                     error=str(err),
+                    refusal=err.refusal if isinstance(err, _ImportRefusedError) else None,
                 )
             )
     return outcomes
 
 
 def summarize_failed_imports(outcomes: Sequence[ResourceOutcome]) -> str | None:
-    """One person-facing line on the skills that did not import, or None."""
+    """One person-facing line on the skills that did not import, or None.
+
+    Only a deliberate refusal is explained; any other error stays in the logs,
+    since provider error bodies do not belong on a channel-visible card.
+    """
     failed = [outcome for outcome in outcomes if outcome.action is Action.FAILED]
     if not failed:
         return None
+    first = failed[0]
+    reason = first.refusal or f"`{first.name}` (upload failed)."
     others = len(failed) - 1
     tail = f" {others} more did not import either." if others else ""
-    return f"Not imported: {failed[0].error or failed[0].name}{tail}"
+    return f"Not imported: {reason}{tail}"

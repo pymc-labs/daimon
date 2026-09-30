@@ -31,6 +31,8 @@ class ResourceOutcome:
     action: Action
     anthropic_id: str | None = None
     error: str | None = None
+    # Set only for a deliberate refusal: the reason, safe to show in a channel.
+    refusal: str | None = None
 
 
 @dataclass

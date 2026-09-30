@@ -1732,7 +1732,9 @@ async def test_skill_repo_modal_puts_a_refused_import_on_the_card(
         "run_skill_sync",
         AsyncMock(
             return_value=[
-                ResourceOutcome(kind="skill", name="eda", action=Action.FAILED, error=reason)
+                ResourceOutcome(
+                    kind="skill", name="eda", action=Action.FAILED, error="raw", refusal=reason
+                )
             ]
         ),
     )

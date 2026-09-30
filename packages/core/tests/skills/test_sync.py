@@ -154,6 +154,7 @@ async def test_sync_refuses_a_member_replacing_an_existing_library_skill(tmp_pat
     assert [o.action for o in outcomes] == [Action.FAILED], "a member may not replace it"
     # No POST route is registered, so a pushed version would fail differently.
     assert outcomes[0].error is not None and "only an admin" in outcomes[0].error
+    assert outcomes[0].refusal is not None and "ask again to import" in outcomes[0].refusal
 
 
 async def test_sync_records_failed_outcome_on_error(tmp_path: Path) -> None:
@@ -395,6 +396,9 @@ async def test_sync_fails_when_agent_scoped_skill_takes_the_mount_name(tmp_path:
         "error should tell the caller the name is taken so it can rename"
     )
     assert not create_called, "skills.create must not run for a colliding name"
+    assert outcomes[0].refusal is not None and scoped_title not in outcomes[0].refusal, (
+        "the channel-safe reason names no tenant-prefixed title"
+    )
 
 
 async def test_sync_refuses_a_seeded_skill_name_without_touching_ma(tmp_path: Path) -> None:
@@ -449,18 +453,24 @@ async def test_sync_refuses_a_seeded_skill_name_without_touching_ma(tmp_path: Pa
     assert version_posts == [], "no version may be pushed onto the seeded skill"
     assert outcomes[0].action is Action.FAILED, "the seeded name is refused"
     assert "default skill" in (outcomes[0].error or ""), "the refusal says why"
+    assert "ask again to import" in (outcomes[0].refusal or ""), "chat users get their remedy"
     assert outcomes[1].action is Action.CREATED, "the rest of the batch still syncs"
 
 
-def test_summarize_failed_imports_names_the_first_reason_and_counts_the_rest() -> None:
-    def outcome(name: str, action: Action, error: str | None = None) -> ResourceOutcome:
-        return ResourceOutcome(kind="skill", name=name, action=action, error=error)
+def test_summarize_failed_imports_explains_only_refusals() -> None:
+    def outcome(
+        name: str, action: Action, error: str | None = None, refusal: str | None = None
+    ) -> ResourceOutcome:
+        return ResourceOutcome(kind="skill", name=name, action=action, error=error, refusal=refusal)
 
     assert summarize_failed_imports([outcome("a", Action.CREATED)]) is None
     assert summarize_failed_imports(
         [
             outcome("a", Action.CREATED),
-            outcome("b", Action.FAILED, "Rename b."),
-            outcome("c", Action.FAILED),
+            outcome("b", Action.FAILED, "internal", "Rename b."),
+            outcome("c", Action.FAILED, "Error code: 400 - {'request_id': 'req_1'}"),
         ]
     ) == ("Not imported: Rename b. 1 more did not import either.")
+    assert summarize_failed_imports(
+        [outcome("c", Action.FAILED, "Error code: 400 - {'request_id': 'req_1'}")]
+    ) == ("Not imported: `c` (upload failed)."), "a provider error body stays in the logs"
