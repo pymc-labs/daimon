@@ -16,6 +16,7 @@ from typing import Any
 
 from daimon.adapters.slack.billing_panel.state import BillingPanelState
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.core.channel_budget import describe_budget
 
 REDEEM_OPEN_ACTION_ID = "billing_redeem_open"
 
@@ -47,6 +48,12 @@ def _format_caller_line(spend: float, cap: Decimal | None, turns: int) -> str:
     cap_f = float(cap)
     pct = int(spend / cap_f * 100) if cap_f > 0 else 0
     return f"💸 {_fmt_usd(spend)} / {_fmt_usd(cap_f)} cap ({pct}%) · {turns} turns"
+
+
+def _channel_budget_suffix(state: BillingPanelState) -> str:
+    if state.channel_budget is None:
+        return ""
+    return f"\nthis channel: {describe_budget(state.channel_budget)}"
 
 
 def estimate_turns(
@@ -151,6 +158,7 @@ def build_billing_container(
         credit_line = (
             f"🏦 *Server credit*\n{_fmt_usd(state.guild_balance_usd)} balance"
             f"{_timed_credit_lines(state)}"
+            f"{_channel_budget_suffix(state)}"
         )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
 
@@ -251,6 +259,7 @@ def build_billing_container(
             f"🏦 *Server credit*\n"
             f"{_fmt_usd(state.guild_balance_usd)} balance _(top-ups are admin-only)_"
             f"{_timed_credit_lines(state)}"
+            f"{_channel_budget_suffix(state)}"
         )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": credit_line}})
 

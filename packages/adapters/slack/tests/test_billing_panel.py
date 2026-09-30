@@ -24,7 +24,7 @@ import pytest
 import pytest_asyncio
 from daimon.core.stores import usage_events
 from daimon.testing import ma_model_usage
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # ---------------------------------------------------------------------------
@@ -367,6 +367,36 @@ def test_build_billing_container_omits_topup_select_for_member() -> None:
 
     topup = _find_topup_select(blocks)
     assert topup is None, "build_billing_container must NOT render top-up select for a non-admin"
+
+
+async def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one(
+    db_session: AsyncSession,
+) -> None:
+    from daimon.adapters.slack.billing_panel.read import load_billing_snapshot
+    from daimon.adapters.slack.billing_panel.views import build_billing_container
+
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_BUDGET")
+    await make_channel_budget(db_session, tenant=tenant, channel_id="C1", limit_usd=Decimal("5"))
+    await make_ledger_entry(
+        db_session, tenant=tenant, delta_usd=Decimal("-1.2"), channel_id="C1", occurred_at=_NOW
+    )
+
+    for is_admin in (False, True):
+        texts: dict[str, str] = {}
+        for channel_id in ("C1", "C2"):
+            state = await load_billing_snapshot(
+                db_session,
+                team_id="T_BUDGET",
+                platform_user_id=_CALLER_ID,
+                is_admin=is_admin,
+                since=_SINCE,
+                channel_id=channel_id,
+                now=_NOW,
+            )
+            blocks = build_billing_container(state, now=_NOW, since=_SINCE)
+            texts[channel_id] = str(blocks)
+        assert "this channel: $1.20 of $5.00 (monthly)" in texts["C1"]
+        assert "this channel" not in texts["C2"]
 
 
 def test_build_billing_container_empty_period_renders_cleanly() -> None:

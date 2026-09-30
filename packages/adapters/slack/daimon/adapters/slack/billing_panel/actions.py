@@ -100,6 +100,7 @@ async def handle_billing_command(
                 platform_user_id=user_id,
                 is_admin=is_admin,
                 since=since,
+                channel_id=channel_id or None,
                 now=now,
             )
 

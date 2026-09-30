@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 from decimal import Decimal
 
+from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.promo_credit import ActiveTimedCredit
 
 
@@ -46,3 +47,5 @@ class BillingPanelState:
 
     # Live timed promo credit (both views), soonest-ending first; empty without promo codes
     timed_credit: tuple[ActiveTimedCredit, ...] = ()
+    # The invoking channel's budget (both views); None when it has none.
+    channel_budget: ChannelBudgetStatus | None = None

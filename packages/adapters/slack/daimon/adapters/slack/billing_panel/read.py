@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from daimon.adapters.slack.billing_panel.state import BillingPanelState, MemberRow
+from daimon.core.channel_budget import get_channel_budget_status
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.promo_credit import get_active_timed_credit
 from daimon.core.stores import tenant_user_caps
@@ -50,6 +51,7 @@ async def load_billing_snapshot(
     is_admin: bool,
     since: datetime,
     now: datetime,
+    channel_id: str | None = None,
 ) -> BillingPanelState:
     """Read everything needed to render /billing for a single Slack invocation.
 
@@ -66,6 +68,8 @@ async def load_billing_snapshot(
                             upstream via resolve_is_admin).
         since:              Period start (typically first day of current month).
         now:                Moment live timed promo credit is measured at.
+        channel_id:         The channel /billing was run in; its budget, if any,
+                            is shown in both views.
 
     Returns:
         A frozen BillingPanelState ready for views.build_billing_container.
@@ -91,6 +95,17 @@ async def load_billing_snapshot(
     )
     guild_balance = await get_balance(session, tenant_id=tenant_id)
     timed_credit = tuple(await get_active_timed_credit(session, tenant_id=tenant_id, now=now))
+    channel_budget = (
+        None
+        if not channel_id
+        else await get_channel_budget_status(
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            channel_id=channel_id,
+            now=now,
+        )
+    )
 
     if not is_admin:
         return BillingPanelState(
@@ -106,6 +121,7 @@ async def load_billing_snapshot(
             member_rows=(),
             over_cap_count=0,
             timed_credit=timed_credit,
+            channel_budget=channel_budget,
         )
 
     # Admin path — workspace aggregates + per-member breakdown
@@ -162,4 +178,5 @@ async def load_billing_snapshot(
         member_rows=capped,
         over_cap_count=over_cap_count,
         timed_credit=timed_credit,
+        channel_budget=channel_budget,
     )

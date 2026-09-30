@@ -3174,6 +3174,66 @@ async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
     assert rows == [], "over-cap turn must write zero usage_events rows"
 
 
+async def test_run_thread_turn_when_over_channel_budget_blocks_before_session_create(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A channel over its budget: the gate runs on the Slack channel and the
+    mention gets the budget notice in-thread instead of a turn."""
+    team_id = "T_ORCH_OVER_BUDGET"
+    channel = "C_TEST"
+    thread_ts = "9000000031.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    app, _ = make_orchestrate_app(db_session_factory)
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": thread_ts,
+        "event_ts": thread_ts,
+        "channel": channel,
+        "user": "U_TEST_OVER_BUDGET",
+        "text": "<@U_BOT> hello",
+    }
+
+    with (
+        patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as agent,
+        patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock) as env,
+        patch("daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock) as balance,
+        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as cap,
+        patch(
+            "daimon.core.turn.admission.is_over_channel_budget", new_callable=AsyncMock
+        ) as budget,
+        patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
+    ):
+        agent.return_value = "agent_test_id"
+        env.return_value = "env_test_id"
+        balance.return_value = False
+        cap.return_value = False
+        budget.return_value = True
+
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event,
+            team_id=team_id,
+            channel=channel,
+            event_ts=thread_ts,
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+        assert budget.call_args.kwargs["platform"] == "slack"
+        assert budget.call_args.kwargs["channel_id"] == channel
+        mock_create.assert_not_called()  # pyright: ignore[reportUnknownMemberType]
+
+    post_url = URL("https://slack.com/api/chat.postMessage")
+    texts = [
+        str((req.kwargs.get("json") or json.loads(req.kwargs.get("data") or "{}")).get("text"))
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == post_url
+        for req in reqs
+    ]
+    assert any("spending budget" in text for text in texts), texts
+
+
 async def test_run_thread_turn_when_unblocked_writes_usage_event_and_ledger_debit(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

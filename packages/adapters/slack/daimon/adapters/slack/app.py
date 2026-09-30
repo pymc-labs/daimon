@@ -1680,6 +1680,22 @@ class SlackApp:
                         "An admin can top up with `/billing`."
                     ),
                 )
+            elif err.reason == "channel_budget_exceeded":
+                log.info(
+                    "turn.skipped.over_channel_budget",
+                    tenant_id=str(tenant_id),
+                    team_id=team_id,
+                    channel_id=channel,
+                    thread_id=thread_id,
+                )
+                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel,
+                    thread_ts=thread_id,
+                    text=(
+                        "This channel has used its spending budget. "
+                        "A workspace admin can raise or clear it."
+                    ),
+                )
             else:
                 log.info(
                     "turn.skipped.over_cap",
