@@ -23,6 +23,9 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.agents import (
+    _reject_system_agent,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import (
@@ -326,6 +329,9 @@ async def _sync_impl(
         agent = await resolve_setup_agent(
             runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
         )
+        # Refused before the import rather than at attach time, so a seeded
+        # target leaves nothing half-done behind.
+        _reject_system_agent(agent)
         expected_ma_agent_id = agent.id
     async with runtime.session_factory() as session:
         seeded_skill_names = await list_seeded_skill_names(session, tenant_id=auth.tenant_id)

@@ -423,15 +423,28 @@ async def test_sync_impl_rejects_path_traversal(
     assert not cleanup_dir.exists(), "should clean up temp directory even on traversal attempt"
 
 
-def _agent_json(*, agent_id: str, tenant_id: uuid.UUID, skill_ids: list[str]) -> dict[str, Any]:
-    """A minimal MA agent payload tagged for ``tenant_id``, attaching ``skill_ids``."""
+def _agent_json(
+    *,
+    agent_id: str,
+    tenant_id: uuid.UUID,
+    skill_ids: list[str],
+    extra_metadata: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """A minimal user-owned MA agent payload for ``tenant_id``, attaching ``skill_ids``."""
     return ma_agent(
         id=agent_id,
         name="agent",
         model="claude-opus-4-7",
         # daimon_name too: name lookups go through the metadata tag, not the
-        # MA `name` field, so an agent without it is invisible to them.
-        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "agent"},
+        # MA `name` field, so an agent without it is invisible to them. The
+        # account stamp marks it user-owned; without one it reads as a system
+        # agent and chat tools refuse to attach to it.
+        metadata={
+            "daimon_tenant": str(tenant_id),
+            "daimon_name": "agent",
+            "daimon_account": str(uuid.uuid4()),
+            **(extra_metadata or {}),
+        },
         skills=[
             BetaManagedAgentsCustomSkill(skill_id=skill_id, type="custom", version="1")
             for skill_id in skill_ids
@@ -752,6 +765,45 @@ async def test_sync_impl_attaches_to_the_named_agent_and_preserves_its_existing_
     assert "attached nothing" not in result.summary, (
         "an attach did happen here, so the no-agent_name disclaimer must not fire"
     )
+
+
+async def test_sync_impl_refuses_a_seeded_agent_before_importing(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Attaching to a defaults-managed agent is refused, admins included.
+
+    A chat attach never stamps the reconciler's spec hash, so the drift would
+    survive every later `defaults apply`. The refusal comes before the fetch,
+    so nothing lands in the library either.
+    """
+    tenant_id = uuid.uuid4()
+    managed = _agent_json(
+        agent_id="ag_seeded",
+        tenant_id=tenant_id,
+        skill_ids=[],
+        extra_metadata={"daimon_managed": "true"},
+    )
+    router = MARouter()
+    router.add("GET", r"/v1/agents$", lambda _req, _m: list_response([managed]))
+    router.add("GET", r"/v1/agents/ag_seeded$", lambda _req, _m: httpx.Response(200, json=managed))
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+
+    with (
+        patch("daimon.core.skills.pipeline.fetch_repo") as mock_fetch,
+        pytest.raises(ToolError, match="fork_agent"),
+    ):
+        await _sync_impl(
+            _runtime(build_fake_anthropic(router.dispatch), sessionmaker),
+            auth,
+            url="https://github.com/org/repo",
+            branch="main",
+            path="",
+            agent_name="agent",
+        )
+
+    assert not mock_fetch.called, "a refused attach must not import anything first"
 
 
 async def test_sync_impl_anonymous_404_names_the_credential_remedy(
