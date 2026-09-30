@@ -22,6 +22,7 @@ from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import pytest
 from aioresponses import aioresponses
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.oauth_slack import (
@@ -468,10 +469,17 @@ async def test_install_landing_has_authorize_url_and_state(
 
 async def test_callback_persists_token_and_tenant(
     sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Happy-path callback: token + tenant persisted, success page shows workspace name."""
     fernet_key = Fernet.generate_key().decode()
     settings = _build_slack_settings()
+    alerts: list[tuple[str, str]] = []
+
+    def record_alert(url: SecretStr | None, *, key: str, message: str) -> None:
+        alerts.append((key, message))
+
+    monkeypatch.setattr("daimon.adapters.mcp.oauth_slack.alert_ops", record_alert)
     fernet = build_multifernet((fernet_key,))
 
     handler = _make_slack_exchange_handler()
@@ -493,6 +501,12 @@ async def test_callback_persists_token_and_tenant(
     assert _SLACK_TEAM_NAME in r.text, (
         "success page must show the workspace name from the exchange response"
     )
+    assert alerts == [
+        (
+            f"install:slack:{_SLACK_TEAM_ID}",
+            f"New install: Slack {_SLACK_TEAM_NAME} ({_SLACK_TEAM_ID})",
+        )
+    ]
 
     # Token row persisted.
     async with sessionmaker() as session:

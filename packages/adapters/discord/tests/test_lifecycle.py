@@ -109,8 +109,14 @@ def _make_success_state(text: str = "Hello response") -> TurnState:
 
 
 @pytest.mark.parametrize("status", [400, 429])
-async def test_spend_limit_posts_notice_and_error_log(status: int) -> None:
+async def test_spend_limit_posts_notice_and_error_log(
+    status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
     tenant_id = uuid.uuid4()
+    alerts: list[str] = []
+    monkeypatch.setattr(
+        lifecycle_module, "alert_ops", lambda url, *, key, message: alerts.append(key)
+    )
     lc, _, edits = _make_lifecycle(tenant_id=tenant_id)
     await lc.post_initial()
     body = (
@@ -134,6 +140,7 @@ async def test_spend_limit_posts_notice_and_error_log(status: int) -> None:
     turn_error = TurnError(kind="upstream", cause=error)
     with structlog.testing.capture_logs() as logs:
         await lc.on_terminal_failure(TurnState(error=turn_error), turn_error)
+    assert alerts == [f"spend_limit:{'org_cap' if status == 429 else 'user_limit'}"]
     embed = edits[-1][1]["embeds"][0]
     assert (
         "Daimon has reached its model usage limit for now. The operators have been notified."

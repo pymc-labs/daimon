@@ -68,6 +68,7 @@ from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.tables import render_slack_tables
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
 from daimon.core.turn.degraded import render_degraded_notice
@@ -80,6 +81,7 @@ from daimon.core.turn.state import (
     extract_sealed_responses,
 )
 from daimon.core.turn.termination import termination_reason
+from pydantic import SecretStr
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -167,6 +169,7 @@ class SlackTurnLifecycle:
         request_id: Callable[[], str] = bound_request_id,
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: UUID | None = None,
+        alert_webhook_url: SecretStr | None = None,
     ) -> None:
         self._trigger_ts = trigger_ts
         self._notify_on_completion = notify_on_completion
@@ -176,6 +179,7 @@ class SlackTurnLifecycle:
         self._request_id = request_id
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
+        self._alert_webhook_url = alert_webhook_url
         self._channel = channel
         self._thread_ts = thread_ts
         self._cancel = cancel
@@ -649,6 +653,11 @@ class SlackTurnLifecycle:
                 "anthropic.spend_limit_reached",
                 tenant_id=str(self._tenant_id) if self._tenant_id is not None else None,
                 limit=limit,
+            )
+            alert_ops(
+                self._alert_webhook_url,
+                key=f"spend_limit:{limit}",
+                message=f"Anthropic spend limit reached: {limit} (tenant {self._tenant_id})",
             )
         try:
             label = str(err)[:100]

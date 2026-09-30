@@ -20,6 +20,7 @@ from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     McpSettings,
+    OpsSettings,
     Settings,
 )
 from daimon.core.stores import payment_events, pending_clawbacks, tenant_ledger
@@ -53,12 +54,17 @@ def _build_billing_config() -> BillingConfig:
     )
 
 
-def _build_app(sessionmaker: async_sessionmaker[AsyncSession]) -> Starlette:
+def _build_app(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    alert_webhook_url: SecretStr | None = None,
+) -> Starlette:
     return create_mcp_app(
         settings=Settings(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
             mcp=McpSettings(jwt_secret=SecretStr("a" * 32), public_url=HttpUrl("https://x/mcp")),
+            ops=OpsSettings(alert_webhook_url=alert_webhook_url),
         ),
         sessionmaker=sessionmaker,
         auth=StaticTokenVerifier(tokens={}),
@@ -389,10 +395,18 @@ async def test_credit_completed_event_writes_ledger_row(
 
 async def test_credit_replay_no_double_credit(
     sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test 2: replaying the same event_id yields exactly one ledger row."""
     tenant = await _seed_tenant_via_sessionmaker(sessionmaker)
-    app = _build_app(sessionmaker)
+    alerts: list[tuple[str, str]] = []
+
+    def record_alert(url: SecretStr | None, *, key: str, message: str) -> None:
+        assert url is not None
+        alerts.append((key, message))
+
+    monkeypatch.setattr(webhooks, "alert_ops", record_alert)
+    app = _build_app(sessionmaker, alert_webhook_url=SecretStr("https://discord.com/webhook"))
     payload_dict = _checkout_session_completed_payload("evt_replay_credit", tenant_id=str(tenant))
 
     await _post_signed(app, payload_dict)
@@ -403,6 +417,9 @@ async def test_credit_replay_no_double_credit(
     assert balance == Decimal("10"), (
         "replay must not double-credit; balance must equal one topup amount"
     )
+    assert alerts == [
+        ("stripe_topup:pi_evt_replay_credit", f"Stripe top-up: $10.00 to tenant {tenant}")
+    ]
 
 
 async def test_credit_missing_tenant_id_returns_200_noop(

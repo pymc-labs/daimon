@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import httpx
+import pytest
 import structlog.testing
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord.bot import DaimonBot
@@ -32,6 +33,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.tenants import get_tenant, get_tenant_liveness, set_provision_status
+from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -194,11 +196,18 @@ async def _drain_bg_tasks(bot: DaimonBot) -> None:
 async def test_on_guild_join_provisions_pending_then_seeds_ready(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _make_runtime(db_session_factory)
     bot = _make_bot(runtime)
     guild = _make_guild(guild_id=555000111)
     guild_id = str(guild.id)
+    alerts: list[tuple[str, str]] = []
+
+    def record_alert(url: SecretStr | None, *, key: str, message: str) -> None:
+        alerts.append((key, message))
+
+    monkeypatch.setattr("daimon.adapters.discord.bot.alert_ops", record_alert)
 
     with patch(
         "daimon.adapters.discord.bot.reconcile_tenant_defaults", new_callable=AsyncMock
@@ -212,6 +221,9 @@ async def test_on_guild_join_provisions_pending_then_seeds_ready(
     # tenant_deterministic: the row keyed on the derived uuid exists.
     derived = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
     tr = await get_tenant_liveness(db_session_factory, derived)
+    assert alerts == [
+        (f"install:discord:{guild_id}", f"New install: Discord {guild.name} ({guild_id})")
+    ]
     assert tr is not None, "on_guild_join must provision a tenant row"
     assert tr.id == derived, "tenant_id must equal derive_tenant_uuid(discord, guild_id)"
     assert tr.provision_status == "ready", "background seed must flip status to ready"

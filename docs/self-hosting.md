@@ -28,6 +28,9 @@ All four must be set before the first `docker compose` command:
 `docker-compose.yml` interpolates them for every service with fail-fast
 `${VAR:?...}` guards. `.env` is gitignored, so secrets never get committed.
 `.env.example` documents every other setting.
+Set `DAIMON_OPS__ALERT_WEBHOOK_URL` to a private Discord channel webhook to
+receive short alerts for installs, Stripe top-ups, and Anthropic limits.
+Leave it unset to disable operator alerts.
 
 ## 2. Create the Discord application
 

@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional Discord webhook alerts for new installs, Stripe top-ups, and Anthropic spend or overload events.
+
 - Discord delivers files generated during tool-using turns into the chat thread,
   with upload-limit notices and protected-channel checks.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess

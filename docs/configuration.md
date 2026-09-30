@@ -20,6 +20,7 @@ typo is silent — check the spelling here.
 - [Anthropic](#anthropic)
 - [CLI](#cli)
 - [Logging](#logging)
+- [Ops](#ops)
 - [MCP Server](#mcp-server)
 - [Hub](#hub)
 - [Discord](#discord)
@@ -164,6 +165,17 @@ Read from `daimon.core.config.LogSettings`. Prefix `DAIMON_LOG__`.
 `'DEBUG' | 'INFO' | 'WARNING' | 'ERROR'` · optional · default `INFO`
 
 Minimum log level emitted by the structured logger.
+
+## Ops
+
+Read from `daimon.core.config.OpsSettings`. Prefix `DAIMON_OPS__`.
+
+### `DAIMON_OPS__ALERT_WEBHOOK_URL`
+
+`SecretStr | None` · optional · default unset · secret
+
+Discord webhook URL for short operator alerts about new installs, Stripe top-ups, and
+Anthropic limits. Unset disables alerts. Keep the URL secret.
 
 ## MCP Server
 

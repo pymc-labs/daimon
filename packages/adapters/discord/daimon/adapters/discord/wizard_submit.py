@@ -580,6 +580,7 @@ async def run_wizard_submit_turn_observed(
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
                 sessionmaker=bot.runtime.sessionmaker,
+                alert_webhook_url=bot.runtime.settings.ops.alert_webhook_url,
                 tenant_id=row.tenant_id,
                 render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
                 is True,
@@ -614,6 +615,7 @@ async def run_wizard_submit_turn_observed(
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
                 sessionmaker=bot.runtime.sessionmaker,
+                alert_webhook_url=bot.runtime.settings.ops.alert_webhook_url,
                 tenant_id=row.tenant_id,
                 render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
                 is True,
