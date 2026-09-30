@@ -12,10 +12,10 @@
   '''
 # ---
 # name: test_embed_render_snapshot[minimal_thinking]
-  EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='', description='**Thinking** · 42s', color=9807270, footer=None)
+  EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='', description='**Thinking** · 42s', color=3447003, footer=None)
 # ---
 # name: test_embed_render_snapshot[preview_present]
-  EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='', description='**Thinking** · 42s\n> Let me check that for you.', color=9807270, footer=None)
+  EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='', description='**Thinking** · 42s\n> Let me check that for you.', color=3447003, footer=None)
 # ---
 # name: test_embed_render_snapshot[saturated_trail_with_preview_and_cost]
   EmbedData(phase=<TurnPhase.TOOL_RUNNING: 'tool_running'>, title='', description='**Working** · 42s\n```\n+3 earlier\n✔️ Read a file\n🚫 Wrote a file\n✔️ Search issues (tracker)\n✔️ Listed files\n🔍 Searching files\n🖋️ Running a command\n```\n> Preview text describing the ongoing work.', color=3447003, footer=None)
@@ -36,5 +36,5 @@
   EmbedData(phase=<TurnPhase.ERROR: 'error'>, title='', description='', color=15548997, footer='❌ rate limited · Atlas · 42s · 100 in / 50 out')
 # ---
 # name: test_embed_render_snapshot[thinking_no_now]
-  EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='', description='**Thinking**', color=9807270, footer=None)
+  EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='', description='**Thinking**', color=3447003, footer=None)
 # ---

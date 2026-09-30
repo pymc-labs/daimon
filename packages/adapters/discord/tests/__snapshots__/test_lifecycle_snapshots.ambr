@@ -24,7 +24,7 @@
         'content': None,
         'embeds': list([
           dict({
-            'color': 9807270,
+            'color': 3447003,
             'description': '**Thinking** · 0s',
             'footer': None,
             'title': None,
@@ -74,7 +74,7 @@
         'content': None,
         'embeds': list([
           dict({
-            'color': 9807270,
+            'color': 3447003,
             'description': '**Thinking** · 0s',
             'footer': None,
             'title': None,

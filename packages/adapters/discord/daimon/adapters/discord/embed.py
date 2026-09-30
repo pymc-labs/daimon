@@ -17,8 +17,7 @@ from typing import Literal
 from daimon.adapters.discord.theme import (
     COLOR_GREEN,
     COLOR_RED,
-    COLOR_THINKING,
-    COLOR_TOOL_RUNNING,
+    COLOR_IN_PROGRESS,
 )
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.state import ContentBlock
@@ -110,8 +109,8 @@ class EmbedData:
 _EMOJI_CROSS = "❌"  # ❌
 
 _PHASE_COLOR: dict[TurnPhase, int] = {
-    TurnPhase.THINKING: COLOR_THINKING,
-    TurnPhase.TOOL_RUNNING: COLOR_TOOL_RUNNING,
+    TurnPhase.THINKING: COLOR_IN_PROGRESS,
+    TurnPhase.TOOL_RUNNING: COLOR_IN_PROGRESS,
     TurnPhase.DONE: COLOR_GREEN,
     TurnPhase.ERROR: COLOR_RED,
 }

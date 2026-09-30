@@ -2,9 +2,8 @@
 
 Both fold the turn state through `daimon.core.turn.status_lines`, so the
 headline, tool lines and draft are the same words and only the bold markup
-differs. One deliberate asymmetry: Discord colors the embed's bar by phase,
-grey while thinking and blue while a tool runs; Block Kit messages have no
-color, so on Slack the headline word alone says which phase the turn is in.
+differs. One deliberate asymmetry: a Discord embed has a bar color and a Block
+Kit message has none.
 """
 
 from __future__ import annotations
@@ -59,13 +58,10 @@ def test_discord_and_slack_show_the_same_status_words() -> None:
     )
 
 
-def test_only_discord_colors_the_card_by_phase() -> None:
-    working = discord_embed.update_activity(discord_embed.EmbedState(), _CONTENT)
-    assert (
-        discord_embed.to_embed_data(discord_embed.EmbedState()).color
-        != discord_embed.to_embed_data(working).color
-    ), "Discord's bar tells thinking from working"
-    blocks = blockkit.to_blocks(blockkit.update_activity(blockkit.State(), _CONTENT), now=None)
-    assert all("color" not in block for block in blocks), (
-        "Block Kit has no bar color; the headline word carries the phase on Slack"
+def test_only_discord_has_a_bar_color() -> None:
+    data = discord_embed.to_embed_data(
+        discord_embed.update_activity(discord_embed.EmbedState(), _CONTENT)
     )
+    assert data.color, "a running Discord card has a bar color"
+    blocks = blockkit.to_blocks(blockkit.update_activity(blockkit.State(), _CONTENT), now=None)
+    assert all("color" not in block for block in blocks), "Block Kit has no bar color"

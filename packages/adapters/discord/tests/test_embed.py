@@ -16,9 +16,8 @@ from daimon.adapters.discord.embed import (
 )
 from daimon.adapters.discord.theme import (
     COLOR_GREEN,
+    COLOR_IN_PROGRESS,
     COLOR_RED,
-    COLOR_THINKING,
-    COLOR_TOOL_RUNNING,
 )
 from daimon.core.turn.state import ToolUseBlock
 
@@ -96,17 +95,12 @@ class TestUpdateActivity:
 
 
 class TestToEmbedData:
-    def test_thinking_phase_grey_color(self) -> None:
-        state = _make_state(phase=TurnPhase.THINKING)
-        data = to_embed_data(state)
-        assert data.color == COLOR_THINKING
-        assert data.color == 0x95A5A6
-
-    def test_tool_running_phase_blue_color(self) -> None:
-        state = _make_state(phase=TurnPhase.TOOL_RUNNING)
-        data = to_embed_data(state)
-        assert data.color == COLOR_TOOL_RUNNING
-        assert data.color == 0x3498DB
+    def test_thinking_and_working_share_one_blue_color(self) -> None:
+        for phase in (TurnPhase.THINKING, TurnPhase.TOOL_RUNNING):
+            data = to_embed_data(_make_state(phase=phase))
+            assert data.color == COLOR_IN_PROGRESS == 0x3498DB, (
+                f"{phase} is in progress; the headline word, not the bar, tells the two apart"
+            )
 
     def test_done_phase_green_color(self) -> None:
         state = _make_state(phase=TurnPhase.DONE)
