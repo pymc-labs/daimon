@@ -24,9 +24,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
 from daimon.adapters.teams import card
+from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.message_split import split_fenced
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.stores import tenant_ledger
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
 from daimon.core.turn.notices import render_termination_notice
@@ -38,6 +41,8 @@ from daimon.core.turn.state import (
 )
 from daimon.core.turn.termination import termination_reason
 from microsoft_teams.api import MessageActivityInput, SentActivity
+from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
 
@@ -101,9 +106,15 @@ class TeamsTurnLifecycle:
         clock: Callable[[], float] = time.monotonic,
         adopt_message_id: str | None = None,
         request_id: Callable[[], str] = bound_request_id,
+        sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+        tenant_id: uuid.UUID | None = None,
+        alert_webhook_url: SecretStr | None = None,
     ) -> None:
         self._sender = sender
         self._request_id = request_id
+        self._sessionmaker = sessionmaker
+        self._tenant_id = tenant_id
+        self._alert_webhook_url = alert_webhook_url
         self._conversation_id = conversation_id
         self._service_url = service_url
         self._cancel_key = cancel_key
@@ -182,7 +193,21 @@ class TeamsTurnLifecycle:
         self._last_flush = now
         await self._send(self._status(), message_id=self._message_id)
 
-    def _footer(self, state: TurnState) -> str:
+    async def _balance(self) -> str | None:
+        """A prepaid tenant's balance for the footer; None otherwise or on failure."""
+        if self._sessionmaker is None or self._tenant_id is None:
+            return None
+        try:
+            async with self._sessionmaker() as session:
+                balance = await tenant_ledger.get_prepaid_balance(
+                    session, tenant_id=self._tenant_id
+                )
+        except Exception:
+            log.warning("turn.balance_footer_failed", exc_info=True)
+            return None
+        return f"${balance:.2f} left" if balance is not None else None
+
+    async def _footer(self, state: TurnState) -> str:
         totals = state.usage_totals
         usage = BetaManagedAgentsSpanModelUsage(
             input_tokens=totals.input_tokens,
@@ -202,6 +227,7 @@ class TeamsTurnLifecycle:
             tokens_in=tokens_in,
             tokens_out=totals.output_tokens,
             cost=format_cost(cost_of(usage, MODEL_PRICING.get(self._model_id))),
+            balance=await self._balance(),
         )
 
     async def close_with_notice(self, text: str) -> None:
@@ -235,7 +261,7 @@ class TeamsTurnLifecycle:
         pass an answer nobody saw.
         """
         self._terminal = True
-        footer = self._footer(state)
+        footer = await self._footer(state)
         answer = self._answer_text(state)
         degraded = render_degraded_notice(state.mcp_failures)
         replaced = False
@@ -312,7 +338,15 @@ class TeamsTurnLifecycle:
         return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
-        footer = self._footer(state)
+        if (limit := spend_limit_error(err)) is not None:
+            tenant = str(self._tenant_id) if self._tenant_id is not None else None
+            log.error("anthropic.spend_limit_reached", tenant_id=tenant, limit=limit)
+            alert_ops(
+                self._alert_webhook_url,
+                key=f"spend_limit:{limit}",
+                message=f"Anthropic spend limit reached: {limit} (tenant {self._tenant_id})",
+            )
+        footer = await self._footer(state)
         label = state.error.message if state.error is not None else str(err)
         text = f"❌ {label or 'error'} · {footer}"
         reason = request_id = None
@@ -321,7 +355,9 @@ class TeamsTurnLifecycle:
         try:
             reason = state.termination or termination_reason(err)
             request_id = self._request_id()
-            notice = render_termination_notice(reason, state=state, request_id=request_id)
+            notice = render_termination_notice(
+                reason, state=state, request_id=request_id, error=err
+            )
             if notice is not None:
                 text = card.termination_text(notice, footer=footer)
         except Exception:

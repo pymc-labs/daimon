@@ -46,7 +46,9 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
         raise ValueError("Teams runtime requires configured Teams settings")
     engine = build_engine(str(settings.database.url))
     sessionmaker = build_session_factory(
-        engine, crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys)
+        engine,
+        crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys),
+        allow_plaintext=settings.crypto.allow_plaintext,
     )
     deployment_default = parse_deployment_default(settings.defaults_root)
     resolver_cache = new_resolver_cache()

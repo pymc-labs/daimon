@@ -58,7 +58,7 @@ the agent. None of them runs an agent turn.
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
 | `help` | List the commands. |
 | `setup` | Agents, their details and who answers where; create an agent, connect coding tools (admins), or open a setup conversation. |
-| `routines` | List routines; admins create them, admins and creators pause, resume, read the last output or delete. |
+| `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the 1:1 chat's agent remembers; add a path to read one file. |
 | `privacy` | See, export or delete what daimon stores about you. |
 | `billing` | Your usage this month; admins also see totals, top spenders and top-ups. |
@@ -98,7 +98,7 @@ When an agent asks for an API key or an MCP token (`request_agent_key`,
 asked can open it; the secret goes into a password field in a Teams dialog and
 never through the chat. `request_mcp_oauth` opens a private sign-in link the
 same way. Once the value is saved, the card shows the outcome and the waiting
-work resumes. Replacing an existing key follows the same admin rules as Slack.
+work resumes. Key names and replacing an existing key follow Slack's rules.
 
 ### Agent tools
 

@@ -40,6 +40,7 @@ from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.credential_requests import availability_for_request
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_name_problem
 from daimon.core.errors import DaimonError
 from daimon.core.mcp_attach import attach_mcp_server_to_agent
 from daimon.core.mcp_oauth import INVITE_BUTTON_LABEL, begin_mcp_oauth_flow, invite_copy, start_url
@@ -60,7 +61,11 @@ from daimon.core.posted_controls.teams_card import (
     card_for_request,
 )
 from daimon.core.stores import credential_requests as store
-from daimon.core.stores.agent_files import put_agent_file_if_unchanged
+from daimon.core.stores.agent_files import (
+    AgentEnvEncryptionRequiredError,
+    agent_env_writes_allowed,
+    put_agent_file_if_unchanged,
+)
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.teams_threads import conversation_of
@@ -131,6 +136,19 @@ def refusal(
     if row.expires_at <= now:
         return "expired"
     return "used" if row.used_at is not None else None
+
+
+def env_name_refusal(name: str, problem: str) -> str:
+    """One-line refusal for a key name the submitter may not store (Slack's copy)."""
+    if problem == "bad_name":
+        return f"{name} is not a valid key name (letters, digits, underscores; not leading digit)."
+    if problem == "reserved_name":
+        return f"{name} is reserved: it changes how the agent's tools run, so it cannot be a key."
+    return (
+        f"{name} is not a secret name a member can add. Use a name ending in "
+        f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, region "
+        "and URL names."
+    )
 
 
 def credential_form(row: CredentialRequestRow, error: str | None = None) -> TaskModuleResponse:
@@ -265,6 +283,15 @@ class TeamsCredentialRequests:
         mcp = self._runtime.settings.mcp
         if row.kind == "mcp" and (mcp.public_url is None or mcp.jwt_secret is None):
             return dialog_message(_UNCONFIGURED)
+        if row.kind == "env":
+            # The name is re-checked against the submitter's live role.
+            problem = env_name_problem(row.target, is_admin=actor.is_admin)
+            if problem is not None:
+                return dialog_message(env_name_refusal(row.target, problem))
+            async with self._runtime.sessionmaker() as session:
+                if not agent_env_writes_allowed(session):
+                    log.error("teams.credential.env_refused_no_crypto_keys")
+                    return dialog_message(str(AgentEnvEncryptionRequiredError()))
         agent = await find_agent_by_derived_uuid(
             self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
         )

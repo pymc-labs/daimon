@@ -1,9 +1,10 @@
 """The `routines` command, its card actions and its create dialog.
 
-Mirrors Slack's `/routines` panel and its rules: everyone sees the tenant's
-routines; only an admin or the routine's creator may pause, resume, read the
-last output or delete one; only an admin may create. Every click re-verifies
-the clicker and re-reads the row, so a stale card grants nothing.
+Mirrors Slack's `/routines` panel and its rules: a member sees only the
+routines they created, an admin sees all; only an admin or the creator may
+pause, resume, read the last output or delete one; only an admin may create.
+Every click re-verifies the clicker and re-reads the row, so a stale card
+grants nothing.
 """
 
 from __future__ import annotations
@@ -90,6 +91,9 @@ class RoutinesPanel:
     ) -> AdaptiveCard:
         async with self._runtime.sessionmaker() as session:
             rows = await store.list_routines_for_tenant(session, tenant_id=tenant_id)
+        if not is_admin:
+            # A routine's label and trigger are its creator's work.
+            rows = [row for row in rows if row.created_by_user_id == user_id]
         shown, hidden = panel_rows(rows)
         return panel_card(shown, hidden, user_id=user_id, is_admin=is_admin, notice=notice)
 

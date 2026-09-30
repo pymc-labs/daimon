@@ -44,7 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Teams dialogs, and with tool safety on, attached-tool writes wait on an
   Approve/Deny card only the requester can answer. A turn that ends early
   explains why with the termination notice. Protected channels get no
-  replies, notices or tool posts.
+  replies, notices or tool posts. Tenant turn caps, agent pins, key-name
+  rules, prepaid balance footers and spend-limit alerts match Slack.
   Builds on #220 by @jchu96. See `docs/teams.md`.
 - Staging-only load rehearsal script for synthetic installs and metered headless turns, with a dry run, spend guard, and tenant cleanup.
 

@@ -85,7 +85,7 @@ def panel_card(
     is_admin: bool,
     notice: str | None = None,
 ) -> AdaptiveCard:
-    """Everyone sees every routine; buttons show only where the viewer may act."""
+    """The routines the caller passed; buttons show only where the viewer may act."""
     body: list[CardElement] = [TextBlock(text="Routines", weight="Bolder", size="Medium")]
     if notice:
         body.append(TextBlock(text=notice, wrap=True))

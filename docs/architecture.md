@@ -137,11 +137,11 @@ Unprompted replies follow their existing silent-refusal policy. Continuation
 wakes retain their existing admission path. The limit is unset by default and
 applies only to this Discord process.
 
-Discord and Slack also limit simultaneous chat turns per tenant before admission.
+Discord, Slack and Teams also limit simultaneous chat turns per tenant before admission.
 `daimon tenants turn-cap PLATFORM WORKSPACE_ID N` stores a tenant override;
 `default` clears it and restores the adapter's deployment setting (3 by default).
 The check covers Discord mentions, thread participation and wizard submits,
-and Slack mentions. It does not limit MCP or routine turns.
+Slack mentions, and Teams messages and wakes. It does not limit MCP or routine turns.
 
 A protected channel hears nothing from the agent, not even a refusal or an
 error. Each turn entry decides FIRST, before tenant liveness, provisioning or
@@ -396,7 +396,7 @@ already receives -- so the CLI, headless routines and any new adapter keep
 their existing failure path, and `TerminationNotice.plain_text()` is the
 fallback wording for a surface without markup.
 Anthropic's monthly spend-cap response stops SDK retries at the HTTP transport.
-If Anthropic reports that cap or a user-set spend limit, Discord and Slack
+If Anthropic reports that cap or a user-set spend limit, Discord, Slack and Teams
 show a model usage limit notice and log `anthropic.spend_limit_reached` with
 the tenant and limit type.
 

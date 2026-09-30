@@ -67,7 +67,7 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.stores.domain import Role, TaskContinuationRow
-from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     get_live_thread_session,
@@ -126,6 +126,9 @@ _CAP_REACHED = "Monthly usage cap reached for this organisation. Ask an admin to
 _NOT_INVITED = (
     "You aren't on this organisation's list of people who can start a turn. An admin can add you."
 )
+_PINNED_ELSEWHERE = (
+    "This agent only runs in the channels an operator pinned it to, so it can't answer here."
+)
 _RESOLVER_MISS = (
     "The configured agent or environment no longer exists. Pick another with `setup` in a "
     "1:1 chat with me, or ask an admin to restore it."
@@ -140,6 +143,7 @@ _DENIALS: dict[AdmissionDenialReason, tuple[str, str | None]] = {
     "balance_depleted": ("turn.skipped.over_balance", _BALANCE_DEPLETED),
     "cap_exceeded": ("turn.skipped.over_cap", _CAP_REACHED),
     "invoker_not_allowed": ("turn.skipped.invoker_not_allowed", _NOT_INVITED),
+    "agent_pinned_elsewhere": ("turn.skipped.agent_pinned_elsewhere", _PINNED_ELSEWHERE),
     # A protected channel hears nothing, a refusal included.
     "channel_protected": ("turn.skipped.channel_protected", None),
 }
@@ -450,13 +454,18 @@ class TeamsApp:
             return
         await self._orchestrate(inbound, tenant_id)
 
+    async def _turn_cap(self, tenant_id: uuid.UUID) -> int:
+        default = self._teams.max_concurrent_turns_per_tenant
+        return await get_turn_cap(self.runtime.sessionmaker, tenant_id=tenant_id, default=default)
+
     async def _orchestrate(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
         key = inbound.conversation_id
+        # Read first: no await may split the queue check from the claim below.
+        cap = await self._turn_cap(tenant_id)
         if key in self._processing:
             self._last_message_at[key] = datetime.now(UTC)
             self._pending.setdefault(key, []).append(inbound)
             return
-        cap = self._teams.max_concurrent_turns_per_tenant
         count = self._inflight.get(tenant_id, 0)
         if not should_admit_turn(current_in_flight=count, cap=cap):
             record_refusal(
@@ -602,6 +611,9 @@ class TeamsApp:
                 agent_name=agent.name,
                 model_id=agent.model.id,
                 adopt_message_id=adopt,
+                sessionmaker=self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             )
             holder.append(attempt)
             return attempt
@@ -854,6 +866,8 @@ class TeamsApp:
         if self._recovery is not None:
             await asyncio.shield(self._recovery)
         conversation_id = conversation_of(thread_id)
+        # Only a wake is capped; read before the busy check, as `_orchestrate` does.
+        cap = await self._turn_cap(tenant_id) if capped else 0
         if conversation_id in self._processing:
             # A wake's None must not drop a saved input's regional service URL, and
             # the cap never holds back a saved input's resume.
@@ -866,7 +880,6 @@ class TeamsApp:
                 capped and previous_capped,
             )
             return
-        cap = self._teams.max_concurrent_turns_per_tenant
         if capped and not should_admit_turn(
             current_in_flight=self._inflight.get(tenant_id, 0), cap=cap
         ):

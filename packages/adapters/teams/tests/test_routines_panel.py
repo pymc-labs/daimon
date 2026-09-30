@@ -83,20 +83,32 @@ async def _load(db_factory: async_sessionmaker[AsyncSession], row: RoutineRow) -
         return await get_routine(session, row.id, tenant_id=TENANT)
 
 
-async def test_command_lists_every_routine_with_buttons_only_where_the_viewer_may_act(
+async def test_a_member_sees_only_their_own_routines(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     mine = await _routine(db_session_factory, owner=AAD_OBJECT_ID, message="my standup")
-    theirs = await _routine(db_session_factory, owner=OTHER_AAD_OBJECT_ID, message="their digest")
+    await _routine(db_session_factory, owner=OTHER_AAD_OBJECT_ID, message="their digest")
     async with _running(db_session_factory, teams_api_fake) as service:
         await post_activity(service, make_message_activity(text="routines"))
         await service.turns.drain(timeout=30)
 
     card = json.dumps(teams_api_fake.activity_requests[-1].body)
-    assert "my standup" in card and "their digest" in card, "everyone sees every routine"
-    assert str(mine.id) in card, "the creator gets buttons on their own routine"
-    assert str(theirs.id) not in card, "no buttons on a routine the viewer cannot manage"
+    assert "my standup" in card and str(mine.id) in card, "the creator manages their own"
+    assert "their digest" not in card, "another person's routine is not listed"
     assert "New routine" not in card, "only an admin is offered create"
+
+
+async def test_an_admin_sees_and_manages_every_routine(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    theirs = await _routine(db_session_factory, owner=OTHER_AAD_OBJECT_ID, message="their digest")
+    async with _running(db_session_factory, teams_api_fake, admins=(AAD_OBJECT_ID,)) as service:
+        await post_activity(service, make_message_activity(text="routines"))
+        await service.turns.drain(timeout=30)
+
+    card = json.dumps(teams_api_fake.activity_requests[-1].body)
+    assert "their digest" in card and str(theirs.id) in card
+    assert "New routine" in card
 
 
 async def test_pause_and_resume_update_the_row_and_replace_the_card(

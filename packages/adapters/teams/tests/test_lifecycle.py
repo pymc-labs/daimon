@@ -5,17 +5,28 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import uuid
 from collections.abc import Callable
+from decimal import Decimal
+from typing import Any
 
+import httpx
 import pytest
+import structlog
+from anthropic import RateLimitError
 from daimon.adapters.teams import card
+from daimon.adapters.teams import lifecycle as lifecycle_module
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsTurnLifecycle, TimedSender
 from daimon.core.errors import TurnError
 from daimon.core.message_split import split_fenced
+from daimon.core.stores import tenant_ledger
+from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
+from daimon.testing.factories import make_tenant
 from microsoft_teams.api import MessageActivityInput, SentActivity
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import CONVERSATION_ID, SERVICE_URL, FakeSender
 
@@ -33,6 +44,7 @@ async def _posted(
     clock: Clock | None = None,
     *,
     request_id: Callable[[], str] = lambda: "rid-1",
+    **kw: Any,
 ) -> TeamsTurnLifecycle:
     """A lifecycle whose status card is already posted."""
     lifecycle = TeamsTurnLifecycle(
@@ -44,6 +56,7 @@ async def _posted(
         model_id="claude-test",
         clock=clock or Clock(),
         request_id=request_id,
+        **kw,
     )
     await lifecycle.post_initial()
     return lifecycle
@@ -87,6 +100,57 @@ async def test_answer_replaces_the_card_with_footer_and_feedback() -> None:
     assert final.channel_data is not None and final.channel_data.feedback_loop is not None
     assert lifecycle.answer_prefix_applied
     assert lifecycle.card_closed and lifecycle.final_message_id == "m-1"
+
+
+async def test_the_footer_shows_a_prepaid_balance_only(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="teams")
+        await tenant_ledger.insert_entry(
+            session,
+            tenant_id=tenant.id,
+            delta_usd=Decimal("12.50"),
+            reason="test",
+            idempotency_key=f"test:{tenant.id}",
+        )
+    sender = FakeSender()
+    lifecycle = await _posted(sender, sessionmaker=db_session_factory, tenant_id=tenant.id)
+    await lifecycle.on_terminal_success(_answer("done"))
+    assert "· $12.50 left" in _card_json(sender, -1)
+
+    async with db_session_factory.begin() as session:
+        await set_funding_mode(session, tenant_id=tenant.id, funding_mode="operator_funded")
+    lifecycle = await _posted(sender, sessionmaker=db_session_factory, tenant_id=tenant.id)
+    await lifecycle.on_terminal_success(_answer("done"))
+    assert "left" not in _card_json(sender, -1)
+
+
+async def test_a_spend_limit_alerts_the_operators(monkeypatch: pytest.MonkeyPatch) -> None:
+    alerts: list[str] = []
+    monkeypatch.setattr(
+        lifecycle_module, "alert_ops", lambda url, *, key, message: alerts.append(key)
+    )
+    tenant_id = uuid.uuid4()
+    sender = FakeSender()
+    lifecycle = await _posted(sender, tenant_id=tenant_id)
+    body = {"type": "rate_limit_error", "details": {"error_code": "enforced_spend_limit_reached"}}
+    response = httpx.Response(
+        429,
+        json={"type": "error", "error": body},
+        request=httpx.Request("GET", "https://api.anthropic.com/v1/models"),
+    )
+    err = TurnError(kind="upstream", cause=RateLimitError("limit", response=response, body=body))
+    with structlog.testing.capture_logs() as logs:
+        await lifecycle.on_terminal_failure(TurnState(error=err), err)
+    assert alerts == ["spend_limit:org_cap"]
+    assert "reached its model usage limit" in _card_json(sender, -1)
+    assert {
+        "event": "anthropic.spend_limit_reached",
+        "log_level": "error",
+        "tenant_id": str(tenant_id),
+        "limit": "org_cap",
+    } in logs
 
 
 async def test_a_long_answer_overflows_into_new_messages_with_the_footer_last() -> None:

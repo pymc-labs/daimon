@@ -103,7 +103,12 @@ def _turn_state() -> card.CardState:
 
 def _footer() -> str:
     return card.footer_text(
-        _turn_state(), now=99 * 3600.0, tokens_in=10**9, tokens_out=10**9, cost="$123456.78"
+        _turn_state(),
+        now=99 * 3600.0,
+        tokens_in=10**9,
+        tokens_out=10**9,
+        cost="$123456.78",
+        balance="$123456.78 left",
     )
 
 

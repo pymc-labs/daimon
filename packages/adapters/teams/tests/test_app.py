@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, get_args
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,11 +16,13 @@ from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import TurnCardIntentRow
+from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.stores.turn_outcomes import OutcomeRecord, list_for_tenant
 from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
+from daimon.core.turn.errors import AdmissionDenialReason
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -52,6 +54,12 @@ def _app(
     return TeamsApp(
         runtime=runtime, sender=sender, commands={"new": fresh_start}, bot_token=bot_token
     )
+
+
+async def _holding_a_slot(teams: TeamsApp) -> None:
+    async with asyncio.timeout(5):
+        while not teams._inflight.get(TENANT):
+            await asyncio.sleep(0.01)
 
 
 async def test_messages_during_a_turn_queue_and_run_once_per_author(
@@ -149,7 +157,7 @@ async def test_the_tenant_cap_sheds_a_new_thread(
 
     with patch.object(TeamsApp, "_run_turn", _turn):
         first = asyncio.create_task(teams._orchestrate(make_inbound(), TENANT))
-        await asyncio.sleep(0)
+        await _holding_a_slot(teams)
         await teams._orchestrate(make_inbound(conversation="a:conversation-2"), TENANT)
         release.set()
         await first
@@ -160,6 +168,33 @@ async def test_the_tenant_cap_sheds_a_new_thread(
         TerminationReason.ADMISSION_CONCURRENCY_SHED,
         "a:conversation-2",
     ), "a shed turn leaves an outcome row"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_tenant_turn_cap_override_beats_the_deployment_cap(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        await set_turn_cap(session, tenant_id=TENANT, cap=1)
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender, cap=3)
+    release = asyncio.Event()
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        await release.wait()
+
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        first = asyncio.create_task(teams._orchestrate(make_inbound(), TENANT))
+        await _holding_a_slot(teams)
+        await teams._orchestrate(make_inbound(conversation="a:conversation-2"), TENANT)
+        release.set()
+        await first
+
+    assert [(c, a.text) for c, a, _ in sender.sent] == [("a:conversation-2", app_module._SHED)]
+
+
+def test_every_admission_denial_has_a_reply() -> None:
+    assert set(app_module._DENIALS) == set(get_args(AdmissionDenialReason))
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

@@ -75,16 +75,21 @@ def format_tokens(n: int) -> str:
 
 
 def footer_text(
-    state: CardState, *, now: float, tokens_in: int, tokens_out: int, cost: str | None
+    state: CardState,
+    *,
+    now: float,
+    tokens_in: int,
+    tokens_out: int,
+    cost: str | None,
+    balance: str | None = None,
 ) -> str:
-    """`agent · 12s · 1.2k in / 300 out · $0.01`, the terminal summary line."""
+    """`agent · 12s · 1.2k in / 300 out · $0.01 · $4.20 left`, the terminal summary line."""
     parts = [
         state.agent_name,
         format_elapsed(int(now - state.started_at)),
         f"{format_tokens(tokens_in)} in / {format_tokens(tokens_out)} out",
     ]
-    if cost is not None:
-        parts.append(cost)
+    parts += [part for part in (cost, balance) if part is not None]
     return " · ".join(parts)
 
 

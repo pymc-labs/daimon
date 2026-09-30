@@ -100,6 +100,7 @@ async def _request(
     kind: str = "env",
     expires_in: timedelta = timedelta(minutes=10),
     replaces: datetime | None = None,
+    target: str | None = None,
 ) -> CredentialRequestRow:
     async with db.begin() as session:
         return await create_credential_request(
@@ -109,7 +110,7 @@ async def _request(
             tenant_id=TENANT,
             agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id=MA_ID),
             account_id=account_id,
-            target="API_KEY" if kind == "env" else "linear",
+            target=target or ("API_KEY" if kind == "env" else "linear"),
             mcp_server_url=None if kind == "env" else MCP_URL,
             requester_platform_user_id=AAD_OBJECT_ID,
             channel_id=CONVERSATION_ID,
@@ -218,6 +219,44 @@ async def test_an_env_value_is_saved_once_and_resumes_the_work(
     assert "✅" in _edits(fake)[-1], "the card becomes the receipt"
     dispatch.assert_awaited_once_with(TENANT, CONVERSATION_ID, SERVICE_URL)
     assert SECRET not in json.dumps([r.body for r in fake.requests]) + repr(logs)
+
+
+@pytest.mark.parametrize(
+    ("target", "admin_ok"), [("1BAD", False), ("LD_PRELOAD", False), ("SERVICE_URL", True)]
+)
+async def test_a_key_name_the_submitter_may_not_store_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    target: str,
+    admin_ok: bool,
+) -> None:
+    row = await _request(db_session_factory, account_id, target=target)
+    problem = module.env_name_problem(target)
+    expected = module.env_name_refusal(target, problem or "not_credential_name")
+    assert (module.env_name_problem(target, is_admin=True) is None) == admin_ok
+    async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, dispatch):
+        refused = await post_activity(service, _submit(row.token))
+        await service.turns.drain(5)
+    assert refused["task"]["value"] == expected
+    async with db_session_factory() as session:
+        file = await get_agent_file(session, tenant_id=TENANT, agent_id=row.agent_id, key=target)
+        live = await peek_credential_request(session, token=row.token)
+    assert file is None and live is not None and live.used_at is None, "nothing spent or saved"
+    dispatch.assert_not_awaited()
+
+
+async def test_an_env_value_is_refused_without_encryption_keys(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    row = await _request(db_session_factory, account_id)
+    with patch.object(module, "agent_env_writes_allowed", return_value=False):
+        async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
+            refused = await post_activity(service, _submit(row.token))
+            await service.turns.drain(5)
+    assert "DAIMON_CRYPTO__KEYS" in refused["task"]["value"]
+    async with db_session_factory() as session:
+        live = await peek_credential_request(session, token=row.token)
+    assert live is not None and live.used_at is None, "the request stays live for a retry"
 
 
 async def test_a_failed_submit_reports_nothing_that_could_carry_the_value(

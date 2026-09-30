@@ -190,6 +190,7 @@ async def test_a_newer_message_supersedes_the_queued_work(
         ("balance_depleted", app_module._BALANCE_DEPLETED),
         ("cap_exceeded", app_module._CAP_REACHED),
         ("invoker_not_allowed", app_module._NOT_INVITED),
+        ("agent_pinned_elsewhere", app_module._PINNED_ELSEWHERE),
     ],
 )
 async def test_a_refused_turn_tells_only_a_live_person_then_raises(
