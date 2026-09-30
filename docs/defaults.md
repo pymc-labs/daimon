@@ -169,7 +169,8 @@ recorded id and content hash both match. Otherwise a **new version** is
 pushed — never a delete-and-recreate, because agents pin the latest version
 and deleting a referenced skill breaks every one of that agent's turns. The
 row is written after the upload succeeds, so a failed upload cannot leave a
-fingerprint claiming content was delivered.
+fingerprint claiming content was delivered. Apply drops the rows of skills no
+longer in the tree, so a retired default stops reserving its name.
 
 What that means in practice when you edit a seeded skill:
 

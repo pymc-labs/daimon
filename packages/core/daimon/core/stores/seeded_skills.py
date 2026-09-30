@@ -14,7 +14,7 @@ import uuid
 
 from daimon.core._models import SeededSkill
 from daimon.core.stores.domain import SeededSkillRow
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,6 +63,22 @@ async def record_seeded_skill(
         stmt.on_conflict_do_update(
             index_elements=[SeededSkill.tenant_id, SeededSkill.name],
             set_={"content_hash": content_hash, "anthropic_id": anthropic_id},
+        )
+    )
+    await session.flush()
+
+
+async def prune_seeded_skills(
+    session: AsyncSession, *, tenant_id: uuid.UUID, present_names: set[str]
+) -> None:
+    """Drop the rows of skills no longer in the defaults tree.
+
+    A leftover row would keep refusing imports under that name and deleting
+    the leftover skill, long after it stopped being a default.
+    """
+    await session.execute(
+        delete(SeededSkill).where(
+            SeededSkill.tenant_id == tenant_id, SeededSkill.name.not_in(present_names)
         )
     )
     await session.flush()
