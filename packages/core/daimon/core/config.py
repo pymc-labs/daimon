@@ -51,6 +51,15 @@ class AnthropicSettings(BaseModel):
             "a proxy or a non-default API endpoint."
         ),
     )
+    skills_requests_per_minute: int = Field(
+        default=80,
+        ge=1,
+        description=(
+            "Maximum Anthropic Skills API requests per minute in this process. "
+            "Default 80 leaves headroom below the 100 requests/minute organization limit. "
+            "Other deployments in the same organization share that limit."
+        ),
+    )
 
 
 class CLISettings(BaseModel):
@@ -68,6 +77,16 @@ class LogSettings(BaseModel):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
         default="INFO",
         description="Minimum log level emitted by the structured logger.",
+    )
+
+
+class OpsSettings(BaseModel):
+    alert_webhook_url: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Discord webhook URL for short operator alerts about new installs, Stripe top-ups, "
+            "and Anthropic limits. Unset disables alerts. Keep the URL secret."
+        ),
     )
 
 
@@ -306,6 +325,15 @@ class DiscordSettings(BaseModel):
             "Maximum number of agent turns a single tenant (Discord guild) may "
             "have in flight at once. Caps one noisy guild from starving others "
             "on the shared Anthropic key."
+        ),
+    )
+    max_concurrent_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Maximum Discord agent turns running across all guilds and DMs in this process. "
+            "Unset leaves deployment-wide admission unlimited. Excess turns are refused "
+            "with a retry notice; continuation wakes keep their existing admission path."
         ),
     )
     health_port: int = Field(
@@ -650,18 +678,28 @@ class CryptoSettings(BaseModel):
 
     A single deployment ships one key; rotation means prepending a new key.
     Each key must be a Fernet.generate_key()-style base64-urlsafe 32-byte
-    string. Empty default lets deployments without any encrypted credentials
-    boot without crypto config.
+    string. A deployment without keys still boots, but refuses to save agent
+    keys unless `allow_plaintext` opts into plaintext storage for local
+    development.
     """
 
     keys: tuple[SecretStr, ...] = Field(
         default=(),
         description=(
             "Ordered tuple of Fernet keys used to encrypt/decrypt stored "
-            "credentials. Agent environment values encrypt when keys are configured; "
-            "without keys they remain plaintext. The first key encrypts "
-            "new values; older keys "
-            "remain valid for decrypting existing ciphertext during rotation."
+            "credentials. Required to save agent keys: without keys, saving an "
+            "agent environment value is refused unless `allow_plaintext` is set. "
+            "The first key encrypts new values; older keys "
+            "remain valid for decrypting existing ciphertext during rotation. "
+            "Run `daimon crypto verify` to confirm no plaintext rows remain."
+        ),
+    )
+    allow_plaintext: bool = Field(
+        default=False,
+        description=(
+            "Store agent environment values (agent keys) in plaintext when no "
+            "`keys` are configured. For local development only: with this off "
+            "and no keys, every agent key write is refused."
         ),
     )
 
@@ -982,6 +1020,7 @@ class Settings(BaseSettings):
     )
     cli: CLISettings = Field(default_factory=CLISettings)
     log: LogSettings = Field(default_factory=LogSettings)
+    ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     discord: DiscordSettings | None = None

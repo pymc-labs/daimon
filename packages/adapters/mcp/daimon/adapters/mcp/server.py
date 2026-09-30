@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import structlog
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.adapters.mcp.artifacts import build_artifact_store
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.bundles import build_bundles_route
@@ -77,6 +77,7 @@ from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
+from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import TokenVerifier
 from fastmcp.server.transforms import Visibility
@@ -178,7 +179,9 @@ def create_mcp_app(
     if effective_sessionmaker is None:
         engine = build_engine(str(effective_settings.database.url))
         effective_sessionmaker = build_session_factory(
-            engine, crypto_keys=tuple(k.get_secret_value() for k in effective_settings.crypto.keys)
+            engine,
+            crypto_keys=tuple(k.get_secret_value() for k in effective_settings.crypto.keys),
+            allow_plaintext=effective_settings.crypto.allow_plaintext,
         )
 
     effective_auth = auth
@@ -209,6 +212,11 @@ def create_mcp_app(
         effective_anthropic = AsyncAnthropic(
             api_key=effective_settings.anthropic.api_key.get_secret_value(),
             max_retries=MA_MAX_RETRIES,
+            http_client=DefaultAsyncHttpxClient(
+                transport=SkillsRateLimitedTransport(
+                    effective_settings.anthropic.skills_requests_per_minute
+                )
+            ),
         )
 
     effective_billing_config = billing_config
@@ -366,6 +374,7 @@ def create_mcp_app(
             build_stripe_webhook(
                 sessionmaker=effective_sessionmaker,
                 billing_config=effective_billing_config,
+                alert_webhook_url=effective_settings.ops.alert_webhook_url,
             ),
             methods=["POST"],
         )

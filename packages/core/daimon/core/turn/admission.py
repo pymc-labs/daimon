@@ -7,7 +7,7 @@ raising a typed error. No boolean gate result crosses this boundary.
 
 Gate ORDER is load-bearing and must not be reordered: identity -> channel
 protection -> invoker policy -> cascade -> missing-config -> resolve/retrieve
--> balance -> cap. A tenant that is both over-balance and mis-configured must
+-> agent pin -> balance -> cap. A tenant that is both over-balance and mis-configured must
 see the config error (matches both adapters' inline sequences today). The
 access policy gates run before the cascade so a refused turn learns nothing
 about the tenant's configuration and never reaches an MA call.
@@ -25,8 +25,14 @@ from datetime import datetime
 from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from daimon.core.access_policy import is_invoker_allowed, is_sealed, is_write_protected
+from daimon.core.access_policy import (
+    is_invoker_allowed,
+    is_outside_agent_pin,
+    is_sealed_source,
+    is_write_protected,
+)
 from daimon.core.billing import is_over_cap
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
 from daimon.core.scope import ResolvedConfig, ScopeContext
@@ -56,6 +62,9 @@ class Admission:
     # Turn from a sealed channel (or a thread under one), or from a DM when the
     # tenant asks for it: memory mounts must be read-only.
     memory_read_only: bool = False
+    # The channel or thread itself is sealed (DM memory policy aside). Callers
+    # that copy content out of the channel, such as /dm, must refuse.
+    source_sealed: bool = False
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
     private_dm_id: str | None = None
@@ -247,6 +256,19 @@ async def admit_impl(
             await clear_agent_references(session, tenant_id=tenant_id, agent_name=config.agent_name)
         raise MAResolverMissError(kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name)
 
+    # --- Agent pin: an operator can tie an agent to named channels because of
+    # what its credentials reach. It runs after the cascade because it depends
+    # on which agent answers, and it checks both the cascade's name and the
+    # agent's own, so a handed-off thread (resolved by id) is covered too. A DM
+    # has no channel, so it is outside every pin. Admins get no exemption. ---
+    if is_outside_agent_pin(
+        policy,
+        agent_names=(config.agent_name, agent.metadata.get(MA_METADATA_KEY_NAME)),
+        channel_id=None if is_dm else (thread_id or channel_id),
+        parent_channel_id=None if is_dm else channel_id,
+    ):
+        raise AdmissionDenied(reason="agent_pinned_elsewhere")
+
     # --- Admission gate: per-tenant balance -- independent of Stripe config ---
     if await is_over_balance(sessionmaker=deps.sessionmaker, tenant_id=tenant_id):
         raise AdmissionDenied(reason="balance_depleted")
@@ -261,15 +283,12 @@ async def admit_impl(
     ):
         raise AdmissionDenied(reason="cap_exceeded")
 
-    memory_read_only = (
-        is_sealed(policy, channel_id=thread_id or channel_id, parent_channel_id=channel_id)
-        # A Slack thread is sealed on its own as channel_id:thread_ts.
-        or (thread_id is not None and f"{channel_id}:{thread_id}" in policy.sealed_channel_ids)
-        or (is_dm and policy.dm_memory_read_only)
-    )
+    source_sealed = is_sealed_source(policy, channel_id=channel_id, thread_id=thread_id)
+    memory_read_only = source_sealed or (is_dm and policy.dm_memory_read_only)
 
     return Admission(
         memory_read_only=memory_read_only,
+        source_sealed=source_sealed,
         account_id=principal.account_id,
         agent=agent,
         environment=environment,

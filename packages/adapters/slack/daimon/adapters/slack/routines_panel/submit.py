@@ -25,7 +25,7 @@ from typing import Any
 import anthropic
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.routines_panel.read import load_routines
+from daimon.adapters.slack.routines_panel.read import load_routines, routines_viewer
 from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -327,7 +327,10 @@ async def run_routines_delete_submission(
         # Refresh the underlying panel in place (best-effort — the row is gone).
         async with runtime.sessionmaker() as session:
             entries, over_cap_count, agent_name_map = await load_routines(
-                session, runtime.anthropic, tenant_id=tenant_id
+                session,
+                runtime.anthropic,
+                tenant_id=tenant_id,
+                viewer_user_id=await routines_viewer(web_client, user_id=user_id),
             )
         state = RoutinesPanelState(
             rows=entries, over_cap_count=over_cap_count, agent_name_map=agent_name_map

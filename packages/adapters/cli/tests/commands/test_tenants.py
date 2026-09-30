@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from decimal import Decimal
 from io import StringIO
 from typing import cast
 
@@ -15,20 +16,23 @@ from daimon.adapters.cli.commands import tenants as tenants_mod
 from daimon.adapters.cli.commands.tenants import (
     tenants_access_policy_get,
     tenants_access_policy_set,
+    tenants_cap,
+    tenants_credit,
     tenants_delete,
     tenants_list,
+    tenants_turn_cap,
 )
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import TenantScopeRef
-from daimon.core.stores import scoped_config_write
+from daimon.core.stores import scoped_config_write, tenant_ledger, tenant_user_caps
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     load_access_policy,
 )
-from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.testing.factories import make_tenant
 from rich.console import Console
 from sqlalchemy import text
@@ -51,6 +55,105 @@ class _FakeSettings:
 def _make_console() -> Console:
     """Console that writes to a StringIO for test output capture."""
     return Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+
+
+def test_credit_uses_note_option() -> None:
+    command = get_command(tenants_mod.tenants_app)
+    assert isinstance(command, Group)
+    flags = {
+        flag
+        for param in command.commands["credit"].params
+        if isinstance(param, Option)
+        for flag in param.opts
+    }
+    assert "--note" in flags
+    assert "--reason" not in flags
+
+
+@pytest.mark.asyncio
+async def test_credit_is_positive_and_idempotent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = build_cli_runtime(db_session_factory)
+    console = _make_console()
+    result = await provision_tenant(
+        db_session_factory, platform="discord", workspace_id="credit-guild"
+    )
+    async with db_session_factory() as s:
+        before = await tenant_ledger.get_balance(s, tenant_id=result.tenant_id)
+    for _ in range(2):
+        await tenants_credit(
+            rt=rt,
+            console=console,
+            platform="discord",
+            workspace_id="credit-guild",
+            usd="25.00",
+            note="Hackathon grant: team #3",
+            request_id="grant-1",
+        )
+    async with db_session_factory() as s:
+        after = await tenant_ledger.get_balance(s, tenant_id=result.tenant_id)
+        rows = await tenant_ledger.list_for_tenant(s, tenant_id=result.tenant_id)
+    assert after == before + Decimal("25.00")
+    credits = [row for row in rows if row.reason == "manual_credit"]
+    assert len(credits) == 1
+    assert credits[0].idempotency_key == (
+        f"manual:credit:{result.tenant_id}:hackathon-grant-team-3:usd25.00:grant-1"
+    )
+    assert "already credited" in cast(StringIO, console.file).getvalue()
+    assert "credit id: grant-1" in cast(StringIO, console.file).getvalue()
+    with pytest.raises(typer.BadParameter, match="positive"):
+        await tenants_credit(
+            rt=rt,
+            console=console,
+            platform="discord",
+            workspace_id="credit-guild",
+            usd="-1",
+            note="invalid",
+            request_id=None,
+        )
+    with pytest.raises(typer.BadParameter, match="note"):
+        await tenants_credit(
+            rt=rt,
+            console=console,
+            platform="discord",
+            workspace_id="credit-guild",
+            usd="1",
+            note="!!!",
+            request_id=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_cap_sets_default_and_user_override(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = build_cli_runtime(db_session_factory)
+    console = _make_console()
+    result = await provision_tenant(db_session_factory, platform="slack", workspace_id="cap-team")
+    await tenants_cap(
+        rt=rt,
+        console=console,
+        platform="slack",
+        workspace_id="cap-team",
+        usd="10.00",
+        user=None,
+    )
+    await tenants_cap(
+        rt=rt,
+        console=console,
+        platform="slack",
+        workspace_id="cap-team",
+        usd="5.00",
+        user="U123",
+    )
+    async with db_session_factory() as s:
+        assert await tenant_user_caps.get_effective_cap(
+            s, tenant_id=result.tenant_id, user_id="other"
+        ) == Decimal("10.00")
+        assert await tenant_user_caps.get_effective_cap(
+            s, tenant_id=result.tenant_id, user_id="U123"
+        ) == Decimal("5.00")
 
 
 @pytest.mark.asyncio
@@ -290,6 +393,36 @@ async def test_tenants_funding_mode_changes_only_the_selected_tenant(
         )
 
 
+async def test_tenants_turn_cap_sets_and_clears_one_tenant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="shared-guild")
+    other = await make_tenant(db_session, platform="discord", workspace_id="other-guild")
+    await db_session.commit()
+    rt = build_cli_runtime(db_session_factory)
+    console = _make_console()
+    await tenants_turn_cap(
+        rt=rt, console=console, platform="discord", workspace_id="shared-guild", value="30"
+    )
+    assert await get_turn_cap(db_session_factory, tenant_id=tenant.id, default=3) == 30
+    assert await get_turn_cap(db_session_factory, tenant_id=other.id, default=3) == 3
+    assert "turn cap: 30" in cast(StringIO, console.file).getvalue()
+    await tenants_turn_cap(
+        rt=rt, console=console, platform="discord", workspace_id="shared-guild", value="default"
+    )
+    assert await get_turn_cap(db_session_factory, tenant_id=tenant.id, default=3) == 3
+    for bad in ("0", "-1", "1.5", "nope"):
+        with pytest.raises(typer.BadParameter):
+            await tenants_turn_cap(
+                rt=rt,
+                console=console,
+                platform="discord",
+                workspace_id="shared-guild",
+                value=bad,
+            )
+
+
 # --- access-policy -------------------------------------------------------------
 
 
@@ -483,6 +616,7 @@ def test_access_policy_set_is_registered_with_its_flags() -> None:
         "--protected-category",
         "--sealed-channel",
         "--dm-memory-read-only",
+        "--pin-agent",
         "--clear",
     ):
         assert flag in flags, f"{flag} missing from registered options"
@@ -732,3 +866,151 @@ async def test_access_policy_seals_a_single_slack_thread(
     )
     async with db_session_factory() as session:
         assert await load_access_policy(session, tenant_id=tenant.id) == OPEN_ACCESS_POLICY
+
+
+@pytest.mark.asyncio
+async def test_access_policy_set_pins_an_agent_to_channels(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-pin")
+
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="guild-pin",
+        pin_agent=[
+            "daimon-rx=666666666666666666",
+            "daimon-rx=777777777777777777",
+            "daimon-rx=666666666666666666",
+        ],
+    )
+
+    assert await _policy(db_session_factory, workspace_id="guild-pin") == TenantAccessPolicy(
+        agent_channel_pins={"daimon-rx": ("666666666666666666", "777777777777777777")}
+    ), "repeating an agent adds channels; a repeated channel is kept once"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["daimon-rx", "=666666666666666666", "daimon-rx=general"])
+async def test_access_policy_set_rejects_a_malformed_pin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+    value: str,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-pin-bad")
+
+    with pytest.raises(typer.BadParameter):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="discord",
+            external_id="guild-pin-bad",
+            pin_agent=[value],
+        )
+
+
+_ACME = "111111111111111111"
+_ACME_2 = "222222222222222222"
+_CLIENT_B = "333333333333333333"
+
+
+@pytest.mark.asyncio
+async def test_onboarding_a_second_client_keeps_the_first_clients_pin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    """The onboarding step run once per client must never unpin an earlier client."""
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-onboard")
+
+    async def pin(**flags: object) -> str:
+        console = _make_console()
+        await tenants_access_policy_set(
+            rt=rt,
+            console=console,
+            platform="discord",
+            external_id="guild-onboard",
+            **flags,  # type: ignore[arg-type]
+        )
+        return _output(console)
+
+    await pin(add_pin_agent=[f"acme-project={_ACME}"])
+    printed = await pin(add_pin_agent=[f"clientb-project={_CLIENT_B}"])
+
+    assert await _policy(db_session_factory, workspace_id="guild-onboard") == TenantAccessPolicy(
+        agent_channel_pins={"acme-project": (_ACME,), "clientb-project": (_CLIENT_B,)}
+    ), "adding the second client's pin must keep the first client's"
+    assert f"acme-project -> {_ACME}" in printed and f"clientb-project -> {_CLIENT_B}" in printed
+
+    with pytest.raises(typer.BadParameter, match="would unpin acme-project"):
+        await pin(pin_agent=[f"clientb-project={_CLIENT_B}"])
+    assert (await _policy(db_session_factory, workspace_id="guild-onboard")).agent_channel_pins[
+        "acme-project"
+    ] == (_ACME,), "a refused replace changes nothing"
+
+    await pin(add_pin_agent=[f"acme-project={_ACME_2}"])
+    await pin(remove_pin_agent=[f"acme-project={_ACME}"])
+    assert (await _policy(db_session_factory, workspace_id="guild-onboard")).agent_channel_pins == {
+        "acme-project": (_ACME_2,),
+        "clientb-project": (_CLIENT_B,),
+    }
+
+    await pin(remove_pin_agent=["acme-project"])
+    assert (await _policy(db_session_factory, workspace_id="guild-onboard")).agent_channel_pins == {
+        "clientb-project": (_CLIENT_B,)
+    }, "removing one agent's pin keeps the other's"
+
+    await pin(pin_agent=[f"acme-project={_ACME}"], replace_pins=True)
+    assert (await _policy(db_session_factory, workspace_id="guild-onboard")).agent_channel_pins == {
+        "acme-project": (_ACME,)
+    }, "--replace-pins is the explicit way to drop pins"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "flags",
+    [
+        {"remove_pin_agent": ["nobody"]},
+        {"remove_pin_agent": [f"acme-project={_CLIENT_B}"]},
+        {"pin_agent": [f"acme-project={_ACME}"], "add_pin_agent": [f"x={_ACME_2}"]},
+        {"replace_pins": True, "add_pin_agent": [f"x={_ACME_2}"]},
+        {"clear": True, "add_pin_agent": [f"x={_ACME_2}"]},
+    ],
+    ids=[
+        "remove-unknown-agent",
+        "remove-unknown-channel",
+        "replace-and-edit",
+        "stray-replace",
+        "clear-and-edit",
+    ],
+)
+async def test_pin_edits_refuse_ambiguous_or_mistyped_changes(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+    flags: dict[str, object],
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-pin-edit")
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="guild-pin-edit",
+        add_pin_agent=[f"acme-project={_ACME}"],
+    )
+
+    with pytest.raises(typer.BadParameter):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="discord",
+            external_id="guild-pin-edit",
+            **flags,  # type: ignore[arg-type]
+        )
+    assert (
+        await _policy(db_session_factory, workspace_id="guild-pin-edit")
+    ).agent_channel_pins == {"acme-project": (_ACME,)}

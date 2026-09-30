@@ -87,11 +87,14 @@ four token counts by those rates and returns USD. The table is split in two:
 configured with (`ALLOWED_MODEL_IDS` in
 `packages/core/daimon/core/constants.py` is literally its keys), while
 `TOOL_MODEL_PRICING` covers models pinned by individual MCP tools and never
-selectable by an agent.
+selectable by an agent. Every agent-model row is the provider's list price.
+Put any margin in `DAIMON_BILLING__MARKUP` (below), not in the table, because
+reports read the table as provider cost.
 
 Opus 5.5 is priced at $4 input, $20 output, $5 five-minute cache write, and
-$0.20 cache read per million tokens. The four-field ledger cannot distinguish
-one-hour cache writes, which Anthropic prices at $8 per million tokens; it
+$0.20 cache read per million tokens; Sonnet 5.5 at $2, $10, $2.50 and $0.20.
+The four-field ledger cannot distinguish one-hour cache writes, which
+Anthropic prices at $8 (Opus 5.5) and $4 (Sonnet 5.5) per million tokens; it
 currently treats all cache writes as five-minute writes.
 
 Two consequences worth knowing before you add a model:
@@ -147,8 +150,11 @@ Two boundaries of the design worth stating plainly:
   re-checks mid-turn, so a single long turn can take a tenant's balance
   negative. The ledger allows it. Concurrent turns compound this: every turn
   admitted while the balance was still positive runs to completion, so a chat
-  tenant can overdraw by up to `max_concurrent_turns_per_tenant` (default 3)
-  times one turn's cost. An MCP `start_turn` session is worse. Its spend
+  tenant can overdraw by up to its effective concurrent-turn cap (the adapter's
+  `max_concurrent_turns_per_tenant`, default 3, or the tenant's `turn-cap`
+  override) times one turn's cost. Discord's optional process-wide limit refuses
+  excess guild mentions and DMs before `admit()`. An MCP `start_turn` session is
+  worse. Its spend
   reaches the ledger only when the scheduler's usage sweep next runs (after
   the tick's routine fires, which can take up to the 45-minute turn ceiling).
   Until then the gate reads a balance that leaves out earlier headless turns,
@@ -229,12 +235,26 @@ retry alone cannot resolve inconsistent payment data; inspect the Stripe
 event, payment intent, original credit, and tenant before replaying it.
 
 Both the checkout and webhook routes are mounted only when Stripe is
-configured. A self-hoster without it credits a tenant by inserting a
-`tenant_ledger` row directly with a positive `delta_usd` and a unique
-idempotency key — `.env.example` spells this out, and the unique index makes
-a re-run harmless.
+configured. Operators can credit an existing tenant without Stripe:
 
-There is no CLI command and no MCP tool that adds credit.
+```sh
+daimon tenants credit discord GUILD_ID 25.00 --note "hackathon grant" --id grant-1
+```
+
+The ledger reason is `manual_credit`; the readable note goes in the idempotency
+key. The command prints the new balance, credit id and key. Reusing the same
+arguments and `--id` does not add a second credit. Omit `--id` for a new,
+generated id each time.
+
+Set a per-person monthly cap, with an optional user override:
+
+```sh
+daimon tenants cap discord GUILD_ID 10.00
+daimon tenants cap discord GUILD_ID 5.00 --user PLATFORM_USER_ID
+```
+
+The default row applies to everyone without an override. A zero cap blocks
+all turns; the cap gate applies even without Stripe.
 
 ## The tables
 
@@ -248,17 +268,20 @@ There is no CLI command and no MCP tool that adds credit.
 
 These tables are declared in `packages/core/daimon/core/_models.py` with stores
 beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
-`trial`, `topup`, `turn_debit`, `checkpoint_debit`, `media_debit`,
+`trial`, `topup`, `manual_credit`, `turn_debit`, `checkpoint_debit`, `media_debit`,
 `classifier_debit`, `thread_naming_debit`, and the two clawback reasons named
 after their Stripe events.
 
 **The sweep.** An MCP `start_turn` creates a session and sends a message but
 never drives the stream, so the inline hook never fires for it.
 `packages/core/daimon/core/usage_sweep.py` closes that hole: each scheduler
-tick it walks Managed Agents sessions, skips any without a `daimon_tenant`
+tick it lists Managed Agents sessions, skips any without a `daimon_tenant`
 stamp, belonging to a tenant this deployment does not own, or stamped
 `daimon_billing_exempt`, and replays the rest's `span.model_request_end`
-events through the same recorder. It is safe to run
+events through the same recorder. After a successful pass, it skips event
+reads for sessions last updated before that pass started minus 15 minutes.
+The watermark stays in scheduler memory; startup and hourly passes read all
+stamped sessions, and a failed pass leaves the watermark in place. It is safe to run
 against already-metered sessions precisely because the idempotency grain is
 the same.
 
@@ -288,9 +311,9 @@ counts, `cost_usd` (the raw price) and `would_be_debit_usd` (with
 `usage_sweep.completed` line carrying `recorded`, `exempt_sessions`,
 `exempt_model_calls`, `exempt_cost_usd` and `exempt_would_be_debit_usd`.
 
-Nothing is written to the database for these sessions, and the sweep has no
-watermark, so an exempt session is logged again on every tick for as long as
-Managed Agents lists it. Total the absorbed spend by distinct
+Nothing is written to the database for these sessions. An exempt session is
+logged again when its events are read, including the hourly full pass. Total
+the absorbed spend by distinct
 `managed_session_id` (taking its latest line), not by summing every line or
 the per-pass totals.
 
@@ -303,21 +326,19 @@ deliberately kept separate. Both blocks are catalogued in
 
 `load_billing_config` in `packages/core/daimon/core/billing.py` requires
 **all** of the flat Stripe variables together. If any one is missing it logs
-that billing is disabled, returns `None`, and three things follow:
+that Stripe billing is disabled, returns `None`, and these things follow:
 
 - the checkout, webhook and landing routes are not mounted;
-- **the cap gate becomes inert** — `is_over_cap` returns `False` immediately
-  when there is no billing config, so monthly caps do nothing at all;
-- metering, debits, the balance gate and the trial credit are unaffected.
+- metering, debits, the balance gate, configured monthly caps and the trial
+  credit are unaffected.
 
 Self-service top-ups additionally need `DAIMON_MCP__PUBLIC_URL` and
 `DAIMON_MCP__JWT_SECRET` for the adapter-to-MCP hop, and the image must carry
 the optional `billing` extra, which is what pulls in `stripe`.
 
-One gap to be aware of when reading the cap code: nothing in the shipped
-adapters or CLI writes a `tenant_user_caps` row. The stores exist and the gate
-reads them, but today a cap has to be inserted directly, and some user-facing
-copy still says "when available" for exactly that reason.
+The Discord and Slack terminal reply footers show the remaining ledger balance
+for prepaid tenants after the turn's debit. Operator-funded tenants and turns
+without a tenant omit it.
 
 ## What you can see
 

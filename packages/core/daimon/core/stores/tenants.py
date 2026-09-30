@@ -63,6 +63,17 @@ async def get_tenant_liveness(
         return await get_tenant(session, tenant_id)
 
 
+async def get_turn_cap(
+    session_factory: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, default: int
+) -> int:
+    """Read the tenant override, falling back to the adapter's configured cap."""
+    async with session_factory() as session:
+        override = (
+            await session.execute(select(Tenant.turn_cap).where(Tenant.id == tenant_id))
+        ).scalar_one_or_none()
+    return override if override is not None else default
+
+
 _LAST_RECONCILE_ERROR_MAX_LENGTH = 2000
 _LAST_RECONCILE_ERROR_TRUNCATION_MARKER = "... [truncated]"
 
@@ -241,6 +252,27 @@ async def set_funding_mode(
             update(Tenant)
             .where(Tenant.id == tenant_id)
             .values(funding_mode=funding_mode)
+            .returning(Tenant)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise StoreError(f"tenant {tenant_id} not found")
+    await session.flush()
+    return TenantRow.model_validate(row)
+
+
+async def set_turn_cap(
+    session: AsyncSession, *, tenant_id: uuid.UUID, cap: int | None
+) -> TenantRow:
+    """Set or clear a tenant's concurrent-turn override."""
+    if cap is not None and cap < 1:
+        raise StoreError("turn cap must be positive")
+    row = (
+        await session.execute(
+            update(Tenant)
+            .where(Tenant.id == tenant_id)
+            .values(turn_cap=cap)
             .returning(Tenant)
             .execution_options(populate_existing=True)
         )

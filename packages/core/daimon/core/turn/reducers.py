@@ -192,6 +192,7 @@ def _apply_tool_result(
 
     Orphan results (no matching block — possible if a partial replay
     starts mid-pair) are recorded as dedup-only and synthesize no block.
+    The call's id joins `finished_tool_ids` the first time it gets a result.
     """
     if isinstance(event, BetaManagedAgentsAgentMCPToolResultEvent):
         pairing_id = event.mcp_tool_use_id
@@ -224,7 +225,12 @@ def _apply_tool_result(
         updated,
         *state.content[match_index + 1 :],
     ]
-    return dataclasses.replace(state, content=new_content, seen_event_ids=seen)
+    finished = state.finished_tool_ids
+    if matched.id not in finished:
+        finished = (*finished, matched.id)
+    return dataclasses.replace(
+        state, content=new_content, finished_tool_ids=finished, seen_event_ids=seen
+    )
 
 
 _MCP_FAILURE_TYPES = ("mcp_connection_failed_error", "mcp_authentication_failed_error")

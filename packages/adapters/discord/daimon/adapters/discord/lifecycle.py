@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
@@ -32,13 +33,16 @@ from daimon.adapters.discord.embed import (
     TurnPhase,
     format_termination_notice,
     to_embed_data,
-    to_preview_embed_data,
     update,
+    update_activity,
 )
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
+from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.stores import tenant_ledger
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import render_termination_notice
@@ -49,6 +53,8 @@ from daimon.core.turn.state import (
     extract_sealed_responses,
 )
 from daimon.core.turn.termination import termination_reason
+from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 
@@ -62,25 +68,23 @@ _DEBOUNCE_S = 10.0
 
 # A text block sealed by a later tool use posts permanently once it reaches
 # this size; shorter sealed blocks are pre-tool narration and stay in the
-# ephemeral preview embed. Calibrated on prod sessions 2026-07-04..13: the
+# ephemeral draft on the status card. Calibrated on real sessions: the
 # largest narration block was 429 chars, the smallest swallowed answer 542.
 _SEALED_RESPONSE_MIN_CHARS = 500
 
 
 def _map_sse_event(event: RawMessageStreamEvent) -> EmbedEvent | None:
-    """Map a Managed Agents session SSE event to an EmbedEvent, or None if irrelevant."""
-    event_type: str = getattr(event, "type", "")
-    if event_type == "agent.thinking":
-        return EmbedEvent(kind="thinking", label="")
-    if event_type == "agent.tool_use":
-        name: str = getattr(event, "name", "tool")
-        return EmbedEvent(kind="tool_use", label=name)
-    if event_type == "agent.message":
-        parts: list[object] = getattr(event, "content", [])
-        # Full text — the embed state machine caps it for the preview embed.
-        text = "".join(getattr(p, "text", "") for p in parts).strip()
-        return EmbedEvent(kind="message", label=text)
-    return None
+    """Map a Managed Agents session SSE event to an EmbedEvent, or None if irrelevant.
+
+    Only the draft rides SSE: tool calls and the Thinking/Working phase are
+    read from the turn state on each render, which sees every tool kind.
+    """
+    if getattr(event, "type", "") != "agent.message":
+        return None
+    parts: list[object] = getattr(event, "content", [])
+    # Full text — the embed state machine clips it for the draft.
+    text = "".join(getattr(p, "text", "") for p in parts).strip()
+    return EmbedEvent(kind="message", label=text)
 
 
 def _has_visible_output(state: TurnState) -> bool:
@@ -139,6 +143,9 @@ class DiscordTurnLifecycle:
         unprompted: bool = False,
         on_first_post: Callable[[discord.Message], Awaitable[None]] | None = None,
         request_id: Callable[[], str] = bound_request_id,
+        sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+        tenant_id: uuid.UUID | None = None,
+        alert_webhook_url: SecretStr | None = None,
     ) -> None:
         self._requester_id = requester_id
         self._trigger_message = trigger_message
@@ -146,6 +153,9 @@ class DiscordTurnLifecycle:
         self._render_tables = render_tables
         self._send = send
         self._request_id = request_id
+        self._sessionmaker = sessionmaker
+        self._tenant_id = tenant_id
+        self._alert_webhook_url = alert_webhook_url
         self._edit = edit
         self._delete = delete
         # Nobody asked for an unprompted turn, so it stays invisible until it
@@ -158,7 +168,6 @@ class DiscordTurnLifecycle:
         self._clock = clock
         self._state = EmbedState(
             phase=TurnPhase.THINKING,
-            trail=(),
             agent_name=agent_name,
             started_at=self._clock(),
         )
@@ -248,12 +257,8 @@ class DiscordTurnLifecycle:
         return await self._send(**kwargs)
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
-        """Render the activity embed plus the optional text-preview embed below it."""
-        embeds = [build_discord_embed(to_embed_data(self._state, now=now))]
-        preview = to_preview_embed_data(self._state)
-        if preview is not None:
-            embeds.append(build_discord_embed(preview))
-        return embeds
+        """Render the one status embed: headline, tool lines and the latest draft."""
+        return [build_discord_embed(to_embed_data(self._state, now=now))]
 
     async def _maybe_flush(self) -> None:
         """Post or edit the embeds, subject to debounce. No-op after terminal."""
@@ -317,7 +322,19 @@ class DiscordTurnLifecycle:
 
     async def _flush_terminal(self) -> None:
         """Unconditionally flush terminal state as a single collapsed embed,
-        bypassing debounce. ``embeds=[...]`` also drops the preview embed."""
+        bypassing debounce."""
+        if self._sessionmaker is not None and self._tenant_id is not None:
+            try:
+                async with self._sessionmaker() as session:
+                    balance = await tenant_ledger.get_prepaid_balance(
+                        session, tenant_id=self._tenant_id
+                    )
+                if balance is not None:
+                    self._state = dataclasses.replace(
+                        self._state, balance_str=f"${balance:.2f} left"
+                    )
+            except Exception:
+                log.warning("turn.balance_footer_failed", exc_info=True)
         self._terminal = True
         now = self._clock()
         data = to_embed_data(self._state, now=now)
@@ -471,6 +488,17 @@ class DiscordTurnLifecycle:
         return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
+        if (limit := spend_limit_error(err)) is not None:
+            log.error(
+                "anthropic.spend_limit_reached",
+                tenant_id=str(self._tenant_id) if self._tenant_id is not None else None,
+                limit=limit,
+            )
+            alert_ops(
+                self._alert_webhook_url,
+                key=f"spend_limit:{limit}",
+                message=f"Anthropic spend limit reached: {limit} (tenant {self._tenant_id})",
+            )
         if self._unprompted and self._message_ref is None:
             # Same rule as an empty answer: an unprompted turn that never
             # spoke does not announce its own failure into the thread.
@@ -486,7 +514,9 @@ class DiscordTurnLifecycle:
         try:
             reason = state.termination or termination_reason(err)
             request_id = self._request_id()
-            notice = render_termination_notice(reason, state=state, request_id=request_id)
+            notice = render_termination_notice(
+                reason, state=state, request_id=request_id, error=err
+            )
             if notice is not None:
                 label, body = notice.headline, format_termination_notice(notice)
         except Exception:
@@ -507,6 +537,7 @@ class DiscordTurnLifecycle:
         # answer never trails behind an embed that already moved past it.
         if self._terminal:
             return
+        self._state = update_activity(self._state, state)
         await self._persist_sealed_responses(state)
         if self._unprompted and self._message_ref is None and not _has_visible_output(state):
             return  # nothing to show yet, and nobody asked: stay invisible

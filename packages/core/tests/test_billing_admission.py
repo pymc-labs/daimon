@@ -37,21 +37,21 @@ _TEST_BILLING = billing.BillingConfig(
 )
 
 
-async def _record_1m_opus_tokens(
+async def _record_3m_opus_tokens(
     session: AsyncSession,
     *,
     user_id: str,
     tenant_id: uuid.UUID,
     event_id: str,
 ) -> None:
-    """1M input tokens at claude-opus-4-7 input rate ($15/M) = $15.00."""
+    """3M input tokens at claude-opus-4-7 input rate ($5/M) = $15.00."""
     await usage_events.record(
         session,
         tenant_id=tenant_id,
         platform_user_id=user_id,
         managed_session_id=f"s_{event_id}",
         model="claude-opus-4-7",
-        model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
+        model_usage=ma_model_usage(input_tokens=3_000_000, output_tokens=0),
         event_id=event_id,
     )
 
@@ -83,7 +83,7 @@ async def test_is_over_cap_returns_true_when_sum_meets_threshold(
             tenant_id=tenant.id,
             amount=Decimal("15.00"),
         )
-        await _record_1m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
+        await _record_3m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
     over = await billing.is_over_cap(
         billing_config=_TEST_BILLING,
         sessionmaker=db_session_factory,
@@ -110,7 +110,7 @@ async def test_is_over_cap_window_follows_injected_now(
             amount=Decimal("10.00"),
         )
         # $15 spent, stamped at the current wall-clock month.
-        await _record_1m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
+        await _record_3m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
 
     now = datetime.now(UTC)
     over_this_month = await billing.is_over_cap(
@@ -145,7 +145,7 @@ async def test_is_over_cap_returns_false_when_under_threshold(
             tenant_id=tenant.id,
             amount=Decimal("20.00"),
         )
-        await _record_1m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
+        await _record_3m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
     over = await billing.is_over_cap(
         billing_config=_TEST_BILLING,
         sessionmaker=db_session_factory,
@@ -174,7 +174,7 @@ async def test_is_over_cap_uses_override_when_set(
             user_id="u1",
             amount=Decimal("10.00"),
         )
-        await _record_1m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
+        await _record_3m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
     over = await billing.is_over_cap(
         billing_config=_TEST_BILLING,
         sessionmaker=db_session_factory,
@@ -209,7 +209,7 @@ async def test_is_over_cap_period_boundary_utc_first_of_month(
                 platform_user_id="u1",
                 managed_session_id="s_old",
                 model="claude-opus-4-7",
-                input_tokens=1_000_000,
+                input_tokens=3_000_000,
                 output_tokens=0,
                 cache_creation_input_tokens=0,
                 cache_read_input_tokens=0,
@@ -272,7 +272,24 @@ async def test_is_over_cap_returns_false_when_billing_config_none(
         user_id="u1",
         now=datetime.now(UTC),
     )
-    assert result is False, "billing_config=None should allow all turns"
+    assert result is False, "no cap row should allow turns without Stripe"
+
+
+async def test_is_over_cap_without_stripe_when_cap_is_reached(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    async with db_session_factory() as s, s.begin():
+        await tenant_user_caps.set_default(s, tenant_id=tenant.id, amount=Decimal("15.00"))
+        await _record_3m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="no-stripe")
+    assert await billing.is_over_cap(
+        billing_config=None,
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        user_id="u1",
+        now=datetime.now(UTC),
+    )
 
 
 def test_load_billing_config_returns_config_when_env_complete(

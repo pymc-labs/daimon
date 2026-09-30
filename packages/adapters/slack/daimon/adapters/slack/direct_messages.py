@@ -13,7 +13,14 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.direct_messages import reply_to_dm, require_dm_enabled, start_dm
+from daimon.core.direct_messages import (
+    is_sealed_slack_message,
+    reply_to_dm,
+    require_dm_enabled,
+    require_unsealed_source,
+    sealed_channel_ids,
+    start_dm,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -131,8 +138,17 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 is_dm=True,
                 now=datetime.now(UTC),
             )
+            require_unsealed_source(admission)
             response = await client.conversations_history(channel=channel_id, limit=12)  # pyright: ignore[reportUnknownMemberType]
             messages = cast(list[dict[str, Any]], response.get("messages", []))
+            # /dm carries no thread_ts, so admission cannot see a thread sealed
+            # on its own: drop such threads' roots and broadcast replies here.
+            sealed = await sealed_channel_ids(runtime.turn_deps, tenant_id=tenant_id)
+            messages = [
+                item
+                for item in messages
+                if not is_sealed_slack_message(sealed, channel_id=channel_id, message=item)
+            ]
             context = [
                 TranscriptTurn(
                     role="user", text=f"{item.get('user', 'agent')}: {item.get('text', '')}"
@@ -153,7 +169,14 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 channel_id=dm_channel,
                 external_user_id=user_id,
                 source_url=source_url,
+                source_channel_id=channel_id,
+                source_thread_id=None,
                 context=context,
+                # Each copied message's thread, so a later thread-only seal ends
+                # this DM too.
+                source_thread_keys=[
+                    f"{channel_id}:{item.get('thread_ts') or item.get('ts')}" for item in messages
+                ],
             )
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=dm_channel,

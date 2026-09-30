@@ -26,7 +26,7 @@ def test_apply_mcp_modal_adds_matching_toolset_entry() -> None:
     server = BetaManagedAgentsURLMCPServerParams(
         name="ga4-mcp", type="url", url="https://ga4.example.com/mcp"
     )
-    state.apply_mcp_modal(server_entry=server, token_last4="abcd")
+    state.apply_mcp_modal(server_entry=server)
     assert state.selected is not None
     tools = state.selected.spec.tools or []
     referenced = [
@@ -47,8 +47,8 @@ def test_apply_mcp_modal_is_idempotent_for_duplicate_name() -> None:
     server = BetaManagedAgentsURLMCPServerParams(
         name="dup-mcp", type="url", url="https://example.com/mcp"
     )
-    state.apply_mcp_modal(server_entry=server, token_last4="abcd")
-    state.apply_mcp_modal(server_entry=server, token_last4="abcd")
+    state.apply_mcp_modal(server_entry=server)
+    state.apply_mcp_modal(server_entry=server)
     assert state.selected is not None
     tools = state.selected.spec.tools or []
     toolset_for_dup = [t for t in tools if t.get("mcp_server_name") == "dup-mcp"]
@@ -62,7 +62,6 @@ def test_remove_mcp_at_removes_matching_toolset_entry() -> None:
         server_entry=BetaManagedAgentsURLMCPServerParams(
             name="to-remove", type="url", url="https://example.com/mcp"
         ),
-        token_last4="abcd",
     )
     state.remove_mcp_at(0)
     assert state.selected is not None

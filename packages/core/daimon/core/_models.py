@@ -45,6 +45,7 @@ class Tenant(Base):
         CheckConstraint(
             "funding_mode IN ('prepaid', 'operator_funded')", name="ck_tenants_funding_mode"
         ),
+        CheckConstraint("turn_cap IS NULL OR turn_cap > 0", name="ck_tenants_turn_cap"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -60,6 +61,7 @@ class Tenant(Base):
     funding_mode: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'prepaid'")
     )
+    turn_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_reconcile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     registered_at: Mapped[datetime] = mapped_column(
@@ -860,7 +862,7 @@ class TenantLedger(Base):
     delta_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
     reason: Mapped[str] = mapped_column(
         Text, nullable=False
-    )  # topup|trial|turn_debit|charge.refunded|charge.dispute.created
+    )  # topup|manual_credit|trial|turn_debit|charge.refunded|charge.dispute.created
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
     payment_event_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("payment_events.id", ondelete="SET NULL"), nullable=True
@@ -2058,6 +2060,11 @@ class DirectMessageConversation(Base):
     channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     scope_id: Mapped[str] = mapped_column(Text, nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # The channel (and thread) /dm was run in; re-checked against seals each turn.
+    source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Slack: channel:thread_ts of every copied message, so later thread seals match.
+    source_thread_keys: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     context: Mapped[str] = mapped_column(Text, nullable=False)
     memory_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)

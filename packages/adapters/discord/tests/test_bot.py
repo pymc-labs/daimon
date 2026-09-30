@@ -20,6 +20,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_agent, ma_environment, ma_session
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -106,6 +107,30 @@ def _make_channel_message(
 
 class TestInflightCapRejection:
     """4th turn for a saturated tenant rejected (SCALE-01)."""
+
+    async def test_tenant_override_admits_above_deployment_default(
+        self, db_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        from daimon.core.defaults.provisioning import provision_tenant
+
+        guild_id = "801000099"
+        result = await provision_tenant(
+            db_session_factory,
+            platform="discord",
+            workspace_id=guild_id,
+            signup_credit=Decimal("5.00"),
+        )
+        async with db_session_factory() as session, session.begin():
+            await set_turn_cap(session, tenant_id=result.tenant_id, cap=30)
+        bot = make_bot(_make_runtime(db_session_factory, max_concurrent_turns_per_tenant=3))
+        bot._inflight[result.tenant_id] = 3  # pyright: ignore[reportPrivateUsage]
+        bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue, reportMethodAssign]
+
+        message = _make_channel_message(guild_id=int(guild_id))
+        await bot.on_message(message)
+
+        bot._handle_mention.assert_awaited_once()  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        assert bot._inflight[result.tenant_id] == 3  # pyright: ignore[reportPrivateUsage]
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)

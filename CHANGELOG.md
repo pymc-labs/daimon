@@ -9,11 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- `/dm` now refuses in a sealed channel or a Discord thread under one, before reading any history. It used to copy the last 12 messages into a DM that sits outside the seal. On Slack, a thread sealed on its own is dropped from the copied history instead. An existing DM whose source channel, thread or (on Slack) any copied thread is sealed later ends on its next message: the conversation and its copied context are deleted and its sessions retired. DMs started before this release end as soon as the workspace seals anything. Run migration `0032_dm_source_ids` before deploying.
+- The Slack `/routines` panel lists only your own routines unless you are an admin. `daimon agents fork` refuses a pinned source and leaves token-backed MCP servers off the copy, like the chat tool. The unused panel fork helpers and credential-copy stores are removed, and member-facing copy no longer points members at `fork_agent`, which is admin-only.
+- `fork_agent` is admin-only, refuses to copy an agent pinned to channels, and a fork now starts with no credentials: no GitHub access, repo binding or proof of access, and no agent-wide MCP token. MCP servers that only work with a stored token are left off the copy. Previously any member could fork another project's agent and walk off with its repo access and connector tokens.
+- A member can no longer operate another project's agent from outside its channels. MCP and hub turns (`start_turn`, `ask`, `continue_turn`, new or resumed) refuse a pinned agent. `hand_off_task` to an agent other than the channel's own, and `create_routine`/`update_routine` for an agent other than the one you are talking to or the destination channel's, now need an admin. Routines are listed and read only by their creator and admins.
+- Operators can pin an agent to named channels (`daimon tenants access-policy set --add-pin-agent AGENT=CHANNEL_ID`, `--remove-pin-agent AGENT[=CHANNEL_ID]`). Pin edits keep every other agent's pin, and `--pin-agent`, which replaces the whole map, refuses to drop an unnamed agent's pin without `--replace-pins`. A pinned agent refuses turns anywhere else, including DMs and threads handed to it from other channels, and its routines must post into a pinned channel. Agents without a pin are unchanged.
+- Agent keys are no longer stored in plaintext by default. Without `DAIMON_CRYPTO__KEYS`, saving one is refused (`request_agent_key` refuses before posting a form, and the form says why) unless `DAIMON_CRYPTO__ALLOW_PLAINTEXT=true` opts in for local development. The session factory logs `agent_env.encryption_keys_missing` at error level at startup.
+- New `daimon crypto verify` (fails when keys are missing, any agent key is stored in plaintext, or an encrypted key can't be decrypted with the current keys; counts per tenant only) and `daimon crypto encrypt-plaintext` (encrypts legacy plaintext rows in place).
+- `self_read_file` and `self_list_files` no longer return any agent key value, only keys and metadata; the sandbox `.env` still carries them.
+- Credential submissions no longer log any part of tokens, PATs or credential request tokens.
+- Make the mounted agent `.env` inert under `set -a; source`: any value bash would expand, substitute or split is now single-quoted (double-quoted only when it holds a line break), so a key value such as `$(curl …)` set by any member no longer runs code in the agent's sandbox.
+- Refuse key *names* that are themselves a capability, in two structural layers rather than a fixed list. Hard-denied for everyone (including admins), and filtered out of the mounted file even for rows stored earlier: any name that controls an interpreter, archiver, loader, locale, package manager, git, an HTTP client or a CA bundle, or that redirects an SDK's own traffic — recognised by exact names plus prefix/suffix classes (`*_OPTIONS`, `*OPTS`, `*_COMMAND`, `*STARTUP`, `*RC`, `*_PATH`/`PATH`, `*_PROXY`, `*_CONFIG`, `*_PRELOAD`, `*_BASE_URL`, `*_ENDPOINT`, `*_INDEX_URL`, `LD_*`, `GIT_*`, `LC_*`, …). This closes `TAR_OPTIONS`, `BASH_ENV`, `PYTHONSTARTUP`, `GIT_SSH_COMMAND`, `LESSOPEN` and their kind as cross-agent execution routes. Non-admin members may additionally only add a *secret* name — `^[A-Z][A-Z0-9_]{1,63}$` ending in `_KEY`, `_KEY_ID`, `_TOKEN`, `_SECRET`, `_PASSWORD`, `_PASSPHRASE` or `_PAT` (plus `GH_TOKEN`/`GITHUB_TOKEN` and bare words like `TOKEN`) — never an identity or targeting name (`*_USER`, `*_ID`, `*_EMAIL`, `*_ORG`, `*_PROJECT`, `*_REGION` …) or a `*_URL`/`*_HOST`; an admin may add any name that is not hard-denied. Language and build loaders (`R_*`, `JULIA_*`, `LUA_INIT*`, `JUPYTER_*`, `PYTEST_PLUGINS`, `*FLAGS`, `CC`/`LD`, `CMAKE_*`), libc and TLS controls (`GLIBC_TUNABLES`, `MALLOC_*`, `OPENSSL_*`, `NODE_TLS_REJECT_UNAUTHORIZED`, `SSLKEYLOGFILE`), config directories (`XDG_*`, `*_CONFIG_DIR`, `GNUPGHOME`, `PG*FILE`) and endpoint overrides (`AWS_ENDPOINT_URL*`, `GH_HOST`, `GITHUB_API_URL`, `CLOUDSDK_API_ENDPOINT_OVERRIDES_*`, `TF_CLI_*`, `HELM_*`, `CONDA_*`, `BUNDLE_*`, `POETRY_*`) are hard-denied; `NPM_TOKEN`, `CARGO_REGISTRY_TOKEN`, `UV_PUBLISH_TOKEN` and `DOCKER_PASSWORD` are exempt as opaque secrets. `self_write_file` now stores only secret-named keys (every key it writes is exported into the sandbox `.env`), so it no longer accepts file-like keys such as `config.yaml`. Enforced at `request_agent_key`, the Discord and Slack forms and uploads, and `self_write_file`; the store and the `.env` assembler apply the hard-deny layer under all of them.
 - Encrypt agent environment values with rotatable deployment keys when configured, including existing rows on upgrade. Store encoding separately from user text so every literal value, including `enc:v1:` prefixes, remains valid. A database trigger keeps writes from older code tagged as plaintext; decryption errors identify the affected row without exposing values.
 
 ### Upgrade notes
 
-- Agent environment encryption is opt-in through `DAIMON_CRYPTO__KEYS`; keyless deployments retain plaintext storage and initialization still succeeds. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
+- Set `DAIMON_CRYPTO__KEYS` before upgrading: keyless deployments still start and read existing values, but refuse new agent key writes unless `DAIMON_CRYPTO__ALLOW_PLAINTEXT=true`, including the agent's own `self_write_file` notes (the tool error names `DAIMON_CRYPTO__KEYS`). After setting keys, run `daimon crypto encrypt-plaintext`, then `daimon crypto verify`. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
+- Agents whose keys hold shell metacharacters get a re-quoted `.env` once, so those sessions pick up a fresh mount on their next turn. Keys already stored under a hard-denied or non-identifier name stop being exported (an admin-set `DATABASE_URL` still mounts — only tool-control names are dropped); each skipped name is logged as `credential_env.row_skipped` and still shows in `list_agent_keys` so it can be removed or re-added under another name. If you suspect a name like `TAR_OPTIONS` or `LD_PRELOAD` was set on a shared agent before this release, refresh that agent's sessions and rotate any credential the agent could have reached.
+- The seeded agents move to Sonnet 5.5 on the next defaults reconcile, so each existing `daimon` and `dev_agent` thread replaces its session on its next message, with one checkpoint turn on the old session if it had replied. Reports and spend caps reprice history at read time, so this month's Sonnet 5 and Opus 4.7 spend drops at once; set `DAIMON_BILLING__MARKUP` if the old rates stood in for a margin.
 
 ### Added
 
@@ -33,6 +46,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explains why with the termination notice. Protected channels get no
   replies, notices or tool posts.
   Builds on #220 by @jchu96. See `docs/teams.md`.
+- Staging-only load rehearsal script for synthetic installs and metered headless turns, with a dry run, spend guard, and tenant cleanup.
+
+- Optional Discord webhook alerts for new installs, Stripe top-ups, and Anthropic spend or overload events.
+
+- Discord delivers files generated during tool-using turns into the chat thread,
+  with upload-limit notices and protected-channel checks.
+- Optional Discord process-wide turn limit for guild chats and DMs. Excess
+  requested turns get a retry notice; surfaced Anthropic 429/529 responses
+  emit structured logs.
+- Operators can credit tenants with `daimon tenants credit --note` and set default
+  or per-person monthly caps with `daimon tenants cap`. Caps apply without Stripe;
+  prepaid Discord and Slack turn footers show the remaining balance.
+- Operators can set a tenant's concurrent chat-turn cap with
+  `daimon tenants turn-cap`, or clear it to use the deployment default.
 - Record content-free turn outcomes across chat, headless, routines and MCP hub/agent-chat, including attributed admission refusals, with bounded best-effort persistence. MCP `ask` records its terminal reason; fire-and-forget `start_turn`/`continue_turn` record dispatch only (`unknown`), without a later terminal update. Pre-attribution and adapter readiness gates are outside coverage.
 - Routines can name an optional destination channel or thread
   (`create_routine`/`update_routine` `destination_kind` + `destination_id`,
@@ -176,6 +203,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A tidier status card while a turn runs.** Discord shows one embed instead
+  of two and Slack one matching card: a bold Thinking or Working headline with
+  the elapsed time, up to six recent tool calls in a code block, and the latest
+  draft quoted underneath. Built-in tools read as plain verbs ("Reading a
+  file", then "Read a file"), MCP and custom tools get readable names, finished
+  calls are ticked, failed ones marked, and older calls fold into "+N earlier".
+  The list now includes MCP and custom tool calls and still never shows tool
+  arguments. The finished-turn summary and the error card are unchanged.
+
 - A handoff or private-input continuation whose process dies mid-dispatch is
   no longer stuck in `claimed`: it is retried if its turn had not started, and
   settled `skipped/interrupted` if it had. When the session is busy, the same
@@ -200,8 +236,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defer the durable queue job using GitHub's retry deadline; permission 403s
   remain permanent. See `docs/github-push-resync.md` for the covered request
   paths and remaining scope.
+- **Sonnet 5.5 is the default model.** It can be selected for an agent and is
+  metered at its published rates, and the seeded `daimon` and `dev_agent`
+  agents and every new agent now start on it instead of Sonnet 5, at the same
+  per-token price. Asking an agent tool for "Sonnet" or "Opus" now means
+  Sonnet 5.5 or Opus 5.5. Opus 5.5 and the older models remain selectable per
+  agent; fork a seeded agent to keep it on another model. Sonnet 5.5 returns longer notes between tool calls as thinking, so the in-progress
+  card can show less draft text than it did on Sonnet 5.
 - Opus 5.5 can be selected for an agent and is metered at its published rates.
-  The seeded and new-agent defaults remain Sonnet 5.
 - The documentation site carries daimon's own look: the readme sticker as
   logo and favicon, and a palette taken from it.
 - Defaults reconciliation serializes writes and sweeps per tenant so concurrent
@@ -214,6 +256,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Continuity notices (workspace loss, fresh start, a failed preparation, a new
   responder, a timer that did not run) say "here" and "ask again" instead of
   "this thread" and "mention me", so they read right in a chat without threads.
+- **Sonnet 5 and Opus 4.7 are metered at list price.** Sonnet 5 was charged at
+  $3/$15 per million tokens, the rise Anthropic announced and then withdrew;
+  its standard price stayed $2/$10. Opus 4.7 was charged Opus 4.1's $15/$75
+  instead of $5/$25. Every agent-model row in the pricing table is now the
+  provider's list price. Deployments that want a margin set `DAIMON_BILLING__MARKUP`, which
+  applies the same multiplier to every model and leaves the cost reports
+  showing provider cost.
+
+- Stop retrying Anthropic's monthly spend-cap response and show a clear model usage limit notice in Discord and Slack.
+
+- Avoid repeated Managed Agents event reads for unchanged sessions during the usage sweep, with hourly full passes.
+
+- The MCP server's hub login store opens one database connection at startup and
+  grows to four, instead of holding ten per instance. During a deploy the old and
+  new revisions no longer exhaust a small Cloud SQL tier's connection slots.
+
+- Fresh Discord installs and boot reconciles share a bounded seed queue. Skills API
+  calls are paced across the adapter process and retry temporary rate limits;
+  defaults reconciliation lists workspace skills once per tenant instead of once
+  per skill.
+
+- Follow Anthropic Skills API cursors across multiple pages. A full final page
+  without a cursor still fails closed before skill writes or deletes.
+
 - Direct-message policies normalize tenant UUID keys and reject invalid keys at
   settings load, so restrictive policies cannot silently miss their tenant.
 

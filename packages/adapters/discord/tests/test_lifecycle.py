@@ -10,13 +10,17 @@ from __future__ import annotations
 import dataclasses
 import time
 import types
+import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, NoReturn
 
 import daimon.adapters.discord.lifecycle as lifecycle_module
 import discord
+import httpx
 import pytest
 import structlog
+from anthropic import BadRequestError, RateLimitError
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
@@ -27,10 +31,14 @@ from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.stores import tenant_ledger
+from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
+from daimon.testing.factories import make_tenant
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,6 +53,8 @@ def _make_lifecycle(
     model_id: str = "claude-sonnet-4-6",
     notify_on_completion: bool = False,
     render_tables: bool = False,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
     """Create lifecycle with recorder callables.
 
@@ -71,6 +81,8 @@ def _make_lifecycle(
         agent_name=agent_name,
         model_id=model_id,
         cancel_view=cancel_view,
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
     )
     return lc, sends, edits
 
@@ -80,9 +92,10 @@ def _thinking_event() -> Any:
     return types.SimpleNamespace(type="agent.thinking")
 
 
-def _tool_use_event(name: str = "Bash") -> Any:
-    """MA session SSE event: agent.tool_use."""
-    return types.SimpleNamespace(type="agent.tool_use", name=name)
+def _running_tool_turn(name: str = "bash") -> TurnState:
+    """Turn state with one tool call still waiting on its result."""
+    call = ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name=name, input={})
+    return TurnState(content=[call])
 
 
 def _message_event(text: str = "I'll look that up") -> Any:
@@ -93,6 +106,52 @@ def _message_event(text: str = "I'll look that up") -> Any:
 
 def _make_success_state(text: str = "Hello response") -> TurnState:
     return TurnState(content=[TextBlock(kind="text", text=text)])
+
+
+@pytest.mark.parametrize("status", [400, 429])
+async def test_spend_limit_posts_notice_and_error_log(
+    status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id = uuid.uuid4()
+    alerts: list[str] = []
+    monkeypatch.setattr(
+        lifecycle_module, "alert_ops", lambda url, *, key, message: alerts.append(key)
+    )
+    lc, _, edits = _make_lifecycle(tenant_id=tenant_id)
+    await lc.post_initial()
+    body = (
+        {"type": "rate_limit_error", "details": {"error_code": "enforced_spend_limit_reached"}}
+        if status == 429
+        else {
+            "type": "invalid_request_error",
+            "message": "You have reached your specified API usage limits",
+        }
+    )
+    response = httpx.Response(
+        status,
+        json={"type": "error", "error": body},
+        request=httpx.Request("GET", "https://api.anthropic.com/v1/models"),
+    )
+    error = (
+        RateLimitError("limit", response=response, body=body)
+        if status == 429
+        else BadRequestError("limit", response=response, body=body)
+    )
+    turn_error = TurnError(kind="upstream", cause=error)
+    with structlog.testing.capture_logs() as logs:
+        await lc.on_terminal_failure(TurnState(error=turn_error), turn_error)
+    assert alerts == [f"spend_limit:{'org_cap' if status == 429 else 'user_limit'}"]
+    embed = edits[-1][1]["embeds"][0]
+    assert (
+        "Daimon has reached its model usage limit for now. The operators have been notified."
+        in embed.description
+    )
+    assert {
+        "event": "anthropic.spend_limit_reached",
+        "log_level": "error",
+        "tenant_id": str(tenant_id),
+        "limit": "org_cap" if status == 429 else "user_limit",
+    } in logs
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +188,7 @@ class TestFirstEventSendsEmbed:
 
         await lc.on_sse_event(_thinking_event())
         await lc.on_render(TurnState())  # first post
-        await lc.on_sse_event(_tool_use_event("read_file"))
-        await lc.on_render(TurnState())  # same debounce window
+        await lc.on_render(_running_tool_turn("read"))  # same debounce window
 
         assert len(sends) == 1, "only one send — no additional posts"
         assert len(edits) == 0, "no edits within debounce window"
@@ -147,8 +205,8 @@ class TestPostInitial:
 
         assert len(sends) == 1, "post_initial should post the embed immediately"
         embed: discord.Embed = sends[0]["embeds"][0]
-        assert embed.title is not None and "thinking" in embed.title, (
-            "initial embed should render the thinking phase"
+        assert (embed.description or "").startswith("**Thinking**"), (
+            "initial embed should lead with the Thinking headline"
         )
         assert len(edits) == 0, "no edits before any SSE event"
 
@@ -160,8 +218,7 @@ class TestPostInitial:
         await lc.post_initial()
         # Simulate debounce elapsed by backdating last flush
         lc._last_flush = time.monotonic() - 11.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce is the established idiom in TestDebounce
-        await lc.on_sse_event(_tool_use_event("Bash"))
-        await lc.on_render(TurnState())
+        await lc.on_render(_running_tool_turn())
 
         assert len(sends) == 1, "initial embed should be adopted, not re-posted"
         assert len(edits) == 1, "render tick should edit the initial embed in place"
@@ -183,8 +240,7 @@ class TestDebounce:
         # Simulate debounce elapsed by backdating last flush
         lc._last_flush = time.monotonic() - 11.0
 
-        await lc.on_sse_event(_tool_use_event("Bash"))
-        await lc.on_render(TurnState())
+        await lc.on_render(_running_tool_turn())
 
         assert len(edits) == 1, "edit should fire after debounce elapsed"
         assert edits[0][0] is _SENTINEL_REF, "edit should use stored message ref"
@@ -472,10 +528,9 @@ class TestRenderPropagatesFailures:
         await lc.on_sse_event(_thinking_event())
         await lc.on_render(TurnState())  # first post -- no edit yet, succeeds
         lc._last_flush = time.monotonic() - 11.0
-        await lc.on_sse_event(_tool_use_event("Bash"))
 
         with pytest.raises(RuntimeError, match="rate limited"):
-            await lc.on_render(TurnState())
+            await lc.on_render(_running_tool_turn())
 
     async def test_on_sse_event_never_raises_for_the_same_scenario(self) -> None:
         """The cheap local tap performs no I/O, so a failing edit callable
@@ -499,7 +554,10 @@ class TestRenderPropagatesFailures:
         lc._last_flush = time.monotonic() - 11.0
         # Does not raise even though the next render tick would hit the
         # raising edit -- on_sse_event performs no I/O at all.
-        await lc.on_sse_event(_tool_use_event("Bash"))
+        await lc.on_sse_event(_message_event("Checking the logs"))
+        assert lc._state.text_preview == "Checking the logs", (  # pyright: ignore[reportPrivateUsage]
+            "the tap still folded the event into the card"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -637,8 +695,7 @@ class TestCancelViewWiring:
         await lc.on_sse_event(_thinking_event())
         await lc.on_render(TurnState())
         lc._last_flush = time.monotonic() - 11.0
-        await lc.on_sse_event(_tool_use_event("Bash"))
-        await lc.on_render(TurnState())
+        await lc.on_render(_running_tool_turn())
         assert edits[0][1].get("view") is fake_view, "debounced edit must include cancel_view"
 
     async def test_terminal_success_removes_cancel_view(self) -> None:
@@ -694,44 +751,49 @@ class TestCancelViewWiring:
 
 
 # ---------------------------------------------------------------------------
-# Thinking is a contentless ping: phase/title only, no trail line
+# One status embed, built from the turn state on each render
 # ---------------------------------------------------------------------------
 
 
-class TestThinkingNotInTrail:
-    async def test_thinking_then_tool_trail_has_tool_line_only(self) -> None:
-        """A thinking ping followed by a tool call yields a trail with the tool
-        line only — the thinking ping leaves no entry behind."""
+class TestStatusEmbedFromTurnState:
+    async def test_render_lists_every_tool_kind_from_turn_state(self) -> None:
+        """Tool lines come from the render's TurnState, so MCP calls show too,
+        not only the agent.tool_use events the SSE tap sees."""
         lc, sends, edits = _make_lifecycle()
 
-        await lc.on_sse_event(_thinking_event())
-        await lc.on_render(TurnState())
-        lc._last_flush = time.monotonic() - 11.0
-        await lc.on_sse_event(_tool_use_event("Bash"))
-        await lc.on_render(TurnState())
+        await lc.on_render(TurnState(content=[TextBlock(kind="text", text="Checking.")]))
+        lc._last_flush = time.monotonic() - 11.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce is the established idiom in TestDebounce
+        mcp_call = ToolUseBlock(
+            kind="tool_use",
+            id="tu_1",
+            type="agent.mcp_tool_use",
+            name="search_issues",
+            input={"query": "private words"},
+            mcp_server_name="tracker",
+        )
+        await lc.on_render(TurnState(content=[mcp_call]))
 
-        embed = edits[-1][1]["embeds"][0]
-        assert "Bash" in (embed.description or ""), "tool line must be present"
-        assert "thinking" not in (embed.description or ""), "no thinking line in the trail"
+        embeds = edits[-1][1]["embeds"]
+        assert len(embeds) == 1, "the whole status is one embed"
+        description = embeds[0].description or ""
+        assert description.startswith("**Working**"), "a pending call reads as working"
+        assert "🔍 Search issues (tracker)" in description, "MCP calls get a readable line"
+        assert "private words" not in description, "a tool line never shows its arguments"
 
-    async def test_thinking_then_message_surfaces_preview_embed(self) -> None:
-        """The real intermediate content arrives via agent.message and is surfaced
-        in the bottom preview embed — not the activity trail."""
+    async def test_message_draft_shares_the_status_embed(self) -> None:
+        """The latest agent.message text is quoted under the tool lines, in the
+        same embed rather than a second one."""
         lc, sends, edits = _make_lifecycle()
 
-        await lc.on_sse_event(_thinking_event())
         await lc.on_render(TurnState())
         lc._last_flush = time.monotonic() - 11.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce is the established idiom in TestDebounce
         await lc.on_sse_event(_message_event("Let me check the workspace config"))
         await lc.on_render(TurnState())
 
         embeds = edits[-1][1]["embeds"]
-        assert len(embeds) == 2, "activity embed on top, preview embed below"
-        assert "Let me check the workspace config" not in (embeds[0].description or ""), (
-            "message text must not enter the activity trail"
-        )
-        assert "Let me check the workspace config" in (embeds[1].description or ""), (
-            "agent.message text must be surfaced in the preview embed"
+        assert len(embeds) == 1, "the draft rides the status embed"
+        assert (embeds[0].description or "").endswith("> Let me check the workspace config"), (
+            "agent.message text must be quoted at the bottom of the status embed"
         )
 
 
@@ -825,47 +887,40 @@ class TestZeroMessageBehavior:
 
 
 class TestMessageEventMapping:
-    async def test_message_event_produces_preview_embed(self) -> None:
-        """agent.message SSE events surface their text in the bottom preview embed."""
+    async def test_message_event_produces_draft(self) -> None:
+        """agent.message SSE events surface their text as the status embed's draft."""
         lc, sends, edits = _make_lifecycle()
         await lc.on_sse_event(_message_event(text="I'll look that up for you and check"))
         await lc.on_render(TurnState())
 
-        assert len(sends) == 1
         embeds = sends[0].get("embeds")
-        assert embeds is not None and len(embeds) == 2
-        assert "I'll look that up" in embeds[1].description, (
-            "message text belongs to the preview embed"
-        )
+        assert embeds is not None and len(embeds) == 1, "one status embed"
+        assert "> I'll look that up" in embeds[0].description, "message text is the draft"
 
-    async def test_thinking_event_shows_phase_in_title_not_trail(self) -> None:
-        """agent.thinking posts the embed and shows the thinking phase in the title,
-        but adds no trail line — MA emits no thinking text to surface."""
+    async def test_thinking_event_adds_nothing_to_the_card(self) -> None:
+        """agent.thinking carries no text; the headline already says Thinking."""
         lc, sends, edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
         await lc.on_render(TurnState())
 
-        assert len(sends) == 1
         embeds: list[discord.Embed] | None = sends[0].get("embeds")
         assert embeds is not None
-        embed = embeds[0]
-        assert "thinking" in (embed.title or ""), "title should show the thinking phase"
-        assert "thinking" not in (embed.description or ""), (
-            "trail must not carry a contentless thinking line"
-        )
+        description = embeds[0].description or ""
+        assert description.startswith("**Thinking**"), "headline shows the thinking state"
+        assert "\n" not in description, "no tool lines and no draft for a bare thinking ping"
 
     async def test_message_event_truncates_long_text(self) -> None:
-        """Long agent.message text is capped at 250 chars in the preview embed."""
+        """Long agent.message text is capped at 300 chars in the draft."""
         lc, sends, edits = _make_lifecycle()
         long_text = "A" * 400
         await lc.on_sse_event(_message_event(text=long_text))
         await lc.on_render(TurnState())
 
         embeds = sends[0].get("embeds")
-        assert embeds is not None and len(embeds) == 2
-        preview = embeds[1].description
-        assert len(preview) < 400, "preview must be truncated, not the full text"
-        assert "…" in preview, "truncated text should end with ellipsis"
+        assert embeds is not None and len(embeds) == 1, "the draft rides the one status embed"
+        description = embeds[0].description
+        assert len(description) < 400, "draft must be truncated, not the full text"
+        assert "…" in description, "truncated text should end with ellipsis"
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +958,36 @@ def _terminal_embed(edits: list[tuple[Any, dict[str, Any]]]) -> discord.Embed:
         if embeds:
             return embeds[0]
     raise AssertionError("no terminal embed was flushed")
+
+
+@pytest.mark.asyncio
+async def test_terminal_footer_shows_prepaid_balance_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    async with db_session_factory() as s, s.begin():
+        await tenant_ledger.insert_entry(
+            s,
+            tenant_id=tenant.id,
+            delta_usd=Decimal("12.50"),
+            reason="test",
+            idempotency_key=f"test:{tenant.id}",
+        )
+    lc, _sends, edits = _make_lifecycle(sessionmaker=db_session_factory, tenant_id=tenant.id)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_render(TurnState())
+    await lc.on_terminal_success(_make_success_state())
+    assert _terminal_embed(edits).footer.text.endswith("· $12.50 left")
+
+    async with db_session_factory() as s, s.begin():
+        await set_funding_mode(s, tenant_id=tenant.id, funding_mode="operator_funded")
+    lc, _sends, edits = _make_lifecycle(sessionmaker=db_session_factory, tenant_id=tenant.id)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_render(TurnState())
+    await lc.on_terminal_success(_make_success_state())
+    assert "$12.50 left" not in _terminal_embed(edits).footer.text
 
 
 class TestWasAnswered:

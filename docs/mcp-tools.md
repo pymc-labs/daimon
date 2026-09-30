@@ -186,8 +186,8 @@ Routines tools: create / list / get / update / delete.
 | --- | --- | --- |
 | `create_routine` | all callers | Create a routine in the caller's tenant partition. |
 | `delete_routine` | all callers | Delete a routine (hard delete, tenant-scoped). |
-| `get_routine` | all callers | Get a routine by id (tenant-scoped; raises if not found or cross-tenant). |
-| `list_routines` | all callers | List all routines in the caller's tenant partition. |
+| `get_routine` | all callers | Get a routine by id. |
+| `list_routines` | all callers | List the routines you created (an admin sees every routine in the workspace). |
 | `update_routine` | all callers | PATCH-update a routine. |
 
 ## `self_edit`
@@ -200,8 +200,8 @@ MCP tools for an agent to edit its own ``agent_files`` and manage its
 | `clear_repo_binding` | agent tokens only | Remove the repo binding for your agent. |
 | `get_repo_binding` | agent tokens only | Return the current repo binding for your agent, or null if unbound. |
 | `self_delete_file` | agent tokens only | Delete a per-agent file by `key`. |
-| `self_list_files` | agent tokens only | List all keys + metadata for files in your private agent_files namespace. |
-| `self_read_file` | agent tokens only | Read a per-agent file by `key`. |
+| `self_list_files` | agent tokens only | List all keys + metadata (no values) in your private agent_files namespace. |
+| `self_read_file` | agent tokens only | Check a per-agent file by `key`. |
 | `self_write_file` | agent tokens only | Write or overwrite a per-agent file under `key`. |
 | `set_repo_binding` | agent tokens only | Bind your agent to a git repo. |
 

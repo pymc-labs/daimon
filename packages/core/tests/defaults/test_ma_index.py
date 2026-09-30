@@ -267,6 +267,30 @@ async def test_list_skills_strict_returns_rows_on_partial_page() -> None:
     assert len(rows) == partial, "strict list must return every row from a partial page"
 
 
+async def test_list_skills_strict_follows_cursor_past_first_full_page() -> None:
+    first_page = _make_filler_skills(_SKILLS_PAGE_LIMIT)
+    second_page = _make_filler_skills(1)
+    second_page[0]["id"] = "sk_after_cursor"
+    requested_pages: list[str | None] = []
+    router = MARouter()
+
+    def on_list(req: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        cursor = req.url.params.get("page")
+        requested_pages.append(cursor)
+        if cursor is None:
+            return httpx.Response(200, json={"data": first_page, "next_page": "next"})
+        assert cursor == "next"
+        return httpx.Response(200, json={"data": second_page, "next_page": None})
+
+    router.add("GET", r"/v1/skills", on_list)
+    client = build_fake_anthropic_http(router.dispatch)
+    rows = await list_skills_strict(client)
+
+    assert len(rows) == _SKILLS_PAGE_LIMIT + 1
+    assert rows[-1].id == "sk_after_cursor"
+    assert requested_pages == [None, "next"]
+
+
 # ---------------------------------------------------------------------------
 # list_skills_lenient tests
 # ---------------------------------------------------------------------------

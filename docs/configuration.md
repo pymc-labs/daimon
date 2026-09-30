@@ -20,6 +20,7 @@ typo is silent — check the spelling here.
 - [Anthropic](#anthropic)
 - [CLI](#cli)
 - [Logging](#logging)
+- [Ops](#ops)
 - [MCP Server](#mcp-server)
 - [Hub](#hub)
 - [Discord](#discord)
@@ -137,6 +138,14 @@ Anthropic API key used to authenticate all Managed Agents SDK calls. Required.
 Base URL for the Anthropic API. Override only when routing through a proxy or a non-
 default API endpoint.
 
+### `DAIMON_ANTHROPIC__SKILLS_REQUESTS_PER_MINUTE`
+
+`int` · optional · default `80`
+
+Maximum Anthropic Skills API requests per minute in this process. Default 80 leaves
+headroom below the 100 requests/minute organization limit. Other deployments in the same
+organization share that limit.
+
 ## CLI
 
 Read from `daimon.core.config.CLISettings`. Prefix `DAIMON_CLI__`.
@@ -157,6 +166,17 @@ Read from `daimon.core.config.LogSettings`. Prefix `DAIMON_LOG__`.
 `'DEBUG' | 'INFO' | 'WARNING' | 'ERROR'` · optional · default `INFO`
 
 Minimum log level emitted by the structured logger.
+
+## Ops
+
+Read from `daimon.core.config.OpsSettings`. Prefix `DAIMON_OPS__`.
+
+### `DAIMON_OPS__ALERT_WEBHOOK_URL`
+
+`SecretStr | None` · optional · default unset · secret
+
+Discord webhook URL for short operator alerts about new installs, Stripe top-ups, and
+Anthropic limits. Unset disables alerts. Keep the URL secret.
 
 ## MCP Server
 
@@ -294,6 +314,14 @@ Discord bot token. Required to run the Discord adapter.
 
 Maximum number of agent turns a single tenant (Discord guild) may have in flight at
 once. Caps one noisy guild from starving others on the shared Anthropic key.
+
+### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS`
+
+`int | None` · optional · default unset
+
+Maximum Discord agent turns running across all guilds and DMs in this process. Unset
+leaves deployment-wide admission unlimited. Excess turns are refused with a retry
+notice; continuation wakes keep their existing admission path.
 
 ### `DAIMON_DISCORD__HEALTH_PORT`
 
@@ -595,17 +623,26 @@ Read from `daimon.core.config.CryptoSettings`. Prefix `DAIMON_CRYPTO__`.
 MultiFernet keys for at-rest token encryption.
 
 A single deployment ships one key; rotation means prepending a new key. Each key must be
-a Fernet.generate_key()-style base64-urlsafe 32-byte string. Empty default lets
-deployments without any encrypted credentials boot without crypto config.
+a Fernet.generate_key()-style base64-urlsafe 32-byte string. A deployment without keys
+still boots, but refuses to save agent keys unless `allow_plaintext` opts into plaintext
+storage for local development.
 
 ### `DAIMON_CRYPTO__KEYS`
 
 `tuple[SecretStr, ...]` · optional · default unset · secret
 
-Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. Agent
-environment values encrypt when keys are configured; without keys they remain plaintext.
-The first key encrypts new values; older keys remain valid for decrypting existing
-ciphertext during rotation.
+Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. Required to
+save agent keys: without keys, saving an agent environment value is refused unless
+`allow_plaintext` is set. The first key encrypts new values; older keys remain valid for
+decrypting existing ciphertext during rotation. Run `daimon crypto verify` to confirm no
+plaintext rows remain.
+
+### `DAIMON_CRYPTO__ALLOW_PLAINTEXT`
+
+`bool` · optional · default `False`
+
+Store agent environment values (agent keys) in plaintext when no `keys` are configured.
+For local development only: with this off and no keys, every agent key write is refused.
 
 ## Credentials
 

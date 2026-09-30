@@ -50,6 +50,7 @@ from daimon.core.credential_requests import (
 )
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_name_problem
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
@@ -58,7 +59,7 @@ from daimon.core.operation_policy import (
     decide_operation,
     needs_reachability_read,
 )
-from daimon.core.stores.agent_files import get_agent_file
+from daimon.core.stores.agent_files import agent_env_writes_allowed, get_agent_file
 from daimon.core.stores.credential_requests import (
     create_credential_request,
     list_live_credential_requests,
@@ -78,6 +79,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # MCP adapter cannot import each other (import-linter's independence
 # contract), and this rule is small enough not to warrant a core lift.
 _POSIX_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _caller_is_admin(auth: AuthIdentity) -> bool:
+    """Whether this caller may REQUEST a key outside the member allowlist.
+
+    `auth.is_admin` is the middleware's gate: the account's live DB role is
+    ADMIN, or the token is an internal CLI/scheduler/headless token carrying
+    the admin claim. An agent-scoped key (`auth.agent_id` set) re-derives its
+    role from the account that owns it, which may be an admin — so it is
+    treated as a member here regardless, as `self_write_file` is.
+
+    This only decides whether the card may be minted. The value is written
+    when a person submits the form, and the Discord and Slack submit paths
+    re-check that person's live platform admin status against the same name
+    policy, so a mint by an admin-capable token never lets a member store an
+    admin-only name.
+    """
+    return auth.is_admin and auth.agent_id is None
+
 
 # `normalize_owner_repo` does not truncate to two path segments (it only
 # strips a known prefix/suffix), so a URL like
@@ -449,11 +469,24 @@ async def _request_agent_key_impl(
     expected_ma_agent_id: str | None = None,
 ) -> RequestCredentialResult:
     requester = _require_requestable_platform(auth)
-    if key is not None and not _POSIX_KEY_RE.match(key):
-        raise ToolError(
-            "key must match [A-Za-z_][A-Za-z0-9_]* "
-            "(letters, digits, underscores; must not start with a digit)"
-        )
+    if key is not None:
+        problem = env_name_problem(key, is_admin=_caller_is_admin(auth))
+        if problem == "bad_name":
+            raise ToolError(
+                "key must match [A-Za-z_][A-Za-z0-9_]* "
+                "(letters, digits, underscores; must not start with a digit)"
+            )
+        if problem == "reserved_name":
+            raise ToolError(
+                f"{key} is a reserved name: it changes how the agent's shell, git, "
+                "interpreters or HTTP clients run, so it cannot be stored as a key."
+            )
+        if problem == "not_credential_name":
+            raise ToolError(
+                f"{key} is not a secret name a member can add. Use a name ending in "
+                f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, "
+                "region and URL names."
+            )
     if key is None:
         named = _named_single_key(purpose)
         if named is not None:
@@ -465,6 +498,16 @@ async def _request_agent_key_impl(
             raise ToolError(
                 "Teams cannot take a .env file upload. Request each key by name with `key`."
             )
+    async with runtime.session_factory() as session:
+        writable = agent_env_writes_allowed(session)
+    if not writable:
+        # Fail closed before anyone is asked for a value that could not be stored
+        # encrypted. Tell the model plainly so it relays the operator step.
+        raise ToolError(
+            "This deployment has no encryption keys (DAIMON_CRYPTO__KEYS), so agent keys "
+            "can't be saved and no card was posted. Tell them the operator must set "
+            "DAIMON_CRYPTO__KEYS first. Do not ask for the value in chat."
+        )
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     agent_id, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin

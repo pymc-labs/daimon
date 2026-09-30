@@ -98,15 +98,13 @@ async def is_over_cap(
     """Adapter-edge admission decision.
 
     Returns True iff the user has spent at-or-above their effective cap
-    in the calendar-month UTC window containing ``now``. Returns False when
-    billing_config is None (billing disabled). Exceptions propagate.
+    in the calendar-month UTC window containing ``now``. Caps apply even when
+    Stripe is not configured. Exceptions propagate.
 
     ``now`` is injected by the caller (the adapter edge) rather than read from
     the clock here, per guideline:architecture — keeps the decision pure and
     testable without monkeypatching.
     """
-    if billing_config is None:
-        return False
     async with sessionmaker() as s:
         cap = await tenant_user_caps.get_effective_cap(
             s,

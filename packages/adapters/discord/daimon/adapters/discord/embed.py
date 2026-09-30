@@ -1,8 +1,9 @@
 """Pure embed state machine for Discord turn UX.
 
-Converts EmbedEvents into EmbedState and EmbedData with zero I/O dependencies.
-Imports only the stdlib-only `theme` palette — no discord, anthropic, or core
-daimon imports.
+Converts EmbedEvents and the turn's content into EmbedState and EmbedData with
+zero I/O dependencies. The in-progress card's words come from
+`daimon.core.turn.status_lines`, shared with Slack; this module adds the
+Discord markup and the phase colors. No discord or anthropic imports.
 """
 
 from __future__ import annotations
@@ -14,11 +15,17 @@ from typing import Literal
 
 from daimon.adapters.discord.theme import (
     COLOR_GREEN,
+    COLOR_IN_PROGRESS,
     COLOR_RED,
-    COLOR_THINKING,
-    COLOR_TOOL_RUNNING,
 )
 from daimon.core.turn.notices import TerminationNotice, fit_notice
+from daimon.core.turn.state import TurnState
+from daimon.core.turn.status_lines import (
+    format_draft,
+    format_headline,
+    format_tool_lines,
+    has_running_tool,
+)
 
 # ---------------------------------------------------------------------------
 # Phase enum
@@ -42,32 +49,17 @@ class EmbedEvent:
     """An event fed into the embed state machine.
 
     kind discriminates the event:
-    - "thinking": agent is thinking or generating text
     - "message": agent emitted intermediate text; label is the full text
-      (capped to the preview length in ``update``)
-    - "tool_use": a tool was invoked; label is the tool name (never args)
+      (flattened and clipped to the draft length in ``update``)
     - "done": turn completed successfully
     - "error": turn failed; label is the error description
 
-    Per threat model T-13-01: label carries tool name only for tool_use events,
-    never tool arguments.
+    Tool calls are not events here: ``update_activity`` reads them from the
+    turn state on each render.
     """
 
-    kind: Literal["thinking", "message", "tool_use", "done", "error"]
+    kind: Literal["message", "done", "error"]
     label: str = ""
-
-
-# ---------------------------------------------------------------------------
-# Trail entry
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class TrailEntry:
-    """A single entry in the activity trail."""
-
-    emoji: str
-    text: str
 
 
 # ---------------------------------------------------------------------------
@@ -80,13 +72,16 @@ class EmbedState:
     """Accumulated embed state. Immutable — update() returns new instances."""
 
     phase: TurnPhase = TurnPhase.THINKING
-    trail: tuple[TrailEntry, ...] = ()
+    tool_lines: tuple[str, ...] = ()
     agent_name: str = ""
     started_at: float = 0.0
     usage_in: int = 0
     usage_out: int = 0
     cost_str: str | None = None
+    balance_str: str | None = None
     text_preview: str | None = None
+    error_reason: str = ""
+    """Why the turn failed; leads the ERROR card's footer."""
     notice: str = ""
     """Rendered termination notice; the ERROR card's body."""
 
@@ -108,42 +103,16 @@ class EmbedData:
 
 
 # ---------------------------------------------------------------------------
-# Emoji constants
+# Constants
 # ---------------------------------------------------------------------------
 
-_EMOJI_BRAIN = "\U0001f9e0"  # 🧠
-_EMOJI_GEAR = "⚙️"  # ⚙️
-_EMOJI_CHECK = "✅"  # ✅
 _EMOJI_CROSS = "❌"  # ❌
 
-_KIND_EMOJI: dict[str, str] = {
-    "thinking": _EMOJI_BRAIN,
-    "message": _EMOJI_BRAIN,
-    "tool_use": _EMOJI_GEAR,
-    "done": _EMOJI_CHECK,
-    "error": _EMOJI_CROSS,
-}
-
-_KIND_PHASE: dict[str, TurnPhase] = {
-    "thinking": TurnPhase.THINKING,
-    "message": TurnPhase.THINKING,
-    "tool_use": TurnPhase.TOOL_RUNNING,
-    "done": TurnPhase.DONE,
-    "error": TurnPhase.ERROR,
-}
-
 _PHASE_COLOR: dict[TurnPhase, int] = {
-    TurnPhase.THINKING: COLOR_THINKING,
-    TurnPhase.TOOL_RUNNING: COLOR_TOOL_RUNNING,
+    TurnPhase.THINKING: COLOR_IN_PROGRESS,
+    TurnPhase.TOOL_RUNNING: COLOR_IN_PROGRESS,
     TurnPhase.DONE: COLOR_GREEN,
     TurnPhase.ERROR: COLOR_RED,
-}
-
-_PHASE_TITLE: dict[TurnPhase, str] = {
-    TurnPhase.THINKING: f"{_EMOJI_BRAIN} thinking",
-    TurnPhase.TOOL_RUNNING: f"{_EMOJI_GEAR} running tool",
-    TurnPhase.DONE: "complete",
-    TurnPhase.ERROR: f"{_EMOJI_CROSS} error",
 }
 
 _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
@@ -152,17 +121,13 @@ _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 # Pure functions
 # ---------------------------------------------------------------------------
 
-_TRAIL_MAX = 5
-
-_TEXT_PREVIEW_MAX_CHARS = 250
-
 # Discord caps an embed description at 4,096 characters.
 _NOTICE_MAX_CHARS = 4000
 
 
 def _escape_markdown(text: str) -> str:
     """Escape Discord markdown so truncated preview text renders literally
-    (a 250-char cut can otherwise leave unclosed code fences / bold markers)."""
+    (a clipped draft can otherwise leave unclosed code fences / bold markers)."""
     for char in r"\`*_~|>[]()#":
         text = text.replace(char, f"\\{char}")
     return text
@@ -171,47 +136,28 @@ def _escape_markdown(text: str) -> str:
 def update(state: EmbedState, event: EmbedEvent) -> EmbedState:
     """Return a new EmbedState with event applied.
 
-    Trail is capped at _TRAIL_MAX (5) entries — keeps the last 5.
-    Phase transitions to match event kind.
-
-    Messages do not enter the trail: the latest agent message text is held in
-    ``text_preview`` and rendered as its own bottom embed (cs/daimon style),
-    so reasoning is readable instead of truncated to a one-line snippet.
+    A message replaces the draft shown under the tool lines; an empty one
+    keeps the last draft. done and error move to the terminal phases.
     """
-    new_phase = _KIND_PHASE[event.kind]
-    if event.kind == "thinking":
-        # agent.thinking is a contentless progress ping — MA carries no thinking
-        # text to surface. Reflect the phase in the title but add no trail entry;
-        # a bare "thinking" line is empty noise next to real tool lines.
-        return dataclasses.replace(state, phase=new_phase)
-
     if event.kind == "message":
         if not event.label:
-            return dataclasses.replace(state, phase=new_phase)
-        preview = (
-            event.label[:_TEXT_PREVIEW_MAX_CHARS] + "…"
-            if len(event.label) > _TEXT_PREVIEW_MAX_CHARS
-            else event.label
-        )
-        return dataclasses.replace(state, phase=new_phase, text_preview=preview)
+            return state
+        return dataclasses.replace(state, text_preview=format_draft(event.label))
+    if event.kind == "done":
+        return dataclasses.replace(state, phase=TurnPhase.DONE)
+    return dataclasses.replace(state, phase=TurnPhase.ERROR, error_reason=event.label or "error")
 
-    emoji = _KIND_EMOJI[event.kind]
-    text: str
-    if event.kind == "tool_use":
-        text = event.label
-    elif event.kind == "done":
-        text = "complete"
-    else:  # "error"
-        text = event.label if event.label else "error"
 
-    new_entry = TrailEntry(emoji=emoji, text=text)
-    current = state.trail
-    if len(current) >= _TRAIL_MAX:
-        updated_trail: tuple[TrailEntry, ...] = current[-(_TRAIL_MAX - 1) :] + (new_entry,)
-    else:
-        updated_trail = current + (new_entry,)
+def update_activity(state: EmbedState, turn: TurnState) -> EmbedState:
+    """Fold the turn's tool calls into the card: Working while one runs, else Thinking.
 
-    return dataclasses.replace(state, phase=new_phase, trail=updated_trail)
+    A no-op once the turn is terminal, so a late render cannot reopen the card.
+    """
+    if state.phase in _TERMINAL_PHASES:
+        return state
+    phase = TurnPhase.TOOL_RUNNING if has_running_tool(turn.content) else TurnPhase.THINKING
+    lines = format_tool_lines(turn.content, finished_ids=turn.finished_tool_ids)
+    return dataclasses.replace(state, phase=phase, tool_lines=lines)
 
 
 def _fmt_tokens(n: int) -> str:
@@ -231,8 +177,8 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
     color = _PHASE_COLOR[state.phase]
 
     if state.phase in _TERMINAL_PHASES:
-        # Terminal turns collapse to ONE line: the activity trail and the phase
-        # title drop away, leaving just a summary in the footer. The green/red
+        # Terminal turns collapse to ONE line: the headline, tool lines and
+        # draft drop away, leaving just a summary in the footer. The green/red
         # bar alone signals outcome — DONE shows no checkmark; ERROR keeps the
         # ❌ + its reason so a failed turn still says why.
         elapsed = int(now - state.started_at) if now is not None else 0
@@ -240,11 +186,12 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         parts = [state.agent_name, f"{elapsed}s", tokens]
         if state.cost_str is not None:
             parts.append(state.cost_str)
+        if state.balance_str is not None:
+            parts.append(state.balance_str)
         summary = " · ".join(parts)
         description = ""
         if state.phase is TurnPhase.ERROR:
-            reason = state.trail[-1].text if state.trail else "error"
-            footer = f"{_EMOJI_CROSS} {reason} · {summary}"
+            footer = f"{_EMOJI_CROSS} {state.error_reason or 'error'} · {summary}"
             description = state.notice
         else:
             footer = summary
@@ -252,44 +199,21 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
             phase=state.phase, title="", description=description, color=color, footer=footer
         )
 
-    # In-progress turns show the title + elapsed + activity trail; no footer yet.
-    lines: list[str] = []
-    if now is not None and state.started_at:
-        lines.append(f"⏱️ {_fmt_elapsed(int(now - state.started_at))}")
-    lines.extend(f"{entry.emoji} {entry.text}" for entry in state.trail)
+    # In progress: one embed, the headline, the tool lines, then the latest draft.
+    elapsed_seconds = now - state.started_at if now is not None and state.started_at else None
+    sections = [
+        format_headline(
+            is_working=state.phase is TurnPhase.TOOL_RUNNING,
+            elapsed_seconds=elapsed_seconds,
+            bold=lambda word: f"**{word}**",
+        )
+    ]
+    if state.tool_lines:
+        sections.append("```\n" + "\n".join(state.tool_lines) + "\n```")
+    if state.text_preview:
+        sections.append(f"> {_escape_markdown(state.text_preview)}")
     return EmbedData(
-        phase=state.phase,
-        title=_PHASE_TITLE[state.phase],
-        description="\n".join(lines),
-        color=color,
-        footer=None,
-    )
-
-
-def _fmt_elapsed(total_seconds: int) -> str:
-    """Format elapsed seconds as ``42s`` or ``2m 3s``."""
-    total_seconds = max(0, total_seconds)
-    if total_seconds < 60:
-        return f"{total_seconds}s"
-    minutes, seconds = divmod(total_seconds, 60)
-    return f"{minutes}m {seconds}s"
-
-
-def to_preview_embed_data(state: EmbedState) -> EmbedData | None:
-    """Render the latest agent message as its own bottom embed, or None.
-
-    cs/daimon-style text preview: the most recent intermediate message is shown
-    in full (up to the 250-char cap applied in ``update``) below the activity
-    embed, so reasoning is readable while the turn runs.
-    """
-    if not state.text_preview:
-        return None
-    return EmbedData(
-        phase=state.phase,
-        title="",
-        description=f"💬 {_escape_markdown(state.text_preview)}",
-        color=_PHASE_COLOR[state.phase],
-        footer=None,
+        phase=state.phase, title="", description="\n".join(sections), color=color, footer=None
     )
 
 

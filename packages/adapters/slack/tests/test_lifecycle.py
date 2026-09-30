@@ -6,7 +6,7 @@ Task 1 (debounce / registry / usage):
   - on_sse_event alone performs zero chat.postMessage and zero chat.update;
     the following on_render posts immediately (flush rides the render
     tick, not the SSE consume path).
-  - Two events plus two on_render ticks within 5s trigger NO chat.update
+  - Two on_render ticks within 5s trigger NO chat.update
     (debounce window).
   - Events plus an on_render tick after 5s trigger exactly one chat.update
     (debounce elapsed).
@@ -51,16 +51,23 @@ import asyncio
 import dataclasses
 import time
 import types
+import uuid
+from decimal import Decimal
 from typing import Any, NoReturn
 
 import aiohttp
 import daimon.adapters.slack.lifecycle as lifecycle_module
+import httpx
 import pytest
 import structlog
 import yarl
+from anthropic import BadRequestError, RateLimitError
 from daimon.adapters.slack import lifecycle as lifecycle_mod
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
+from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.stores import tenant_ledger
+from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import (
@@ -72,7 +79,9 @@ from daimon.core.turn.state import (
 )
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing import ma_model_usage
+from daimon.testing.factories import make_tenant
 from slack_sdk.errors import SlackApiError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import CHAT_OK_PAYLOAD
 
@@ -130,6 +139,39 @@ def _block_text(blocks: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+@pytest.mark.asyncio
+async def test_terminal_footer_shows_prepaid_balance_only(
+    fake_slack_web_client: Any,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    async with db_session_factory() as s, s.begin():
+        await tenant_ledger.insert_entry(
+            s,
+            tenant_id=tenant.id,
+            delta_usd=Decimal("12.50"),
+            reason="test",
+            idempotency_key=f"test:{tenant.id}",
+        )
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client, sessionmaker=db_session_factory, tenant_id=tenant.id
+    )
+    await lc.post_initial()
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
+    assert _block_text(_last_update_blocks(fake_slack_web_client)).endswith("· $12.50 left")
+
+    async with db_session_factory() as s, s.begin():
+        await set_funding_mode(s, tenant_id=tenant.id, funding_mode="operator_funded")
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client, sessionmaker=db_session_factory, tenant_id=tenant.id
+    )
+    await lc.post_initial()
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
+    assert "$12.50 left" not in _block_text(_last_update_blocks(fake_slack_web_client))
+
+
 # ---------------------------------------------------------------------------
 # SSE event constructors (SimpleNamespace fakes — same pattern as Discord tests)
 # ---------------------------------------------------------------------------
@@ -140,9 +182,15 @@ def _thinking_event() -> Any:
     return types.SimpleNamespace(type="agent.thinking")
 
 
-def _tool_event(name: str = "Bash") -> Any:
-    """MA session SSE event: agent.tool_use."""
-    return types.SimpleNamespace(type="agent.tool_use", name=name)
+def _message_event(text: str) -> Any:
+    """MA session SSE event: agent.message with one text part."""
+    return types.SimpleNamespace(type="agent.message", content=[types.SimpleNamespace(text=text)])
+
+
+def _running_tool_turn(name: str = "bash") -> TurnState:
+    """Turn state with one tool call still waiting on its result."""
+    call = ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name=name, input={})
+    return TurnState(content=[call])
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +207,8 @@ def _make_lifecycle(
     notify_on_completion: bool = False,
     trigger_ts: str | None = None,
     render_tables: bool = False,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
 
@@ -191,8 +241,55 @@ def _make_lifecycle(
         register=register,
         deregister=deregister,
         adopt_status_ts=adopt_status_ts,
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
     )
     return lc, cancel, registered, deregistered
+
+
+@pytest.mark.parametrize("status", [400, 429])
+async def test_spend_limit_posts_notice_and_error_log(
+    fake_slack_web_client: Any, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id = uuid.uuid4()
+    alerts: list[str] = []
+    monkeypatch.setattr(
+        lifecycle_module, "alert_ops", lambda url, *, key, message: alerts.append(key)
+    )
+    lc, *_ = _make_lifecycle(fake_slack_web_client, tenant_id=tenant_id)
+    await lc.post_initial()
+    body = (
+        {"type": "rate_limit_error", "details": {"error_code": "enforced_spend_limit_reached"}}
+        if status == 429
+        else {
+            "type": "invalid_request_error",
+            "message": "You have reached your specified workspace API usage limits",
+        }
+    )
+    response = httpx.Response(
+        status,
+        json={"type": "error", "error": body},
+        request=httpx.Request("GET", "https://api.anthropic.com/v1/models"),
+    )
+    error = (
+        RateLimitError("limit", response=response, body=body)
+        if status == 429
+        else BadRequestError("limit", response=response, body=body)
+    )
+    turn_error = TurnError(kind="upstream", cause=error)
+    with structlog.testing.capture_logs() as logs:
+        await lc.on_terminal_failure(TurnState(error=turn_error), turn_error)
+    assert alerts == [f"spend_limit:{'org_cap' if status == 429 else 'user_limit'}"]
+    assert (
+        "Daimon has reached its model usage limit for now. The operators have been notified."
+        in _block_text(_last_update_blocks(fake_slack_web_client))
+    )
+    assert {
+        "event": "anthropic.spend_limit_reached",
+        "log_level": "error",
+        "tenant_id": str(tenant_id),
+        "limit": "org_cap" if status == 429 else "user_limit",
+    } in logs
 
 
 # ---------------------------------------------------------------------------
@@ -231,13 +328,12 @@ async def test_on_sse_event_performs_no_io_then_on_render_posts_immediately(
 
 
 async def test_second_event_within_debounce_no_update(fake_slack_web_client: Any) -> None:
-    """Two events plus two on_render ticks inside the debounce window produce one post, no update."""
+    """Two render ticks inside the debounce window produce one post, no update."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
 
     await lc.on_sse_event(_thinking_event())
     await lc.on_render(TurnState())  # first render tick — immediate post, no debounce
-    await lc.on_sse_event(_tool_event())  # within debounce window (no time elapsed)
-    await lc.on_render(TurnState())  # second render tick — still within debounce
+    await lc.on_render(_running_tool_turn())  # second render tick — still within debounce
 
     assert _post_count(fake_slack_web_client) == 1, (
         "second render tick within debounce must not post a new message"
@@ -246,7 +342,7 @@ async def test_second_event_within_debounce_no_update(fake_slack_web_client: Any
 
 
 async def test_event_after_debounce_triggers_update(fake_slack_web_client: Any) -> None:
-    """SSE events plus an on_render tick past the debounce window trigger one chat.update."""
+    """A render tick with a new tool call past the debounce window triggers one chat.update."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
 
     await lc.on_sse_event(_thinking_event())
@@ -254,8 +350,7 @@ async def test_event_after_debounce_triggers_update(fake_slack_web_client: Any) 
     # Backdate _last_flush to simulate 6s elapsed (established idiom from Discord tests)
     lc._last_flush = time.monotonic() - 6.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce
 
-    await lc.on_sse_event(_tool_event())
-    await lc.on_render(TurnState())
+    await lc.on_render(_running_tool_turn())
 
     assert _post_count(fake_slack_web_client) == 1, "debounced update must NOT post a new message"
     assert _update_count(fake_slack_web_client) == 1, (
@@ -425,7 +520,6 @@ async def test_raising_chat_update_propagates_out_of_on_render(
     await lc.on_sse_event(_thinking_event())
     await lc.on_render(TurnState())  # first post — no update yet, succeeds
     lc._last_flush = time.monotonic() - 6.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce
-    await lc.on_sse_event(_tool_event())
 
     _reset_slack_responses(fake_slack_web_client)
     fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
@@ -434,7 +528,7 @@ async def test_raising_chat_update_propagates_out_of_on_render(
     )
 
     with pytest.raises(SlackApiError):
-        await lc.on_render(TurnState())
+        await lc.on_render(_running_tool_turn())
 
 
 async def test_on_sse_event_never_raises_for_the_same_scenario(
@@ -456,7 +550,10 @@ async def test_on_sse_event_never_raises_for_the_same_scenario(
 
     # Does not raise even though the next render tick would hit the failing
     # update -- on_sse_event performs no I/O at all.
-    await lc.on_sse_event(_tool_event())
+    await lc.on_sse_event(_message_event("Checking the logs"))
+    assert lc._state.text_preview == "Checking the logs", (  # pyright: ignore[reportPrivateUsage]
+        "the tap still folded the event into the card"
+    )
 
 
 # ---------------------------------------------------------------------------

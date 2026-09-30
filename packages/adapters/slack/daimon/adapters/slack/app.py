@@ -137,7 +137,7 @@ from daimon.core.stores.slack_turn_contexts import (
     delete_slack_turn_context,
 )
 from daimon.core.stores.slack_user_tokens import get_slack_user_token
-from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.core.stores.thread_agent_bindings import get_binding as get_setup_binding
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
@@ -976,7 +976,8 @@ class SlackApp:
     ) -> None:
         """Pre-turn safety gates → orchestration seam (turn body injected).
 
-        Gate order (strict):
+        The cap is fetched before these gates so no await splits the queue
+        check from its thread claim. Gate order (strict):
         1. Draining check (fast path — no I/O).
         1b. MAY POST: the access-policy protection state; anything but
             unprotected returns silently, before any other I/O can fail.
@@ -1207,7 +1208,16 @@ class SlackApp:
                 if event.get("user") == auth.get("user_id"):
                     return
 
-        # (1) Per-thread queue check — before cap so queued mentions don't consume a slot.
+        assert self.runtime.settings.slack is not None, (
+            "SlackApp._orchestrate requires slack settings (entrypoint validates at boot)"
+        )
+        cap = await get_turn_cap(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            default=self.runtime.settings.slack.max_concurrent_turns_per_tenant,
+        )
+
+        # (1) Per-thread queue check — queued mentions don't consume a slot.
         if thread_id in self._processing:
             # Append before awaiting reactions_add so a Slack API error on the
             # reaction call does not drop the enqueued event (WR-05).
@@ -1222,10 +1232,6 @@ class SlackApp:
 
         # (2) Per-tenant concurrency cap.
         # Read-check-increment in ONE synchronous span — no await between.
-        assert self.runtime.settings.slack is not None, (
-            "SlackApp._orchestrate requires slack settings (entrypoint validates at boot)"
-        )
-        cap = self.runtime.settings.slack.max_concurrent_turns_per_tenant
         count = self._inflight.get(tenant_id, 0)
         if not should_admit_turn(current_in_flight=count, cap=cap):
             # The rejection below is an ephemeral — it appears in no channel
@@ -1604,6 +1610,22 @@ class SlackApp:
                         "A workspace admin can add you."
                     ),
                 )
+            elif err.reason == "agent_pinned_elsewhere":
+                log.info(
+                    "turn.skipped.agent_pinned_elsewhere",
+                    tenant_id=str(tenant_id),
+                    team_id=team_id,
+                    channel_id=channel,
+                    thread_id=thread_id,
+                )
+                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel,
+                    thread_ts=thread_id,
+                    text=(
+                        "This agent only runs in the channels an operator pinned it to, "
+                        "so it can't answer here."
+                    ),
+                )
             elif err.reason == "balance_depleted":
                 log.info(
                     "turn.skipped.over_balance",
@@ -1665,6 +1687,9 @@ class SlackApp:
         # final_ts off THAT lifecycle, not the pre-recovery one.
         cancel_event = asyncio.Event()
         lifecycle = SlackTurnLifecycle(
+            sessionmaker=self.runtime.sessionmaker,
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+            tenant_id=tenant_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
             channel=channel,
@@ -2087,6 +2112,9 @@ class SlackApp:
 
             def _recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
                 new_lifecycle = SlackTurnLifecycle(
+                    sessionmaker=self.runtime.sessionmaker,
+                    alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+                    tenant_id=tenant_id,
                     render_tables=self.runtime.settings.table_rendering.get(tenant_id, False)
                     is True,
                     client=web_client,
@@ -2454,6 +2482,9 @@ class SlackApp:
             await intent_session.commit()
         follow_cancel = asyncio.Event()
         follow_lifecycle = SlackTurnLifecycle(
+            sessionmaker=self.runtime.sessionmaker,
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+            tenant_id=tenant_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
             channel=channel,
@@ -2533,6 +2564,9 @@ class SlackApp:
 
         def _follow_up_recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = SlackTurnLifecycle(
+                sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+                tenant_id=tenant_id,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 client=web_client,
                 channel=channel,

@@ -15,12 +15,14 @@ from pathlib import Path
 
 import structlog
 from anthropic import APIError, AsyncAnthropic
+from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.loader import (
     load_agent_specs,
     load_environment_specs,
     load_skill_paths,
     load_skill_spec,
 )
+from daimon.core.defaults.ma_index import list_skills_strict
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.preflight import check_models_accepted
 from daimon.core.defaults.reconcile_agents import reconcile_agent
@@ -52,10 +54,12 @@ async def _run_sweep(
     present_names: set[str],
     tenant_id: uuid.UUID,
     dry_run: bool,
+    skills_view: list[SkillListResponse] | None = None,
 ) -> None:
     try:
+        kwargs = {"skills_view": skills_view} if kind == "skill" and skills_view is not None else {}
         for outcome in await sweep_fn(
-            client, present_names=present_names, tenant_id=tenant_id, dry_run=dry_run
+            client, present_names=present_names, tenant_id=tenant_id, dry_run=dry_run, **kwargs
         ):
             report.add(outcome)
     except (APIError, DaimonError) as err:
@@ -152,7 +156,21 @@ async def _reconcile_core(
 
     async def _run_passes(skill_session: AsyncSession | None) -> ApplyReport:
         # Skill pass.
+        skills_view = None
+        if skill_dirs:
+            try:
+                skills_view = await list_skills_strict(client)
+            except (APIError, DaimonError) as err:
+                _log.warning("defaults.skills_list_failed", error=str(err))
+                for skill_dir in skill_dirs:
+                    report.add(
+                        ResourceOutcome(
+                            kind="skill", name=skill_dir.name, action=Action.FAILED, error=str(err)
+                        )
+                    )
         for skill_dir in skill_dirs:
+            if skills_view is None:
+                break
             await _run_per_resource(
                 report,
                 lambda skill_dir=skill_dir: reconcile_skill(
@@ -162,6 +180,7 @@ async def _reconcile_core(
                     tenant_id=tenant_id,
                     dry_run=dry_run,
                     db_session=skill_session,
+                    skills_view=skills_view,
                 ),
                 kind="skill",
                 name=skill_dir.name,
@@ -216,7 +235,14 @@ async def _reconcile_core(
             dry_run,
         )
         await _run_sweep(
-            report, sweep_removed_skills, "skill", client, present_skills, tenant_id, dry_run
+            report,
+            sweep_removed_skills,
+            "skill",
+            client,
+            present_skills,
+            tenant_id,
+            dry_run,
+            skills_view=skills_view,
         )
         return report
 

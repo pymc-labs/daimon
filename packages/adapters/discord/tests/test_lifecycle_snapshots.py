@@ -17,7 +17,7 @@ import types
 from typing import Any
 
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
-from daimon.core.turn.state import TextBlock, TurnState, UsageTotals
+from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
 from syrupy.assertion import SnapshotAssertion
 
 _SENTINEL_REF = object()
@@ -25,10 +25,6 @@ _SENTINEL_REF = object()
 
 def _thinking_event() -> Any:
     return types.SimpleNamespace(type="agent.thinking")
-
-
-def _tool_use_event(name: str) -> Any:
-    return types.SimpleNamespace(type="agent.tool_use", name=name)
 
 
 def _make_clock(times: list[float]) -> Any:
@@ -107,8 +103,10 @@ class TestSuccessSequenceSnapshot:
         # event is followed by the render call production drives it with.
         await lc.on_sse_event(_thinking_event())
         await lc.on_render(TurnState())
-        await lc.on_sse_event(_tool_use_event("Bash"))
-        await lc.on_render(TurnState())
+        bash = ToolUseBlock(
+            kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
+        )
+        await lc.on_render(TurnState(content=[bash]))
 
         state = TurnState(
             content=[TextBlock(kind="text", text="Here is the answer.")],

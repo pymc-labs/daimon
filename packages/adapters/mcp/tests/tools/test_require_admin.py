@@ -180,7 +180,7 @@ async def test_self_write_file_impl_does_not_raise_admin_gate_for_non_admin(
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
     )
-    row = await _self_write_file_impl(runtime, auth, key="config.yaml", content="hello")
+    row = await _self_write_file_impl(runtime, auth, key="CONFIG_TOKEN", content="hello")
     assert row.content == "hello", "non-admin write must succeed and persist content"
 
 

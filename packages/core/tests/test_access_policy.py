@@ -7,6 +7,7 @@ from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
     is_invoker_allowed,
+    is_outside_agent_pin,
     is_sealed,
     is_write_protected,
 )
@@ -67,3 +68,47 @@ def test_sealed_covers_the_channel_and_threads_under_it() -> None:
 def test_unknown_fields_are_rejected() -> None:
     with pytest.raises(ValidationError):
         TenantAccessPolicy.model_validate({"invoker_user_ids": [], "typo_ids": []})
+
+
+_PINNED = TenantAccessPolicy(agent_channel_pins={"daimon-rx": ("rx-1", "rx-2")})
+
+
+@pytest.mark.parametrize(
+    ("names", "channel_id", "parent_channel_id", "outside"),
+    [
+        (("daimon-rx",), "rx-1", None, False),
+        (("daimon-rx",), "thr-9", "rx-2", False),
+        (("daimon-rx",), "general", None, True),
+        (("daimon-rx",), "thr-9", "general", True),
+        (("daimon-rx",), None, None, True),
+        (("daimon",), "general", None, False),
+        ((None, "daimon-rx"), "general", None, True),
+        (("daimon", None), None, None, False),
+    ],
+    ids=[
+        "pinned-channel",
+        "thread-under-pinned",
+        "other-channel",
+        "thread-under-other",
+        "no-channel",
+        "unpinned-agent",
+        "pin-on-metadata-name",
+        "unpinned-dm",
+    ],
+)
+def test_agent_pin_confines_only_the_pinned_agent(
+    names: tuple[str | None, ...],
+    channel_id: str | None,
+    parent_channel_id: str | None,
+    outside: bool,
+) -> None:
+    assert (
+        is_outside_agent_pin(
+            _PINNED, agent_names=names, channel_id=channel_id, parent_channel_id=parent_channel_id
+        )
+        is outside
+    )
+
+
+def test_open_policy_pins_no_agent() -> None:
+    assert not is_outside_agent_pin(OPEN_ACCESS_POLICY, agent_names=("daimon-rx",), channel_id=None)

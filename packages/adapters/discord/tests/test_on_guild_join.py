@@ -13,10 +13,14 @@ Here we assert the bot's two-phase control flow + the status flip owned by _seed
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
+import httpx
+import pytest
 import structlog.testing
+from anthropic import AsyncAnthropic
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
@@ -26,10 +30,80 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.tenants import get_tenant, get_tenant_liveness, set_provision_status
+from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+async def test_fifty_joins_seed_after_skills_api_429() -> None:
+    attempts = 0
+    active = 0
+    peak_active = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        assert request.url.path == "/v1/skills"
+        attempts += 1
+        if attempts <= 10:
+            return httpx.Response(
+                429,
+                headers={"retry-after": "0.01"},
+                json={"type": "error", "error": {"type": "rate_limit_error", "message": "burst"}},
+            )
+        return httpx.Response(200, json={"data": [], "next_page": None})
+
+    async with AsyncAnthropic(
+        api_key="test",
+        max_retries=8,
+        http_client=httpx.AsyncClient(
+            transport=SkillsRateLimitedTransport(6000, inner=httpx.MockTransport(handler))
+        ),
+    ) as client:
+        runtime = replace(
+            _make_runtime(MagicMock()),  # pyright: ignore[reportArgumentType]
+            anthropic=client,
+        )
+        bot = _make_bot(runtime)
+        guilds = [_make_guild(guild_id=555100000 + index) for index in range(50)]
+
+        async def reconcile(
+            client: AsyncAnthropic, *_args: object, **_kwargs: object
+        ) -> ApplyReport:
+            nonlocal active, peak_active
+            active += 1
+            peak_active = max(peak_active, active)
+            try:
+                async for _skill in client.beta.skills.list(limit=1):
+                    pass
+                return ApplyReport()
+            finally:
+                active -= 1
+
+        with (
+            patch("daimon.adapters.discord.bot.reconcile_tenant_defaults", side_effect=reconcile),
+            patch.object(
+                bot,
+                "_provision_joined_guild",
+                side_effect=lambda guild: derive_tenant_uuid(
+                    platform="discord", workspace_id=str(guild.id)
+                ),
+            ),
+            patch("daimon.adapters.discord.bot.set_provision_status", new_callable=AsyncMock),
+        ):
+            for guild in guilds:
+                await _dispatch_guild_join(bot, guild)
+            await _drain_bg_tasks(bot)
+
+    assert peak_active == 2, "fresh joins must use the boot sweep's seed bound"
+    assert attempts == 60, "429 responses should be retried until all 50 joins seed"
+    for guild in guilds:
+        embeds = [call.kwargs["embed"] for call in guild.system_channel.send.await_args_list]
+        assert len(embeds) == 2, "each guild needs a welcome and terminal follow-up"
+        assert "setting up" in (embeds[0].description or "").lower()
+        assert "ready" in ((embeds[1].title or "") + (embeds[1].description or "")).lower()
 
 
 def _make_runtime(
@@ -122,11 +196,18 @@ async def _drain_bg_tasks(bot: DaimonBot) -> None:
 async def test_on_guild_join_provisions_pending_then_seeds_ready(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _make_runtime(db_session_factory)
     bot = _make_bot(runtime)
     guild = _make_guild(guild_id=555000111)
     guild_id = str(guild.id)
+    alerts: list[tuple[str, str]] = []
+
+    def record_alert(url: SecretStr | None, *, key: str, message: str) -> None:
+        alerts.append((key, message))
+
+    monkeypatch.setattr("daimon.adapters.discord.bot.alert_ops", record_alert)
 
     with patch(
         "daimon.adapters.discord.bot.reconcile_tenant_defaults", new_callable=AsyncMock
@@ -140,6 +221,9 @@ async def test_on_guild_join_provisions_pending_then_seeds_ready(
     # tenant_deterministic: the row keyed on the derived uuid exists.
     derived = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
     tr = await get_tenant_liveness(db_session_factory, derived)
+    assert alerts == [
+        (f"install:discord:{guild_id}", f"New install: Discord {guild.name} ({guild_id})")
+    ]
     assert tr is not None, "on_guild_join must provision a tenant row"
     assert tr.id == derived, "tenant_id must equal derive_tenant_uuid(discord, guild_id)"
     assert tr.provision_status == "ready", "background seed must flip status to ready"

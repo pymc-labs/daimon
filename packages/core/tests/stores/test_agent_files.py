@@ -32,12 +32,12 @@ async def test_put_agent_file_inserts_new_row_when_key_unseen(
         db_session,
         tenant_id=tenant.id,
         agent_id=agent_id,
-        key="AGENT.md",
+        key="AGENT_MD",
         content="hello",
         set_by_account_id=None,
     )
 
-    row = await get_agent_file(db_session, tenant_id=tenant.id, agent_id=agent_id, key="AGENT.md")
+    row = await get_agent_file(db_session, tenant_id=tenant.id, agent_id=agent_id, key="AGENT_MD")
     assert row is not None, "row should exist after put"
     assert row.content == "hello", "content should round-trip"
     assert row.created_at is not None, "created_at should be set by server_default"
@@ -429,3 +429,53 @@ async def test_put_agent_file_if_unchanged_returns_none_when_key_removed_since(
     assert row is None, "a removed key must fail the precondition rather than be re-created"
     stored = await get_agent_file(db_session, tenant_id=tenant.id, agent_id=agent_id, key="K")
     assert stored is None, "the key must stay removed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "key",
+    ["LD_PRELOAD", "BASH_ENV", "PATH", "GIT_CONFIG_KEY_0", "https_proxy", "X;id;Y", "notes.md"],
+)
+async def test_put_agent_file_refuses_a_key_the_sandbox_would_export_unsafely(
+    db_session: AsyncSession, key: str
+) -> None:
+    """Every write path funnels here, so a reserved or non-identifier name never lands."""
+    tenant = await make_tenant(db_session)
+    agent_id = uuid.uuid4()
+    with pytest.raises(StoreError):
+        await put_agent_file(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            key=key,
+            content="/tmp/evil.so",
+            set_by_account_id=None,
+        )
+    with pytest.raises(StoreError):
+        await put_agent_file_if_unchanged(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            key=key,
+            content="/tmp/evil.so",
+            set_by_account_id=None,
+            expected_updated_at=None,
+        )
+    assert await list_agent_files(db_session, tenant_id=tenant.id, agent_id=agent_id) == []
+
+
+@pytest.mark.asyncio
+async def test_put_agent_file_refuses_a_nul_without_echoing_the_value(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    with pytest.raises(StoreError) as caught:
+        await put_agent_file(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id=uuid.uuid4(),
+            key="API_KEY",
+            content="sec\0ret",
+            set_by_account_id=None,
+        )
+    assert "sec" not in str(caught.value), "the error must not carry the value"
