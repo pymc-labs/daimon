@@ -194,6 +194,7 @@ class RoutineRow(BaseModel):
     delivery_note: str | None = None
     delivery_payload: str | None = None
     delivered_at: datetime | None = None
+    channel_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -400,6 +401,28 @@ class UsageEventRow(BaseModel):
     cache_read_input_tokens: int
     cache_creation_input_tokens: int
     event_id: str
+    channel_id: str | None = None
+
+
+BudgetWindow = Literal["monthly", "total", "fixed"]
+
+
+class ChannelBudgetRow(BaseModel):
+    """One channel's spend limit. `window` bounds which debits count (see `ChannelBudget`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    platform: str
+    channel_id: str
+    limit_usd: Decimal
+    window: BudgetWindow
+    starts_at: datetime | None
+    ends_at: datetime | None
+    set_by_account_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class TenantUserCapRow(BaseModel):
@@ -452,6 +475,7 @@ class TenantLedgerRow(BaseModel):
     payment_event_id: str | None
     payment_intent: str | None
     occurred_at: datetime
+    channel_id: str | None = None
 
 
 # `credit` codes add credit that never expires; `timed` codes add credit that

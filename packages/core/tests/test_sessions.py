@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import McpSettings
 from daimon.core.credential_requests import mint_request_token
-from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT
+from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT, MA_METADATA_KEY_CHANNEL
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from daimon.core.sessions import create_session
@@ -571,6 +571,35 @@ async def test_create_session_stamps_billing_exempt_reason_only_when_given(
     assert metadata.get(MA_METADATA_KEY_BILLING_EXEMPT) == expected, (
         f"billing_exempt={billing_exempt!r} must stamp {expected!r}; got {metadata!r}"
     )
+
+
+@pytest.mark.parametrize("channel_id", [None, "chan-1"], ids=["dm-unstamped", "channel-stamped"])
+async def test_create_session_stamps_the_channel_only_when_given(channel_id: str | None) -> None:
+    """``channel_id`` becomes ``daimon_channel``, which the usage sweep attributes spend to."""
+    captured_bodies: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured_bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_channel",
+                agent_id=body["agent"],
+                environment_id=body["environment_id"],
+            ),
+        )
+
+    await create_session(
+        build_fake_anthropic_http(_handler),
+        agent=_make_agent(anthropic_id="ag_ch"),
+        environment=_make_env(anthropic_id="env_ch"),
+        tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000022"),
+        channel_id=channel_id,
+    )
+
+    metadata = captured_bodies[0]["metadata"]
+    assert metadata.get(MA_METADATA_KEY_CHANNEL) == channel_id, metadata
 
 
 async def test_create_session_omits_metadata_when_account_and_tenant_both_none() -> None:

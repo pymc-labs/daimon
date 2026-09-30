@@ -37,6 +37,7 @@ async def record(
     model: str,
     model_usage: BetaManagedAgentsSpanModelUsage,
     event_id: str,
+    channel_id: str | None = None,
 ) -> None:
     """Insert one usage row idempotently on (managed_session_id, event_id)."""
     stmt = (
@@ -51,6 +52,7 @@ async def record(
             cache_creation_input_tokens=model_usage.cache_creation_input_tokens,
             cache_read_input_tokens=model_usage.cache_read_input_tokens,
             event_id=event_id,
+            channel_id=channel_id,
         )
         .on_conflict_do_nothing(
             index_elements=["managed_session_id", "event_id"],

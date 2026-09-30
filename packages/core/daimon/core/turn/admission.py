@@ -2,12 +2,12 @@
 
 A single core call performs identity resolution, the channel -> tenant ->
 deployment config cascade, MA resolve + SDK retrieve, the per-tenant balance
-gate, and the per-user monthly cap gate -- returning a frozen `Admission` or
-raising a typed error. No boolean gate result crosses this boundary.
+gate, the per-user monthly cap gate and the channel budget gate -- returning a
+frozen `Admission` or raising a typed error. No boolean gate result crosses this boundary.
 
 Gate ORDER is load-bearing and must not be reordered: identity -> channel
 protection -> invoker policy -> cascade -> missing-config -> resolve/retrieve
--> balance -> cap. A tenant that is both over-balance and mis-configured must
+-> balance -> cap -> channel budget. A tenant that is both over-balance and mis-configured must
 see the config error (matches both adapters' inline sequences today). The
 access policy gates run before the cascade so a refused turn learns nothing
 about the tenant's configuration and never reaches an MA call.
@@ -27,6 +27,7 @@ from typing import Literal
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.access_policy import is_invoker_allowed, is_sealed, is_write_protected
 from daimon.core.billing import is_over_cap
+from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
 from daimon.core.scope import ResolvedConfig, ScopeContext
@@ -59,6 +60,8 @@ class Admission:
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
     private_dm_id: str | None = None
+    # Parent channel the turn's spend is attributed to; None in a DM.
+    channel_id: str | None = None
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 
@@ -261,6 +264,17 @@ async def admit_impl(
     ):
         raise AdmissionDenied(reason="cap_exceeded")
 
+    # --- Admission gate: channel budget; a DM belongs to no channel ---
+    budget_channel_id = None if is_dm else channel_id
+    if await is_over_channel_budget(
+        sessionmaker=deps.sessionmaker,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=budget_channel_id,
+        now=now,
+    ):
+        raise AdmissionDenied(reason="channel_budget_exceeded")
+
     memory_read_only = (
         is_sealed(policy, channel_id=thread_id or channel_id, parent_channel_id=channel_id)
         # A Slack thread is sealed on its own as channel_id:thread_ts.
@@ -274,4 +288,5 @@ async def admit_impl(
         agent=agent,
         environment=environment,
         config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
+        channel_id=budget_channel_id,
     )

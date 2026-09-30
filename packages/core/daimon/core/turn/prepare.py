@@ -194,6 +194,7 @@ async def create_ma_session(
         tool_safety=deps.tool_safety,
         slack_turn_context_id=admission.slack_turn_context_id,
         private_dm_id=admission.private_dm_id,
+        channel_id=admission.channel_id,
     )
 
     has_repo = any(
@@ -307,6 +308,7 @@ def bind_recorder(
     external_user_id: str,
     ma_session_id: str,
     model_id: str,
+    channel_id: str | None = None,
 ) -> UsageRecorder:
     """Build the usage recorder bound to a specific session id and its model.
 
@@ -322,6 +324,9 @@ def bind_recorder(
     Factored as a module-level helper (not inlined in `bind_session`) so
     06-05's dead-session recovery cycle can re-invoke it against the NEW
     session id after a recreate, rather than reusing a stale binding.
+
+    `channel_id` is `Admission.channel_id`: the channel whose budget the
+    turn's spend counts toward.
     """
     if (observation := current_outcome.get()) is not None:
         observation.model_by_session[ma_session_id] = model_id
@@ -339,6 +344,7 @@ def bind_recorder(
         tenant_id=tenant_id,
         markup=deps.markup,
         pricing=pricing,
+        channel_id=channel_id,
     )
 
 
@@ -475,6 +481,7 @@ async def bind_session_impl(
             tenant_id=tenant_id,
             external_user_id=external_user_id,
             markup=deps.markup,
+            channel_id=admission.channel_id,
         )
 
         # `SessionOps` is built here rather than at import time so that

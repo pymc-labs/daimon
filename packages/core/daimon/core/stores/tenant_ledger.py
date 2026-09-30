@@ -33,8 +33,12 @@ async def insert_entry(
     idempotency_key: str,
     payment_event_id: str | None = None,
     payment_intent: str | None = None,
+    channel_id: str | None = None,
 ) -> bool:
-    """INSERT ... ON CONFLICT (idempotency_key) DO NOTHING. True iff a row was inserted."""
+    """INSERT ... ON CONFLICT (idempotency_key) DO NOTHING. True iff a row was inserted.
+
+    `channel_id` is set on debits only: the channel whose budget the spend counts against.
+    """
     stmt = (
         pg_insert(TenantLedger)
         .values(
@@ -44,6 +48,7 @@ async def insert_entry(
             idempotency_key=idempotency_key,
             payment_event_id=payment_event_id,
             payment_intent=payment_intent,
+            channel_id=channel_id,
         )
         .on_conflict_do_nothing(index_elements=["idempotency_key"])
     )
@@ -57,6 +62,31 @@ async def get_balance(session: AsyncSession, *, tenant_id: uuid.UUID) -> Decimal
     stmt = select(func.coalesce(func.sum(TenantLedger.delta_usd), Decimal("0"))).where(
         TenantLedger.tenant_id == tenant_id
     )
+    return (await session.execute(stmt)).scalar_one()  # type: ignore[no-any-return]
+
+
+async def get_channel_spend(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    since: datetime | None,
+    until: datetime | None,
+) -> Decimal:
+    """Positive USD debited to a channel in `[since, until)`; an open end is unbounded.
+
+    Reads the ledger, so markup is included and a model call counts once
+    whichever writer (live recorder or sweep) recorded it.
+    """
+    stmt = select(func.coalesce(-func.sum(TenantLedger.delta_usd), Decimal("0"))).where(
+        TenantLedger.tenant_id == tenant_id,
+        TenantLedger.channel_id == channel_id,
+        TenantLedger.delta_usd < Decimal("0"),
+    )
+    if since is not None:
+        stmt = stmt.where(TenantLedger.occurred_at >= since)
+    if until is not None:
+        stmt = stmt.where(TenantLedger.occurred_at < until)
     return (await session.execute(stmt)).scalar_one()  # type: ignore[no-any-return]
 
 

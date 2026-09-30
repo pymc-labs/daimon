@@ -812,6 +812,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # proof kind/timestamp intact — deleting the row would drop a whole
             # tenant's repo mount because one member erased their account.
             "agent_repo_binding",
+            # A tenant-wide channel budget; the only accounts.id FK is the admin
+            # who set it, set_by_account_id with ON DELETE SET NULL.
+            "channel_budgets",
             # Tenant/agent-scoped, no account/principal column — "purge account X"
             # is undefined for them; deferred to a future tenant-purge path.
             "agent_files",

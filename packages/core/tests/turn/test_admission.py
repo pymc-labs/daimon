@@ -36,6 +36,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from daimon.testing.factories import (  # isort: skip
+    make_channel_budget,
     make_ledger_entry,
     make_tenant,
     make_tenant_config,
@@ -203,6 +204,109 @@ async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
     assert outcomes[0].platform == platform
     assert outcomes[0].agent_id == "ag_1"
     assert outcomes[0].account_id is not None
+
+
+async def _funded_tenant_with_spent_channel(session: AsyncSession) -> TenantRow:
+    tenant = await make_tenant(session)
+    await make_tenant_config(
+        session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(session, tenant=tenant, delta_usd=Decimal("10"))
+    await make_ledger_entry(
+        session, tenant=tenant, delta_usd=Decimal("-1"), channel_id="chan-1", occurred_at=_NOW
+    )
+    return tenant
+
+
+def _router_for(tenant: TenantRow) -> MARouter:
+    return resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack"])
+async def test_admit_refuses_a_turn_in_a_channel_over_its_budget(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    platform: str,
+) -> None:
+    tenant = await _funded_tenant_with_spent_channel(db_session)
+    await make_channel_budget(db_session, tenant=tenant, platform=platform, limit_usd=Decimal("1"))
+    await db_session.commit()
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_router_for(tenant)
+    )
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform=platform,
+            external_user_id="user-1",
+            channel_id="chan-1",
+            thread_id="thread-1",
+            now=_NOW,
+        )
+    assert exc_info.value.reason == "channel_budget_exceeded"
+
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    await drain_outcomes()
+    async with db_session_factory() as session:
+        outcomes = await list_for_tenant(session, tenant.id)
+    assert [o.reason for o in outcomes] == ["admission_denied"]
+
+
+async def test_admit_attributes_the_channel_and_never_gates_a_dm(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await _funded_tenant_with_spent_channel(db_session)
+    await db_session.commit()
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_router_for(tenant)
+    )
+    args = {"tenant_id": tenant.id, "platform": "discord", "external_user_id": "user-1"}
+
+    unbudgeted = await admit(deps, **args, channel_id="chan-1", now=_NOW)
+    assert unbudgeted.channel_id == "chan-1", "no budget row admits, and still attributes"
+
+    await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("0"))
+    await db_session.commit()
+    dm = await admit(deps, **args, channel_id="chan-1", is_dm=True, now=_NOW)
+    assert dm.channel_id is None, "a DM belongs to no channel"
+
+
+async def test_admit_gate_order_cap_wins_over_channel_budget(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await _funded_tenant_with_spent_channel(db_session)
+    await make_tenant_user_cap(db_session, tenant=tenant, amount=Decimal("0"))
+    await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("0"))
+    await db_session.commit()
+    deps = _deps(
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_router_for(tenant),
+        billing_config=_billing_config(),
+    )
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+    assert exc_info.value.reason == "cap_exceeded"
 
 
 async def test_admit_missing_agent_only_raises_missing_turn_config_error(

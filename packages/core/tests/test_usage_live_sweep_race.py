@@ -73,6 +73,7 @@ async def test_failed_usage_debit_rolls_back_and_retries(
         idempotency_key: str,
         payment_event_id: str | None = None,
         payment_intent: str | None = None,
+        channel_id: str | None = None,
     ) -> bool:
         await insert_entry(
             session,
@@ -82,6 +83,7 @@ async def test_failed_usage_debit_rolls_back_and_retries(
             idempotency_key=idempotency_key,
             payment_event_id=payment_event_id,
             payment_intent=payment_intent,
+            channel_id=channel_id,
         )
         raise RuntimeError("injected failure after ledger insert")
 
@@ -192,6 +194,7 @@ async def test_live_writer_and_sweep_wait_on_same_usage_unique_key(
         model: str,
         model_usage: BetaManagedAgentsSpanModelUsage,
         event_id: str,
+        channel_id: str | None = None,
     ) -> None:
         nonlocal call_count, sweep_backend
         call_count += 1
@@ -206,6 +209,7 @@ async def test_live_writer_and_sweep_wait_on_same_usage_unique_key(
                 model=model,
                 model_usage=model_usage,
                 event_id=event_id,
+                channel_id=channel_id,
             )
             live_inserted.set()
             await release_live.wait()
@@ -220,6 +224,7 @@ async def test_live_writer_and_sweep_wait_on_same_usage_unique_key(
             model=model,
             model_usage=model_usage,
             event_id=event_id,
+            channel_id=channel_id,
         )
 
     monkeypatch.setattr(usage_events, "record", hold_live_insert)

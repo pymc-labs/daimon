@@ -35,6 +35,7 @@ from daimon.core.scope import TenantConfigRow, TenantScopeRef
 from daimon.core.stores import (
     agent_github_binding,
     agent_repo_binding,
+    channel_budgets,
     mcp_tokens,
     routines,
     scoped_config_read,
@@ -53,6 +54,8 @@ from daimon.core.stores.domain import (
     AgentGithubBindingRow,
     AgentMemoryStoreRow,
     AgentRepoBindingRow,
+    BudgetWindow,
+    ChannelBudgetRow,
     CliPrincipalRow,
     McpTokenRow,
     Platform,
@@ -288,6 +291,8 @@ async def make_ledger_entry(
     idempotency_key: str | None = None,
     payment_event_id: str | None = None,
     payment_intent: str | None = None,
+    channel_id: str | None = None,
+    occurred_at: datetime | None = None,
 ) -> TenantLedgerRow:
     """Insert a tenant_ledger row via `tenant_ledger.insert_entry`.
 
@@ -304,12 +309,16 @@ async def make_ledger_entry(
         idempotency_key=idempotency_key,
         payment_event_id=payment_event_id,
         payment_intent=payment_intent,
+        channel_id=channel_id,
     )
     orm = (
         await session.execute(
             select(TenantLedger).where(TenantLedger.idempotency_key == idempotency_key)
         )
     ).scalar_one()
+    if occurred_at is not None:
+        orm.occurred_at = occurred_at
+        await session.flush()
     return TenantLedgerRow.model_validate(orm, from_attributes=True)
 
 
@@ -352,6 +361,32 @@ async def make_tenant_user_cap(
         return await tenant_user_caps.set_default(session, tenant_id=tenant.id, amount=amount)
     return await tenant_user_caps.set_override(
         session, tenant_id=tenant.id, user_id=user_id, amount=amount
+    )
+
+
+async def make_channel_budget(
+    session: AsyncSession,
+    *,
+    tenant: TenantRow | None = None,
+    platform: str | None = None,
+    channel_id: str = "chan-1",
+    limit_usd: Decimal = Decimal("5"),
+    window: BudgetWindow = "monthly",
+    starts_at: datetime | None = None,
+    ends_at: datetime | None = None,
+) -> ChannelBudgetRow:
+    """Upsert a channel_budgets row via `channel_budgets.set_channel_budget`."""
+    tenant = tenant or await make_tenant(session)
+    return await channel_budgets.set_channel_budget(
+        session,
+        tenant_id=tenant.id,
+        platform=platform or tenant.platform,
+        channel_id=channel_id,
+        limit_usd=limit_usd,
+        window=window,
+        starts_at=starts_at,
+        ends_at=ends_at,
+        set_by_account_id=None,
     )
 
 

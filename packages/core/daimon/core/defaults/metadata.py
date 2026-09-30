@@ -25,6 +25,9 @@ MA_METADATA_KEY_READER_OF = "daimon_reader_of"
 # skips a session carrying it: the operator absorbs that usage, it is never
 # debited to the tenant named by `daimon_tenant`. Absent on a billed session.
 MA_METADATA_KEY_BILLING_EXEMPT = "daimon_billing_exempt"
+# The parent channel a session was created for, so the usage sweep can
+# attribute its spend to that channel's budget. Absent on DM and MCP sessions.
+MA_METADATA_KEY_CHANNEL = "daimon_channel"
 
 # Marks a whole MA workspace as a throwaway one that the test-only workspace
 # nuke is allowed to empty. Stamped on a single sentinel agent, never on a

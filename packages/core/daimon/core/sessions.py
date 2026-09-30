@@ -37,6 +37,7 @@ from daimon.core.credential_env import upload_env_and_mount
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
+    MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
     MA_METADATA_KEY_TENANT,
 )
@@ -77,6 +78,7 @@ def _session_metadata(
     account_id: uuid.UUID | None,
     tenant_id: uuid.UUID | None,
     billing_exempt: ExemptReason | None,
+    channel_id: str | None = None,
 ) -> dict[str, str]:
     """The metadata stamp every Daimon-created session carries.
 
@@ -84,6 +86,7 @@ def _session_metadata(
     the owning account. `daimon_billing_exempt=<reason>` marks a session
     created for a `BillingExempt` caller, which the sweep skips (the operator
     absorbs its usage). It is decided once, here, from the creator's posture.
+    `daimon_channel` is the parent channel the sweep attributes the spend to.
     """
     metadata: dict[str, str] = {}
     if account_id is not None:
@@ -92,6 +95,8 @@ def _session_metadata(
         metadata[MA_METADATA_KEY_TENANT] = str(tenant_id)
     if billing_exempt is not None:
         metadata[MA_METADATA_KEY_BILLING_EXEMPT] = billing_exempt
+    if channel_id is not None:
+        metadata[MA_METADATA_KEY_CHANNEL] = channel_id
     return metadata
 
 
@@ -116,6 +121,7 @@ async def create_session(
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     slack_turn_context_id: uuid.UUID | None = None,
     private_dm_id: str | None = None,
+    channel_id: str | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -440,7 +446,10 @@ async def create_session(
             _log.info("session.tool_safety_applied", agent_id=agent.id)
 
     metadata = _session_metadata(
-        account_id=account_id, tenant_id=tenant_id, billing_exempt=billing_exempt
+        account_id=account_id,
+        tenant_id=tenant_id,
+        billing_exempt=billing_exempt,
+        channel_id=channel_id,
     )
     if slack_turn_context_id is not None:
         metadata[MA_METADATA_KEY_PRIVATE_DM] = str(slack_turn_context_id)
