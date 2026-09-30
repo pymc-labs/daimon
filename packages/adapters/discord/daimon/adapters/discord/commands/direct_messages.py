@@ -6,12 +6,18 @@ from typing import Literal
 
 import anthropic
 import structlog
-from daimon.adapters.discord.bot import GLOBAL_CAP_NOTICE, DaimonBot, log_anthropic_overload
+from daimon.adapters.discord.bot import (
+    CHANNEL_BUDGET_NOTICE,
+    GLOBAL_CAP_NOTICE,
+    DaimonBot,
+    log_anthropic_overload,
+)
 from daimon.adapters.discord.checks import (
     is_member_guild_admin,
     member_role_ids,
     require_registered_guild,
 )
+from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.direct_messages import reply_to_dm, require_dm_enabled, start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
@@ -74,18 +80,28 @@ class DirectMessageCog(commands.Cog):
             if not permissions.view_channel or not permissions.read_message_history:
                 raise DaimonError("You need access to this channel's history to move it to DMs.")
             parent_id = channel.parent_id if isinstance(channel, discord.Thread) else channel.id
+            source_channel_id = str(parent_id or channel.id)
             admission = await admit(
                 runtime.turn_deps,
                 tenant_id=tenant_id,
                 platform="discord",
                 external_user_id=str(member.id),
-                channel_id=str(parent_id or channel.id),
+                channel_id=source_channel_id,
                 thread_id=str(channel.id) if isinstance(channel, discord.Thread) else None,
                 role=Role.ADMIN if is_admin else Role.USER,
                 platform_role_ids=member_role_ids(member),
                 is_dm=True,
                 now=datetime.now(UTC),
             )
+            # A DM's spend is not the channel's, but a used-up channel cannot open one.
+            if await is_over_channel_budget(
+                sessionmaker=runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="discord",
+                channel_id=source_channel_id,
+                now=datetime.now(UTC),
+            ):
+                raise DaimonError("Sorry, " + CHANNEL_BUDGET_NOTICE)
             messages = [message async for message in channel.history(limit=12)]
             context = [
                 TranscriptTurn(
@@ -109,7 +125,7 @@ class DirectMessageCog(commands.Cog):
                 channel_id=str(dm_channel.id),
                 external_user_id=str(member.id),
                 source_url=source_url,
-                source_channel_id=str(parent_id or channel.id),
+                source_channel_id=source_channel_id,
                 context=context,
             )
             await dm_channel.send(

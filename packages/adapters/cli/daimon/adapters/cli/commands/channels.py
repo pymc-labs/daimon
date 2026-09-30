@@ -5,8 +5,9 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any, cast
 
+import httpx
 import typer
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
@@ -21,7 +22,7 @@ from daimon.core.channel_budget import (
     parse_budget_spec,
 )
 from daimon.core.config import load_settings
-from daimon.core.errors import StoreError
+from daimon.core.errors import DaimonError, StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.channel_admins import (
@@ -46,7 +47,9 @@ admins_app = typer.Typer(
 channels_app.add_typer(admins_app, name="admins")
 
 _PLATFORMS = ("discord", "slack")
-_CHANNEL_HELP = "Channel id; for a Discord thread pass its parent channel."
+_CHANNEL_HELP = "Channel id; a thread budgets against its parent channel."
+_DISCORD_API = "https://discord.com/api/v10"
+_DISCORD_THREAD_TYPES = frozenset({10, 11, 12})
 
 
 class BudgetListing(BaseModel):
@@ -71,6 +74,45 @@ def _channel(value: str) -> str:
     channel_id = value.strip().partition(":")[0]
     if not channel_id:
         raise typer.BadParameter("channel id must not be empty")
+    return channel_id
+
+
+async def _discord_budget_channel(
+    rt: CliRuntime,
+    *,
+    guild_id: str,
+    channel_id: str,
+    transport: httpx.AsyncBaseTransport | None,
+) -> str:
+    """The server channel a Discord id budgets against: a thread's parent.
+
+    Spend is attributed to parent channels, so a budget saved on a thread id
+    would never gate anything; the id is looked up with the bot token.
+    """
+    if not channel_id.isdigit():
+        raise typer.BadParameter(f"{channel_id!r} is not a Discord channel id")
+    if rt.settings.discord is None:
+        raise DaimonError(
+            "DAIMON_DISCORD__BOT_TOKEN is not set; it is needed to look the channel up"
+        )
+    token = rt.settings.discord.bot_token.get_secret_value()
+    try:
+        async with httpx.AsyncClient(
+            base_url=_DISCORD_API,
+            headers={"Authorization": f"Bot {token}"},
+            timeout=10.0,
+            transport=transport,
+        ) as http:
+            response = await http.get(f"/channels/{channel_id}")
+    except httpx.HTTPError as exc:
+        raise DaimonError(f"could not reach Discord to look up channel {channel_id}") from exc
+    if not response.is_success:
+        raise DaimonError(f"Discord channel {channel_id} is not visible to daimon")
+    channel = cast("dict[str, Any]", response.json())
+    if str(channel.get("guild_id")) != guild_id:
+        raise DaimonError(f"channel {channel_id} is not in server {guild_id}")
+    if channel.get("type") in _DISCORD_THREAD_TYPES:
+        return str(channel["parent_id"])
     return channel_id
 
 
@@ -130,6 +172,7 @@ async def budget_set(
     window: str,
     starts_at: str | None,
     ends_at: str | None,
+    discord_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
     try:
         spec = parse_budget_spec(limit_usd=usd, window=window, starts_at=starts_at, ends_at=ends_at)
@@ -137,6 +180,10 @@ async def budget_set(
         raise typer.BadParameter(str(exc)) from exc
     target = _channel(channel_id)
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+    if platform == "discord":
+        target = await _discord_budget_channel(
+            rt, guild_id=workspace_id, channel_id=target, transport=discord_transport
+        )
     async with rt.sessionmaker() as session, session.begin():
         budget = await channel_budgets.set_channel_budget(
             session,
@@ -157,7 +204,7 @@ async def budget_set(
 def budget_clear_command(
     platform: str,
     workspace_id: str,
-    channel_id: Annotated[str, typer.Argument(help=_CHANNEL_HELP)],
+    channel_id: Annotated[str, typer.Argument(help="Channel id the budget is set on.")],
 ) -> None:
     """Remove a channel's budget."""
     settings = load_settings()

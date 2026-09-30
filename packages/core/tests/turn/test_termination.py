@@ -386,6 +386,7 @@ def test_the_value_set_is_pinned() -> None:
         "reducer_bug",
         "admission_balance_depleted",
         "admission_cap_exceeded",
+        "admission_channel_budget_exceeded",
         "admission_denied",
         "admission_concurrency_shed",
         "missing_config",

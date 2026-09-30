@@ -138,6 +138,12 @@ _COPY: dict[TerminationReason, _Copy] = {
         _KEPT,
         "An admin can raise the cap.",
     ),
+    TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED: _Copy(
+        "Channel budget reached",
+        "This channel has used its spending budget, so the turn did not run.",
+        _KEPT,
+        "An admin can raise or clear the channel's budget.",
+    ),
     TerminationReason.ADMISSION_DENIED: _Copy(
         "Not allowed",
         "This turn was refused before it ran.",

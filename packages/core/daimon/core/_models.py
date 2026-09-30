@@ -992,7 +992,9 @@ class PromoCode(Base):
     __tablename__ = "promo_codes"
     __table_args__ = (
         Index("promo_codes_code_hash_idx", "code_hash", unique=True),
-        CheckConstraint("amount_usd > 0", name="ck_promo_codes_amount_positive"),
+        CheckConstraint(
+            "amount_usd > 0 AND amount_usd <= 999999.99", name="ck_promo_codes_amount_range"
+        ),
         CheckConstraint("kind IN ('credit', 'timed')", name="ck_promo_codes_kind"),
         CheckConstraint(
             "(kind = 'credit' AND credit_starts_at IS NULL AND credit_ends_at IS NULL)"
@@ -2180,7 +2182,8 @@ class TurnOutcome(Base):
             "'connection_lost', 'upstream', 'rate_limited', 'session_terminated', "
             "'mcp_degraded_empty', 'retrying_unsettled', 'requires_action', 'ceiling', "
             "'recovery_cancelled', 'recovery_failed', 'reducer_bug', "
-            "'admission_balance_depleted', 'admission_cap_exceeded', 'admission_denied', "
+            "'admission_balance_depleted', 'admission_cap_exceeded', "
+            "'admission_channel_budget_exceeded', 'admission_denied', "
             "'admission_concurrency_shed', 'missing_config', 'resolver_miss', "
             "'session_preparation_failed', 'session_busy', 'session_agent_mismatch', "
             "'unknown')",

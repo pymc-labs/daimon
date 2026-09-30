@@ -219,9 +219,14 @@ def test_success_html_close_tab_copy() -> None:
     assert "close this tab" in body, "success page should tell the user they can close the tab"
 
 
-def test_success_html_mentions_promo_codes() -> None:
-    body = bytes(_success_html(workspace="Acme Corp", signup_credit=Decimal("5.00")).body).decode()
-    assert "redeem it in <code>/billing</code>" in body
+def test_success_html_mentions_promo_codes_only_when_one_is_redeemable() -> None:
+    """A deployment without promo codes keeps its install page unchanged."""
+    plain = bytes(_success_html(workspace="Acme", signup_credit=Decimal("5")).body).decode()
+    promo = bytes(
+        _success_html(workspace="Acme", signup_credit=Decimal("5"), promo_codes=True).body
+    ).decode()
+    assert "promo code" not in plain, "no codes, no mention"
+    assert "admins can redeem it in <code>/billing</code>" in promo, "admins are pointed at it"
 
 
 def test_success_html_status_200() -> None:

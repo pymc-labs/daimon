@@ -256,6 +256,7 @@ async def test_run_routines_create_when_admin_creates_row_with_creator_user_id(
     )
     assert row.agent_name == _AGENT_NAME, "agent_name should be persisted"
     assert row.next_fire_at is not None, "next_fire_at should be computed from cron"
+    assert row.channel_id == _CHANNEL_ID, "spend counts toward the channel it was made in"
 
     ephemeral_key = ("POST", yarl.URL("https://slack.com/api/chat.postEphemeral"))
     assert ephemeral_key in fake_slack_web_client.mock.requests, (

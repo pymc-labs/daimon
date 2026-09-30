@@ -269,6 +269,8 @@ async def run_routines_create_submission(
                 timezone_=timezone_,
                 trigger_message=trigger_message,
                 next_fire_at=next_fire_at,
+                # No destination: spend counts toward the channel it was made in.
+                channel_id=channel_id if channel_id and not channel_id.startswith("D") else None,
             )
 
         log.info(

@@ -127,7 +127,8 @@ config). The order is load-bearing and documented as such in the module:
 9. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
    parent channel; skipped in a DM or where the channel has no budget. The
    channel is carried on `Admission.channel_id` so every debit for the turn
-   is attributed to it.
+   is attributed to it. `/dm` checks the source channel's budget before it
+   opens a DM.
 
 The policy, protection, balance, cap and channel budget gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
@@ -462,7 +463,9 @@ against.
   drive a session directly. They do not use the chokepoint either; they re-run
   the same balance and cap gates through `_admit` in
   `packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py` and create
-  sessions via `daimon.core.sessions.create_session`.
+  sessions via `daimon.core.sessions.create_session`. The billed media tool
+  runs the same gates, then the budget of the channel named by the calling
+  turn's `origin_context_id`, and charges its spend to that channel.
 - **`daimon run`**, in
   `packages/adapters/cli/daimon/adapters/cli/run/command.py`, is a single-turn
   subprocess entry point that calls `run_turn` directly with `BillingExempt`.
