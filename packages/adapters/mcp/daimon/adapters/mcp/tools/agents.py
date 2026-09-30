@@ -33,7 +33,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._isolation import load_caller_isolation, load_skill_owners
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
-from daimon.core import agent_lifecycle
+from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
@@ -44,21 +44,16 @@ from daimon.core.defaults.ma_index import (
 from daimon.core.defaults.mcp_merge import (
     DAIMON_MCP_SERVER_NAME,
     get_reserved_mcp_rejection,
-    merge_default_mcp_server,
-    merge_default_mcp_toolset,
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
-    MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_MANAGED,
-    MA_METADATA_KEY_NAME,
-    build_metadata,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.skills import resolve_custom_skill_titles, resolve_skill_names
 from daimon.core.defaults.spec_merge import merge_mcp_servers_with_ma, merge_skills_with_ma
-from daimon.core.errors import DefaultsError
+from daimon.core.errors import DaimonError, DefaultsError
 from daimon.core.github_app_auth import build_app_jwt, get_installation_id_for_repo
 from daimon.core.github_repo_auth import InstallationLookup
 from daimon.core.ma import update_agent_with_version_retry
@@ -72,7 +67,6 @@ from daimon.core.specs import (
     SkillRepo,
     merge_default_agent_toolset,
 )
-from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from fastmcp import Context, FastMCP
@@ -119,6 +113,9 @@ class AgentInfo(BaseModel):
     """Set only by ``create_agent`` and ``fork_agent``, and only when nothing
     routes to the new agent yet: post it verbatim, so the person learns the
     agent exists but answers nowhere and what to say to change that."""
+    dropped_skills: list[str] | None = None
+    """Set only by ``fork_agent``: skills scoped to one agent (``agent/skill``),
+    left off the copy. Tell the person which ones."""
 
     @classmethod
     def from_ma(
@@ -203,11 +200,6 @@ _CREATE_FIELDS: Final = frozenset(
         # skills tool group ships; attach skills via update_agent instead.
     }
 )
-
-# Fork copies the source's attached skills (panel _FORK_COPY_FIELDS parity).
-# The create_agent skills restriction (above) applies only to create_agent's
-# flat params, not to cloning an existing agent's state.
-_FORK_COPY_FIELDS: Final = _CREATE_FIELDS | {"skills"}
 
 
 _DEFAULT_MCP_TOOLSET_CONFIG: Final[dict[str, Any]] = {
@@ -571,7 +563,6 @@ async def _update_agent_impl(
     if skills is not None:
         touched_fields.add("skills")
     if touched_fields & reachability.REACHABILITY_GATED_FIELDS:
-            owners = await load_skill_owners(runtime, caller, auth.tenant_id)
         await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=name)
 
     # Resolve skill names outside the closure — name resolution does not depend on
@@ -580,6 +571,7 @@ async def _update_agent_impl(
     if skills is not None:
         try:
             caller = await load_caller_isolation(runtime, auth)
+            owners = await load_skill_owners(runtime, caller, auth.tenant_id)
             resolved_skills = await resolve_skill_names(
                 runtime.client,
                 skills,
@@ -745,81 +737,21 @@ async def _fork_agent_impl(
     source = await resolve_setup_agent(
         runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
     )
-    # A copy of a pinned agent would be an unpinned agent with its prompt,
-    # skills and connectors. Refuse rather than guess which channels the copy
-    # belongs in; an operator pins the copy by name if it should exist.
-    async with runtime.session_factory() as session:
-        try:
-            policy = await load_access_policy(session, tenant_id=auth.tenant_id)
-        except AccessPolicyUnreadable as exc:
-            raise ToolError(
-                "fork_agent: the workspace access policy could not be read; nothing was created."
-            ) from exc
-    if any(
-        name in policy.agent_channel_pins
-        for name in (source.name, source.metadata.get(MA_METADATA_KEY_NAME))
-        if name is not None
-    ):
-        raise ToolError(
-            f"fork_agent: {source_name} is pinned to specific channels by an operator, so it "
-            "can't be copied. Nothing was created. Do not retry."
+    public_url = runtime.settings.mcp.public_url
+    try:
+        copy = await copy_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            source=source,
+            new_name=new_name,
+            public_url=str(public_url) if public_url is not None else None,
         )
-    source_ma = await runtime.client.beta.agents.retrieve(source.id)
-    params = source_ma.model_dump(mode="json")
-    fork_params = {k: params[k] for k in _FORK_COPY_FIELDS if k in params}
-    fork_params["name"] = new_name
-    fork_params["metadata"] = build_metadata(
-        tenant_id=auth.tenant_id,
-        name=new_name,
-        account_id=derive_guild_account_uuid(auth.tenant_id),
-    )
-    public_url = (
-        str(runtime.settings.mcp.public_url)
-        if runtime.settings.mcp.public_url is not None
-        else None
-    )
-    fork_params["mcp_servers"] = merge_default_mcp_server(
-        cast("list[BetaManagedAgentsURLMCPServerParams] | None", fork_params.get("mcp_servers")),
-        public_url,
-    )
-    fork_params["tools"] = merge_default_mcp_toolset(
-        cast("list[Tool] | None", fork_params.get("tools")),
-        public_url,
-    )
-    # Fork copies raw MA state and bypasses dump_agent_spec — guarantee the
-    # base toolset here so forking a legacy pre-guarantee agent doesn't
-    # propagate the skills-unusable hole.
-    fork_params["tools"] = merge_default_agent_toolset(
-        cast("list[Tool] | None", fork_params.get("tools"))
-    )
-
-    # Every non-forked creation/edit path already runs the guidance applier
-    # (`update_agent`, `reconcile_agent`); a fork bypasses both and copies raw
-    # MA state directly, so normalize it here too. Skip for a source stamped
-    # isolated — its session mounts no secrets, and the block would teach it
-    # to look for resources it must not have.
-    if source_ma.metadata.get(MA_METADATA_KEY_ISOLATED) != "true":
-        fork_params["system"] = apply_credential_guidance(
-            cast("str", fork_params.get("system") or "")
-        )
-
-    # A fork starts with no credentials: no GitHub access, repo binding or
-    # proof, and no agent-wide MCP token. Servers that only work with one are
-    # left off the copy rather than mounted broken.
-    source_agent_uuid = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(source.id))
-    servers, tools = await agent_lifecycle.strip_credentialed_mcp_servers(
-        sessionmaker=runtime.session_factory,
-        tenant_id=auth.tenant_id,
-        source_agent_uuid=source_agent_uuid,
-        mcp_servers=cast("list[dict[str, object]] | None", fork_params.get("mcp_servers")),
-        tools=cast("list[dict[str, object]] | None", fork_params.get("tools")),
-    )
-    fork_params["mcp_servers"] = servers
-    fork_params["tools"] = tools
-
-    new_ma = await runtime.client.beta.agents.create(**fork_params)
-
-    info = await _build_agent_info(runtime.client, new_ma, tenant_id=auth.tenant_id)
+    except DaimonError as exc:
+        raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc
+    info = await _build_agent_info(runtime.client, copy.agent, tenant_id=auth.tenant_id)
+    if copy.dropped_skills:
+        info = info.model_copy(update={"dropped_skills": list(copy.dropped_skills)})
     return await _with_answering_note(runtime, auth, info)
 
 

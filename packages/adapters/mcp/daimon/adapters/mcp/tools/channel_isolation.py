@@ -8,6 +8,7 @@ admins only. The rules live in ``daimon.core.channel_isolation_setup``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import cast
 
@@ -29,7 +30,11 @@ from daimon.adapters.mcp.tools.slack._client import (
 )
 from daimon.core.agent_fork import fork_agent
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
-from daimon.core.channel_isolation_setup import ForkAgent, set_channel_isolation
+from daimon.core.channel_isolation_setup import (
+    END_ISOLATION_WARNING,
+    ForkAgent,
+    set_channel_isolation,
+)
 from daimon.core.errors import DaimonError
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -96,8 +101,8 @@ async def _set_channel_isolation_impl(
     if isolated and fork_from is not None:
         public_url = runtime.settings.mcp.public_url
 
-        async def fork_copy(source: str, new_name: str) -> None:
-            await fork_agent(
+        async def fork_copy(source: str, new_name: str) -> Sequence[str]:
+            copy = await fork_agent(
                 runtime.client,
                 runtime.session_factory,
                 tenant_id=auth.tenant_id,
@@ -105,6 +110,7 @@ async def _set_channel_isolation_impl(
                 new_name=new_name,
                 public_url=str(public_url) if public_url is not None else None,
             )
+            return copy.dropped_skills
 
         fork = fork_copy
         label = await _channel_label(runtime, auth, channel)
@@ -129,7 +135,9 @@ async def _set_channel_isolation_impl(
         agent_name=change.agent_name,
         forked_from=change.forked_from,
         changed=change.changed,
-        note=_NOTE if change.isolated else "The channel is open again.",
+        note=" ".join(filter(None, [_NOTE, change.dropped_skills_note]))
+        if change.isolated
+        else f"The channel is open again. {END_ISOLATION_WARNING}",
     )
 
 
