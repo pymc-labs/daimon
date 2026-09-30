@@ -391,7 +391,7 @@ class TestNewThreadCreation:
         )
         assert "embeds" in first_send_kwargs, "instant feedback should be an embed, not text"
         embed = cast("list[discord.Embed]", first_send_kwargs["embeds"])[0]
-        assert embed.title is not None and "thinking" in embed.title, (
+        assert (embed.description or "").startswith("**Thinking**"), (
             "initial embed should show the thinking phase"
         )
 
