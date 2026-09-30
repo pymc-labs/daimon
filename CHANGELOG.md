@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Agent environment encryption is opt-in through `DAIMON_CRYPTO__KEYS`; keyless deployments retain plaintext storage and initialization still succeeds. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
 - The seeded agents move to Sonnet 5.5 on the next defaults reconcile, so each existing `daimon` and `dev_agent` thread replaces its session on its next message, with one checkpoint turn on the old session if it had replied. Reports and spend caps reprice history at read time, so this month's Sonnet 5 and Opus 4.7 spend drops at once; set `DAIMON_BILLING__MARKUP` if the old rates stood in for a margin.
+- Routines now run in their channel's environment, then the workspace default, instead of always the deployment default. A channel or workspace `environment_name` already set with `daimon config set` moves those routines onto it from their next fire; `daimon config unset` it first to keep them where they were.
 
 ### Added
 
@@ -67,7 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routine runs in its channel's environment. A channel admin can pick any
   environment a member created, including one with unrestricted networking.
   The missing-environment notice now points at the panel instead of the
-  operator. Nothing changes until an environment is picked.
+  operator. With no channel or workspace environment set, nothing changes;
+  see the upgrade notes for routines where one already is.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.
