@@ -36,11 +36,10 @@ from daimon.core.ma_identity import derive_agent_uuid
 
 _log = structlog.get_logger(__name__)
 
-# _SKILLS_PAGE_LIMIT is the absolute org-wide visibility window for skills.
-# ``next_page`` is NEVER populated for skills at any page boundary (verified
-# live, 2026-06-10); agents.list paginates correctly under identical
-# conditions. A full page therefore means
-# the org skill view is truncated, not simply "more pages to follow".
+# Anthropic documents a `page` / `next_page` cursor for skills. Older live
+# responses omitted `next_page` even at a page boundary (verified 2026-06-10).
+# Follow a cursor when present, but treat a full final page without one as
+# potentially truncated so create/delete decisions remain safe.
 #
 # Raised 100 -> 1000 after production crossed 100 skills and locked itself out
 # of every write path: the seeded-agent reconcile could not resolve a skill id,
@@ -48,9 +47,7 @@ _log = structlog.get_logger(__name__)
 # resolve its agent, and a fresh install would have failed to provision at all.
 # `skills.list` honours a larger limit — 103 rows came back with has_more=False
 # at limit=200 against production, verified live 2026-08-08 — so the ceiling was
-# ours, not the API's. This buys headroom, it does not remove the ceiling: the
-# truncation guards below are still the thing that keeps a partial view from
-# driving a delete, and at 1000 skills they will fire again.
+# ours, not the API's. The guard remains necessary if the API omits the cursor.
 _SKILLS_PAGE_LIMIT = 1000
 
 
@@ -218,20 +215,19 @@ async def list_environments_by_tenant(
 async def _collect_skills_page(
     client: AsyncAnthropic,
 ) -> tuple[list[SkillListResponse], bool]:
-    """Fetch the single skills page and return (rows, page_full).
-
-    ``page_full`` is True when the number of returned rows equals
-    _SKILLS_PAGE_LIMIT — because MA never populates ``next_page`` for skills,
-    a full page means the org view is truncated.
-    """
+    """Follow skill cursors and flag a full terminal page with no cursor."""
     rows: list[SkillListResponse] = []
-    async for sk in client.beta.skills.list(limit=_SKILLS_PAGE_LIMIT):
-        rows.append(sk)
-    return rows, len(rows) >= _SKILLS_PAGE_LIMIT
+    page = await client.beta.skills.list(limit=_SKILLS_PAGE_LIMIT)
+    truncated = False
+    async for current in page.iter_pages():
+        rows.extend(current.data)
+        if len(current.data) >= _SKILLS_PAGE_LIMIT and not current.next_page:
+            truncated = True
+    return rows, truncated
 
 
 async def list_skills_strict(client: AsyncAnthropic) -> list[SkillListResponse]:
-    """Return all MA skills, raising SkillsListTruncatedError if the page is full.
+    """Return all MA skills, raising if the last full page has no cursor.
 
     Use in write contexts (create, delete, dedup) where making decisions on a
     truncated view is unsafe.
@@ -240,7 +236,7 @@ async def list_skills_strict(client: AsyncAnthropic) -> list[SkillListResponse]:
     if page_full:
         raise SkillsListTruncatedError(
             f"skills.list returned a full page of {_SKILLS_PAGE_LIMIT} rows — "
-            "MA never populates next_page for skills, so the org skill view is "
+            "the org skill view may be "
             "truncated; create/delete decisions on this view are unsafe"
         )
     return rows
@@ -287,7 +283,7 @@ async def find_skills_by_display_title(
         if on_truncation == "raise":
             raise SkillsListTruncatedError(
                 f"skills.list returned a full page of {_SKILLS_PAGE_LIMIT} rows — "
-                "MA never populates next_page for skills, so the org skill view is "
+                "the org skill view may be "
                 "truncated; create/delete decisions on this view are unsafe"
             )
         _log.warning("ma_index.skills_list_ceiling_hit", limit=_SKILLS_PAGE_LIMIT)

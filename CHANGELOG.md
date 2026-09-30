@@ -203,6 +203,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defaults reconciliation lists workspace skills once per tenant instead of once
   per skill.
 
+- Follow Anthropic Skills API cursors across multiple pages. A full final page
+  without a cursor still fails closed before skill writes or deletes.
+
 - Direct-message policies normalize tenant UUID keys and reject invalid keys at
   settings load, so restrictive policies cannot silently miss their tenant.
 
