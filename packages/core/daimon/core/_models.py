@@ -2276,6 +2276,7 @@ class DirectMessageConversation(Base):
     channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     scope_id: Mapped[str] = mapped_column(Text, nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     context: Mapped[str] = mapped_column(Text, nullable=False)
     memory_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)

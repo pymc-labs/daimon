@@ -109,6 +109,7 @@ class DirectMessageCog(commands.Cog):
                 channel_id=str(dm_channel.id),
                 external_user_id=str(member.id),
                 source_url=source_url,
+                source_channel_id=str(parent_id or channel.id),
                 context=context,
             )
             await dm_channel.send(

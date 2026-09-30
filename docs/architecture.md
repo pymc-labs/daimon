@@ -240,13 +240,19 @@ that channel on top of the server admins (`channel_admins`,
 live role ids on the account (`accounts.platform_role_ids`) beside the role, so
 MCP tools test a grant without asking the platform; Slack has no roles, so a
 Slack grant is by user id. A channel admin may do what a server admin may for
-an agent local to their channels -- not the tenant default, and every
-channel-scope row and thread binding in a channel they run
+an agent local to their channels -- not the tenant default, every
+channel-scope row and thread binding in a channel they run, and every routine
+running it made by them, since a routine runs with its creator's rights
 (`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
-channels' default agent. A channel admin binds only a shared agent (managed or
-tenant-wide), one answering nowhere, or one already local to their channels,
+channels' default agent. A `/dm` conversation counts as the channel it was
+started from. A channel admin binds only a shared agent (managed or
+tenant-wide), one answering nowhere, or one already local to them,
 never another channel's own agent. Managed agents and the tenant default stay with server
-admins, and a tenant with no grant behaves as before. Server admins edit grants
+admins, and a tenant with no grant behaves as before. Stored role ids refresh on
+the member's next chat turn; until then MCP calls, a coding-tools token
+included, keep the old grant. A server admin who chats with an agent a channel
+admin edited runs that agent's instructions with their own rights, as with any
+agent someone else wrote. Server admins edit grants
 with the `*_channel_admins` MCP tools, from Who answers where in the setup
 panel, or with the CLI:
 

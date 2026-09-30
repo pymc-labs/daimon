@@ -153,6 +153,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 channel_id=dm_channel,
                 external_user_id=user_id,
                 source_url=source_url,
+                source_channel_id=channel_id,
                 context=context,
             )
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]

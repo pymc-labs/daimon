@@ -8,6 +8,7 @@ from typing import Literal
 
 from daimon.core._models import ThreadAgentBinding
 from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
+from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -167,7 +168,8 @@ async def list_bound_parent_channel_ids(
     """Parent channels of every thread that answers as `responder_name`, sorted.
 
     Archived and locked threads count: reopening one routes to the agent again.
-    Only a deleted thread no longer answers.
+    Only a deleted thread no longer answers. Private conversation scopes are
+    left out; see `list_dm_bindings`.
     """
     ids = await session.execute(
         select(ThreadAgentBinding.parent_channel_id)
@@ -175,11 +177,30 @@ async def list_bound_parent_channel_ids(
             ThreadAgentBinding.tenant_id == tenant_id,
             ThreadAgentBinding.responder_name == responder_name,
             ThreadAgentBinding.deleted.is_(False),
+            ThreadAgentBinding.thread_id.not_like(f"{DM_SCOPE_PREFIX}%"),
         )
         .distinct()
         .order_by(ThreadAgentBinding.parent_channel_id)
     )
     return list(ids.scalars())
+
+
+async def list_dm_bindings(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> list[tuple[str, str, str]]:
+    """`(dm_channel_id, scope_id, responder_name)` of every private conversation scope."""
+    rows = await session.execute(
+        select(
+            ThreadAgentBinding.parent_channel_id,
+            ThreadAgentBinding.thread_id,
+            ThreadAgentBinding.responder_name,
+        ).where(
+            ThreadAgentBinding.tenant_id == tenant_id,
+            ThreadAgentBinding.deleted.is_(False),
+            ThreadAgentBinding.thread_id.like(f"{DM_SCOPE_PREFIX}%"),
+        )
+    )
+    return [(parent, scope, responder) for parent, scope, responder in rows.tuples()]
 
 
 async def update_target(

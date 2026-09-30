@@ -112,6 +112,18 @@ async def list_routines_for_tenant(
     return [RoutineRow.model_validate(r) for r in rows]
 
 
+async def list_routine_creator_ids(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, agent_name: str
+) -> list[str | None]:
+    """Who made the routines that run `agent_name`, paused ones included; None if unknown."""
+    rows = await session.execute(
+        select(Routine.created_by_user_id)
+        .where(Routine.tenant_id == tenant_id, Routine.agent_name == agent_name)
+        .distinct()
+    )
+    return list(rows.scalars())
+
+
 async def update_routine(
     session: AsyncSession,
     routine_id: _uuid.UUID,

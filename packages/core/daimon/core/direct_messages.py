@@ -13,6 +13,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.direct_messages import (
+    DM_SCOPE_PREFIX,
     DirectMessageRow,
     claim_message,
     dm_enabled,
@@ -62,16 +63,18 @@ async def start_dm(
     channel_id: str,
     external_user_id: str,
     source_url: str,
+    source_channel_id: str,
     context: Sequence[TranscriptTurn],
 ) -> DirectMessageRow:
     """Select a workspace explicitly and give the DM a new thread-like scope.
 
     Caller admits the source with is_dm=True before reading history or opening
     the DM. Each move resets the private scope; a prior workspace's physical
-    DM history is never replayed into this one.
+    DM history is never replayed into this one. `source_channel_id` is the
+    channel run in (a thread's parent): the DM counts as that channel's.
     """
     await require_dm_enabled(deps, tenant_id=tenant_id)
-    scope_id = f"dm:{uuid.uuid4()}"
+    scope_id = f"{DM_SCOPE_PREFIX}{uuid.uuid4()}"
     conversation = DirectMessageRow(
         platform=platform,
         route_key=route_key,
@@ -82,6 +85,7 @@ async def start_dm(
         channel_id=channel_id,
         scope_id=scope_id,
         source_url=source_url,
+        source_channel_id=source_channel_id,
         context=render_previous_session(
             [TranscriptTurn(role="user", text=f"Source: {source_url}"), *bounded_turns(context)],
             from_agent_name="source conversation",
