@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Seeded defaults are protected from chat edits.** Skill-repo imports now
+  gate like other attachment writes: a member needs an admin on an agent
+  that answers for others, and the import never attaches to a
+  defaults-managed agent, even for admins. A library import may not reuse a
+  seeded skill's name, `delete_skill` refuses seeded skills, and
+  `update_environment`/`archive_environment` refuse defaults-managed
+  environments. Private agents are unaffected, and operators can still
+  delete a seeded skill with `daimon skills delete`.
 - Encrypt agent environment values with rotatable deployment keys when configured, including existing rows on upgrade. Store encoding separately from user text so every literal value, including `enc:v1:` prefixes, remains valid. A database trigger keeps writes from older code tagged as plaintext; decryption errors identify the affected row without exposing values.
 
 ### Upgrade notes

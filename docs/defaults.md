@@ -177,10 +177,12 @@ What that means in practice when you edit a seeded skill:
   and apply pushes a new version to every install. If a user had edited that
   skill on their side, your version wins. There is no prompt and no
   `--force`; the only trace is a structured log line.
-- **A user edits a seeded skill and `defaults/` is unchanged.** The
-  fingerprint still matches, so apply skips it and the user's edit survives.
-  daimon never reads the live content back, so it genuinely cannot tell that
-  install apart from an untouched one, and `verify` calls it in sync.
+- **Someone changes a seeded skill outside `defaults/`.** Chat tools refuse
+  to: a library import under a seeded name fails, and `delete_skill` refuses a
+  seeded skill. An edit made straight on the provider still survives apply,
+  because the fingerprint still matches. daimon never reads the live content
+  back, so it genuinely cannot tell that install apart from an untouched one,
+  and `verify` calls it in sync.
 - **No fingerprint row, but the skill exists.** A new version is pushed
   unconditionally. This is the case the table was added for: without a local
   record, apply used to adopt whatever was on the provider as correct, which
