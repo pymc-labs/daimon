@@ -296,8 +296,14 @@ many tenants may redeem it. Each tenant redeems a code at most once.
   still counts as spend inside it. Fifteen minutes after the close a
   `promo_expiry_refund` entry, keyed
   `promo_expiry_refund:{code_id}:{tenant_id}`, credits back that late spend,
-  never more than the expiry removed. Spend recorded later counts as ordinary
-  spend.
+  never more than the expiry removed. Until then late spend is debited twice,
+  once itself and once inside the expiry, so for up to about fifteen minutes
+  the balance can read low or negative, or hit the balance gate, until the
+  refund lands. Spend recorded later counts as ordinary spend: after a grant's
+  reconcile, spend recorded inside its window is still charged to that grant
+  first, as far as it had credit left, even where it overlaps a later grant
+  that is still open. That part is paid from ordinary credit and never
+  credited twice.
 
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
 timed credit only changes what the ledger holds. `/billing` shows live timed
@@ -319,7 +325,7 @@ including timed credit not yet started, stays.
 | `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
 | `promo_codes` | deployment-wide codes, by hash, with their amount, windows and redemption limit. |
-| `promo_redemptions` | one row per code and tenant, with when a timed grant was made and expired. |
+| `promo_redemptions` | one row per code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
 | `promo_redeem_failures` | refused redemption attempts per tenant, for the throttle. |
 
 These tables are declared in `packages/core/daimon/core/_models.py` with stores
