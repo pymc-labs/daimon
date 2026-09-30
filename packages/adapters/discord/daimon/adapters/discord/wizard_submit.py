@@ -95,6 +95,7 @@ from daimon.adapters.discord.wizard_render import build_wizard_view
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.domain import Role, WizardSessionRow
+from daimon.core.stores.tenants import get_turn_cap
 from daimon.core.stores.thread_sessions import (
     clear_active_turn_if_message_id,
     mark_turn_active,
@@ -415,10 +416,13 @@ async def run_wizard_submit_turn_observed(
         # matching release in this function's `finally`. The claim already
         # committed, so an over-cap submit says the answers were recorded
         # rather than pretending nothing happened. ---
+        cap = await get_turn_cap(
+            bot.runtime.sessionmaker,
+            tenant_id=row.tenant_id,
+            default=discord_settings.max_concurrent_turns_per_tenant,
+        )
         count = bot._inflight.get(row.tenant_id, 0)  # pyright: ignore[reportPrivateUsage]  # the per-tenant cap bookkeeping DaimonBot owns; a wizard turn must count against the same cap the mention path claims
-        if not should_admit_turn(
-            current_in_flight=count, cap=discord_settings.max_concurrent_turns_per_tenant
-        ):
+        if not should_admit_turn(current_in_flight=count, cap=cap):
             record_refusal(
                 bot.runtime.sessionmaker,
                 tenant_id=row.tenant_id,

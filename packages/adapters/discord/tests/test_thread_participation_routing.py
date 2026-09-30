@@ -32,6 +32,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import thread_participation as store
+from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.thread_classifier import ClassifierOutcome
 from daimon.core.thread_participation import (
     ClassifierVerdict,
@@ -404,14 +405,17 @@ async def test_concurrency_shed_is_silent(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON, cap=0))
+    async with db_session_factory() as session, session.begin():
+        await set_turn_cap(session, tenant_id=tenant_id, cap=1)
+    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.ON, cap=100))
+    bot._inflight[tenant_id] = 1  # pyright: ignore[reportPrivateUsage]
     turns = _stub_turn(bot)
     message = _thread_message(_make_thread(), content="anyone?")
 
     await bot.on_message(message)
     await _drain_timer(bot)
 
-    assert turns == [], "over the cap the unasked-for turn is dropped"
+    assert turns == [], "the tenant override sheds the unasked-for turn"
     message.channel.send.assert_not_called()
 
 

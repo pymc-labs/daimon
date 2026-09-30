@@ -135,6 +135,12 @@ Unprompted replies follow their existing silent-refusal policy. Continuation
 wakes retain their existing admission path. The limit is unset by default and
 applies only to this Discord process.
 
+Discord and Slack also limit simultaneous chat turns per tenant before admission.
+`daimon tenants turn-cap PLATFORM WORKSPACE_ID N` stores a tenant override;
+`default` clears it and restores the adapter's deployment setting (3 by default).
+The check covers Discord mentions, thread participation and wizard submits,
+and Slack mentions. It does not limit MCP or routine turns.
+
 A protected channel hears nothing from the agent, not even a refusal or an
 error. Each turn entry decides FIRST, before tenant liveness, provisioning or
 any other read that can fail, whether the agent may post there:

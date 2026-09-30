@@ -66,6 +66,7 @@ from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.tenants import (
     get_tenant_liveness,
+    get_turn_cap,
     list_tenants_by_platform,
     set_provision_status,
 )
@@ -1253,7 +1254,11 @@ class DaimonBot(commands.Bot):
         if self.draining or thread_id in self._processing:
             return  # re-checked: the protection read above awaited
 
-        cap = discord_settings.max_concurrent_turns_per_tenant
+        cap = await get_turn_cap(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            default=discord_settings.max_concurrent_turns_per_tenant,
+        )
         count = self._inflight.get(tenant_id, 0)
         if not should_admit_turn(current_in_flight=count, cap=cap):
             record_refusal(
@@ -1418,7 +1423,11 @@ class DaimonBot(commands.Bot):
             # both increment past the cap. The queue check above is also synchronous,
             # so there is exactly one increment per coroutine that reaches this point
             # and one matching decrement in the finally block below.
-            cap = self.runtime.settings.discord.max_concurrent_turns_per_tenant
+            cap = (
+                tr.turn_cap
+                if tr.turn_cap is not None
+                else self.runtime.settings.discord.max_concurrent_turns_per_tenant
+            )
             count = self._inflight.get(tenant_id, 0)
             if not should_admit_turn(current_in_flight=count, cap=cap):
                 # Mirror of the Slack shed log — here the notice is a visible

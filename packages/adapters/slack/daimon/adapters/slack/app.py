@@ -137,7 +137,7 @@ from daimon.core.stores.slack_turn_contexts import (
     delete_slack_turn_context,
 )
 from daimon.core.stores.slack_user_tokens import get_slack_user_token
-from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.core.stores.thread_agent_bindings import get_binding as get_setup_binding
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
@@ -1239,7 +1239,11 @@ class SlackApp:
         assert self.runtime.settings.slack is not None, (
             "SlackApp._orchestrate requires slack settings (entrypoint validates at boot)"
         )
-        cap = self.runtime.settings.slack.max_concurrent_turns_per_tenant
+        cap = await get_turn_cap(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            default=self.runtime.settings.slack.max_concurrent_turns_per_tenant,
+        )
         count = self._inflight.get(tenant_id, 0)
         if not should_admit_turn(current_in_flight=count, cap=cap):
             # The rejection below is an ephemeral — it appears in no channel

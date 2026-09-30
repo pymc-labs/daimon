@@ -50,7 +50,7 @@ from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token, upsert_slack_bot_token
-from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.tenants import get_tenant, set_turn_cap
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
     get_live_thread_session,
@@ -1597,6 +1597,7 @@ async def test_orchestrate_queue_coalesce_when_thread_in_flight_adds_hourglass_a
             "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
         ) as mock_create_session,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+        patch("daimon.adapters.slack.app.get_turn_cap", new_callable=AsyncMock, return_value=3),
         patch(
             "daimon.adapters.slack.app.deliver_session_outputs", new_callable=AsyncMock
         ) as mock_deliver_outputs,
@@ -1789,6 +1790,7 @@ async def test_drain_partitions_queued_mentions_by_author_when_two_users_queue_i
             "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
         ) as mock_create_session,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
+        patch("daimon.adapters.slack.app.get_turn_cap", new_callable=AsyncMock, return_value=3),
         patch(
             "daimon.adapters.slack.app.deliver_session_outputs", new_callable=AsyncMock
         ) as mock_deliver_outputs,
@@ -1924,30 +1926,32 @@ async def _drive_drain(
 
     app._run_thread_turn = _spy_turn  # type: ignore[method-assign]
 
-    task = asyncio.create_task(
-        app._orchestrate(  # pyright: ignore[reportPrivateUsage]
-            root_event,
-            team_id=team_id,
-            channel=channel,
-            event_ts=str(root_event["event_ts"]),
-            web_client=web_client,
-            tenant_id=tenant_id,
+    # These queue tests use one test connection; cap lookup is covered separately.
+    with patch("daimon.adapters.slack.app.get_turn_cap", new=AsyncMock(return_value=3)):
+        task = asyncio.create_task(
+            app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                root_event,
+                team_id=team_id,
+                channel=channel,
+                event_ts=str(root_event["event_ts"]),
+                web_client=web_client,
+                tenant_id=tenant_id,
+            )
         )
-    )
-    await asyncio.sleep(0)  # let task reach the gate inside the first turn
+        await asyncio.sleep(0)  # let task reach the gate inside the first turn
 
-    for ev in queued_events:
-        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
-            ev,
-            team_id=team_id,
-            channel=channel,
-            event_ts=str(ev["event_ts"]),
-            web_client=web_client,
-            tenant_id=tenant_id,
-        )
+        for ev in queued_events:
+            await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+                ev,
+                team_id=team_id,
+                channel=channel,
+                event_ts=str(ev["event_ts"]),
+                web_client=web_client,
+                tenant_id=tenant_id,
+            )
 
-    first_turn_gate.set()
-    await task
+        first_turn_gate.set()
+        await task
     return calls
 
 
@@ -2725,7 +2729,10 @@ async def test_orchestrate_tenant_cap_when_exhausted_sends_ephemeral_and_skips_t
 
     await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
 
-    app, _ = make_orchestrate_app(db_session_factory, max_concurrent_turns_per_tenant=cap)
+    async with db_session_factory() as session, session.begin():
+        await set_turn_cap(session, tenant_id=tenant_id, cap=cap)
+
+    app, _ = make_orchestrate_app(db_session_factory, max_concurrent_turns_per_tenant=3)
 
     # Saturate the tenant in-flight count.
     app._inflight[tenant_id] = cap  # pyright: ignore[reportPrivateUsage]
