@@ -6,13 +6,15 @@ import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from daimon.core.promo_codes import (
     PROMO_CODE_ALPHABET,
     PromoCodeError,
+    PromoRefusal,
     build_promo_code_terms,
+    describe_refusal,
     generate_promo_code,
     hash_promo_code,
     is_granted_on_redeem,
@@ -158,3 +160,8 @@ def test_timed_credit_is_granted_on_redeem_only_once_started() -> None:
     early = _code(kind="timed", credit_starts_at=NOW + HOUR, credit_ends_at=NOW + 2 * HOUR)
     assert not is_granted_on_redeem(early, now=NOW)
     assert is_granted_on_redeem(early, now=NOW + HOUR)
+
+
+def test_every_refusal_has_a_sentence() -> None:
+    for reason in get_args(PromoRefusal):
+        assert describe_refusal(reason).endswith(".")

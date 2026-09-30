@@ -28,7 +28,22 @@ _SEPARATORS = re.compile(r"[\s-]+")
 PromoRefusal = Literal[
     "invalid", "revoked", "not_started", "expired", "exhausted", "already_redeemed", "throttled"
 ]
-"""Why a redemption was refused. Wording belongs to each surface."""
+"""Why a redemption was refused."""
+
+_REFUSAL_TEXT: dict[PromoRefusal, str] = {
+    "invalid": "That code is not valid. Check it and try again.",
+    "revoked": "That code is no longer active.",
+    "not_started": "That code cannot be redeemed yet.",
+    "expired": "That code has expired.",
+    "exhausted": "That code has been fully redeemed.",
+    "already_redeemed": "That code was already redeemed here.",
+    "throttled": "Too many failed attempts. Try again in a few minutes.",
+}
+
+
+def describe_refusal(reason: PromoRefusal) -> str:
+    """One plain sentence for a refused redemption, shared by every surface."""
+    return _REFUSAL_TEXT[reason]
 
 
 class PromoCodeError(ValueError):
