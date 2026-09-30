@@ -22,6 +22,7 @@ AdmissionDenialReason = Literal[
     "invoker_not_allowed",
     "channel_protected",
     "agent_pinned_elsewhere",
+    "channel_isolated",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 

@@ -7,7 +7,7 @@ frozen `Admission` or raising a typed error. No boolean gate result crosses this
 
 Gate ORDER is load-bearing and must not be reordered: identity -> channel
 protection -> invoker policy -> cascade -> missing-config -> resolve/retrieve
--> agent pin -> balance -> cap -> channel budget. A tenant that is both
+-> agent pin -> channel isolation -> balance -> cap -> channel budget. A tenant that is both
 over-balance and mis-configured must see the config error (matches both
 adapters' inline sequences today). The
 access policy gates run before the cascade so a refused turn learns nothing
@@ -36,6 +36,7 @@ from daimon.core.access_policy import (
 )
 from daimon.core.billing import is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.channel_isolation import load_channel_isolation
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_resolver import MAResolverMissError, resolve_agent, resolve_environment
@@ -285,6 +286,26 @@ async def admit_impl(
     ):
         raise AdmissionDenied(reason="agent_pinned_elsewhere")
 
+    # --- Channel isolation: inside an isolated channel only its own agents
+    # answer, and they answer nowhere else. Checked here as well as when
+    # routing is written, so an archived default falling through to a shared
+    # one, or a thread handed out before isolation, is refused rather than
+    # answered. A DM counts as the channel it came from. A setup thread
+    # answers as the built-in agent, with memory read-only. ---
+    setup_inside_isolated = False
+    if policy.isolated_channel_ids:
+        place = (dm_source_channel_id, None) if is_dm else (thread_id or channel_id, channel_id)
+        async with deps.sessionmaker() as session:
+            isolation = await load_channel_isolation(
+                session, tenant_id=tenant_id, default=deps.deployment_default, policy=policy
+            )
+        setup_inside_isolated = (
+            config.thread_binding_kind == "setup" and isolation.isolated_channel(*place) is not None
+        )
+        agent_name = agent.metadata.get(MA_METADATA_KEY_NAME) or config.agent_name
+        if not setup_inside_isolated and isolation.crosses(agent_name, *place):
+            raise AdmissionDenied(reason="channel_isolated")
+
     # --- Admission gate: per-tenant balance -- independent of Stripe config ---
     if await is_over_balance(sessionmaker=deps.sessionmaker, tenant_id=tenant_id):
         raise AdmissionDenied(reason="balance_depleted")
@@ -315,6 +336,7 @@ async def admit_impl(
         # A Slack thread is sealed on its own as channel_id:thread_ts.
         or (thread_id is not None and f"{channel_id}:{thread_id}" in policy.sealed_channel_ids)
         or (is_dm and policy.dm_memory_read_only)
+        or setup_inside_isolated
     )
 
     return Admission(
