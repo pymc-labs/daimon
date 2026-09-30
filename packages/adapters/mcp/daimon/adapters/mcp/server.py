@@ -55,6 +55,7 @@ from daimon.adapters.mcp.tools.credential_requests import register_credential_re
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
+from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
 from daimon.adapters.mcp.tools.publish import register_publish_tools
 from daimon.adapters.mcp.tools.repo_binding import register_repo_binding_tools
@@ -321,6 +322,7 @@ def create_mcp_app(
     register_notebook_tools(mcp, runtime)  # notebook publish (raises when unconfigured)
     register_publish_tools(mcp, runtime)  # report publish/delete (raises when unconfigured)
     register_propagation_tools(mcp, runtime)  # set/clear agent default
+    register_promo_code_tools(mcp, runtime)  # redeem a promo code for tenant credit
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
 
     register_upload_tool(mcp, runtime=runtime)
