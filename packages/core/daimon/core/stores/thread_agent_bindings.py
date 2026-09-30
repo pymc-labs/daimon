@@ -211,6 +211,23 @@ async def list_handoff_parent_channel_ids(
     return parents
 
 
+async def list_handoff_threads(
+    session: AsyncSession, *, tenant_id: uuid.UUID, parent_channel_id: str
+) -> list[tuple[str, str]]:
+    """`(thread_id, responder_name)` of the live handed-over threads under one channel."""
+    rows = await session.execute(
+        select(ThreadAgentBinding.thread_id, ThreadAgentBinding.responder_name)
+        .where(
+            ThreadAgentBinding.tenant_id == tenant_id,
+            ThreadAgentBinding.kind == "handoff",
+            ThreadAgentBinding.deleted.is_(False),
+            ThreadAgentBinding.parent_channel_id == parent_channel_id,
+        )
+        .order_by(ThreadAgentBinding.thread_id)
+    )
+    return [(thread, responder) for thread, responder in rows.tuples()]
+
+
 async def list_dm_bindings(
     session: AsyncSession, *, tenant_id: uuid.UUID
 ) -> list[tuple[str, str, str]]:
