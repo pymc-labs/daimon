@@ -884,7 +884,9 @@ class PromoCode(Base):
     __tablename__ = "promo_codes"
     __table_args__ = (
         Index("promo_codes_code_hash_idx", "code_hash", unique=True),
-        CheckConstraint("amount_usd > 0", name="ck_promo_codes_amount_positive"),
+        CheckConstraint(
+            "amount_usd > 0 AND amount_usd <= 999999.99", name="ck_promo_codes_amount_range"
+        ),
         CheckConstraint("kind IN ('credit', 'timed')", name="ck_promo_codes_kind"),
         CheckConstraint(
             "(kind = 'credit' AND credit_starts_at IS NULL AND credit_ends_at IS NULL)"

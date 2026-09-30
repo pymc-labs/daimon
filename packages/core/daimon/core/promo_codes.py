@@ -24,6 +24,9 @@ _GROUP_COUNT = 4
 _GROUP_LENGTH = 5  # 20 characters = 100 bits of entropy
 _CODE_PATTERN = re.compile(r"^[A-Z0-9]{6,64}$")
 _SEPARATORS = re.compile(r"[\s-]+")
+# Largest amount per redemption. The ledger holds Numeric(12, 6), so a grant
+# above this would overflow at write time instead of at creation.
+MAX_PROMO_AMOUNT_USD = Decimal("999999.99")
 
 PromoRefusal = Literal[
     "invalid", "revoked", "not_started", "expired", "exhausted", "already_redeemed", "throttled"
@@ -109,6 +112,8 @@ def build_promo_code_terms(
     """Validate operator input. A timed code's redemption ends with its credit by default."""
     if not amount_usd.is_finite() or amount_usd <= 0:
         raise PromoCodeError("amount must be a positive dollar amount")
+    if amount_usd > MAX_PROMO_AMOUNT_USD:
+        raise PromoCodeError(f"amount must be at most ${MAX_PROMO_AMOUNT_USD:,}")
     exponent = amount_usd.as_tuple().exponent
     if isinstance(exponent, int) and exponent < -2:
         raise PromoCodeError("amount must have at most two decimal places")

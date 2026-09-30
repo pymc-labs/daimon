@@ -35,6 +35,7 @@ from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import PromoCodeKind, TimedPromoGrantRow
 from daimon.core.usage_recording import SPEND_LEDGER_REASONS
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -221,6 +222,90 @@ async def get_active_timed_credit(
     return sorted(credits, key=lambda credit: credit.ends_at)
 
 
+async def _settle_grant(session: AsyncSession, row: TimedPromoGrantRow, *, now: datetime) -> bool:
+    """Grant one due redemption, or close it unfunded if its window already ended."""
+    if row.credit_ends_at <= now:
+        await promo_store.mark_expired(
+            session, redemption_id=row.redemption_id, expired_at=now, expired_usd=Decimal("0")
+        )
+        return False
+    await _grant(
+        session, promo_code_id=row.promo_code_id, tenant_id=row.tenant_id, amount_usd=row.amount_usd
+    )
+    await promo_store.mark_granted(session, redemption_id=row.redemption_id, granted_at=now)
+    return True
+
+
+async def _settle_expiry(
+    session: AsyncSession, row: TimedPromoGrantRow, *, now: datetime
+) -> Decimal:
+    """Remove what is left of one closed window; returns the amount removed."""
+    remaining = (
+        await _remaining_at(
+            session,
+            tenant_id=row.tenant_id,
+            targets={row.promo_code_id},
+            horizon=row.credit_ends_at,
+        )
+    ).get(row.promo_code_id, row.amount_usd)
+    if remaining > 0:
+        await tenant_ledger.insert_entry(
+            session,
+            tenant_id=row.tenant_id,
+            delta_usd=-remaining,
+            reason="promo_expiry",
+            idempotency_key=f"promo_expiry:{row.promo_code_id}:{row.tenant_id}",
+        )
+    await promo_store.mark_expired(
+        session, redemption_id=row.redemption_id, expired_at=now, expired_usd=remaining
+    )
+    return remaining
+
+
+def _skip_bad_row(phase: str, row: TimedPromoGrantRow, exc: DBAPIError) -> None:
+    """Log a row the database rejected, or re-raise when the connection itself failed."""
+    if exc.connection_invalidated or isinstance(exc, OperationalError | InterfaceError):
+        raise exc
+    log.error(
+        "promo_credit.settle_row_failed",
+        phase=phase,
+        redemption_id=str(row.redemption_id),
+        promo_code_id=str(row.promo_code_id),
+        tenant_id=str(row.tenant_id),
+        exc_info=exc,
+    )
+
+
+async def _settle_grants(
+    session_factory: async_sessionmaker[AsyncSession], *, now: datetime, limit: int
+) -> int:
+    granted = 0
+    async with session_factory() as session, session.begin():
+        for row in await promo_store.lock_due_grants(session, now=now, limit=limit):
+            try:
+                async with session.begin_nested():
+                    granted += await _settle_grant(session, row, now=now)
+            except DBAPIError as exc:
+                _skip_bad_row("grant", row, exc)
+    return granted
+
+
+async def _settle_expiries(
+    session_factory: async_sessionmaker[AsyncSession], *, now: datetime, limit: int
+) -> tuple[int, Decimal]:
+    expired = 0
+    expired_usd = Decimal("0")
+    async with session_factory() as session, session.begin():
+        for row in await promo_store.lock_due_expiries(session, now=now, limit=limit):
+            try:
+                async with session.begin_nested():
+                    expired_usd += await _settle_expiry(session, row, now=now)
+                expired += 1
+            except DBAPIError as exc:
+                _skip_bad_row("expiry", row, exc)
+    return expired, expired_usd
+
+
 async def settle_promo_credit(
     session_factory: async_sessionmaker[AsyncSession], *, now: datetime, limit: int = 100
 ) -> PromoSettlement:
@@ -229,51 +314,17 @@ async def settle_promo_credit(
     Idempotent: the ledger keys and the ``granted_at``/``expired_at`` guards make
     a re-run, or a second scheduler, a no-op. A window that opened and closed
     while nothing ran is marked expired without ever granting.
+
+    Each row settles in its own savepoint, so a row the database rejects is
+    logged and left due without holding back the rest. The expiry phase runs
+    even when the grant phase fails; that failure is raised afterwards.
     """
-    granted = 0
-    async with session_factory() as session, session.begin():
-        for row in await promo_store.lock_due_grants(session, now=now, limit=limit):
-            if row.credit_ends_at <= now:
-                await promo_store.mark_expired(
-                    session,
-                    redemption_id=row.redemption_id,
-                    expired_at=now,
-                    expired_usd=Decimal("0"),
-                )
-                continue
-            await _grant(
-                session,
-                promo_code_id=row.promo_code_id,
-                tenant_id=row.tenant_id,
-                amount_usd=row.amount_usd,
-            )
-            await promo_store.mark_granted(session, redemption_id=row.redemption_id, granted_at=now)
-            granted += 1
-    expired = 0
-    expired_usd = Decimal("0")
-    async with session_factory() as session, session.begin():
-        for row in await promo_store.lock_due_expiries(session, now=now, limit=limit):
-            remaining = (
-                await _remaining_at(
-                    session,
-                    tenant_id=row.tenant_id,
-                    targets={row.promo_code_id},
-                    horizon=row.credit_ends_at,
-                )
-            ).get(row.promo_code_id, row.amount_usd)
-            if remaining > 0:
-                await tenant_ledger.insert_entry(
-                    session,
-                    tenant_id=row.tenant_id,
-                    delta_usd=-remaining,
-                    reason="promo_expiry",
-                    idempotency_key=f"promo_expiry:{row.promo_code_id}:{row.tenant_id}",
-                )
-            await promo_store.mark_expired(
-                session, redemption_id=row.redemption_id, expired_at=now, expired_usd=remaining
-            )
-            expired += 1
-            expired_usd += remaining
+    grant_error: SQLAlchemyError | None = None
+    try:
+        granted = await _settle_grants(session_factory, now=now, limit=limit)
+    except SQLAlchemyError as exc:
+        grant_error, granted = exc, 0
+    expired, expired_usd = await _settle_expiries(session_factory, now=now, limit=limit)
     if granted or expired:
         log.info(
             "promo_credit.settled",
@@ -281,4 +332,6 @@ async def settle_promo_credit(
             expired=expired,
             expired_usd=str(expired_usd),
         )
+    if grant_error is not None:
+        raise grant_error
     return PromoSettlement(granted=granted, expired=expired, expired_usd=expired_usd)

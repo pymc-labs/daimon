@@ -101,6 +101,7 @@ def test_timed_terms_stop_redemption_when_the_credit_ends() -> None:
         ({"amount_usd": Decimal("-1"), "timed": False}, "positive"),
         ({"amount_usd": Decimal("NaN"), "timed": False}, "positive"),
         ({"amount_usd": Decimal("1.005"), "timed": False}, "two decimal"),
+        ({"amount_usd": Decimal("1000000"), "timed": False}, "at most"),
         ({"amount_usd": Decimal("1"), "timed": True, "credit_ends_at": NOW}, "both"),
         (
             {

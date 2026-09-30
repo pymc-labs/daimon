@@ -7,8 +7,14 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from daimon.core._models import TenantLedger
-from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
+from daimon.core.promo_codes import (
+    PromoCodeTerms,
+    build_promo_code_terms,
+    hash_promo_code,
+    normalize_promo_code,
+)
 from daimon.core.promo_credit import (
     REDEEM_FAILURE_LIMIT,
     REDEEM_FAILURE_WINDOW,
@@ -25,6 +31,8 @@ from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import PromoCodeRow, TenantRow
 from daimon.testing.factories import make_account, make_tenant
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 T0 = datetime(2026, 5, 1, tzinfo=UTC)
@@ -239,3 +247,89 @@ async def test_window_missed_entirely_is_closed_without_credit(
     assert await settle_promo_credit(db_session_factory, now=T0 + 7 * H) == _settled(0, 0)
     assert await _ledger(db_session, tenant) == {}
     assert await settle_promo_credit(db_session_factory, now=T0 + 8 * H) == _settled(0, 0)
+
+
+def _terms(amount: str, *, start: int, end: int) -> PromoCodeTerms:
+    """Timed terms built directly, skipping validation, to reach the database's own checks."""
+    return PromoCodeTerms(
+        amount_usd=Decimal(amount),
+        kind="timed",
+        note=None,
+        credit_starts_at=T0 + start * H,
+        credit_ends_at=T0 + end * H,
+        redeem_starts_at=None,
+        redeem_ends_at=None,
+        max_redemptions=None,
+    )
+
+
+async def test_the_database_refuses_an_amount_the_ledger_cannot_hold(
+    db_session: AsyncSession,
+) -> None:
+    """The amount CHECK backs up validation for rows written around it."""
+    with pytest.raises(IntegrityError, match="ck_promo_codes_amount_range"):
+        await promo_store.insert_promo_code(
+            db_session, code_hash="h", terms=_terms("1000000", start=0, end=1)
+        )
+
+
+@pytest.mark.fresh_schema  # drops a CHECK to plant a row the ledger rejects
+async def test_a_row_the_ledger_rejects_does_not_hold_back_settlement(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """The bad grant is logged and stays due; other grants and expiries still settle."""
+    tenant = await make_tenant(db_session)
+    await db_session.execute(
+        text("ALTER TABLE promo_codes DROP CONSTRAINT ck_promo_codes_amount_range")
+    )
+    huge = await promo_store.insert_promo_code(
+        db_session,
+        code_hash=hash_promo_code(normalize_promo_code("HUGEAMOUNT")),
+        terms=_terms("9999999999", start=0, end=5),
+    )
+    assert huge is not None, "the unchecked insert should succeed"
+    await _timed(db_session, "GOODGRANT", 0, 5)
+    await _timed(db_session, "EARLYWINDOW", -3, -2)
+    for code, at in (("HUGEAMOUNT", T0 - H), ("GOODGRANT", T0 - H), ("EARLYWINDOW", T0 - 3 * H)):
+        result = await _redeem(db_session_factory, tenant, code, now=at)
+        assert isinstance(result, PromoRedeemed), f"{code} should redeem"
+
+    settled = await settle_promo_credit(db_session_factory, now=T0 + H)
+
+    assert settled == _settled(1, 1, "10"), "the good grant and the expiry should both settle"
+    granted = await promo_store.list_timed_grants(db_session, tenant_id=tenant.id)
+    assert huge.id not in {g.promo_code_id for g in granted}, "the rejected grant stays due"
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("10"), (
+        "only the good grant should remain on the ledger"
+    )
+
+
+class _FirstSessionFails(async_sessionmaker[AsyncSession]):
+    """Fails the first session it opens, as a dropped connection would."""
+
+    opened = 0
+
+    def __call__(self, **local_kw: Any) -> AsyncSession:
+        self.opened += 1
+        if self.opened == 1:
+            raise OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
+        return super().__call__(**local_kw)
+
+
+async def test_expiries_settle_even_when_the_grant_phase_fails(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """The grant phase's error is raised only after the expiry phase has run."""
+    tenant = await make_tenant(db_session)
+    await _timed(db_session, "EARLYWINDOW", -3, -2)
+    await _redeem(db_session_factory, tenant, "EARLYWINDOW", now=T0 - 3 * H)
+    factory = _FirstSessionFails(bind=db_session.bind, expire_on_commit=False)
+
+    with pytest.raises(OperationalError):
+        await settle_promo_credit(factory, now=T0 + H)
+
+    [grant] = await promo_store.list_timed_grants(db_session, tenant_id=tenant.id)
+    assert grant.expired_at is not None, "the closed window should still expire"
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == 0, (
+        "the unspent timed credit should be gone"
+    )

@@ -35,7 +35,9 @@ def upgrade() -> None:
             "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
         ),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
-        sa.CheckConstraint("amount_usd > 0", name="ck_promo_codes_amount_positive"),
+        sa.CheckConstraint(
+            "amount_usd > 0 AND amount_usd <= 999999.99", name="ck_promo_codes_amount_range"
+        ),
         sa.CheckConstraint("kind IN ('credit', 'timed')", name="ck_promo_codes_kind"),
         sa.CheckConstraint(
             "(kind = 'credit' AND credit_starts_at IS NULL AND credit_ends_at IS NULL)"
