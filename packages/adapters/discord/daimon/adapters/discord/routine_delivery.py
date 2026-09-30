@@ -24,6 +24,7 @@ from collections.abc import Awaitable, Callable
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy, is_write_protected
+from daimon.core.channel_isolation import load_channel_isolation
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
@@ -33,6 +34,7 @@ from daimon.core.routine_delivery import (
     render_fallback_dm,
     render_fallback_post,
 )
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -136,6 +138,7 @@ def make_discord_routine_poster(
     fetch_channel: ChannelFetcher,
     open_dm: DmOpener,
     dm_policy: DmPolicyLookup,
+    deployment_default: DeploymentDefault,
 ) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
     """A poster bound to the bot's channel lookup (cache first, then REST)."""
 
@@ -172,18 +175,32 @@ def make_discord_routine_poster(
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
             return DeliveryOutcome(status="skipped", note=cleared)
         policy = cleared
+        async with sessionmaker() as session:
+            isolation = await load_channel_isolation(
+                session, tenant_id=row.tenant_id, default=deployment_default, policy=policy
+            )
+        if isolation.routine_crosses(row):
+            log.info("routine.delivery_refused", routine_id=str(row.id), reason="channel_isolated")
+            return DeliveryOutcome(status="skipped", note="channel_isolated")
+        keep_inside = isolation.keeps_routine_inside(row)
+
+        async def fallback(reason: str) -> DeliveryOutcome:
+            if keep_inside:  # an isolated channel's result never leaves it, not even by DM
+                return DeliveryOutcome(status="skipped", note=reason)
+            return await _dm_fallback(row, reason, tenant.external_id)
+
         target = delivery_target(row, platform="discord")
         if target is None or not target.channel_id.isdigit():
-            return await _dm_fallback(row, "destination_unavailable", tenant.external_id)
+            return await fallback("destination_unavailable")
         try:
             channel = await fetch_channel(int(target.channel_id))
         except discord.HTTPException:
-            return await _dm_fallback(row, "destination_unavailable", tenant.external_id)
+            return await fallback("destination_unavailable")
         placement = await _placement(channel, fetch_channel)
         if placement is None or str(placement[2]) != tenant.external_id:
             # Not a text channel or thread, its parent is unknown, or it is in
             # another guild.
-            return await _dm_fallback(row, "destination_unavailable", tenant.external_id)
+            return await fallback("destination_unavailable")
         parent_channel_id, category_id, _guild_id, permission_source = placement
         creator = row.created_by_user_id
         if (
@@ -196,7 +213,7 @@ def make_discord_routine_poster(
             log.info(
                 "routine.delivery_refused", routine_id=str(row.id), reason="creator_cannot_post"
             )
-            return await _dm_fallback(row, "creator_cannot_post", tenant.external_id)
+            return await fallback("creator_cannot_post")
         if is_write_protected(
             policy,
             channel_id=target.channel_id,
@@ -204,7 +221,7 @@ def make_discord_routine_poster(
             category_id=category_id,
         ):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
-            return await _dm_fallback(row, "protected_channel", tenant.external_id)
+            return await fallback("protected_channel")
         assert isinstance(channel, discord.Thread | discord.TextChannel)
         await channel.send(
             content=render_fallback_post(row)[:_DISCORD_MAX_CHARS],

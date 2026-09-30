@@ -579,6 +579,7 @@ class DaimonBot(commands.Bot):
                         dm_policy=lambda row: self.runtime.settings.direct_message_policies.get(
                             row.tenant_id, DirectMessagePolicy()
                         ),
+                        deployment_default=self.runtime.deployment_default,
                     ),
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
