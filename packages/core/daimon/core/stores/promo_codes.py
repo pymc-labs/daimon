@@ -16,7 +16,7 @@ from typing import Any, cast
 from daimon.core._models import PromoCode, PromoRedeemFailure, PromoRedemption, Tenant
 from daimon.core.promo_codes import PromoCodeTerms
 from daimon.core.stores.domain import PromoCodeRow, PromoRedemptionRow, TimedPromoGrantRow
-from sqlalchemy import ColumnElement, Select, delete, exists, func, select, update
+from sqlalchemy import ColumnElement, Select, delete, exists, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -143,6 +143,18 @@ async def list_redemptions(
     )
     rows = (await session.execute(stmt)).mappings()
     return [PromoRedemptionRow.model_validate(dict(row)) for row in rows]
+
+
+async def lock_tenant_redemptions(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """Serialize one tenant's redemption attempts for this transaction.
+
+    Without it, concurrent guesses all read the same failure count and slip
+    past the throttle together. Hashed inside Postgres (``hashtextextended``).
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"promo_redeem:{tenant_id}"},
+    )
 
 
 async def count_redeem_failures(

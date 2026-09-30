@@ -23,6 +23,7 @@ PROMO_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _GROUP_COUNT = 4
 _GROUP_LENGTH = 5  # 20 characters = 100 bits of entropy
 _CODE_PATTERN = re.compile(r"^[A-Z0-9]{6,64}$")
+MIN_CHOSEN_CODE_LENGTH = 12
 _SEPARATORS = re.compile(r"[\s-]+")
 _LOOK_ALIKES = str.maketrans({"O": "0", "I": "1", "L": "1"})
 # Largest amount per redemption. The ledger holds Numeric(12, 6), so a grant
@@ -64,6 +65,21 @@ def normalize_promo_code(raw: str) -> str:
 
 def is_well_formed_promo_code(normalized: str) -> bool:
     return _CODE_PATTERN.fullmatch(normalized) is not None
+
+
+def normalize_chosen_promo_code(raw: str) -> str:
+    """Normalize a code an operator picked, refusing one short enough to guess.
+
+    Generated codes carry 100 bits; a chosen code must be at least
+    ``MIN_CHOSEN_CODE_LENGTH`` characters, about 60 bits.
+    """
+    normalized = normalize_promo_code(raw)
+    if len(normalized) < MIN_CHOSEN_CODE_LENGTH or not is_well_formed_promo_code(normalized):
+        raise PromoCodeError(
+            f"a chosen code must be {MIN_CHOSEN_CODE_LENGTH}-64 letters or digits"
+            " (dashes and spaces ignored)"
+        )
+    return normalized
 
 
 def hash_promo_code(normalized: str) -> str:

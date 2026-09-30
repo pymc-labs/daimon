@@ -107,13 +107,13 @@ async def redeem_promo_code(
 ) -> PromoRedeemResult:
     """Redeem ``code`` for the tenant in one transaction; a refusal is counted for throttling.
 
-    The code row is locked first, so the per-code limit and the one-per-tenant
-    rule are checked and applied serially. The throttle count itself is not
-    locked: concurrent guesses can overshoot the limit by a few, which is fine
-    for a guessing brake.
+    The tenant's attempts are serialized first, so concurrent guesses cannot
+    all pass the throttle on the same count. The code row is then locked, so
+    the per-code limit and the one-per-tenant rule are applied serially too.
     """
     since = now - REDEEM_FAILURE_WINDOW
     async with session_factory() as session, session.begin():
+        await promo_store.lock_tenant_redemptions(session, tenant_id=tenant_id)
         failures = await promo_store.count_redeem_failures(
             session, tenant_id=tenant_id, since=since
         )

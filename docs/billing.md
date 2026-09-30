@@ -271,7 +271,7 @@ daimon promo revoke CODE_ID
 Codes are deployment-wide and stored only as a SHA-256 hash, so a lost code
 cannot be shown again. Generated codes are 20 Crockford base32 characters in
 dash-separated groups of five; matching ignores case, spaces and dashes, and reads O as 0 and I or L as 1.
-`--code` sets a chosen code instead. `--amount` is at most $999,999.99. `--redeem-from` and `--redeem-until`
+`--code` sets a chosen code of at least 12 characters instead. `--amount` is at most $999,999.99. `--redeem-from` and `--redeem-until`
 bound when it can be redeemed, and `--max-redemptions` how many tenants may
 redeem it. Each tenant redeems a code at most once.
 
@@ -298,7 +298,8 @@ credit and when it ends. Admins redeem from `/billing` on Discord or Slack, or
 with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
 `invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
 `already_redeemed` and `throttled`; five refusals in 15 minutes pause a
-tenant's attempts. Revoking stops new redemptions only: redeemed credit,
+tenant's attempts, which are serialized per tenant so parallel guesses
+cannot slip past. Revoking stops new redemptions only: redeemed credit,
 including timed credit not yet started, stays.
 
 ## The tables

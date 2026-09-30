@@ -19,6 +19,7 @@ from daimon.core.promo_codes import (
     hash_promo_code,
     is_granted_on_redeem,
     is_well_formed_promo_code,
+    normalize_chosen_promo_code,
     normalize_promo_code,
     parse_utc_timestamp,
     redeem_refusal,
@@ -66,6 +67,16 @@ def test_normalize_folds_crockford_look_alikes() -> None:
 @pytest.mark.parametrize("raw", ["", "ABC", "AB$DEF", "ÄBCDEF", "A" * 65])
 def test_malformed_codes_are_rejected(raw: str) -> None:
     assert not is_well_formed_promo_code(normalize_promo_code(raw))
+
+
+def test_chosen_codes_must_be_long_enough_to_resist_guessing() -> None:
+    assert normalize_chosen_promo_code("launch-week-26") == "1AUNCHWEEK26", "12 characters pass"
+    with pytest.raises(PromoCodeError, match="12-64"):
+        normalize_chosen_promo_code("LAUNCH-WEEK")
+    generated = generate_promo_code()
+    assert normalize_chosen_promo_code(generated) == normalize_promo_code(generated), (
+        "a generated code always meets the chosen-code minimum"
+    )
 
 
 def test_generated_codes_are_grouped_unambiguous_and_redeemable() -> None:

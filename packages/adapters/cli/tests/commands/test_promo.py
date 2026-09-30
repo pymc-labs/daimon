@@ -100,9 +100,9 @@ async def test_created_code_is_printed_once_and_redeemable(
 
 async def test_custom_codes_are_unique_case_insensitively(db_session_factory: Factory) -> None:
     rt = build_cli_runtime(db_session_factory)
-    await promo_create(rt=rt, console=_console(), amount="5", code="Launch-Week")
+    await promo_create(rt=rt, console=_console(), amount="5", code="Launch-Week-2026")
     with pytest.raises(StoreError, match="already exists"):
-        await promo_create(rt=rt, console=_console(), amount="5", code="LAUNCHWEEK")
+        await promo_create(rt=rt, console=_console(), amount="5", code="LAUNCHWEEK2026")
 
 
 @pytest.mark.parametrize(
@@ -113,7 +113,9 @@ async def test_custom_codes_are_unique_case_insensitively(db_session_factory: Fa
         ({"amount": "5", "timed": True, "ends": "2026-06-01"}, "both"),
         ({"amount": "5", "timed": True, "starts": "soon", "ends": "2026-06-01"}, "ISO 8601"),
         ({"amount": "5", "starts": "2026-06-01"}, "timed code"),
-        ({"amount": "5", "code": "no"}, "6-64"),
+        ({"amount": "5", "code": "no"}, "12-64"),
+        ({"amount": "5", "code": "SHORT-CODE1"}, "12-64"),
+        ({"amount": "1000000"}, "at most"),
     ],
 )
 async def test_create_rejects_bad_input(
@@ -147,7 +149,7 @@ async def test_timed_code_stays_redeemable_until_its_credit_ends(
 
 async def test_revoke(db_session_factory: Factory) -> None:
     rt = build_cli_runtime(db_session_factory)
-    await promo_create(rt=rt, console=_console(), amount="5", code="REVOKE-ME")
+    await promo_create(rt=rt, console=_console(), amount="5", code="REVOKE-ME-PLEASE")
     async with db_session_factory() as session:
         [row] = await promo_store.list_promo_codes(session)
     console = _console()
