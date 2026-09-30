@@ -32,8 +32,8 @@ from daimon.adapters.discord.embed import (
     TurnPhase,
     format_termination_notice,
     to_embed_data,
-    to_preview_embed_data,
     update,
+    update_activity,
 )
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.split import split_for_discord_safe
@@ -62,25 +62,24 @@ _DEBOUNCE_S = 10.0
 
 # A text block sealed by a later tool use posts permanently once it reaches
 # this size; shorter sealed blocks are pre-tool narration and stay in the
-# ephemeral preview embed. Calibrated on prod sessions 2026-07-04..13: the
-# largest narration block was 429 chars, the smallest swallowed answer 542.
+# ephemeral draft on the status card. Calibrated on prod sessions
+# 2026-07-04..13: the largest narration block was 429 chars, the smallest
+# swallowed answer 542.
 _SEALED_RESPONSE_MIN_CHARS = 500
 
 
 def _map_sse_event(event: RawMessageStreamEvent) -> EmbedEvent | None:
-    """Map a Managed Agents session SSE event to an EmbedEvent, or None if irrelevant."""
-    event_type: str = getattr(event, "type", "")
-    if event_type == "agent.thinking":
-        return EmbedEvent(kind="thinking", label="")
-    if event_type == "agent.tool_use":
-        name: str = getattr(event, "name", "tool")
-        return EmbedEvent(kind="tool_use", label=name)
-    if event_type == "agent.message":
-        parts: list[object] = getattr(event, "content", [])
-        # Full text — the embed state machine caps it for the preview embed.
-        text = "".join(getattr(p, "text", "") for p in parts).strip()
-        return EmbedEvent(kind="message", label=text)
-    return None
+    """Map a Managed Agents session SSE event to an EmbedEvent, or None if irrelevant.
+
+    Only the draft rides SSE: tool calls and the Thinking/Working phase are
+    read from the turn state on each render, which sees every tool kind.
+    """
+    if getattr(event, "type", "") != "agent.message":
+        return None
+    parts: list[object] = getattr(event, "content", [])
+    # Full text — the embed state machine clips it for the draft.
+    text = "".join(getattr(p, "text", "") for p in parts).strip()
+    return EmbedEvent(kind="message", label=text)
 
 
 def _has_visible_output(state: TurnState) -> bool:
@@ -158,7 +157,6 @@ class DiscordTurnLifecycle:
         self._clock = clock
         self._state = EmbedState(
             phase=TurnPhase.THINKING,
-            trail=(),
             agent_name=agent_name,
             started_at=self._clock(),
         )
@@ -248,12 +246,8 @@ class DiscordTurnLifecycle:
         return await self._send(**kwargs)
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
-        """Render the activity embed plus the optional text-preview embed below it."""
-        embeds = [build_discord_embed(to_embed_data(self._state, now=now))]
-        preview = to_preview_embed_data(self._state)
-        if preview is not None:
-            embeds.append(build_discord_embed(preview))
-        return embeds
+        """Render the one status embed: headline, tool lines and the latest draft."""
+        return [build_discord_embed(to_embed_data(self._state, now=now))]
 
     async def _maybe_flush(self) -> None:
         """Post or edit the embeds, subject to debounce. No-op after terminal."""
@@ -317,7 +311,7 @@ class DiscordTurnLifecycle:
 
     async def _flush_terminal(self) -> None:
         """Unconditionally flush terminal state as a single collapsed embed,
-        bypassing debounce. ``embeds=[...]`` also drops the preview embed."""
+        bypassing debounce."""
         self._terminal = True
         now = self._clock()
         data = to_embed_data(self._state, now=now)
@@ -507,6 +501,7 @@ class DiscordTurnLifecycle:
         # answer never trails behind an embed that already moved past it.
         if self._terminal:
             return
+        self._state = update_activity(self._state, state.content)
         await self._persist_sealed_responses(state)
         if self._unprompted and self._message_ref is None and not _has_visible_output(state):
             return  # nothing to show yet, and nobody asked: stay invisible

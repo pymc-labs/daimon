@@ -25,9 +25,9 @@
         'embeds': list([
           dict({
             'color': 9807270,
-            'description': '⏱️ 0s',
+            'description': '**Thinking** · 0s',
             'footer': None,
-            'title': '🧠 thinking',
+            'title': None,
           }),
         ]),
       }),
@@ -43,11 +43,13 @@
           dict({
             'color': 3447003,
             'description': '''
-              ⏱️ 11s
-              ⚙️ Bash
+              **Working** · 11s
+              ```
+              🖋️ Running a command
+              ```
             ''',
             'footer': None,
-            'title': '⚙️ running tool',
+            'title': None,
           }),
         ]),
       }),
@@ -73,9 +75,9 @@
         'embeds': list([
           dict({
             'color': 9807270,
-            'description': '⏱️ 0s',
+            'description': '**Thinking** · 0s',
             'footer': None,
-            'title': '🧠 thinking',
+            'title': None,
           }),
         ]),
       }),
