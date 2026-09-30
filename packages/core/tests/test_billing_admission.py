@@ -272,7 +272,24 @@ async def test_is_over_cap_returns_false_when_billing_config_none(
         user_id="u1",
         now=datetime.now(UTC),
     )
-    assert result is False, "billing_config=None should allow all turns"
+    assert result is False, "no cap row should allow turns without Stripe"
+
+
+async def test_is_over_cap_without_stripe_when_cap_is_reached(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    async with db_session_factory() as s, s.begin():
+        await tenant_user_caps.set_default(s, tenant_id=tenant.id, amount=Decimal("15.00"))
+        await _record_1m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="no-stripe")
+    assert await billing.is_over_cap(
+        billing_config=None,
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        user_id="u1",
+        now=datetime.now(UTC),
+    )
 
 
 def test_load_billing_config_returns_config_when_env_complete(

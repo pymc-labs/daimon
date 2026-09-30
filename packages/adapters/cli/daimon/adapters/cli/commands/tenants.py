@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
+from decimal import Decimal, InvalidOperation
 from typing import Annotated
 
 import typer
@@ -16,6 +18,7 @@ from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.config import load_settings
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores import tenant_ledger, tenant_user_caps
 from daimon.core.stores.access_policy import (
     clear_access_policy,
     load_access_policy,
@@ -32,7 +35,7 @@ from daimon.core.stores.tenants import (
 )
 from rich.console import Console
 
-tenants_app = typer.Typer(help="Tenants: list, funding policy, access policy and delete.")
+tenants_app = typer.Typer(help="Tenants: list, credit, caps, funding and access policy, delete.")
 access_policy_app = typer.Typer(
     help="A tenant's access policy: who may invoke the agent, protected and sealed channels."
 )
@@ -203,6 +206,132 @@ async def _existing_tenant_id(rt: CliRuntime, *, platform: str, external_id: str
         if await get_tenant(session, tenant_id) is None:
             raise StoreError(f"no tenant {platform}:{external_id}")
     return tenant_id
+
+
+def _usd(value: str, *, positive: bool) -> Decimal:
+    try:
+        amount = Decimal(value)
+    except (InvalidOperation, ValueError) as exc:
+        raise typer.BadParameter("usd must be a dollar amount") from exc
+    if not amount.is_finite() or amount < 0 or (positive and amount == 0):
+        raise typer.BadParameter(
+            "usd must be a positive dollar amount" if positive else "usd must be nonnegative"
+        )
+    exponent = amount.as_tuple().exponent
+    if isinstance(exponent, int) and exponent < -2:
+        raise typer.BadParameter("usd must have at most two decimal places")
+    return amount
+
+
+@tenants_app.command("credit")
+def tenants_credit_command(
+    platform: str,
+    workspace_id: str,
+    usd: str,
+    reason: Annotated[str, typer.Option("--reason", help="Why credit was added.")],
+    request_id: Annotated[
+        str | None, typer.Option("--id", help="Reuse this id to safely retry the credit.")
+    ] = None,
+) -> None:
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _with_runtime() -> None:
+        async with build_runtime(settings) as rt:
+            await tenants_credit(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                usd=usd,
+                reason=reason,
+                request_id=request_id,
+            )
+
+    run_cli(_with_runtime(), console=console)
+
+
+async def tenants_credit(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    workspace_id: str,
+    usd: str,
+    reason: str,
+    request_id: str | None,
+) -> None:
+    amount = _usd(usd, positive=True)
+    if not reason.strip():
+        raise typer.BadParameter("reason must not be empty")
+    tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=workspace_id)
+    request_id = request_id or str(uuid.uuid4())
+    # Argument digest makes the key stable across retries without putting free-form
+    # reasons in the index. The caller id distinguishes intentional repeat credits.
+    digest = hashlib.sha256(
+        f"{platform}\0{workspace_id}\0{amount:.2f}\0{reason}".encode()
+    ).hexdigest()[:16]
+    key = f"manual:topup:{tenant_id}:{digest}:{request_id}"
+    async with rt.sessionmaker() as session, session.begin():
+        inserted = await tenant_ledger.insert_entry(
+            session,
+            tenant_id=tenant_id,
+            delta_usd=amount,
+            reason=reason,
+            idempotency_key=key,
+        )
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant_id)
+    status = "credited" if inserted else "already credited"
+    console.print(f"{platform}:{workspace_id} balance: ${balance:.2f} ({status})")
+    console.print(f"credit id: {request_id}")
+    console.print(f"idempotency key: {key}")
+
+
+@tenants_app.command("cap")
+def tenants_cap_command(
+    platform: str,
+    workspace_id: str,
+    usd: str,
+    user: Annotated[str | None, typer.Option("--user", help="Platform user id override.")] = None,
+) -> None:
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _with_runtime() -> None:
+        async with build_runtime(settings) as rt:
+            await tenants_cap(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                usd=usd,
+                user=user,
+            )
+
+    run_cli(_with_runtime(), console=console)
+
+
+async def tenants_cap(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    workspace_id: str,
+    usd: str,
+    user: str | None,
+) -> None:
+    amount = _usd(usd, positive=False)
+    tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=workspace_id)
+    if user == "":
+        raise typer.BadParameter("user must not be empty")
+    async with rt.sessionmaker() as session, session.begin():
+        if user is None:
+            await tenant_user_caps.set_default(session, tenant_id=tenant_id, amount=amount)
+        else:
+            await tenant_user_caps.set_override(
+                session, tenant_id=tenant_id, user_id=user, amount=amount
+            )
+    console.print(f"{platform}:{workspace_id} monthly cap for {user or 'default'}: ${amount:.2f}")
 
 
 def _print_policy(

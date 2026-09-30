@@ -230,12 +230,25 @@ retry alone cannot resolve inconsistent payment data; inspect the Stripe
 event, payment intent, original credit, and tenant before replaying it.
 
 Both the checkout and webhook routes are mounted only when Stripe is
-configured. A self-hoster without it credits a tenant by inserting a
-`tenant_ledger` row directly with a positive `delta_usd` and a unique
-idempotency key — `.env.example` spells this out, and the unique index makes
-a re-run harmless.
+configured. Operators can credit an existing tenant without Stripe:
 
-There is no CLI command and no MCP tool that adds credit.
+```sh
+daimon tenants credit discord GUILD_ID 25.00 --reason "hackathon grant" --id grant-1
+```
+
+The command prints the new balance, credit id and idempotency key. Reusing the same
+arguments and `--id` does not add a second credit. Omit `--id` for a new,
+generated id each time.
+
+Set a per-person monthly cap, with an optional user override:
+
+```sh
+daimon tenants cap discord GUILD_ID 10.00
+daimon tenants cap discord GUILD_ID 5.00 --user PLATFORM_USER_ID
+```
+
+The default row applies to everyone without an override. A zero cap blocks
+all turns; the cap gate applies even without Stripe.
 
 ## The tables
 
@@ -304,21 +317,19 @@ deliberately kept separate. Both blocks are catalogued in
 
 `load_billing_config` in `packages/core/daimon/core/billing.py` requires
 **all** of the flat Stripe variables together. If any one is missing it logs
-that billing is disabled, returns `None`, and three things follow:
+that Stripe billing is disabled, returns `None`, and these things follow:
 
 - the checkout, webhook and landing routes are not mounted;
-- **the cap gate becomes inert** — `is_over_cap` returns `False` immediately
-  when there is no billing config, so monthly caps do nothing at all;
-- metering, debits, the balance gate and the trial credit are unaffected.
+- metering, debits, the balance gate, configured monthly caps and the trial
+  credit are unaffected.
 
 Self-service top-ups additionally need `DAIMON_MCP__PUBLIC_URL` and
 `DAIMON_MCP__JWT_SECRET` for the adapter-to-MCP hop, and the image must carry
 the optional `billing` extra, which is what pulls in `stripe`.
 
-One gap to be aware of when reading the cap code: nothing in the shipped
-adapters or CLI writes a `tenant_user_caps` row. The stores exist and the gate
-reads them, but today a cap has to be inserted directly, and some user-facing
-copy still says "when available" for exactly that reason.
+The Discord and Slack terminal reply footers show the remaining ledger balance
+for prepaid tenants after the turn's debit. Operator-funded tenants and turns
+without a tenant omit it.
 
 ## What you can see
 
