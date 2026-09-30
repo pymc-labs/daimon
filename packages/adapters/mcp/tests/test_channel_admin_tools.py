@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,6 +17,7 @@ from daimon.adapters.mcp.tools.channel_admins import (
     _set_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.reachability import require_admin_for_reachable_agent
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
@@ -167,3 +169,40 @@ async def test_channel_admin_may_edit_an_agent_local_to_their_channel(
     await require_admin_for_reachable_agent(runtime, role_member, agent_name="helper")
     with pytest.raises(ToolError, match="an admin must change its setup"):
         await require_admin_for_reachable_agent(runtime, role_member, agent_name="shared")
+
+
+async def test_channel_admin_cannot_bind_another_channels_own_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolve = AsyncMock(return_value=SimpleNamespace(metadata={}))
+    monkeypatch.setattr(propagation, "resolve_setup_agent", resolve)
+    tenant_id = await _tenant(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=OTHER_CHANNEL),
+            tenant_id=tenant_id,
+            agent_name="other-own",
+            mode="agent",
+        )
+    await _set_channel_admins_impl(
+        runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
+    )
+    member = _auth(tenant_id)
+
+    with pytest.raises(ToolError, match="does not administer"):
+        await propagation._set_agent_default_impl(runtime, member, "other-own", CHANNEL)  # pyright: ignore[reportPrivateUsage]
+    assert (
+        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
+        is None
+    ), "the refused bind wrote nothing"
+
+    resolve.return_value = SimpleNamespace(metadata={MA_METADATA_KEY_MANAGED: "true"})
+    await propagation._set_agent_default_impl(runtime, member, "other-own", CHANNEL)  # pyright: ignore[reportPrivateUsage]
+    resolve.return_value = SimpleNamespace(metadata={})
+    await propagation._set_agent_default_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, _auth(tenant_id, admin=True), "other-own", CHANNEL
+    )

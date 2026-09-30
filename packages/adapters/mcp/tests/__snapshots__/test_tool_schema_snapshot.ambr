@@ -3950,7 +3950,9 @@
         omit it to set the workspace-wide default.  Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
         core).  Requires Manage Server (admin); an admin of the channel may set
-        that channel's default.
+        that channel's default to a built-in agent, the workspace default, an
+        agent that answers nowhere yet, or one that answers only in channels
+        they administer.
         
         Discord: ``channel_id`` MUST be the parent channel's id — the one
         your context gives as

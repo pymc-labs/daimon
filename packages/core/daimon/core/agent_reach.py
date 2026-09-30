@@ -112,6 +112,37 @@ async def is_agent_local_to_caller(
     return reach.is_local_to(administered)
 
 
+async def may_bind_as_channel_default(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    agent_name: str,
+    default: DeploymentDefault,
+    caller: ChannelAdminCaller,
+    is_daimon_managed: bool,
+) -> bool:
+    """Whether `caller` may make `agent_name` the default of a channel they run.
+
+    Server admins bind anything. A channel admin binds only agents shared by
+    design (tenant-wide or defaults-managed, which stay read-only to them) or
+    agents already local to their channels, one answering nowhere included.
+    Never another channel's own agent: that would lend its keys and memory to
+    this channel and take its edit rights from that channel's admins.
+    """
+    if caller.is_server_admin or is_daimon_managed:
+        return True
+    reach = await load_agent_reach(
+        session, tenant_id=tenant_id, agent_name=agent_name, default=default
+    )
+    if reach.is_tenant_wide:
+        return True
+    administered = await load_administered_channel_ids(
+        session, tenant_id=tenant_id, platform=platform, caller=caller
+    )
+    return reach.is_local_to(administered)
+
+
 async def load_target_facts(
     session: AsyncSession,
     operation: OperationKind,
@@ -156,4 +187,5 @@ __all__ = [
     "is_agent_local_to_caller",
     "load_agent_reach",
     "load_target_facts",
+    "may_bind_as_channel_default",
 ]

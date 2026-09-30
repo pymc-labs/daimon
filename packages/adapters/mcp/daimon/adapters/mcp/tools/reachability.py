@@ -22,7 +22,7 @@ from typing import Final
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.core.agent_reach import load_target_facts
+from daimon.core.agent_reach import load_target_facts, may_bind_as_channel_default
 from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
 from daimon.core.operation_policy import OperationKind, TargetFacts, decide_operation
 from daimon.core.stores.channel_admins import get_channel_admins
@@ -81,6 +81,31 @@ async def require_channel_admin(
             "This change needs a workspace or server admin, or an admin of that channel, "
             "and the caller is neither. Tell them who can make it and give them a sentence "
             "that admin can say, preserving the requested action and channel. Do not retry."
+        )
+
+
+async def require_bindable_by_channel_admin(
+    runtime: McpRuntime, auth: AuthIdentity, *, agent_name: str, is_daimon_managed: bool
+) -> None:
+    """Raise ``ToolError`` when a channel admin binds another channel's own agent."""
+    if auth.is_admin:
+        return
+    async with runtime.session_factory() as session:
+        allowed = await may_bind_as_channel_default(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=auth.platform or "",
+            agent_name=agent_name,
+            default=runtime.deployment_default,
+            caller=channel_admin_caller(auth),
+            is_daimon_managed=is_daimon_managed,
+        )
+    if not allowed:
+        raise ToolError(
+            f"'{agent_name}' answers in channels this caller does not administer, so only a "
+            "workspace or server admin can make it this channel's default. A channel admin may "
+            "pick a built-in agent, the workspace default, an agent that answers nowhere yet, "
+            "or one that answers only in their channels. Nothing was changed. Do not retry."
         )
 
 

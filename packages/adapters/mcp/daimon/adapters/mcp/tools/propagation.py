@@ -21,8 +21,12 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.reachability import require_channel_admin
+from daimon.adapters.mcp.tools.reachability import (
+    require_bindable_by_channel_admin,
+    require_channel_admin,
+)
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.routing_facts import (
     build_clear_default_note,
     build_resolution_note,
@@ -91,9 +95,18 @@ async def _set_agent_default_impl(
     expected_ma_agent_id: str | None = None,
 ) -> SetDefaultResult:
     await _require_scope_admin(runtime, auth, channel_id)
+    agent = None
     if expected_ma_agent_id is not None or auth.platform in ("discord", "slack"):
-        await resolve_setup_agent(
+        agent = await resolve_setup_agent(
             runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
+        )
+    if channel_id is not None:
+        await require_bindable_by_channel_admin(
+            runtime,
+            auth,
+            agent_name=agent_name,
+            is_daimon_managed=agent is not None
+            and agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
         )
 
     tenant_id: uuid.UUID = auth.tenant_id
@@ -315,7 +328,9 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         omit it to set the workspace-wide default.  Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
         core).  Requires Manage Server (admin); an admin of the channel may set
-        that channel's default.
+        that channel's default to a built-in agent, the workspace default, an
+        agent that answers nowhere yet, or one that answers only in channels
+        they administer.
 
         Discord: ``channel_id`` MUST be the parent channel's id — the one
         your context gives as

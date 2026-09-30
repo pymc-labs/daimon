@@ -6,9 +6,10 @@ from daimon.core.agent_reach import (
     is_agent_local_to_caller,
     load_agent_reach,
     load_target_facts,
+    may_bind_as_channel_default,
 )
 from daimon.core.channel_admins import ChannelAdminCaller
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
@@ -117,3 +118,43 @@ async def test_load_target_facts_marks_only_a_channel_admins_local_agent(
     assert (await facts(member)).is_local_to_caller_channels, "a role grant is enough"
     admin = await facts(member.model_copy(update={"is_server_admin": True}))
     assert not admin.is_reachable_in_tenant, "an admin's decision needs no read"
+
+
+async def test_channel_admin_binds_only_shared_unrouted_or_own_channel_agents(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    for scope, name in (
+        (TenantScopeRef(tenant_id=tenant.id), "shared"),
+        (ChannelScopeRef(tenant_id=tenant.id, channel_id="b"), "b-agent"),
+    ):
+        await set_fields(
+            db_session, scope=scope, tenant_id=tenant.id, agent_name=name, mode="agent"
+        )
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="a",
+        role_ids=[],
+        user_ids=["u1"],
+        actor_account_id=None,
+    )
+    caller = ChannelAdminCaller(platform_user_id="u1")
+
+    async def may_bind(name: str, *, managed: bool = False, who=caller) -> bool:
+        return await may_bind_as_channel_default(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            agent_name=name,
+            default=DEFAULT,
+            caller=who,
+            is_daimon_managed=managed,
+        )
+
+    assert not await may_bind("b-agent"), "another channel's own agent never moves in"
+    assert await may_bind("b-agent", managed=True), "a managed agent is shared by design"
+    assert await may_bind("shared"), "the tenant default is shared by design"
+    assert await may_bind("unrouted"), "an agent answering nowhere is free to bind"
+    assert await may_bind("b-agent", who=caller.model_copy(update={"is_server_admin": True}))

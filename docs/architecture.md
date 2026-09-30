@@ -243,7 +243,9 @@ Slack grant is by user id. A channel admin may do what a server admin may for
 an agent local to their channels -- not the tenant default, and every
 channel-scope row and thread binding in a channel they run
 (`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
-channels' default agent. Managed agents and the tenant default stay with server
+channels' default agent. A channel admin binds only a shared agent (managed or
+tenant-wide), one answering nowhere, or one already local to their channels,
+never another channel's own agent. Managed agents and the tenant default stay with server
 admins, and a tenant with no grant behaves as before. Server admins edit grants
 with the `*_channel_admins` MCP tools, from Who answers where in the setup
 panel, or with the CLI:
