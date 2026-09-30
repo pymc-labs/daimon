@@ -28,6 +28,7 @@ from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed, PromoRede
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.testing.factories import make_account, make_tenant
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 888000000000000001
@@ -162,6 +163,27 @@ async def test_modal_submit_from_a_demoted_admin_redeems_nothing() -> None:
     await modal.on_submit(interaction)
     assert "Manage Server" in interaction.response.send_message.call_args.args[0]
     rerender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_modal_submit_answers_when_the_database_fails() -> None:
+    """After defer() the admin still gets an ephemeral error, not a silent spinner."""
+    runtime = MagicMock(spec=DiscordRuntime)
+    runtime.sessionmaker = MagicMock(
+        side_effect=OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
+    )
+    rerender = AsyncMock()
+    modal = RedeemCodeModal(runtime=runtime, account_id=uuid.uuid4(), rerender=rerender)
+    modal.code_in._value = "WELCOME-2026"
+    interaction = _interaction(admin=True)
+
+    await modal.on_submit(interaction)
+
+    interaction.response.defer.assert_awaited_once()
+    rerender.assert_not_awaited()
+    assert interaction.followup.send.call_args.kwargs == {"ephemeral": True}, (
+        "the failure should be answered ephemerally"
+    )
 
 
 @pytest.mark.asyncio
