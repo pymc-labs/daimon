@@ -30,8 +30,8 @@ from daimon.core.notebooks.publish import (
 # enough to bound the replay window on the single-use token.
 _UPLOAD_TTL_SECONDS = 300
 # 72-bit url-safe nonce for single-use jti dedup (host burns it after one
-# upload). This is dedup entropy, NOT access-secret strength — the slug is the
-# access secret; see _resolve_slug's token_urlsafe(16).
+# upload). This is dedup entropy, NOT access-secret strength; notebook access
+# is the host's per-notebook token in the returned link.
 _JTI_BYTES = 9
 
 
@@ -44,6 +44,7 @@ def _mint_url(
     max_bytes: int,
     now: datetime,
     name: str | None,
+    tenant: str | None = None,
 ) -> dict[str, str]:
     """Mint a token for ``slug``/``op`` and wrap it in the host upload URL."""
     token = mint_token(
@@ -55,6 +56,7 @@ def _mint_url(
         jti=secrets.token_urlsafe(_JTI_BYTES),
         ttl_seconds=_UPLOAD_TTL_SECONDS,
         name=name,
+        tenant=tenant,
     )
     return {
         "upload_url": f"{host.rstrip('/')}/upload/{token}",
@@ -70,6 +72,7 @@ def create_notebook_upload(
     editable: bool = False,
     notebook_settings: NotebookSettings,
     principal_key: str | None = None,
+    tenant: str | None = None,
     now: datetime,
     rate_limiter: RateLimiter | None = None,
 ) -> dict[str, str]:
@@ -119,6 +122,7 @@ def create_notebook_upload(
         max_bytes=notebook_settings.max_source_bytes,
         now=now,
         name=None,
+        tenant=tenant,
     )
 
 
@@ -130,6 +134,7 @@ def create_attachment_upload(
     principal_key: str,
     now: datetime,
     rate_limiter: RateLimiter | None = None,
+    tenant: str | None = None,
 ) -> dict[str, str]:
     """Mint an upload URL for a raw data file at ``data/<name>`` under ``slug``."""
     if notebook_settings.host_url is None or notebook_settings.admin_secret is None:
@@ -155,4 +160,5 @@ def create_attachment_upload(
         max_bytes=notebook_settings.max_attachment_bytes,
         now=now,
         name=name,
+        tenant=tenant,
     )

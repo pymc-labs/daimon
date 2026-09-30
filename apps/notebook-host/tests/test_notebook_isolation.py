@@ -42,8 +42,8 @@ def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def _mint(op: str, slug: str, *, jti: str = "j1") -> str:
-    payload = {
+def _mint(op: str, slug: str, *, jti: str = "j1", tenant: str | None = None) -> str:
+    payload: dict[str, object] = {
         "slug": slug,
         "op": op,
         "name": None,
@@ -51,6 +51,8 @@ def _mint(op: str, slug: str, *, jti: str = "j1") -> str:
         "exp": int(datetime.now(UTC).timestamp()) + 300,
         "jti": jti,
     }
+    if tenant is not None:
+        payload["tenant"] = tenant
     payload_b64 = _b64(json.dumps(payload, separators=(",", ":")).encode())
     sig = hmac.new(_SECRET.encode(), payload_b64.encode(), hashlib.sha256).digest()
     return f"{payload_b64}.{_b64(sig)}"
@@ -726,6 +728,193 @@ def test_proxy_does_not_pretend_to_isolate_notebooks_in_the_browser(
     r = client.get("/n/b/api/status", headers=headers)
     assert r.status_code == 200, r.text
     assert len(seen) == 1
+
+
+# --- per-notebook origins (origin_base) -------------------------------------------
+
+
+def _origin_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[TestClient, Any, list[httpx.Request], dict[str, str]]:
+    from notebook_host.admin import AdminState
+    from notebook_host.config import load_settings
+    from notebook_host.proxy import create_proxy_router
+
+    monkeypatch.setenv("DAIMON_NOTEBOOK__DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DAIMON_NOTEBOOK__ORIGIN_BASE", "nb.example.com")
+    settings = load_settings(_env_file=None)
+    proc = unittest.mock.MagicMock(spec=subprocess.Popen)
+    proc.poll.return_value = None
+    state = AdminState(settings=settings, processes={}, spawner=unittest.mock.MagicMock())
+    hosts: dict[str, str] = {}
+    for slug, port, tok in (("a", 9001, "tok-a"), ("b", 9002, "tok-b")):
+        np = state.make_process(slug, port, proc, access_token=tok, mode="edit")
+        state.processes[slug] = np
+        hosts[slug] = f"{np.origin_label}.nb.example.com"
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            text="ok",
+            headers=[
+                ("set-cookie", "session_1=x; Domain=nb.example.com; Path=/n/b; HttpOnly"),
+                ("set-cookie", "other=y; Path=/"),
+            ],
+        )
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(**kwargs: Any) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr("notebook_host.proxy.httpx.AsyncClient", fake_client)
+    app = FastAPI()
+    app.include_router(create_proxy_router(state))
+    return TestClient(app), state, seen, hosts
+
+
+def test_each_notebook_gets_its_own_unguessable_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, state, _, hosts = _origin_client(tmp_path, monkeypatch)
+    url = state.processes["b"].url
+    assert url.startswith(f"https://{hosts['b']}/n/b/?access_token="), url
+    label = hosts["b"].split(".", 1)[0]
+    assert len(label) == 32 and label != "b", "the label is random-looking, never the slug"
+    assert hosts["a"] != hosts["b"], "two notebooks never share an origin"
+
+
+def test_origin_mode_routes_by_exact_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _, seen, hosts = _origin_client(tmp_path, monkeypatch)
+    assert client.get("/n/b/", headers={"host": hosts["b"]}).status_code == 200
+    assert client.get("/n/b/", headers={"host": "nb.example.com"}).status_code == 404, (
+        "path mode on the shared host is refused"
+    )
+    assert client.get("/n/b/", headers={"host": hosts["a"]}).status_code == 404, (
+        "b's path on a's origin reaches nothing"
+    )
+    assert client.get("/n/b/", headers={"host": "evil." + hosts["b"]}).status_code == 404
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"origin": "https://A"},  # replaced below with a's real origin
+        {"sec-fetch-site": "same-site", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty"},
+        {"sec-fetch-site": "same-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe"},
+        {"sec-fetch-site": "same-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "script"},
+        {"origin": "null"},
+    ],
+)
+def test_origin_mode_refuses_requests_from_another_notebooks_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, headers: dict[str, str]
+) -> None:
+    client, _, seen, hosts = _origin_client(tmp_path, monkeypatch)
+    if headers.get("origin") == "https://A":
+        headers = {"origin": f"https://{hosts['a']}"}
+    r = client.post("/n/b/api/kernel/run", headers={"host": hosts["b"], **headers})
+    assert r.status_code == 403, "the browser-set Origin/Sec-Fetch headers give a's page away"
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},  # curl, old browsers
+        {"sec-fetch-site": "same-origin", "sec-fetch-mode": "cors"},
+        {"sec-fetch-site": "none", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document"},
+        {
+            "sec-fetch-site": "cross-site",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-dest": "document",
+        },
+        {"origin": "ORIGIN_B"},
+    ],
+)
+def test_origin_mode_serves_its_own_page_and_the_link_opened_from_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, headers: dict[str, str]
+) -> None:
+    client, _, seen, hosts = _origin_client(tmp_path, monkeypatch)
+    if headers.get("origin") == "ORIGIN_B":
+        headers = {"origin": f"https://{hosts['b']}"}
+    r = client.get("/n/b/", headers={"host": hosts["b"], **headers})
+    assert r.status_code == 200, r.text
+    assert len(seen) == 1
+
+
+def test_origin_mode_cookies_are_host_only_and_framing_is_self_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _, _, hosts = _origin_client(tmp_path, monkeypatch)
+    r = client.get("/n/b/", headers={"host": hosts["b"]})
+    cookies = r.headers.get_list("set-cookie")
+    assert len(cookies) == 2, "every Set-Cookie is relayed"
+    assert all("domain" not in c.lower() for c in cookies), "no cookie is shared with siblings"
+    assert r.headers["content-security-policy"] == "frame-ancestors 'self'"
+
+
+def test_origin_mode_websocket_needs_the_exact_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from starlette.websockets import WebSocketDisconnect
+
+    client, _, _, hosts = _origin_client(tmp_path, monkeypatch)
+    for origin in (f"https://{hosts['a']}", None, f"http://{hosts['b']}", "https://nb.example.com"):
+        headers = {"host": hosts["b"]}
+        if origin is not None:
+            headers["origin"] = origin
+        with (
+            pytest.raises(WebSocketDisconnect) as exc,
+            client.websocket_connect("/n/b/ws?session_id=x", headers=headers) as ws,
+        ):
+            ws.receive_text()
+        assert exc.value.code == 1008, f"origin {origin!r} must not open b's kernel socket"
+
+
+def test_shared_origin_public_host_serves_one_tenant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DAIMON_NOTEBOOK__PUBLIC_URL_BASE", "https://nbs.example.com")
+    client, _, calls = _make_app(tmp_path, monkeypatch)
+    ok = client.put(f"/upload/{_mint('notebook', 'a', jti='1', tenant='t-1')}", content=b"# a\n")
+    assert ok.status_code == 200, ok.text
+    again = client.put(f"/upload/{_mint('notebook', 'b', jti='2', tenant='t-1')}", content=b"#\n")
+    assert again.status_code == 200
+    other = client.put(f"/upload/{_mint('notebook', 'c', jti='3', tenant='t-2')}", content=b"#\n")
+    assert other.status_code == 403, "a second tenant can't share the origin"
+    anon = client.put(f"/upload/{_mint('notebook', 'd', jti='4')}", content=b"#\n")
+    assert anon.status_code == 403, "a token naming no tenant fails closed"
+    assert len(calls) == 2
+    assert (os.stat(tmp_path / "tenant.json").st_mode & 0o077) == 0
+
+
+def test_per_origin_host_serves_many_tenants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DAIMON_NOTEBOOK__ORIGIN_BASE", "nb.example.com")
+    client, state, _ = _make_app(tmp_path, monkeypatch)
+    for i, tenant in enumerate(("t-1", "t-2")):
+        r = client.put(
+            f"/upload/{_mint('notebook', f's{i}', jti=str(i), tenant=tenant)}", content=b"#\n"
+        )
+        assert r.status_code == 200, r.text
+    assert state.processes["s0"].url.startswith(f"https://{state.processes['s0'].origin_label}.")
+
+
+def test_origin_mode_boot_check_wants_https() -> None:
+    from notebook_host.config import Settings
+    from notebook_host.main import check_link_security
+
+    base = {"admin_secrets": ["x"], "origin_base": "nb.example.com"}
+    check_link_security(Settings(**base))  # pyright: ignore[reportArgumentType]
+    with pytest.raises(RuntimeError, match="ORIGIN_SCHEME"):
+        check_link_security(Settings(**base, origin_scheme="http"))  # pyright: ignore[reportArgumentType]
+    check_link_security(
+        Settings(admin_secrets=["x"], origin_base="localhost:8001", origin_scheme="http")
+    )  # pyright: ignore[reportArgumentType]
 
 
 # --- real marimo: a neighbour on localhost is refused -------------------------

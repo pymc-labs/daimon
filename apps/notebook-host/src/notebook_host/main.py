@@ -51,9 +51,6 @@ from notebook_host.proxy import create_proxy_router
 _log = logging.getLogger(__name__)
 
 
-_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-
-
 def check_link_security(settings: Settings) -> None:
     """Refuse to serve tokenized links over plain http off localhost.
 
@@ -61,7 +58,14 @@ def check_link_security(settings: Settings) -> None:
     is only as private as the transport. ``allow_http_links`` is the explicit
     opt-out for a trusted private network.
     """
-    if settings.allow_http_links:
+    if settings.allow_http_links or settings.is_local_dev:
+        return
+    if settings.origin_base is not None:
+        if settings.origin_scheme != "https":
+            raise RuntimeError(
+                "DAIMON_NOTEBOOK__ORIGIN_SCHEME must be https for a public ORIGIN_BASE; links "
+                "carry each notebook's access token."
+            )
         return
     base = settings.public_url_base
     if base is not None:
@@ -72,12 +76,11 @@ def check_link_security(settings: Settings) -> None:
                 "only on a trusted private network."
             )
         return
-    if settings.public_host not in _LOCAL_HOSTS:
-        raise RuntimeError(
-            f"public_host {settings.public_host!r} would get plain-http links; set "
-            "DAIMON_NOTEBOOK__PUBLIC_URL_BASE to its https:// origin, or "
-            "DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS=true on a trusted private network."
-        )
+    raise RuntimeError(
+        f"public_host {settings.public_host!r} would get plain-http links; set "
+        "DAIMON_NOTEBOOK__PUBLIC_URL_BASE to its https:// origin, or "
+        "DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS=true on a trusted private network."
+    )
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -129,6 +132,12 @@ def create_app(settings: Settings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:  # pyright: ignore[reportUnusedFunction]
         check_link_security(settings)
+        if settings.origin_base is None and not settings.is_local_dev:
+            _log.warning(
+                "notebooks share one browser origin on this host, so it serves ONE tenant: "
+                "the first tenant to upload claims it. Set DAIMON_NOTEBOOK__ORIGIN_BASE "
+                "(wildcard DNS + TLS) for per-notebook origins."
+            )
         # Fail-closed boot gate (D-05): a host that cannot apply the jail must
         # not come up at all. Refusing per-request instead would leave an
         # apparently healthy host answering nothing but 503s — a configuration

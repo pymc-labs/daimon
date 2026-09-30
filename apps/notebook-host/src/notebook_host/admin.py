@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import os
 import shutil
 import subprocess
@@ -43,6 +44,7 @@ from notebook_host.lifecycle import (
     allocate_port,
     kill,
     new_access_token,
+    origin_label_for,
     safe_attachment_name,
     safe_slug,
     should_reap,
@@ -93,13 +95,17 @@ class AdminState:
         mode: Literal["edit", "run"] = "edit",
         permanent: bool = False,
     ) -> NotebookProcess:
+        public_url_base = self.settings.public_url_base
+        if self.settings.origin_base is not None:
+            label = origin_label_for(access_token)
+            public_url_base = f"{self.settings.origin_scheme}://{label}.{self.settings.origin_base}"
         return NotebookProcess(
             slug=slug,
             port=port,
             process=proc,
             public_host=self.settings.public_host,
             host_port=self.settings.host_port,
-            public_url_base=self.settings.public_url_base,
+            public_url_base=public_url_base,
             mode=mode,
             permanent=permanent,
             access_token=access_token,
@@ -153,6 +159,44 @@ def _require_editor_allowed(settings: Settings) -> None:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "the notebook editor is off on this host (DAIMON_NOTEBOOK__ALLOW_EDITABLE)",
+        )
+
+
+_TENANT_FILE = "tenant.json"
+
+
+def _admit_tenant(settings: Settings, tenant: str | None) -> None:
+    """On a shared-origin public host, accept uploads from one tenant only.
+
+    Without per-notebook origins (``origin_base``) every notebook shares one
+    browser origin, so one tenant's notebook JavaScript could reach another's.
+    The first tenant to upload claims the host (``tenant.json``, 0600); any
+    other tenant, or a token that names none, is refused. Local dev hosts and
+    per-origin hosts skip this.
+    """
+    if settings.origin_base is not None or settings.is_local_dev:
+        return
+    if tenant is None:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "upload token names no tenant; this host serves one"
+        )
+    path = settings.data_dir / _TENANT_FILE
+    try:
+        owner = json.loads(path.read_text())["tenant"]
+    except (OSError, ValueError, KeyError, TypeError):
+        owner = None
+    if owner is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"tenant": tenant}))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        return
+    if not hmac.compare_digest(str(owner), tenant):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "this notebook host serves another tenant; notebooks share one browser origin "
+            "here (set DAIMON_NOTEBOOK__ORIGIN_BASE for per-notebook origins)",
         )
 
 
@@ -551,6 +595,7 @@ def create_admin_router(state: AdminState) -> APIRouter:
             # The bot gates this too; the host refuses on its own so a
             # capability minted elsewhere can't turn the editor on.
             _require_editor_allowed(state.settings)
+        _admit_tenant(state.settings, claims.tenant)
         # Burn before reading the body: burn_jti's check-and-write is one call
         # with no await in between, so two concurrent replays of one token
         # cannot both observe it as unused. Burning here (rather than after a

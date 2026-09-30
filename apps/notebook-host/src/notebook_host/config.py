@@ -11,10 +11,21 @@ all fields are top-level on the single Settings class).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _host_only(netloc: str) -> str:
+    """``netloc`` without its port (IPv6 brackets stripped)."""
+    host = netloc.rsplit("@", 1)[-1]
+    if host.startswith("["):
+        return host[1:].split("]", 1)[0]
+    return host.split(":", 1)[0].lower()
 
 
 class Settings(BaseSettings):
@@ -134,6 +145,27 @@ class Settings(BaseSettings):
     # refuses to start without an `https://` `public_url_base`. Only for a
     # trusted private network.
     allow_http_links: bool = False
+    # Serve every notebook from its own origin, ``<label>.<origin_base>``,
+    # with ``label`` an unguessable value derived from the notebook's token
+    # (never the slug). Needs wildcard DNS and a wildcard TLS certificate for
+    # ``*.<origin_base>``. May carry a port for local testing
+    # ("localhost:8001"; browsers resolve ``*.localhost`` to 127.0.0.1). When
+    # set, the proxy routes by Host, requires the exact origin on every
+    # cross-origin request and WebSocket, and refuses path-mode /n/<slug>/ on
+    # any other host. Unset: all notebooks share one origin, so a public host
+    # serves one tenant only (see README).
+    origin_base: str | None = None
+    origin_scheme: Literal["https", "http"] = "https"
+
+    @property
+    def is_local_dev(self) -> bool:
+        """Links only ever point at this machine (no public origin configured)."""
+        if self.origin_base is not None:
+            return _host_only(self.origin_base) in _LOCAL_HOSTS
+        if self.public_url_base is not None:
+            return _host_only(urlsplit(self.public_url_base).netloc) in _LOCAL_HOSTS
+        return self.public_host in _LOCAL_HOSTS
+
     # Path to the persisted uid registry. Host writes {slug: uid} whenever a
     # new slug is jailed; ``None`` (default) means "use
     # ``data_dir / 'uids.json'``" — keeps it on the same persistent volume

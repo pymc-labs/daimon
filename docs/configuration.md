@@ -1127,6 +1127,14 @@ inline comments.
 
 `bool` · optional · default `False`
 
+### `DAIMON_NOTEBOOK__ORIGIN_BASE`
+
+`str | None` · optional · default unset
+
+### `DAIMON_NOTEBOOK__ORIGIN_SCHEME`
+
+`'https' | 'http'` · optional · default `https`
+
 ### `DAIMON_NOTEBOOK__UIDS_FILE`
 
 `Path | None` · optional · default unset

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import importlib.metadata
 import logging
 import os
@@ -86,6 +87,11 @@ class NotebookProcess:
     access_token: str = field(default="", repr=False)
 
     @property
+    def origin_label(self) -> str:
+        """This notebook's DNS label in per-notebook-origin mode (``origin_base``)."""
+        return origin_label_for(self.access_token) if self.access_token else ""
+
+    @property
     def url(self) -> str:
         if self.public_url_base is not None:
             base = f"{self.public_url_base.rstrip('/')}/n/{self.slug}/"
@@ -125,6 +131,17 @@ def should_reap(np: NotebookProcess, ttl_seconds: int) -> bool:
     if not np.is_alive():
         return True
     return ttl_seconds > 0 and np.age_s > ttl_seconds
+
+
+def origin_label_for(access_token: str) -> str:
+    """The notebook's own origin label: ``<label>.<origin_base>``.
+
+    Derived from the token, so it rotates with it and needs no storage, and
+    unguessable without it. 32 lowercase hex characters: a valid DNS label
+    that says nothing about the slug.
+    """
+    digest = hashlib.sha256(b"daimon-notebook-origin\0" + access_token.encode())
+    return digest.hexdigest()[:32]
 
 
 def new_access_token() -> str:

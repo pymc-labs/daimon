@@ -31,6 +31,7 @@ async def _create_notebook_upload_impl(
     permanent: bool,
     principal_key: str,
     editable: bool = False,
+    tenant: str | None = None,
 ) -> dict[str, str]:
     if permanent and editable:
         raise ToolError("editable=True is for scratch notebooks only; a blog is always read-only")
@@ -43,6 +44,7 @@ async def _create_notebook_upload_impl(
             principal_key=principal_key,
             now=datetime.now(UTC),
             rate_limiter=runtime.notebook_rate_limiter,
+            tenant=tenant,
         )
     except HostNotConfiguredError as err:
         raise ToolError("notebook host not configured") from err
@@ -53,7 +55,12 @@ async def _create_notebook_upload_impl(
 
 
 async def _create_attachment_upload_impl(
-    runtime: McpRuntime, *, slug: str, name: str, principal_key: str
+    runtime: McpRuntime,
+    *,
+    slug: str,
+    name: str,
+    principal_key: str,
+    tenant: str | None = None,
 ) -> dict[str, str]:
     try:
         return create_attachment_upload(
@@ -63,6 +70,7 @@ async def _create_attachment_upload_impl(
             principal_key=principal_key,
             now=datetime.now(UTC),
             rate_limiter=runtime.notebook_rate_limiter,
+            tenant=tenant,
         )
     except HostNotConfiguredError as err:
         raise ToolError("notebook host not configured") from err
@@ -167,6 +175,7 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             permanent=permanent,
             editable=editable,
             principal_key=str(auth.account_id),
+            tenant=str(auth.tenant_id),
         )
 
     @mcp.tool
@@ -186,7 +195,11 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         auth = await _auth(ctx)
         return await _create_attachment_upload_impl(
-            runtime, slug=slug, name=name, principal_key=str(auth.account_id)
+            runtime,
+            slug=slug,
+            name=name,
+            principal_key=str(auth.account_id),
+            tenant=str(auth.tenant_id),
         )
 
     @mcp.tool

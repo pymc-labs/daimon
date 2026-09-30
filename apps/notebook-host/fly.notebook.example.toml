@@ -10,15 +10,17 @@
 # Naming convention: prefix the environment, don't suffix it
 # (e.g. production-daimon-notebook-host, staging-daimon-notebook-host).
 #
-# PUBLIC EXPOSURE: the [[services]] block below publishes the host on
-# <your-app-name>.fly.dev, because users open notebook links in a browser.
-# Each notebook is protected only by the access token in its link (see the
-# README's trust model). Notebooks share one machine and one browser origin,
-# and there is no browser isolation between them, so ONE NOTEBOOK HOST
-# SERVES ONE CLIENT: deploy a separate app per client.
-# Otherwise drop [[services]] and reach the host over Fly's private network
-# or behind an authenticating proxy. Set ALLOWED_ORIGINS below to the public
-# origin whenever the host is public.
+# PUBLIC EXPOSURE: the [[services]] block below publishes the host, because
+# users open notebook links in a browser. Each notebook is protected by the
+# access token in its link and served from its own origin,
+# https://<label>.<your-notebook-domain>/ (see the README's trust model).
+# That needs, before deploying:
+#   - a wildcard DNS record: *.<your-notebook-domain> CNAME <your-app-name>.fly.dev
+#     (plus <your-notebook-domain> itself for the upload URL, if you like)
+#   - a wildcard certificate:
+#       fly certs add "*.<your-notebook-domain>" --app <your-app-name>
+# Without ORIGIN_BASE all notebooks share one origin with no browser
+# isolation, and the host admits a single tenant.
 
 app = "<your-app-name>"
 primary_region = "ord"
@@ -36,8 +38,9 @@ primary_region = "ord"
   # Links carry the notebook's access token, so they must be https: without
   # this they come out as http://<host>:8001/... in plaintext.
   DAIMON_NOTEBOOK__PUBLIC_URL_BASE = "https://<your-app-name>.fly.dev"
-  # Reject cross-site WebSocket upgrades to /n/<slug>/*.
-  DAIMON_NOTEBOOK__ALLOWED_ORIGINS = "https://<your-app-name>.fly.dev"
+  # One origin per notebook: links become https://<label>.<this>/n/<slug>/.
+  # Needs the wildcard DNS record and certificate above.
+  DAIMON_NOTEBOOK__ORIGIN_BASE = "<your-notebook-domain>"
   # DAIMON_NOTEBOOK__ADMIN_SECRET must be set via:
   #   fly secrets set DAIMON_NOTEBOOK__ADMIN_SECRET=<secret> --app <your-app-name>
   # Never commit the secret value here.

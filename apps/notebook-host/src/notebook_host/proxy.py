@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
+from collections.abc import Mapping
 
 import httpx
 import websockets
@@ -20,6 +22,7 @@ from fastapi import (
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from notebook_host.admin import AdminState
+from notebook_host.lifecycle import NotebookProcess
 
 _log = logging.getLogger(__name__)
 
@@ -49,8 +52,72 @@ def _filter_request_headers(h: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in h.items() if k.lower() not in _HOP_BY_HOP}
 
 
-def _filter_response_headers(h: httpx.Headers) -> dict[str, str]:
-    return {k: v for k, v in h.items() if k.lower() not in _HOP_BY_HOP}
+_COOKIE_DOMAIN = re.compile(r";\s*domain=[^;]*", re.IGNORECASE)
+
+
+def _response_headers(h: httpx.Headers, *, own_origin: bool) -> list[tuple[bytes, bytes]]:
+    """Backend headers to relay, every ``Set-Cookie`` kept and host-only.
+
+    A ``Domain`` attribute would share a notebook's cookie with every sibling
+    ``<label>.<origin_base>``, so it is stripped: each cookie stays on the
+    exact origin that set it. On its own origin a notebook may only be framed
+    by itself.
+    """
+    out: list[tuple[bytes, bytes]] = []
+    for k, v in h.multi_items():
+        name = k.lower()
+        if name in _HOP_BY_HOP:
+            continue
+        if name == "set-cookie":
+            v = _COOKIE_DOMAIN.sub("", v)
+        out.append((k.encode("latin-1"), v.encode("latin-1")))
+    if own_origin:
+        out.append((b"content-security-policy", b"frame-ancestors 'self'"))
+    return out
+
+
+def _resolve(
+    state: AdminState, slug: str, headers: Mapping[str, str]
+) -> tuple[NotebookProcess, str | None] | None:
+    """The live notebook this request may reach, and the origin it must come from.
+
+    Path mode (no ``origin_base``): by slug, no origin. Per-notebook-origin
+    mode: the Host must be exactly ``<label>.<origin_base>`` for this slug's
+    label, so ``/n/<slug>/`` on the shared host, or on another notebook's
+    origin, reaches nothing.
+    """
+    np = state.processes.get(slug)
+    if np is None or not np.is_alive():
+        return None
+    base = state.settings.origin_base
+    if base is None:
+        return np, None
+    if not np.origin_label:
+        return None
+    own_host = f"{np.origin_label}.{base}".lower()
+    if headers.get("host", "").lower() != own_host:
+        return None
+    return np, f"{state.settings.origin_scheme}://{own_host}"
+
+
+def _cross_origin(headers: Mapping[str, str], own_origin: str) -> bool:
+    """Whether the browser says this request comes from another origin.
+
+    ``Origin`` and ``Sec-Fetch-*`` are set by the browser, and page JavaScript
+    cannot forge them. Another notebook's page (a sibling origin, same site)
+    is refused whatever it asks for, including form posts and frames. The one
+    cross-origin request allowed is a top-level navigation: opening the link
+    from chat.
+    """
+    origin = headers.get("origin")
+    if origin is not None and origin.lower() != own_origin:
+        return True
+    site = headers.get("sec-fetch-site")
+    if site is None or site in ("same-origin", "none"):
+        return False
+    return not (
+        headers.get("sec-fetch-mode") == "navigate" and headers.get("sec-fetch-dest") == "document"
+    )
 
 
 def create_proxy_router(state: AdminState) -> APIRouter:
@@ -63,9 +130,12 @@ def create_proxy_router(state: AdminState) -> APIRouter:
     async def proxy_http(  # pyright: ignore[reportUnusedFunction]
         slug: str, path: str, request: Request
     ) -> Response:
-        np = state.processes.get(slug)
-        if np is None or not np.is_alive():
+        resolved = _resolve(state, slug, request.headers)
+        if resolved is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no active notebook: {slug}")
+        np, own_origin = resolved
+        if own_origin is not None and _cross_origin(request.headers, own_origin):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "cross-origin request refused")
 
         backend_url = f"http://localhost:{np.port}/n/{slug}/{path}"
         if request.url.query:
@@ -81,11 +151,9 @@ def create_proxy_router(state: AdminState) -> APIRouter:
                 headers=headers,
                 content=body,
             )
-        return Response(
-            content=r.content,
-            status_code=r.status_code,
-            headers=_filter_response_headers(r.headers),
-        )
+        response = Response(content=r.content, status_code=r.status_code)
+        response.raw_headers.extend(_response_headers(r.headers, own_origin=own_origin is not None))
+        return response
 
     @router.websocket("/n/{slug}/{ws_path:path}")
     async def proxy_ws(  # pyright: ignore[reportUnusedFunction]
@@ -105,9 +173,16 @@ def create_proxy_router(state: AdminState) -> APIRouter:
                 await websocket.close(code=1008, reason="origin not allowed")
                 return
 
-        np = state.processes.get(slug)
-        if np is None or not np.is_alive():
+        resolved = _resolve(state, slug, websocket.headers)
+        if resolved is None:
             await websocket.close(code=1011, reason="no active notebook")
+            return
+        np, own_origin = resolved
+        # Browsers always send Origin on a WebSocket upgrade, and page JS can't
+        # change it: on its own origin a notebook's socket opens only from that
+        # origin, never from a sibling notebook's page.
+        if own_origin is not None and websocket.headers.get("origin", "").lower() != own_origin:
+            await websocket.close(code=1008, reason="origin not allowed")
             return
 
         # Forward every WS path marimo serves under the base-url, not just

@@ -87,22 +87,42 @@ as a shell on this host. Blogs are always read-only.
 **Bearer auth on `/admin/*`** guards the admin API. The admin bearer is
 scrubbed from every subprocess's environment.
 
-**Known limits: one notebook host serves one client.** This is a hard
-requirement for client work, not a recommendation.
+**Per-notebook origins (`origin_base`).** A notebook's JavaScript (an
+anywidget runs even in a read-only app) can reach anything on its own origin
+with the viewer's cookies. So on a public host every notebook gets its own
+origin: set `DAIMON_NOTEBOOK__ORIGIN_BASE=nb.example.com`, with wildcard DNS
+and a wildcard TLS certificate for `*.nb.example.com`. Each link is then
+`https://<label>.nb.example.com/n/<slug>/?access_token=…`, where `label` is 32
+hex characters derived from the notebook's token (never the slug), so it
+rotates with the token and can't be guessed. The proxy:
 
-- **No browser isolation between notebooks.** Every notebook is served from
-  the same origin. A notebook's JavaScript (an anywidget runs even in a
-  read-only app) can fetch, frame or open the kernel socket of any other
-  notebook on the host whose link the same viewer has opened, because the
-  browser attaches that notebook's cookie. No header check can stop it, since
-  page JavaScript controls `Referer`. The real fix is a separate origin per
-  notebook (a subdomain per slug with host-only cookies); it isn't built.
-- **No per-notebook pid or network namespace.** Subprocesses run as separate
-  uids, but an editor notebook can see other notebooks' process list and
-  reach the host's network.
+- routes by the exact `Host`: `/n/<slug>/` on the bare host, or on another
+  notebook's origin, is a 404, so path mode is refused;
+- refuses (403) any request the browser marks as coming from another origin
+  (`Origin`, or a `Sec-Fetch-Site` other than `same-origin`/`none`), except a
+  top-level navigation such as opening the link from chat. Page JavaScript
+  can't forge these headers, and a sibling notebook is same-site but
+  cross-origin, so its fetches, form posts and frames are all refused;
+- accepts a WebSocket only when `Origin` is exactly the notebook's own origin;
+- strips any `Domain` from `Set-Cookie`, so every cookie is host-only, and
+  sends `Content-Security-Policy: frame-ancestors 'self'`.
 
-Put the host behind TLS with `public_url_base` set to its `https://` origin,
-and set `allowed_origins` when it is publicly reachable.
+A real-browser test (`tests/test_notebook_origin_browser.py`) opens B's link,
+then runs attacker JS on A's page: credentialed fetch, `no-cors` POST and
+WebSocket to B, before and after `history.replaceState` to B's path. None of
+it reaches B's marimo.
+
+**Without `origin_base`, one host serves one tenant.** All notebooks then
+share one origin and there is no browser isolation between them. A public
+host (anything but localhost) therefore admits uploads from a single tenant:
+the first tenant named in an upload token claims it (`tenant.json`, 0600),
+and every other tenant, or a token naming none, gets a 403. It logs a warning
+at boot. Local dev hosts skip the check.
+
+**Known limits.** There is no per-notebook pid or network namespace:
+subprocesses run as separate uids, but an editor notebook can see other
+notebooks' process list and reach the host's network. On a public host, keep
+editors off (`allow_editable`) unless the host serves one client.
 
 ## Configuration
 
@@ -126,6 +146,8 @@ delimiter.
 | `public_url_base` | `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` | *(unset — set when behind a TLS terminator that strips the internal port, e.g. Fly's https edge)* |
 | `allow_editable` | `DAIMON_NOTEBOOK__ALLOW_EDITABLE` | `false` *(every notebook read-only)* |
 | `allow_http_links` | `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS` | `false` *(refuse to boot with plain-http links off localhost)* |
+| `origin_base` | `DAIMON_NOTEBOOK__ORIGIN_BASE` | *(unset — one shared origin, one tenant per public host; set to e.g. `nb.example.com` with wildcard DNS + TLS)* |
+| `origin_scheme` | `DAIMON_NOTEBOOK__ORIGIN_SCHEME` | `https` |
 | `max_source_bytes` | `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` | `1048576` (1 MiB) |
 | `max_attachment_bytes_ceiling` | `DAIMON_NOTEBOOK__MAX_ATTACHMENT_BYTES_CEILING` | `104857600` (100 MiB; host-side hard ceiling, defense-in-depth above the daimon-side cap) |
 | `allowed_origins` | `DAIMON_NOTEBOOK__ALLOWED_ORIGINS` | *(empty — check disabled)* |

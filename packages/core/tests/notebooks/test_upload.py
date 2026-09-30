@@ -208,3 +208,21 @@ def test_create_notebook_upload_editable_needs_the_operator_switch() -> None:
         create_notebook_upload(
             slug="x", editable=True, notebook_settings=settings, principal_key="a", now=_NOW
         )
+
+
+def test_upload_tokens_carry_the_tenant() -> None:
+    out = create_notebook_upload(
+        slug="x", notebook_settings=_settings(), principal_key="a", now=_NOW, tenant="t-1"
+    )
+    assert _payload(out["upload_url"])["tenant"] == "t-1", (
+        "a shared-origin notebook host admits one tenant, so it must know whose upload it is"
+    )
+    att = create_attachment_upload(
+        slug="x",
+        name="d.csv",
+        notebook_settings=_settings(),
+        principal_key="a",
+        now=_NOW,
+        tenant="t-1",
+    )
+    assert _payload(att["upload_url"])["tenant"] == "t-1"
