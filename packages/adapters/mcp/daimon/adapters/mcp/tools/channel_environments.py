@@ -59,12 +59,14 @@ async def _environment_channel(
     if channel_id is None:
         return None
     target = channel_id.strip()
+    if auth.platform == "slack":
+        target = target.partition(":")[0].strip()
     if not target:
         raise ToolError(
             "channel_id is empty. Omit it for the workspace default, or pass the channel's id."
         )
     if auth.platform == "slack":
-        return target.partition(":")[0]
+        return target
     if auth.platform != "discord":
         return target
     if not target.isdigit():

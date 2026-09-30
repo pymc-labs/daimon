@@ -163,9 +163,9 @@ RELAXED_TOOL_NAMES = (
 whole tenant — relaxed onto the open (non-admin-visible, non-admin-callable)
 surface. Untagged, so a non-admin chat session's search surfaces them.
 
-`create_environment` is the "nothing at all" case: the environment it creates is
-unreachable until an admin scopes an agent onto it via the gated
-`set_agent_default`."""
+`create_environment` is the "nothing at all" case: nothing runs in the
+environment it creates until an admin, or a channel's admin, picks it with the
+gated `set_channel_environment`."""
 
 AGENT_IDENTITY_SCOPED_TOOL_NAMES = (
     "set_repo_binding",
@@ -334,8 +334,8 @@ STILL_ADMIN_TOOL_NAMES = (
 Most are tenant-wide and admin-only. The agent default and channel environment
 tools also admit channel admins, but only for channels they run.
 `create_environment` is deliberately absent: a new environment is inert until an
-admin scopes an agent onto it, so its blast radius is nothing until a gated call
-widens it. Mutating an environment others already resolve to is a different
+admin or a channel's admin picks it, so its blast radius is nothing until a gated
+call widens it. Mutating an environment others already resolve to is a different
 matter, which is why `update_environment` and `archive_environment` stay here.
 """
 

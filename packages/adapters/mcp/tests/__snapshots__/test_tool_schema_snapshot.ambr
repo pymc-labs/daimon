@@ -248,7 +248,12 @@
       }),
     }),
     'archive_environment': dict({
-      'description': 'Archive the MA environment and delete from the tenant pool.',
+      'description': '''
+        Archive the MA environment and delete from the tenant pool.
+        
+        Channels and the workspace default that picked it are cleared, so they
+        fall through to the next tier; read ``note`` back to the user.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -1151,7 +1156,7 @@
     }),
     'create_environment': dict({
       'description': '''
-        Create a sandbox environment an agent can later be scoped onto.
+        Create a sandbox environment a channel or the workspace can later run in.
         
         Packages are declared under ``spec.config.packages``, one list per
         ecosystem: ``apt``, ``cargo``, ``gem``, ``go``, ``npm``, ``pip``. For
@@ -1165,8 +1170,8 @@
         Always send the full intended list for every ecosystem you care about.
         
         The new environment is inert until an admin picks it for a channel or
-        the workspace with ``set_channel_environment`` — creating one here does
-        not change what any agent runs on yet.
+        the workspace, or a channel's admin picks it for their channel, with
+        ``set_channel_environment``; creating one here changes nothing yet.
       ''',
       'parameters': dict({
         '$defs': dict({

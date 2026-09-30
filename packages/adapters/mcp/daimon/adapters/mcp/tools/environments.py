@@ -6,6 +6,7 @@ Environments mirror the agent tool group minus fork and model field.
 from __future__ import annotations
 
 import datetime
+from dataclasses import dataclass
 from typing import Any
 
 from anthropic.types.beta import BetaEnvironment
@@ -16,6 +17,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.channel_environments import build_archive_environment_note
 from daimon.core.defaults.ma_index import (
     find_environment_by_daimon_tag,
     find_environments_by_daimon_tag,
@@ -23,6 +25,7 @@ from daimon.core.defaults.ma_index import (
 )
 from daimon.core.defaults.metadata import build_metadata
 from daimon.core.specs import EnvironmentSpec
+from daimon.core.stores.scoped_config_write import clear_environment_references
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
@@ -90,7 +93,8 @@ async def _create_environment_impl(
 ) -> EnvironmentInfo:
     # Deliberately ungated, unlike update/archive below. A freshly created
     # environment is inert: nothing runs in it until an admin picks it for a
-    # channel or the workspace via set_channel_environment, which is gated. So
+    # channel or the workspace, or a channel's admin for their channel, via
+    # set_channel_environment, which is gated. So
     # the gate here bought no isolation while blocking the ordinary onboarding
     # ask -- "make me an agent that can run pymc" -- for every non-admin.
     # Matches create_agent / fork_agent, which are ungated for the same reason.
@@ -121,16 +125,37 @@ async def _update_environment_impl(
     return EnvironmentInfo.from_ma(updated)
 
 
+@dataclass(frozen=True)
+class ArchiveEnvironmentResult:
+    """Result returned from archive_environment."""
+
+    name: str
+    cleared_picks: int
+    """Channel and workspace picks of this environment that were cleared."""
+    note: str
+    """What changed, to report back as is."""
+
+
 async def _archive_environment_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     name: str,
-) -> None:
+) -> ArchiveEnvironmentResult:
+    """Archive the environment, then clear every pick of it so those channels fall through."""
     _require_admin(auth)
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
     if env is None:
         raise ToolError(f"environment '{name}' not found")
     await runtime.client.beta.environments.archive(env.id)
+    async with runtime.session_factory.begin() as session:
+        cleared = await clear_environment_references(
+            session, tenant_id=auth.tenant_id, environment_name=name
+        )
+    return ArchiveEnvironmentResult(
+        name=name,
+        cleared_picks=cleared,
+        note=build_archive_environment_note(environment_name=name, cleared=cleared),
+    )
 
 
 def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -138,7 +163,7 @@ def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     # matching the agents/skills read tools. Mutations carry tags={"admin"} plus
     # the _require_admin impl gate, with one deliberate exception:
     # create_environment is ungated, because a new environment is inert until an
-    # admin picks it for a channel. See the comment on _create_environment_impl.
+    # admin or a channel's admin picks it. See the comment on _create_environment_impl.
     @mcp.tool
     async def list_environments(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
@@ -157,7 +182,7 @@ def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         spec: EnvironmentSpec,
     ) -> EnvironmentInfo:
-        """Create a sandbox environment an agent can later be scoped onto.
+        """Create a sandbox environment a channel or the workspace can later run in.
 
         Packages are declared under ``spec.config.packages``, one list per
         ecosystem: ``apt``, ``cargo``, ``gem``, ``go``, ``npm``, ``pip``. For
@@ -171,8 +196,8 @@ def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Always send the full intended list for every ecosystem you care about.
 
         The new environment is inert until an admin picks it for a channel or
-        the workspace with ``set_channel_environment`` — creating one here does
-        not change what any agent runs on yet.
+        the workspace, or a channel's admin picks it for their channel, with
+        ``set_channel_environment``; creating one here changes nothing yet.
         """
         return await _create_environment_impl(runtime, await _auth(ctx), spec)
 
@@ -194,6 +219,10 @@ def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         )
 
     @mcp.tool(tags={"admin"})
-    async def archive_environment(ctx: Context, name: str) -> None:  # pyright: ignore[reportUnusedFunction]
-        """Archive the MA environment and delete from the tenant pool."""
-        await _archive_environment_impl(runtime, await _auth(ctx), name)
+    async def archive_environment(ctx: Context, name: str) -> ArchiveEnvironmentResult:  # pyright: ignore[reportUnusedFunction]
+        """Archive the MA environment and delete from the tenant pool.
+
+        Channels and the workspace default that picked it are cleared, so they
+        fall through to the next tier; read ``note`` back to the user.
+        """
+        return await _archive_environment_impl(runtime, await _auth(ctx), name)

@@ -296,15 +296,19 @@ async def test_a_slack_thread_id_resolves_to_its_channel(
     assert row is not None and row.environment_name == "science", "the channel row is written"
 
 
-@pytest.mark.parametrize("channel_id", ["", "  "])
+@pytest.mark.parametrize(
+    ("platform", "channel_id"),
+    [("discord", ""), ("discord", "  "), ("slack", ":1717.5"), ("slack", " :")],
+)
 async def test_an_empty_channel_id_is_refused_rather_than_read_as_the_workspace(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
+    platform: str,
     channel_id: str,
 ) -> None:
     tenant_id, account_id = await _seed(committing_sessionmaker)
     runtime = _runtime(committing_sessionmaker, tenant_id, "science")
-    admin = _auth(tenant_id, account_id, admin=True)
+    admin = _auth(tenant_id, account_id, admin=True, platform=platform)
 
     with pytest.raises(ToolError, match="channel_id is empty"):
         await _set_channel_environment_impl(
