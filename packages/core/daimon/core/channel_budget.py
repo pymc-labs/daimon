@@ -130,6 +130,29 @@ def is_budget_active(budget: ChannelBudgetRow, *, now: datetime) -> bool:
     return budget.starts_at <= now < budget.ends_at
 
 
+def _instant_label(value: datetime) -> str:
+    if value.hour == value.minute == value.second == 0:
+        return f"{value:%Y-%m-%d}"
+    return f"{value:%Y-%m-%d %H:%M} UTC"
+
+
+def window_label(budget: ChannelBudgetRow) -> str:
+    """The window in words, e.g. `monthly`, `since 2026-07-01`, `2026-07-01 to 2026-07-03`."""
+    if budget.window == "monthly":
+        return "monthly"
+    if budget.starts_at is None:
+        return "total"
+    if budget.window == "total" or budget.ends_at is None:
+        return f"since {_instant_label(budget.starts_at)}"
+    return f"{_instant_label(budget.starts_at)} to {_instant_label(budget.ends_at)}"
+
+
+def describe_budget(status: ChannelBudgetStatus) -> str:
+    """`$1.20 of $5.00 (monthly)`: the line every surface shows for a channel budget."""
+    budget = status.budget
+    return f"${status.spent_usd:,.2f} of ${budget.limit_usd:,.2f} ({window_label(budget)})"
+
+
 async def load_budget_status(
     session: AsyncSession, budget: ChannelBudgetRow, *, now: datetime
 ) -> ChannelBudgetStatus:

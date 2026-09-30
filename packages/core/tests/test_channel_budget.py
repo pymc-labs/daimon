@@ -13,7 +13,9 @@ from daimon.core import usage_recording
 from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.channel_budget import (
     ChannelBudgetError,
+    ChannelBudgetStatus,
     budget_period,
+    describe_budget,
     get_channel_budget_status,
     is_budget_active,
     is_over_channel_budget,
@@ -87,6 +89,13 @@ async def test_budget_period_and_activity_follow_the_window(db_session: AsyncSes
     assert is_budget_active(fixed, now=_NOW)
     assert not is_budget_active(fixed, now=end), "a fixed window is half-open"
     assert is_budget_active(total, now=start - timedelta(days=30))
+    spent = Decimal("1234.5")
+    assert describe_budget(ChannelBudgetStatus(monthly, spent, True)) == (
+        "$1,234.50 of $5.00 (monthly)"
+    )
+    assert describe_budget(ChannelBudgetStatus(fixed, spent, True)).endswith(
+        "(2026-07-14 12:00 UTC to 2026-07-16 12:00 UTC)"
+    )
 
 
 async def test_set_replaces_the_budget_and_clear_removes_it(db_session: AsyncSession) -> None:
