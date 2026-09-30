@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from decimal import Decimal
 from io import StringIO
 from typing import cast
 
@@ -15,6 +16,8 @@ from daimon.adapters.cli.commands import tenants as tenants_mod
 from daimon.adapters.cli.commands.tenants import (
     tenants_access_policy_get,
     tenants_access_policy_set,
+    tenants_cap,
+    tenants_credit,
     tenants_delete,
     tenants_list,
 )
@@ -23,7 +26,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import TenantScopeRef
-from daimon.core.stores import scoped_config_write
+from daimon.core.stores import scoped_config_write, tenant_ledger, tenant_user_caps
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     load_access_policy,
@@ -51,6 +54,105 @@ class _FakeSettings:
 def _make_console() -> Console:
     """Console that writes to a StringIO for test output capture."""
     return Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+
+
+def test_credit_uses_note_option() -> None:
+    command = get_command(tenants_mod.tenants_app)
+    assert isinstance(command, Group)
+    flags = {
+        flag
+        for param in command.commands["credit"].params
+        if isinstance(param, Option)
+        for flag in param.opts
+    }
+    assert "--note" in flags
+    assert "--reason" not in flags
+
+
+@pytest.mark.asyncio
+async def test_credit_is_positive_and_idempotent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = build_cli_runtime(db_session_factory)
+    console = _make_console()
+    result = await provision_tenant(
+        db_session_factory, platform="discord", workspace_id="credit-guild"
+    )
+    async with db_session_factory() as s:
+        before = await tenant_ledger.get_balance(s, tenant_id=result.tenant_id)
+    for _ in range(2):
+        await tenants_credit(
+            rt=rt,
+            console=console,
+            platform="discord",
+            workspace_id="credit-guild",
+            usd="25.00",
+            note="Hackathon grant: team #3",
+            request_id="grant-1",
+        )
+    async with db_session_factory() as s:
+        after = await tenant_ledger.get_balance(s, tenant_id=result.tenant_id)
+        rows = await tenant_ledger.list_for_tenant(s, tenant_id=result.tenant_id)
+    assert after == before + Decimal("25.00")
+    credits = [row for row in rows if row.reason == "manual_credit"]
+    assert len(credits) == 1
+    assert credits[0].idempotency_key == (
+        f"manual:credit:{result.tenant_id}:hackathon-grant-team-3:usd25.00:grant-1"
+    )
+    assert "already credited" in cast(StringIO, console.file).getvalue()
+    assert "credit id: grant-1" in cast(StringIO, console.file).getvalue()
+    with pytest.raises(typer.BadParameter, match="positive"):
+        await tenants_credit(
+            rt=rt,
+            console=console,
+            platform="discord",
+            workspace_id="credit-guild",
+            usd="-1",
+            note="invalid",
+            request_id=None,
+        )
+    with pytest.raises(typer.BadParameter, match="note"):
+        await tenants_credit(
+            rt=rt,
+            console=console,
+            platform="discord",
+            workspace_id="credit-guild",
+            usd="1",
+            note="!!!",
+            request_id=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_cap_sets_default_and_user_override(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = build_cli_runtime(db_session_factory)
+    console = _make_console()
+    result = await provision_tenant(db_session_factory, platform="slack", workspace_id="cap-team")
+    await tenants_cap(
+        rt=rt,
+        console=console,
+        platform="slack",
+        workspace_id="cap-team",
+        usd="10.00",
+        user=None,
+    )
+    await tenants_cap(
+        rt=rt,
+        console=console,
+        platform="slack",
+        workspace_id="cap-team",
+        usd="5.00",
+        user="U123",
+    )
+    async with db_session_factory() as s:
+        assert await tenant_user_caps.get_effective_cap(
+            s, tenant_id=result.tenant_id, user_id="other"
+        ) == Decimal("10.00")
+        assert await tenant_user_caps.get_effective_cap(
+            s, tenant_id=result.tenant_id, user_id="U123"
+        ) == Decimal("5.00")
 
 
 @pytest.mark.asyncio

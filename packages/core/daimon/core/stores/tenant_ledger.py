@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any, cast
 
-from daimon.core._models import TenantLedger
+from daimon.core._models import Tenant, TenantLedger
 from daimon.core.stores.domain import TenantLedgerRow
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -56,6 +56,18 @@ async def get_balance(session: AsyncSession, *, tenant_id: uuid.UUID) -> Decimal
         TenantLedger.tenant_id == tenant_id
     )
     return (await session.execute(stmt)).scalar_one()  # type: ignore[no-any-return]
+
+
+async def get_prepaid_balance(session: AsyncSession, *, tenant_id: uuid.UUID) -> Decimal | None:
+    """Return the current balance for a prepaid tenant in one query."""
+    stmt = (
+        select(func.coalesce(func.sum(TenantLedger.delta_usd), Decimal("0")))
+        .select_from(Tenant)
+        .outerjoin(TenantLedger, TenantLedger.tenant_id == Tenant.id)
+        .where(Tenant.id == tenant_id, Tenant.funding_mode == "prepaid")
+        .group_by(Tenant.id)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def get_clawed_back_total(session: AsyncSession, *, payment_intent: str) -> Decimal:

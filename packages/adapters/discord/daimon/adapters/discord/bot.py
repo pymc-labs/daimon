@@ -1939,6 +1939,8 @@ class DaimonBot(commands.Bot):
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
+                sessionmaker=self.runtime.sessionmaker,
+                tenant_id=tenant_id,
                 requester_id=int(row.requester_external_user_id),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -2050,6 +2052,8 @@ class DaimonBot(commands.Bot):
 
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
+                sessionmaker=self.runtime.sessionmaker,
+                tenant_id=tenant_id,
                 requester_id=int(row.requester_external_user_id),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -2431,6 +2435,8 @@ class DaimonBot(commands.Bot):
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
+                sessionmaker=self.runtime.sessionmaker,
+                tenant_id=tenant_id,
                 requester_id=message.author.id,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -2796,6 +2802,8 @@ class DaimonBot(commands.Bot):
 
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
+                sessionmaker=self.runtime.sessionmaker,
+                tenant_id=tenant_id,
                 requester_id=message.author.id,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,

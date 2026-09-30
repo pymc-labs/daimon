@@ -51,6 +51,8 @@ import asyncio
 import dataclasses
 import time
 import types
+import uuid
+from decimal import Decimal
 from typing import Any, NoReturn
 
 import aiohttp
@@ -61,6 +63,8 @@ import yarl
 from daimon.adapters.slack import lifecycle as lifecycle_mod
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.stores import tenant_ledger
+from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import (
@@ -72,7 +76,9 @@ from daimon.core.turn.state import (
 )
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing import ma_model_usage
+from daimon.testing.factories import make_tenant
 from slack_sdk.errors import SlackApiError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import CHAT_OK_PAYLOAD
 
@@ -130,6 +136,39 @@ def _block_text(blocks: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+@pytest.mark.asyncio
+async def test_terminal_footer_shows_prepaid_balance_only(
+    fake_slack_web_client: Any,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    async with db_session_factory() as s, s.begin():
+        await tenant_ledger.insert_entry(
+            s,
+            tenant_id=tenant.id,
+            delta_usd=Decimal("12.50"),
+            reason="test",
+            idempotency_key=f"test:{tenant.id}",
+        )
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client, sessionmaker=db_session_factory, tenant_id=tenant.id
+    )
+    await lc.post_initial()
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
+    assert _block_text(_last_update_blocks(fake_slack_web_client)).endswith("· $12.50 left")
+
+    async with db_session_factory() as s, s.begin():
+        await set_funding_mode(s, tenant_id=tenant.id, funding_mode="operator_funded")
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client, sessionmaker=db_session_factory, tenant_id=tenant.id
+    )
+    await lc.post_initial()
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
+    assert "$12.50 left" not in _block_text(_last_update_blocks(fake_slack_web_client))
+
+
 # ---------------------------------------------------------------------------
 # SSE event constructors (SimpleNamespace fakes — same pattern as Discord tests)
 # ---------------------------------------------------------------------------
@@ -159,6 +198,8 @@ def _make_lifecycle(
     notify_on_completion: bool = False,
     trigger_ts: str | None = None,
     render_tables: bool = False,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
 
@@ -191,6 +232,8 @@ def _make_lifecycle(
         register=register,
         deregister=deregister,
         adopt_status_ts=adopt_status_ts,
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
     )
     return lc, cancel, registered, deregistered
 
