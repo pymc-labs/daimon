@@ -23,6 +23,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.scheduler.main import (
     _build_fire,  # pyright: ignore[reportPrivateUsage]  # test seam for balance gate + debit binding
     _CapsAdapter,  # pyright: ignore[reportPrivateUsage]  # named test seam for cap wiring
+    _settle_promo_credit,  # pyright: ignore[reportPrivateUsage]  # test seam for the promo settlement wrapper
     _sweep_retired_turn_card_intents,  # pyright: ignore[reportPrivateUsage]  # test seam for the card-intent sweep wrapper
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
     _sweep_wizard_sessions,  # pyright: ignore[reportPrivateUsage]  # test seam for the wizard sweep wrapper
@@ -32,8 +33,10 @@ from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.pricing import MODEL_PRICING, ModelRates
+from daimon.core.promo_codes import build_promo_code_terms
 from daimon.core.scheduler import run_one_tick
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger, tenant_user_caps, usage_events
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import find_platform_principal
@@ -1170,3 +1173,41 @@ async def test_fire_still_invites_a_post_when_nothing_relevant_is_protected(
     )
 
     assert "posts the end of your final reply there" in str(seen["trigger_message"])
+
+
+async def test_settle_promo_credit_grants_a_due_timed_code(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The tick step grants timed credit whose window opened since the last tick."""
+    start = datetime.now(UTC) - timedelta(minutes=5)
+    terms = build_promo_code_terms(
+        amount_usd=Decimal("10"),
+        timed=True,
+        credit_starts_at=start,
+        credit_ends_at=start + timedelta(days=1),
+    )
+    async with db_session_factory.begin() as s:
+        tenant = await make_tenant(s)
+        code = await promo_store.insert_promo_code(s, code_hash="h", terms=terms)
+        assert code is not None
+        await promo_store.insert_redemption(
+            s,
+            promo_code_id=code.id,
+            tenant_id=tenant.id,
+            account_id=None,
+            now=start - timedelta(hours=1),
+            granted=False,
+        )
+    await _settle_promo_credit(db_session_factory)
+    async with db_session_factory() as s:
+        assert await tenant_ledger.get_balance(s, tenant_id=tenant.id) == Decimal("10")
+
+
+async def test_settle_promo_credit_swallows_sqlalchemy_error(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with unittest.mock.patch(
+        "daimon.adapters.scheduler.main.settle_promo_credit",
+        side_effect=SQLAlchemyError("boom"),
+    ):
+        await _settle_promo_credit(db_session_factory)  # must not raise
