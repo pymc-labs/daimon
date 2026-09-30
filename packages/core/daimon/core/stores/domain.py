@@ -494,18 +494,17 @@ class PromoRedemptionRow(BaseModel):
     expired_usd: Decimal | None
 
 
-class PromoGrantRow(BaseModel):
-    """A redemption joined with the code terms the scheduler and allocation need."""
+class TimedPromoGrantRow(BaseModel):
+    """A timed code's redemption joined with the code's amount and credit window."""
 
     model_config = ConfigDict(frozen=True)
 
     redemption_id: uuid.UUID
     promo_code_id: uuid.UUID
     tenant_id: uuid.UUID
-    kind: PromoCodeKind
     amount_usd: Decimal
-    credit_starts_at: datetime | None
-    credit_ends_at: datetime | None
+    credit_starts_at: datetime
+    credit_ends_at: datetime
     granted_at: datetime | None
     expired_at: datetime | None
 
