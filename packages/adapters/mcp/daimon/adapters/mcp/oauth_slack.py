@@ -29,6 +29,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import SlackOAuthError
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.ops_alerts import alert_ops
 from daimon.core.slack_oauth import (
     SLACK_BOT_SCOPES,
     SLACK_USER_SCOPES,
@@ -684,6 +685,11 @@ def build_oauth_slack_routes(
         # the stored token postdates its event, so a stale teardown landing
         # on either side of this clear cannot leave the workspace archived.
         await set_provision_status(sessionmaker, tenant_id=tenant.tenant_id, clear_archive=True)
+        alert_ops(
+            settings.ops.alert_webhook_url,
+            key=f"install:slack:{team_id}",
+            message=f"New install: Slack {result.team_name or team_id} ({team_id})",
+        )
 
         return _success_html(
             workspace=result.team_name or team_id,

@@ -249,9 +249,13 @@ def _make_lifecycle(
 
 @pytest.mark.parametrize("status", [400, 429])
 async def test_spend_limit_posts_notice_and_error_log(
-    fake_slack_web_client: Any, status: int
+    fake_slack_web_client: Any, status: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tenant_id = uuid.uuid4()
+    alerts: list[str] = []
+    monkeypatch.setattr(
+        lifecycle_module, "alert_ops", lambda url, *, key, message: alerts.append(key)
+    )
     lc, *_ = _make_lifecycle(fake_slack_web_client, tenant_id=tenant_id)
     await lc.post_initial()
     body = (
@@ -275,6 +279,7 @@ async def test_spend_limit_posts_notice_and_error_log(
     turn_error = TurnError(kind="upstream", cause=error)
     with structlog.testing.capture_logs() as logs:
         await lc.on_terminal_failure(TurnState(error=turn_error), turn_error)
+    assert alerts == [f"spend_limit:{'org_cap' if status == 429 else 'user_limit'}"]
     assert (
         "Daimon has reached its model usage limit for now. The operators have been notified."
         in _block_text(_last_update_blocks(fake_slack_web_client))

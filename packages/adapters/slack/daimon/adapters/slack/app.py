@@ -1686,6 +1686,7 @@ class SlackApp:
         cancel_event = asyncio.Event()
         lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             tenant_id=tenant_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
@@ -2110,6 +2111,7 @@ class SlackApp:
             def _recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
                 new_lifecycle = SlackTurnLifecycle(
                     sessionmaker=self.runtime.sessionmaker,
+                    alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                     tenant_id=tenant_id,
                     render_tables=self.runtime.settings.table_rendering.get(tenant_id, False)
                     is True,
@@ -2479,6 +2481,7 @@ class SlackApp:
         follow_cancel = asyncio.Event()
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             tenant_id=tenant_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
@@ -2573,6 +2576,7 @@ class SlackApp:
         def _follow_up_recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = SlackTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 client=web_client,

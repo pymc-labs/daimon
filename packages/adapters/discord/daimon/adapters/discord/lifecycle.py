@@ -40,6 +40,7 @@ from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
 from daimon.core.turn.degraded import render_degraded_notice
@@ -52,6 +53,7 @@ from daimon.core.turn.state import (
     extract_sealed_responses,
 )
 from daimon.core.turn.termination import termination_reason
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -143,6 +145,7 @@ class DiscordTurnLifecycle:
         request_id: Callable[[], str] = bound_request_id,
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: uuid.UUID | None = None,
+        alert_webhook_url: SecretStr | None = None,
     ) -> None:
         self._requester_id = requester_id
         self._trigger_message = trigger_message
@@ -152,6 +155,7 @@ class DiscordTurnLifecycle:
         self._request_id = request_id
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
+        self._alert_webhook_url = alert_webhook_url
         self._edit = edit
         self._delete = delete
         # Nobody asked for an unprompted turn, so it stays invisible until it
@@ -489,6 +493,11 @@ class DiscordTurnLifecycle:
                 "anthropic.spend_limit_reached",
                 tenant_id=str(self._tenant_id) if self._tenant_id is not None else None,
                 limit=limit,
+            )
+            alert_ops(
+                self._alert_webhook_url,
+                key=f"spend_limit:{limit}",
+                message=f"Anthropic spend limit reached: {limit} (tenant {self._tenant_id})",
             )
         if self._unprompted and self._message_ref is None:
             # Same rule as an empty answer: an unprompted turn that never
