@@ -14,7 +14,7 @@ from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
-from daimon.core.channel_isolation_setup import isolation_refusal, render_isolation_refusal
+from daimon.core.channel_isolation_setup import isolation_refusal
 from daimon.core.config import load_settings
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -35,6 +35,7 @@ from daimon.core.stores.tenants import (
     set_turn_cap,
 )
 from rich.console import Console
+from rich.markup import escape
 
 tenants_app = typer.Typer(help="Tenants: list, credit, caps, funding and access policy, delete.")
 access_policy_app = typer.Typer(
@@ -404,7 +405,7 @@ async def _require_isolatable(
     async with rt.sessionmaker() as session:
         current = await load_access_policy(session, tenant_id=tenant_id)
         for channel_id in (c for c in isolated if c not in current.isolated_channel_ids):
-            refusal, agent_name = await isolation_refusal(
+            refused = await isolation_refusal(
                 rt.anthropic,
                 session,
                 tenant_id=tenant_id,
@@ -412,11 +413,15 @@ async def _require_isolatable(
                 isolated_ids=isolated,
                 default=rt.deployment_default,
             )
-            if refusal is not None:
-                message = render_isolation_refusal(refusal, agent_name=agent_name)
+            if refused is not None:
+                hint = (
+                    ""
+                    if refused.reason == "work_crosses_line"
+                    else " The setup panel's Isolate with a copy, or set_channel_isolation "
+                    "with fork_from, makes one."
+                )
                 console.print(
-                    f"[red]{channel_id}: {message} The setup panel's Isolate with a copy, or "
-                    "set_channel_isolation with fork_from, makes one. Nothing was changed.[/red]"
+                    f"[red]{channel_id}: {escape(str(refused))}{hint} Nothing was changed.[/red]"
                 )
                 raise typer.Exit(1)
 
