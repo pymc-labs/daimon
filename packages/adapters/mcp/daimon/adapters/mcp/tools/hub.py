@@ -28,6 +28,7 @@ from __future__ import annotations
 import uuid
 from typing import Literal
 
+import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.hub.identity import (
@@ -36,7 +37,7 @@ from daimon.adapters.mcp.hub.identity import (
 )
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._isolation import agent_name_of, load_isolation
+from daimon.adapters.mcp.tools._isolation import agent_name_of
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import session_belongs_to_caller
 from daimon.adapters.mcp.tools.agent_chat import (
@@ -53,9 +54,11 @@ from daimon.adapters.mcp.tools.agent_chat import (
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core.billing import BillingConfig
+from daimon.core.channel_isolation import load_channel_isolation
 from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
@@ -63,6 +66,8 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel
+
+log = structlog.get_logger(__name__)
 
 _NOT_FOUND = "daimon not found"
 _SESSION_NOT_FOUND = "session not found"
@@ -98,14 +103,22 @@ async def _agents_by_tenant(
     """Each tenant's agents, less those an isolated channel keeps to itself.
 
     A hub call runs outside every channel, so an isolated channel's own agents
-    are neither listed nor resolvable here.
+    are neither listed nor resolvable here. A tenant whose access policy can't
+    be read is left out whole, so one bad workspace doesn't hide the others.
     """
     by_id = await list_agents_by_tenants(
         runtime.client, tenant_ids=[t.tenant_id for t in hub.tenants]
     )
     out: list[tuple[HubTenant, list[BetaManagedAgentsAgent]]] = []
     for tenant in hub.tenants:
-        isolation = await load_isolation(runtime, tenant.tenant_id)
+        try:
+            async with runtime.session_factory() as session:
+                isolation = await load_channel_isolation(
+                    session, tenant_id=tenant.tenant_id, default=runtime.deployment_default
+                )
+        except AccessPolicyUnreadable:
+            log.warning("hub.tenant_skipped.policy_unreadable", tenant_id=str(tenant.tenant_id))
+            continue
         agents = by_id[tenant.tenant_id]
         out.append(
             (

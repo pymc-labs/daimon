@@ -27,6 +27,7 @@ from daimon.testing import ma_agent
 from daimon.testing.factories import make_platform_principal, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.exceptions import ToolError
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -110,6 +111,33 @@ async def test_list_daimons_spans_every_tenant_and_disambiguates_same_names(
         str(derive_agent_uuid(tenant_id=t2.tenant_id, ma_agent_id="ag_2")),
     }, f"ids must be the derived per-agent UUIDs, got {[d.id for d in daimons]!r}"
     assert daimons[0].platform == "discord" and daimons[0].role_summary.startswith("Answers ops")
+
+
+async def test_list_daimons_leaves_out_only_a_tenant_whose_policy_cant_be_read(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    hub = await _two_tenant_hub(db_session)
+    t1, t2 = hub.tenants
+    await db_session.execute(
+        text("INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, 'null'::jsonb)"),
+        {"t": t1.tenant_id},
+    )
+    await db_session.commit()
+    client = build_fake_anthropic(
+        _agents_router({t1.tenant_id: [("ag_1", "a")], t2.tenant_id: [("ag_2", "b")]}).dispatch
+    )
+
+    daimons = await _list_daimons_impl(_runtime(client, db_session_factory), hub)
+
+    assert [(d.name, d.workspace) for d in daimons] == [("b", "Bayes")], (
+        "the unreadable tenant is skipped, not every tenant"
+    )
+    with pytest.raises(ToolError, match="not found"):
+        await _resolve_daimon(
+            _runtime(client, db_session_factory),
+            hub,
+            str(derive_agent_uuid(tenant_id=t1.tenant_id, ma_agent_id="ag_1")),
+        )
 
 
 async def test_hub_never_lists_or_resolves_an_isolated_channels_own_agent(
