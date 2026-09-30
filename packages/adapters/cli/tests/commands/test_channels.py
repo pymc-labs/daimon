@@ -6,18 +6,20 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import StringIO
+from types import SimpleNamespace
 from typing import cast
 
+import httpx
 import pytest
 import typer
 from daimon.adapters.cli.commands.channels import budget_clear, budget_list, budget_set
 from daimon.core.defaults.provisioning import provision_tenant
-from daimon.core.errors import StoreError
+from daimon.core.errors import DaimonError, StoreError
 from daimon.core.stores import channel_budgets
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ..harness import build_cli_runtime
+from ..harness import FakeCliSettings, build_cli_runtime
 
 pytestmark = pytest.mark.no_cli_local_seed
 
@@ -93,3 +95,62 @@ async def test_bad_requests_are_refused_before_any_write(
         )
     async with db_session_factory() as s:
         assert await channel_budgets.list_channel_budgets(s, tenant_id=tenant.tenant_id) == []
+
+
+def _discord_settings() -> object:
+    return SimpleNamespace(
+        cli=FakeCliSettings.cli,
+        discord=SimpleNamespace(bot_token=SimpleNamespace(get_secret_value=lambda: "t")),
+    )
+
+
+def _no_discord() -> object:
+    return SimpleNamespace(cli=FakeCliSettings.cli, discord=None)
+
+
+def _discord_channels(channels: dict[str, dict[str, object]]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bot t", "looked up with the bot token"
+        channel = channels.get(request.url.path.rsplit("/", 1)[-1])
+        return httpx.Response(200, json=channel) if channel else httpx.Response(404, json={})
+
+    return httpx.MockTransport(handler)
+
+
+async def test_a_discord_thread_budgets_its_parent_and_a_foreign_channel_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = build_cli_runtime(db_session_factory, settings=_discord_settings())
+    tenant = await provision_tenant(db_session_factory, platform="discord", workspace_id="g1")
+    transport = _discord_channels(
+        {
+            "900": {"id": "900", "type": 11, "guild_id": "g1", "parent_id": "100"},
+            "200": {"id": "200", "type": 0, "guild_id": "g2"},
+        }
+    )
+    args = {
+        "rt": rt,
+        "console": _console(),
+        "platform": "discord",
+        "workspace_id": "g1",
+        "usd": "5",
+        "window": "monthly",
+        "starts_at": None,
+        "ends_at": None,
+        "discord_transport": transport,
+    }
+
+    await budget_set(**args, channel_id="900")
+    with pytest.raises(DaimonError, match="not in server g1"):
+        await budget_set(**args, channel_id="200")
+    with pytest.raises(DaimonError, match="not visible to daimon"):
+        await budget_set(**args, channel_id="404")
+    with pytest.raises(DaimonError, match="DAIMON_DISCORD__BOT_TOKEN is not set"):
+        await budget_set(
+            **{**args, "rt": build_cli_runtime(db_session_factory, settings=_no_discord())},
+            channel_id="900",
+        )
+
+    async with db_session_factory() as s:
+        budgets = await channel_budgets.list_channel_budgets(s, tenant_id=tenant.tenant_id)
+    assert [b.channel_id for b in budgets] == ["100"], "only the thread's parent was saved"
