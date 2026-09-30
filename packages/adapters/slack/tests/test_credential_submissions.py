@@ -1597,3 +1597,75 @@ async def test_env_file_submission_without_crypto_keys_tells_the_person_and_keep
     assert row is not None and row.used_at is None, "the request stays live for a retry"
     texts = _ephemeral_texts(fake_slack_web_client)
     assert texts and "DAIMON_CRYPTO__KEYS" in texts[-1], "the person learns the operator step"
+
+
+@pytest.mark.parametrize(
+    "target", ["R_PROFILE_USER", "TAR_OPTIONS", "SNOWFLAKE_USER", "AWS_REGION"]
+)
+async def test_env_submission_member_cannot_store_a_non_secret_name(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    target: str,
+) -> None:
+    """The submitter's live Slack role decides the name: a member may store secrets only."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="env",
+        target=target,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
+        origin_thread_id=_ORIGIN_THREAD,
+        target_ma_agent_id=live_agent.id,
+    )
+    await db_session.commit()
+
+    await _run_env(
+        _build_runtime(
+            fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+        ),
+        token,
+        value="private-value",
+    )
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        request_row = await peek_credential_request(s, token=token)
+    assert rows == [], f"a member must not store {target}"
+    assert request_row is not None and request_row.used_at is None, "a refusal spends nothing"
+    ephemeral = fake_slack_web_client.mock.requests[("POST", _EPHEMERAL_URL)][-1].kwargs["json"]
+    assert target in ephemeral["text"], "the refusal names the key"
+    assert "private-value" not in json.dumps(ephemeral), "the value never reaches a message"
+
+
+async def test_env_submission_admin_may_store_an_identity_name(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="env",
+        target="SNOWFLAKE_USER",
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
+        origin_thread_id=_ORIGIN_THREAD,
+        target_ma_agent_id=live_agent.id,
+    )
+    await db_session.commit()
+    _override_users_info_admin(fake_slack_web_client.mock)
+
+    await _run_env(
+        _build_runtime(
+            fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+        ),
+        token,
+    )
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+    assert [r["key"] for r in rows] == ["SNOWFLAKE_USER"], "an admin may add an identity name"

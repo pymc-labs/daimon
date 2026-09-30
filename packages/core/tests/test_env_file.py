@@ -15,6 +15,7 @@ from daimon.core.env_file import (
     MAX_ENV_VALUE_BYTES,
     EnvFileRejected,
     decode_env_bytes,
+    env_name_hard_denied,
     env_name_member_writable,
     env_name_problem,
     is_reserved_env_name,
@@ -445,6 +446,77 @@ _EXEC_ON_ENV_NAMES: list[str] = [
     "SHELL",
     "TERMINFO",
     "INPUTRC",
+    # R / Julia / Lua / PHP / pytest / OpenSSL / Electron / Jupyter code loaders
+    "R_PROFILE_USER",
+    "R_PROFILE",
+    "R_ENVIRON_USER",
+    "R_ENVIRON",
+    "R_LIBS_USER",
+    "R_LIBS",
+    "R_USER",
+    "JULIA_DEPOT_PATH",
+    "JULIA_LOAD_PATH",
+    "LUA_INIT",
+    "LUA_INIT_5_4",
+    "PHP_INI_SCAN_DIR",
+    "PYTEST_PLUGINS",
+    "PYTEST_ADDOPTS",
+    "OPENSSL_MODULES",
+    "OPENSSL_ENGINES",
+    "OPENSSL_CONF",
+    "ELECTRON_RUN_AS_NODE",
+    "IPYTHONDIR",
+    "JUPYTER_CONFIG_DIR",
+    "JUPYTER_PATH",
+    "MPLBACKEND",
+    "MPLCONFIGDIR",
+    # shell / libc
+    "ZDOTDIR",
+    "BASH_XTRACEFD",
+    "HISTFILE",
+    "GLIBC_TUNABLES",
+    "MALLOC_CONF",
+    "MALLOC_ARENA_MAX",
+    "TCMALLOC_RELEASE_RATE",
+    # build toolchain
+    "CC",
+    "CXX",
+    "CPP",
+    "LD",
+    "AR",
+    "LDSHARED",
+    "MAKEFILES",
+    "CFLAGS",
+    "CXXFLAGS",
+    "LDFLAGS",
+    "MAKEFLAGS",
+    "CMAKE_TOOLCHAIN_FILE",
+    # config dirs / keyrings / TLS
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_DIRS",
+    "GCLOUD_CONFIG_DIR",
+    "AZURE_CONFIGDIR",
+    "GNUPGHOME",
+    "PGPASSFILE",
+    "PGSERVICEFILE",
+    "PGSSLROOTCERTFILE",
+    "PGSYSCONFDIR",
+    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "SSLKEYLOGFILE",
+    "GIT_BROWSER",
+    "WWW_BROWSER",
+    # endpoint / host retargeting and tool config
+    "TF_CLI_ARGS",
+    "TF_CLI_CONFIG_FILE",
+    "AWS_ENDPOINT_URL",
+    "AWS_ENDPOINT_URL_S3",
+    "GH_HOST",
+    "GITHUB_API_URL",
+    "CLOUDSDK_API_ENDPOINT_OVERRIDES_STORAGE",
+    "HELM_PLUGINS",
+    "CONDA_PREFIX",
+    "BUNDLE_GEMFILE",
+    "POETRY_REPOSITORIES_X_URL",
 ]
 
 
@@ -477,7 +549,28 @@ def test_ordinary_credential_names_are_writable_by_a_member(name: str) -> None:
     assert env_name_problem(name, is_admin=False) is None
 
 
-@pytest.mark.parametrize("name", ["DATABASE_URL", "SERVICE_HOST", "MY_DSN", "NOTES", "CONFIG", "X"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "DATABASE_URL",
+        "SERVICE_HOST",
+        "MY_DSN",
+        "NOTES",
+        "CONFIG",
+        "X",
+        # identity / targeting names retarget a credential: admin-only
+        "SNOWFLAKE_USER",
+        "JIRA_USERNAME",
+        "GCP_PROJECT_ID",
+        "AZURE_TENANT",
+        "OPENAI_ORG",
+        "STRIPE_ACCOUNT",
+        "SLACK_WORKSPACE",
+        "BILLING_EMAIL",
+        "AWS_REGION",
+        "GOOGLE_CLOUD_PROJECT",
+    ],
+)
 def test_a_member_cannot_write_a_non_credential_name_but_an_admin_can(name: str) -> None:
     # None of these is a tool control, so an admin may set them…
     assert env_name_problem(name, is_admin=True) is None, f"an admin may set {name}"
@@ -495,3 +588,13 @@ def test_a_member_upload_rejects_a_non_credential_name() -> None:
 def test_an_admin_upload_accepts_a_non_credential_name_that_is_not_hard_denied() -> None:
     entries = parse_env_file("API_KEY=ok\nDATABASE_URL=postgres://x\n")
     assert {e.name for e in entries} == {"API_KEY", "DATABASE_URL"}
+
+
+@pytest.mark.parametrize(
+    "name", ["NPM_TOKEN", "CARGO_REGISTRY_TOKEN", "UV_PUBLISH_TOKEN", "DOCKER_PASSWORD"]
+)
+def test_opaque_secret_exceptions_escape_their_prefix_and_nothing_else(name: str) -> None:
+    """Each exception is a plain secret its tool never reads as config or a path."""
+    assert not env_name_hard_denied(name)
+    neighbour = name.split("_", 1)[0] + "_CONFIG_USERCONFIG"
+    assert env_name_hard_denied(neighbour), "the prefix still blocks everything else"

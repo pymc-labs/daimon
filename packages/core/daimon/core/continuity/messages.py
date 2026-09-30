@@ -340,8 +340,9 @@ _ENV_LINE_REASONS: Final[dict[EnvRejection, str]] = {
     "bad_name": "the name here is not usable as a key name.",
     "reserved_name": "{name} is reserved: it changes how the agent's tools run.",
     "not_credential_name": (
-        "{name} is not a credential name a member can add — use a name ending in "
-        "_KEY, _TOKEN, _SECRET or similar. An admin can add other names."
+        "{name} is not a secret name a member can add. Use a name ending in "
+        "_KEY, _KEY_ID, _TOKEN, _SECRET, _PASSWORD, _PASSPHRASE or _PAT. An admin "
+        "can add identity, account, region and URL names."
     ),
     "duplicate_name": "{name} is set more than once.",
     "value_too_large": "{name} is too long.",
@@ -360,8 +361,9 @@ _ENV_FILE_REASONS: Final[dict[EnvRejection, str]] = {
     "bad_name": "The names in the file are not usable as key names.",
     "reserved_name": "The file sets a reserved name that changes how the agent's tools run.",
     "not_credential_name": (
-        "A name in the file is not one a member can add. Member keys must end in "
-        "_KEY, _TOKEN, _SECRET or similar; an admin can add other names."
+        "A name in the file is not a secret name a member can add. Member keys must "
+        "end in _KEY, _KEY_ID, _TOKEN, _SECRET, _PASSWORD, _PASSPHRASE or _PAT; an "
+        "admin can add identity, account, region and URL names."
     ),
     "duplicate_name": "The same name is set more than once.",
     "value_too_large": "One of the keys is too long.",

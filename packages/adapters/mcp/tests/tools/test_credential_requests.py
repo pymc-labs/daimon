@@ -812,7 +812,7 @@ async def test_request_agent_key_member_allowlist_but_admin_may_add_any_name(
     runtime = _runtime(committing_sessionmaker)
     member = _auth_identity()
     # A member cannot add a non-credential name (no mint, no row).
-    with pytest.raises(ToolError, match="credential name"):
+    with pytest.raises(ToolError, match="not a secret name a member can add"):
         await _request_agent_key_impl(
             runtime, member, agent_name="daimon", key="DATABASE_URL", purpose="x", channel_id="222"
         )

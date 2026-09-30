@@ -70,10 +70,12 @@ structural, in two layers.
   non-admin writes a key (a Discord/Slack form or upload submitted by a
   non-admin, ``request_agent_key``, ``self_write_file`` and every agent
   key). A member may only write ``^[A-Z][A-Z0-9_]{1,63}$`` that ends in a
-  credential suffix (``_KEY``, ``_TOKEN``, ``_SECRET``, ``_PASSWORD`` …) and
-  is not hard-denied — never a ``*_URL``/``*_HOST``/``*_DSN`` (redirection),
-  with ``GH_TOKEN``/``GITHUB_TOKEN`` kept for the documented CLI use. An
-  admin may write any name that is not hard-denied.
+  secret suffix (``_KEY``, ``_KEY_ID``, ``_TOKEN``, ``_SECRET``,
+  ``_PASSWORD``, ``_PASSPHRASE``, ``_PAT``) and is not hard-denied — never an
+  identity or targeting name (``*_USER``, ``*_ID``, ``*_ORG``, ``*_REGION``)
+  or a ``*_URL``/``*_HOST`` (redirection), with ``GH_TOKEN``/``GITHUB_TOKEN``
+  kept for the documented CLI use. An admin may write any name that is not
+  hard-denied.
 
 `env_name_problem(name, is_admin=…)` is the one entry every write path calls;
 the store and the `.env` assembler apply the hard-deny layer alone, since
@@ -110,6 +112,7 @@ __all__ = [
     "EnvProblem",
     "EnvRejection",
     "decode_env_bytes",
+    "MEMBER_SECRET_SUFFIX_HINT",
     "env_name_hard_denied",
     "env_name_member_writable",
     "env_name_problem",
@@ -171,34 +174,27 @@ _BARE_VALUE_CHARS: Final[frozenset[str]] = frozenset(
 #: grammar has no room for.
 _NOT_SINGLE_QUOTABLE: Final[frozenset[str]] = frozenset("\n\r")
 
-#: Names that name a credential value and nothing else. A non-admin member may
-#: only write a key whose name ends in one of these — never a plain ``URL`` or
-#: ``HOST`` (those redirect the agent's own traffic; see `_MEMBER_DENY_SUFFIXES`).
+#: Suffixes that name a SECRET value and nothing else. A non-admin member may
+#: only write a key whose name ends in one of these. Identity and targeting
+#: suffixes (``_USER``, ``_ID``, ``_EMAIL``, ``_ACCOUNT``, ``_ORG``,
+#: ``_PROJECT``, ``_REGION`` …) are admin-only: they retarget a credential or,
+#: like ``R_LIBS_USER``, load code.
 _MEMBER_ALLOW_SUFFIXES: Final[tuple[str, ...]] = (
     "_KEY",
     "_API_KEY",
+    "_KEY_ID",
     "_TOKEN",
     "_SECRET",
     "_PASSWORD",
     "_PASSWD",
+    "_PASSPHRASE",
     "_PAT",
-    "_ID",
-    "_USER",
-    "_USERNAME",
-    "_EMAIL",
-    "_ACCOUNT",
-    "_ORG",
-    "_WORKSPACE",
-    "_PROJECT",
-    "_TENANT",
-    "_REGION",
-    "_DSN",
 )
-#: Suffixes a member never writes even though they look credential-shaped: a
-#: value under them points the agent's own tooling somewhere else.
-_MEMBER_DENY_SUFFIXES: Final[tuple[str, ...]] = ("_URL", "_HOST", "_DSN", "_URI", "_ENDPOINT")
-#: Bare credential words a member may use as a whole key name, plus the two
-#: names kept for the documented CLI-token use (`defaults/skills/cli-auth`).
+#: Suffixes a member never writes: a value under them points the agent's own
+#: tooling somewhere else.
+_MEMBER_DENY_SUFFIXES: Final[tuple[str, ...]] = ("_URL", "_HOST", "_URI", "_ENDPOINT")
+#: Bare secret words a member may use as a whole key name, plus the two names
+#: kept for the documented CLI-token use (`defaults/skills/cli-auth`).
 _MEMBER_ALLOW_EXACT: Final[frozenset[str]] = frozenset(
     {
         "GH_TOKEN",
@@ -210,10 +206,19 @@ _MEMBER_ALLOW_EXACT: Final[frozenset[str]] = frozenset(
         "SECRET",
         "PASSWORD",
         "PASSWD",
+        "PASSPHRASE",
         "PAT",
-        "USERNAME",
-        "EMAIL",
     }
+)
+#: Secret names that a hard-deny prefix or substring would otherwise catch but
+#: that their tool reads only as an opaque credential, never as configuration
+#: or a path. Exempt from Layer 1; still subject to Layer 2 like any name.
+_HARD_DENY_EXCEPTIONS: Final[frozenset[str]] = frozenset(
+    {"NPM_TOKEN", "CARGO_REGISTRY_TOKEN", "UV_PUBLISH_TOKEN", "DOCKER_PASSWORD"}
+)
+#: The accepted member suffixes, as refusal copy shows them.
+MEMBER_SECRET_SUFFIX_HINT: Final[str] = (
+    "_KEY, _KEY_ID, _TOKEN, _SECRET, _PASSWORD, _PASSPHRASE or _PAT"
 )
 _MEMBER_NAME_SHAPE: Final[re.Pattern[str]] = re.compile(r"[A-Z][A-Z0-9_]{1,63}")
 
@@ -310,6 +315,33 @@ _HARD_DENY_EXACT: Final[frozenset[str]] = frozenset(
         "RUSTDOCFLAGS",
         "RUSTC_WRAPPER",
         "RUSTC",
+        "PHP_INI_SCAN_DIR",
+        "PYTEST_PLUGINS",
+        "PYTEST_ADDOPTS",
+        "OPENSSL_MODULES",
+        "OPENSSL_ENGINES",
+        "OPENSSL_CONF",
+        "ELECTRON_RUN_AS_NODE",
+        "IPYTHONDIR",
+        "MPLBACKEND",
+        "MPLCONFIGDIR",
+        "ZDOTDIR",
+        "BASH_XTRACEFD",
+        "HISTFILE",
+        "GLIBC_TUNABLES",
+        "CC",
+        "CXX",
+        "CPP",
+        "LD",
+        "AR",
+        "LDSHARED",
+        "MAKEFILES",
+        "GNUPGHOME",
+        "PGSYSCONFDIR",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "GH_HOST",
+        "GITHUB_API_URL",
+        "SSLKEYLOGFILE",
     }
 )
 #: HARD DENY prefixes.
@@ -327,6 +359,20 @@ _HARD_DENY_PREFIXES: Final[tuple[str, ...]] = (
     "PNPM_",
     "CARGO_",
     "RUSTUP_",
+    "R_",
+    "JULIA_",
+    "LUA_INIT",
+    "JUPYTER_",
+    "MALLOC_",
+    "TCMALLOC_",
+    "CMAKE_",
+    "XDG_",
+    "TF_CLI_",
+    "CLOUDSDK_API_ENDPOINT_OVERRIDES_",
+    "HELM_",
+    "CONDA_",
+    "BUNDLE_",
+    "POETRY_",
     "MAVEN_",
     "GRADLE_",
     "DOCKER_",
@@ -375,9 +421,20 @@ _HARD_DENY_SUFFIXES: Final[tuple[str, ...]] = (
     "_CREDENTIALS",
     "_CREDENTIALS_FILE",
     "_TOOL_OPTIONS",
+    "FLAGS",
+    "_CONFIG_DIR",
+    "CONFIGDIR",
+    "_BROWSER",
 )
 #: HARD DENY substrings: a redirect target can sit mid-name (``*_REGISTRY_*``).
-_HARD_DENY_SUBSTRINGS: Final[tuple[str, ...]] = ("_REGISTRY", "_BASE_URL", "_INDEX_URL")
+_HARD_DENY_SUBSTRINGS: Final[tuple[str, ...]] = (
+    "_REGISTRY",
+    "_BASE_URL",
+    "_INDEX_URL",
+    "_ENDPOINT_URL",
+)
+#: libpq reads a file path from any ``PG…FILE`` (``PGPASSFILE``, ``PGSERVICEFILE``).
+_HARD_DENY_PATTERN: Final[re.Pattern[str]] = re.compile(r"PG[A-Z0-9_]*FILE")
 
 
 class EnvProblem(BaseModel):
@@ -428,7 +485,11 @@ def env_name_hard_denied(name: str) -> bool:
     and again when the `.env` is assembled, for admins too.
     """
     upper = name.upper()
+    if upper in _HARD_DENY_EXCEPTIONS:
+        return False
     if upper in _HARD_DENY_EXACT:
+        return True
+    if _HARD_DENY_PATTERN.fullmatch(upper) is not None:
         return True
     if upper.startswith(_HARD_DENY_PREFIXES):
         return True
@@ -440,9 +501,10 @@ def env_name_hard_denied(name: str) -> bool:
 def env_name_member_writable(name: str) -> bool:
     """LAYER 2. Whether a non-admin may write a key under `name`.
 
-    A short upper-snake name that ends in a credential suffix and is neither a
-    redirection suffix (``*_URL``/``*_HOST``) nor hard-denied, plus the two
-    documented CLI-token names. An admin is not bound by this — only by
+    A short upper-snake name that ends in a secret suffix (``_KEY``,
+    ``_TOKEN``, ``_SECRET``, ``_PASSWORD`` …) and is neither a redirection
+    suffix (``*_URL``/``*_HOST``) nor hard-denied, plus bare secret words and
+    the two documented CLI-token names. An admin is not bound by this — only by
     `env_name_hard_denied`.
     """
     if env_name_hard_denied(name):

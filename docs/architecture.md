@@ -452,9 +452,10 @@ stored. Names that control an interpreter, archiver, loader, locale, package
 manager, git, an HTTP client or a CA bundle, or that redirect an SDK's own
 endpoint (`TAR_OPTIONS`, `BASH_ENV`, `LD_PRELOAD`, `GIT_SSH_COMMAND`,
 `*_BASE_URL`, …) are hard-denied for everyone and dropped from the mount even
-if stored earlier; a non-admin member may additionally add only a
-credential-shaped name (ending in `_KEY`, `_TOKEN`, `_SECRET`, … — never a
-`*_URL`/`*_HOST`). This keeps one tenant member from handing another client's
+if stored earlier; a non-admin member may additionally add only a secret
+name (ending in `_KEY`, `_KEY_ID`, `_TOKEN`, `_SECRET`, `_PASSWORD`,
+`_PASSPHRASE` or `_PAT` — never an identity, region or `*_URL`/`*_HOST`
+name, which only an admin may add). This keeps one tenant member from handing another client's
 agent code execution or a redirected connector through a key value or name.
 
 ## Sessions and Managed Agents

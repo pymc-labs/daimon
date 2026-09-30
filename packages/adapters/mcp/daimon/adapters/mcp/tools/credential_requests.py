@@ -46,7 +46,7 @@ from daimon.core.credential_requests import (
 )
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.env_file import env_name_problem
+from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_name_problem
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
@@ -62,7 +62,7 @@ from daimon.core.stores.credential_requests import (
     supersede_credential_request,
     update_credential_request_message,
 )
-from daimon.core.stores.domain import CredentialRequestRow, Role, TurnOriginRow
+from daimon.core.stores.domain import CredentialRequestRow, TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp import Context, FastMCP
@@ -78,13 +78,21 @@ _POSIX_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _caller_is_admin(auth: AuthIdentity) -> bool:
-    """Whether this caller may store a key outside the member credential allowlist.
+    """Whether this caller may REQUEST a key outside the member allowlist.
 
-    The JWT's `is_admin` (Discord owner/manage-guild/administrator or CLI) or an
-    ADMIN role on the account. An agent-scoped key carries neither, so an agent
-    acting on its own behalf is always a member here.
+    `auth.is_admin` is the middleware's gate: the account's live DB role is
+    ADMIN, or the token is an internal CLI/scheduler/headless token carrying
+    the admin claim. An agent-scoped key (`auth.agent_id` set) re-derives its
+    role from the account that owns it, which may be an admin — so it is
+    treated as a member here regardless, as `self_write_file` is.
+
+    This only decides whether the card may be minted. The value is written
+    when a person submits the form, and the Discord and Slack submit paths
+    re-check that person's live platform admin status against the same name
+    policy, so a mint by an admin-capable token never lets a member store an
+    admin-only name.
     """
-    return auth.is_admin or auth.role is Role.ADMIN
+    return auth.is_admin and auth.agent_id is None
 
 
 # `normalize_owner_repo` does not truncate to two path segments (it only
@@ -465,9 +473,9 @@ async def _request_agent_key_impl(
             )
         if problem == "not_credential_name":
             raise ToolError(
-                f"{key} is not a credential name a member can add. Use a name ending "
-                "in _KEY, _TOKEN, _SECRET, _PASSWORD or similar. An admin can add "
-                "other names."
+                f"{key} is not a secret name a member can add. Use a name ending in "
+                f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, "
+                "region and URL names."
             )
     if key is None:
         named = _named_single_key(purpose)

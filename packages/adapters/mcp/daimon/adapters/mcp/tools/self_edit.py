@@ -31,7 +31,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.broker import dispatch_mint_token
 from daimon.core.broker.errors import NoBindingError, ProviderConfigError
-from daimon.core.env_file import env_name_problem
+from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_name_problem
 from daimon.core.errors import StoreError
 from daimon.core.github_visibility import pat_can_access_repo
 from daimon.core.stores.agent_files import (
@@ -157,8 +157,9 @@ async def _self_write_file_impl(
         raise ToolError(f"{key} is a reserved name: it changes how the agent's tools run.")
     if name_problem == "not_credential_name":
         raise ToolError(
-            f"{key} is not a credential name. Use a name ending in _KEY, _TOKEN, "
-            "_SECRET, _PASSWORD or similar."
+            f"{key} is not a secret name an agent can store. Use a name ending in "
+            f"{MEMBER_SECRET_SUFFIX_HINT}; identity, account, region and URL names "
+            "need an admin to add them through a form."
         )
     try:
         async with runtime.session_factory.begin() as session:

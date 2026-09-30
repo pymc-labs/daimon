@@ -1176,16 +1176,16 @@ async def test_self_read_and_list_withhold_values_a_person_entered(
             # Same account the credential form records: the person who asked.
             set_by_account_id=auth.account_id,
         )
-    await _self_write_file_impl(runtime, auth, key="NOTES", content="my own note")
+    await _self_write_file_impl(runtime, auth, key="NOTES_TOKEN", content="my own note")
 
     secret = await _self_read_file_impl(runtime, auth, key="CRM_TOKEN")
-    own = await _self_read_file_impl(runtime, auth, key="NOTES")
+    own = await _self_read_file_impl(runtime, auth, key="NOTES_TOKEN")
     listed = await _self_list_files_impl(runtime, auth)
 
     assert secret is not None and "crm-secret-value" not in secret.content
     assert secret.content == REDACTED_VALUE
     assert own is not None and own.content == REDACTED_VALUE
-    assert [r.key for r in listed] == ["CRM_TOKEN", "NOTES"]
+    assert [r.key for r in listed] == ["CRM_TOKEN", "NOTES_TOKEN"]
     assert all(
         "crm-secret-value" not in r.content and "my own note" not in r.content for r in listed
     )
@@ -1205,4 +1205,26 @@ async def test_self_write_file_without_encryption_keys_names_the_operator_step(
     auth = _auth_identity(tenant_id=tenant_id)
 
     with pytest.raises(ToolError, match="DAIMON_CRYPTO__KEYS"):
-        await _self_write_file_impl(runtime, auth, key="NOTES", content="x")
+        await _self_write_file_impl(runtime, auth, key="NOTES_TOKEN", content="x")
+
+
+@pytest.mark.parametrize(
+    ("key", "match"),
+    [
+        ("TAR_OPTIONS", "reserved name"),
+        ("R_PROFILE_USER", "reserved name"),
+        ("LD_PRELOAD", "reserved name"),
+        ("SNOWFLAKE_USER", "not a secret name"),
+        ("DATABASE_URL", "not a secret name"),
+        ("NOTES", "not a secret name"),
+        ("notes.md", "must match"),
+    ],
+)
+async def test_self_write_file_refuses_every_non_secret_name(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], key: str, match: str
+) -> None:
+    """An agent key is always a member: only secret names, never tool controls."""
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity()
+    with pytest.raises(ToolError, match=match):
+        await _self_write_file_impl(runtime, auth, key=key, content="v")

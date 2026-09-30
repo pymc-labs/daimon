@@ -127,6 +127,7 @@ from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
     MAX_ENV_FILE_BYTES,
+    MEMBER_SECRET_SUFFIX_HINT,
     EnvEntry,
     EnvFileRejected,
     decode_env_bytes,
@@ -387,8 +388,9 @@ def _env_name_refusal(name: str, problem: str) -> str:
     if problem == "reserved_name":
         return f"{name} is reserved: it changes how the agent's tools run, so it cannot be a key."
     return (
-        f"{name} is not a credential name a member can add — use a name ending in "
-        "_KEY, _TOKEN, _SECRET or similar. An admin can add other names."
+        f"{name} is not a secret name a member can add. Use a name ending in "
+        f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, region "
+        "and URL names."
     )
 
 
