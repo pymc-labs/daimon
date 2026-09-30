@@ -31,7 +31,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._isolation import load_caller_isolation
+from daimon.adapters.mcp.tools._isolation import load_caller_isolation, load_skill_owners
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
@@ -571,6 +571,7 @@ async def _update_agent_impl(
     if skills is not None:
         touched_fields.add("skills")
     if touched_fields & reachability.REACHABILITY_GATED_FIELDS:
+            owners = await load_skill_owners(runtime, caller, auth.tenant_id)
         await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=name)
 
     # Resolve skill names outside the closure — name resolution does not depend on
@@ -583,7 +584,9 @@ async def _update_agent_impl(
                 runtime.client,
                 skills,
                 tenant_id=auth.tenant_id,
-                is_owner_hidden=lambda owner: not caller.sees(owner),
+                is_skill_hidden=lambda skill_id, body: caller.hides_skill(
+                    owners, skill_id=skill_id, body=body
+                ),
             )
         except DefaultsError as exc:
             raise ToolError(str(exc)) from exc

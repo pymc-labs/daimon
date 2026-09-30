@@ -10,7 +10,7 @@ those. A tenant that isolates nothing pays one policy read and sees everything.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -24,9 +24,14 @@ from daimon.core.channel_isolation import (
 )
 from daimon.core.channel_isolation_setup import render_isolation_refusal
 from daimon.core.defaults.ma_index import list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
+    skill_owner_candidates,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
+from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from fastmcp.exceptions import ToolError
 
 _UNREADABLE_MSG = (
@@ -52,10 +57,40 @@ class CallerIsolation:
     def sees_agent(self, agent: BetaManagedAgentsAgent) -> bool:
         return self.sees(agent_name_of(agent))
 
-    def hides_skill(self, body: str) -> bool:
-        """Whether an agent-scoped skill body (``agent/name``) belongs to a hidden agent."""
-        owner, _, rest = body.partition("/")
-        return bool(rest) and not self.sees(owner)
+    def hides_skill(self, owners: SkillOwners, *, skill_id: str, body: str) -> bool:
+        """Whether a tenant skill may belong to an agent this caller can't see."""
+        return not all(map(self.sees, owners.of(skill_id, body)))
+
+
+@dataclass(frozen=True)
+class SkillOwners:
+    """Who each agent-scoped skill belongs to: its upload row, else its title."""
+
+    by_skill_id: Mapping[str, str]
+    agent_names: frozenset[str]
+
+    def of(self, skill_id: str, body: str) -> frozenset[str]:
+        return skill_owner_candidates(
+            body, stored_owner=self.by_skill_id.get(skill_id), agent_names=self.agent_names
+        )
+
+
+NO_SKILL_OWNERS = SkillOwners({}, frozenset())
+
+
+async def load_skill_owners(
+    runtime: McpRuntime, caller: CallerIsolation, tenant_id: uuid.UUID
+) -> SkillOwners:
+    """The skill owners `caller.hides_skill` needs; nothing is read while nothing is isolated."""
+    if not caller.isolation.is_active:
+        return NO_SKILL_OWNERS
+    async with runtime.session_factory() as session:
+        rows = await list_user_skills_for_tenant(session, tenant_id=tenant_id)
+    agents = await list_agents_by_tenant(runtime.client, tenant_id=tenant_id)
+    return SkillOwners(
+        {row.anthropic_id: row.agent_name for row in rows if row.anthropic_id},
+        frozenset(map(agent_name_of, agents)) | caller.isolation.agent_channel_ids.keys(),
+    )
 
 
 OPEN_ISOLATION = CallerIsolation(NO_ISOLATION)
@@ -123,11 +158,14 @@ async def load_caller_isolation(
 
 
 __all__ = [
+    "NO_SKILL_OWNERS",
     "OPEN_ISOLATION",
     "CallerIsolation",
+    "SkillOwners",
     "agent_name_of",
     "load_caller_isolation",
     "load_isolation",
+    "load_skill_owners",
     "refuse",
     "require_bindable",
 ]

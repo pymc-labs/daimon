@@ -31,7 +31,10 @@ from daimon.adapters.mcp.tools.routines import (
     _create_routine_impl,  # pyright: ignore[reportPrivateUsage]
     _list_routines_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.skills import _list_impl  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.skills import (
+    _get_impl,  # pyright: ignore[reportPrivateUsage]
+    _list_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
@@ -43,7 +46,8 @@ from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing import ma_agent
 from daimon.testing.crypto import make_fernet
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing.ma import (
     FakeMAState,
     NotHandled,
@@ -92,12 +96,37 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession], client: AsyncAnthro
 
 
 async def _world(
-    sessionmaker: async_sessionmaker[AsyncSession], *, isolate: bool = True
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    isolate: bool = True,
+    local: str = "local",
+    uploaded: bool = False,
 ) -> tuple[_World, McpRuntime]:
     async with sessionmaker.begin() as session:
         tenant = await make_tenant(session)
         account = await make_account(session, tenant=tenant)
-        for channel, agent in ((ROOM, "local"), (OTHER, "shared")):
+    """``uploaded`` adds ``upload-notes``: a title naming no agent, owned by ``local`` by its upload."""
+    titles = {"skill_local": f"{local}/notes", "skill_shared": "shared/notes"}
+    if uploaded:
+        titles["skill_upload"] = "upload-notes"
+        if uploaded:
+            principal = await make_platform_principal(
+                session, platform="discord", external_id="555", tenant=tenant, account=account
+            )
+            await upsert_user_skill(
+                session,
+                tenant_id=tenant.id,
+                principal_id=principal.id,
+                agent_name=local,
+                name="upload-notes",
+                source_repo_url="https://github.com/o/r",
+                source_repo_branch="main",
+                source_path="",
+                content_hash="h",
+                anthropic_id="skill_upload",
+                anthropic_latest_version="1",
+            )
+        for channel, agent in ((ROOM, local), (OTHER, "shared")):
             await set_fields(
                 session,
                 scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel),
@@ -112,20 +141,20 @@ async def _world(
                 policy=TenantAccessPolicy(isolated_channel_ids=(ROOM,)),
             )
     state = FakeMAState()
-    for agent_id, name in (("agent_local", "local"), ("agent_shared", "shared")):
+    for agent_id, name in (("agent_local", local), ("agent_shared", "shared")):
         agent = ma_agent(id=agent_id, name=name, tenant_id=tenant.id)
         state.agents[agent.id] = agent.model_dump(mode="json")
     skills = [
         SkillListResponse(
-            id=f"skill_{owner}",
+            id=skill_id,
             type="custom",
-            display_title=tenant_scoped_display_title(tenant_id=tenant.id, name=f"{owner}/notes"),
+            display_title=tenant_scoped_display_title(tenant_id=tenant.id, name=body),
             latest_version="1",
             created_at="2026-01-01T00:00:00Z",
             updated_at="2026-01-01T00:00:00Z",
             source="custom",
         ).model_dump(mode="json")
-        for owner in ("local", "shared")
+        for skill_id, body in titles.items()
     ]
 
     def skills_handler(request: httpx.Request) -> httpx.Response:
@@ -168,6 +197,26 @@ async def test_agents_and_skills_split_at_the_isolation_line(
 async def test_routing_writes_keep_local_agents_in_and_shared_ones_out(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
+async def test_skill_owners_come_from_uploads_and_survive_shortened_titles(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    long_name = "l" * 64
+    world, runtime = await _world(committing_sessionmaker, local=long_name, uploaded=True)
+    outside, inside = world.auth(), world.auth(executing="agent_local")
+
+    assert [s.name for s in await _list_impl(runtime, outside)] == ["shared/notes"], (
+        "a shortened title and an uploaded skill both stay inside C"
+    )
+    inside_names = {s.name for s in await _list_impl(runtime, inside)}
+    assert "upload-notes" in inside_names and "shared/notes" not in inside_names
+    assert len(inside_names) == 2, "the long agent's own skill is listed inside"
+    shortened = next(name for name in inside_names if name != "upload-notes")
+    assert "/" not in shortened, "the title lost its '/' to shortening"
+    for name in (shortened, "upload-notes"):
+        with pytest.raises(ToolError):
+            await _get_impl(runtime, outside, name)
+
+
     world, runtime = await _world(committing_sessionmaker)
     admin = world.auth()
     with pytest.raises(ToolError, match="isolated"):
