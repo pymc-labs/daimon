@@ -178,7 +178,7 @@ Who counts as an admin differs by path. `admit()` trusts only the live role the
 adapter passes; no role means non-admin. The MCP turn tools (`ask`,
 `start_turn`, `continue_turn`, on the hub and per agent, plus billed media)
 and routine fires have no live platform role, so they use the account's
-stored role, refreshed on every chat turn. The operator path
+stored role (and role ids, for channel admins), refreshed on every chat turn. The operator path
 (`platform_user_id` unset: CLI and internal tokens) is not a platform member
 and skips the policy, as it skips billing. Ids are the platform's own (Discord snowflakes, Slack ids):
 
@@ -233,6 +233,26 @@ non-blank. Invalid input names the field and value and writes nothing.
 To empty a single field, `--clear`
 and set the rest again. `set` refuses to overwrite an unreadable row, so
 `--clear` is also the way out of that state. There is no setup-panel editor.
+
+**Channel admins.** A tenant can name, per channel, roles and members who run
+that channel on top of the server admins (`channel_admins`,
+`packages/core/daimon/core/channel_admins.py`). `admit()` stores the member's
+live role ids on the account (`accounts.platform_role_ids`) beside the role, so
+MCP tools test a grant without asking the platform; Slack has no roles, so a
+Slack grant is by user id. A channel admin may do what a server admin may for
+an agent local to their channels -- not the tenant default, and every
+channel-scope row and thread binding in a channel they run
+(`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
+channels' default agent. Managed agents and the tenant default stay with server
+admins, and a tenant with no grant behaves as before. Server admins edit grants
+with the `*_channel_admins` MCP tools, from Who answers where in the setup
+panel, or with the CLI:
+
+```bash
+daimon channels admins get discord GUILD_ID [CHANNEL_ID] [--json]
+daimon channels admins set discord GUILD_ID CHANNEL_ID --role ROLE_ID --user USER_ID
+daimon channels admins clear discord GUILD_ID CHANNEL_ID
+```
 
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA

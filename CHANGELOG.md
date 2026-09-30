@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/billing` shows the channel's spend against it. Nothing changes until a
   budget is set, with or without Stripe. Usage and debits now record their
   channel from this release on.
+- **Channel admins.** Server and workspace admins can name the roles and
+  members who run a channel, with `set_channel_admins`, `list_channel_admins`
+  and `clear_channel_admins`, from Who answers where in the setup panel, or
+  with `daimon channels admins`. A channel admin may change agents that answer
+  only in channels they run (instructions, skills, keys, MCP servers, repos)
+  and set or clear those channels' default agent; built-in agents and the
+  server default stay with server admins. Slack grants are by member only.
+  Nothing changes until a channel admin is named.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.
