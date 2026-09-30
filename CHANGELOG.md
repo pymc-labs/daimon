@@ -24,9 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_channel_budget`, `clear_channel_budget` and `list_channel_budgets`, or
   `daimon channels budget set|clear|list`. Once a channel's debits (markup
   included, threads counting toward their channel) reach its limit, new turns
-  there are refused, as are unprompted replies, wakes, `/dm`, YouTube
-  transcripts asked for there and routine fires that post there or were made
-  there. Members can read a budget with `get_channel_budget`, and
+  there are refused, as are unprompted replies, wakes, `/dm` and DMs moved
+  from there, YouTube transcripts asked for there and routine fires that post
+  there or were made there. Members can read a budget with `get_channel_budget`, and
   `/billing` shows the channel's spend against it. Nothing changes until a
   budget is set, with or without Stripe. Usage and debits now record their
   channel from this release on.

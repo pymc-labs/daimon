@@ -125,10 +125,10 @@ config). The order is load-bearing and documented as such in the module:
 7. Balance gate — `tenant_balance.is_over_balance`.
 8. Monthly cap gate — `billing.is_over_cap`.
 9. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
-   parent channel; skipped in a DM or where the channel has no budget. The
-   channel is carried on `Admission.channel_id` so every debit for the turn
-   is attributed to it. `/dm` checks the source channel's budget before it
-   opens a DM.
+   parent channel, or for a DM the channel it was moved from with `/dm`
+   (`dm_source_channel_id`); skipped in an older DM or where the channel has
+   no budget. The channel is carried on `Admission.channel_id` so every debit
+   for the turn is attributed to it.
 
 The policy, protection, balance, cap and channel budget gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
