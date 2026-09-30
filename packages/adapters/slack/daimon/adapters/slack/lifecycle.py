@@ -668,7 +668,7 @@ class SlackTurnLifecycle:
         delivers it; the draft was already folded in `on_sse_event`."""
         if self._terminal:
             return
-        self._state = update_activity(self._state, state.content)
+        self._state = update_activity(self._state, state)
         await self._maybe_flush()
 
     async def on_reconnect(self, reason: ReconnectReason) -> None:

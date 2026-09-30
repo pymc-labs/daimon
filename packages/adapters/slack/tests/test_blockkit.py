@@ -24,7 +24,7 @@ from daimon.adapters.slack.blockkit import (
     update,
     update_activity,
 )
-from daimon.core.turn.state import ToolUseBlock
+from daimon.core.turn.state import ToolUseBlock, TurnState
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -101,7 +101,9 @@ class TestUpdate:
 
 class TestUpdateActivity:
     def test_running_call_reads_as_working(self) -> None:
-        result = update_activity(_make_state(), [_call("bash", "failed"), _call("grep")])
+        result = update_activity(
+            _make_state(), TurnState(content=[_call("bash", "failed"), _call("grep")])
+        )
         assert result.phase == TurnPhase.TOOL_RUNNING, "a pending call means the turn is working"
         assert result.tool_lines == ("🚫 Ran a command", "🔍 Searching files"), (
             "tool lines come from the turn state"
@@ -109,12 +111,12 @@ class TestUpdateActivity:
 
     def test_no_running_call_reads_as_thinking(self) -> None:
         state = _make_state(phase=TurnPhase.TOOL_RUNNING)
-        result = update_activity(state, [_call("bash", "complete")])
+        result = update_activity(state, TurnState(content=[_call("bash", "complete")]))
         assert result.phase == TurnPhase.THINKING, "once every call finished the turn is thinking"
 
     def test_terminal_state_is_left_alone(self) -> None:
         error = _make_state(phase=TurnPhase.ERROR)
-        assert update_activity(error, [_call("bash")]) is error, (
+        assert update_activity(error, TurnState(content=[_call("bash")])) is error, (
             "a late render must not reopen a finished card"
         )
 

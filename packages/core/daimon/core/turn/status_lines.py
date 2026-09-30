@@ -89,16 +89,25 @@ def has_running_tool(content: Sequence[ContentBlock]) -> bool:
     return any(isinstance(block, ToolUseBlock) and block.status == "pending" for block in content)
 
 
-def format_tool_lines(content: Sequence[ContentBlock]) -> tuple[str, ...]:
+def format_tool_lines(
+    content: Sequence[ContentBlock], *, finished_ids: Sequence[str] = ()
+) -> tuple[str, ...]:
     """Finished calls, then running ones, within MAX_TOOL_LINES; running ones win.
 
-    Older calls fold into one ``+N earlier`` line on top. Lines carry no
-    backtick, so an adapter can fence them in a code block as they are.
+    Finished calls read in the order they finished, per ``finished_ids``; any
+    it does not list come first, in call order. Older calls fold into one
+    ``+N earlier`` line on top. Lines carry no backtick, so an adapter can
+    fence them in a code block as they are.
     """
     calls = [block for block in content if isinstance(block, ToolUseBlock)]
     running = [call for call in calls if call.status == "pending"][-MAX_TOOL_LINES:]
     budget = MAX_TOOL_LINES - len(running)
-    finished = [call for call in calls if call.status != "pending"][-budget:] if budget else []
+    finish_order = {tool_id: i for i, tool_id in enumerate(finished_ids)}
+    finished = sorted(
+        (call for call in calls if call.status != "pending"),
+        key=lambda call: finish_order.get(call.id, -1),
+    )
+    finished = finished[-budget:] if budget else []
     hidden = len(calls) - len(running) - len(finished)
     lines = [f"+{hidden} earlier"] if hidden else []
     lines += [_tool_line(call) for call in (*finished, *running)]

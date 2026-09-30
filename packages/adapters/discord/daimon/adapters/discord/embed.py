@@ -9,18 +9,17 @@ Discord markup and the phase colors. No discord or anthropic imports.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
 from daimon.adapters.discord.theme import (
     COLOR_GREEN,
-    COLOR_RED,
     COLOR_IN_PROGRESS,
+    COLOR_RED,
 )
 from daimon.core.turn.notices import TerminationNotice, fit_notice
-from daimon.core.turn.state import ContentBlock
+from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
     format_draft,
     format_headline,
@@ -148,15 +147,16 @@ def update(state: EmbedState, event: EmbedEvent) -> EmbedState:
     return dataclasses.replace(state, phase=TurnPhase.ERROR, error_reason=event.label or "error")
 
 
-def update_activity(state: EmbedState, content: Sequence[ContentBlock]) -> EmbedState:
+def update_activity(state: EmbedState, turn: TurnState) -> EmbedState:
     """Fold the turn's tool calls into the card: Working while one runs, else Thinking.
 
     A no-op once the turn is terminal, so a late render cannot reopen the card.
     """
     if state.phase in _TERMINAL_PHASES:
         return state
-    phase = TurnPhase.TOOL_RUNNING if has_running_tool(content) else TurnPhase.THINKING
-    return dataclasses.replace(state, phase=phase, tool_lines=format_tool_lines(content))
+    phase = TurnPhase.TOOL_RUNNING if has_running_tool(turn.content) else TurnPhase.THINKING
+    lines = format_tool_lines(turn.content, finished_ids=turn.finished_tool_ids)
+    return dataclasses.replace(state, phase=phase, tool_lines=lines)
 
 
 def _fmt_tokens(n: int) -> str:

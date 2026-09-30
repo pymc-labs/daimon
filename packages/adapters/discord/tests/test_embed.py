@@ -19,7 +19,7 @@ from daimon.adapters.discord.theme import (
     COLOR_IN_PROGRESS,
     COLOR_RED,
 )
-from daimon.core.turn.state import ToolUseBlock
+from daimon.core.turn.state import ToolUseBlock, TurnState
 
 
 def _make_state(
@@ -76,7 +76,9 @@ class TestUpdate:
 
 class TestUpdateActivity:
     def test_running_call_reads_as_working(self) -> None:
-        result = update_activity(_make_state(), [_call("bash", "complete"), _call("read")])
+        result = update_activity(
+            _make_state(), TurnState(content=[_call("bash", "complete"), _call("read")])
+        )
         assert result.phase == TurnPhase.TOOL_RUNNING, "a pending call means the turn is working"
         assert result.tool_lines == ("✔️ Ran a command", "🔍 Reading a file"), (
             "tool lines come from the turn state"
@@ -84,12 +86,12 @@ class TestUpdateActivity:
 
     def test_no_running_call_reads_as_thinking(self) -> None:
         state = _make_state(phase=TurnPhase.TOOL_RUNNING)
-        result = update_activity(state, [_call("bash", "complete")])
+        result = update_activity(state, TurnState(content=[_call("bash", "complete")]))
         assert result.phase == TurnPhase.THINKING, "once every call finished the turn is thinking"
 
     def test_terminal_state_is_left_alone(self) -> None:
         done = _make_state(phase=TurnPhase.DONE)
-        assert update_activity(done, [_call("bash")]) is done, (
+        assert update_activity(done, TurnState(content=[_call("bash")])) is done, (
             "a late render must not reopen a finished card"
         )
 

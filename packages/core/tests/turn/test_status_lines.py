@@ -97,6 +97,12 @@ def test_tool_lines_never_show_arguments() -> None:
     assert "secret-token" not in "".join(lines), "tool arguments must never reach the card"
 
 
+def test_finished_tool_lines_follow_the_order_calls_finished() -> None:
+    content: list[ContentBlock] = [_call("bash", "complete"), _call("grep", "failed")]
+    lines = format_tool_lines(content, finished_ids=("tu_grep_failed", "tu_bash_complete"))
+    assert lines == ("🚫 Searched files", "✔️ Ran a command"), "the call that finished first leads"
+
+
 def test_tool_lines_keep_running_calls_and_fold_older_ones() -> None:
     content: list[ContentBlock] = [_call(f"step_{i}", "complete") for i in range(5)]
     content += [_call("slow_import"), _call("bash"), _call("read")]

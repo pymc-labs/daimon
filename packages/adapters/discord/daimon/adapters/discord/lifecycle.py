@@ -501,7 +501,7 @@ class DiscordTurnLifecycle:
         # answer never trails behind an embed that already moved past it.
         if self._terminal:
             return
-        self._state = update_activity(self._state, state.content)
+        self._state = update_activity(self._state, state)
         await self._persist_sealed_responses(state)
         if self._unprompted and self._message_ref is None and not _has_visible_output(state):
             return  # nothing to show yet, and nobody asked: stay invisible
