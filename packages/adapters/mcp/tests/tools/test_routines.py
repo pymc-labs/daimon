@@ -12,8 +12,9 @@ real ``AsyncAnthropic`` over ``MARouter`` (transport-level fake — never
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -24,10 +25,11 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.turn_origins import create_origin
 from daimon.testing import ma_agent, ma_model_config
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1232,3 +1234,51 @@ async def test_create_routine_refuses_a_private_slack_channel_the_caller_is_not_
             kind="channel",
             destination_id="C0123ABC",
         )
+
+
+async def test_create_routine_without_a_destination_budgets_the_turns_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord")
+    account = await make_account(db_session, tenant=tenant)
+    now = datetime.now(UTC)
+    origin = await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="444",
+        thread_id="999",
+        responder_ma_agent_id="ag_resolved",
+        responder_name="daimon",
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.USER,
+        expires_at=now + timedelta(minutes=10),
+        now=now,
+    )
+    await db_session.commit()
+    runtime = _runtime(
+        committing_sessionmaker,
+        client=_ma_client_with_agents(
+            [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+        ),
+    )
+    auth = dataclasses.replace(_auth_identity(tenant_id=tenant.id), account_id=account.id)
+
+    async def create(origin_context_id: str) -> RoutineRow:
+        return await _create_routine_impl(
+            runtime,
+            auth,
+            agent_name="daimon",
+            cron_expr="0 9 * * 1",
+            timezone="UTC",
+            trigger_message="weekly summary",
+            origin_context_id=origin_context_id,
+        )
+
+    here = await create(str(origin.id))
+    assert here.channel_id == "444", "spend is budgeted against the channel it was made in"
+    unknown = await create(str(uuid.uuid4()))
+    assert unknown.channel_id is None, "without a live origin the routine is unbudgeted"

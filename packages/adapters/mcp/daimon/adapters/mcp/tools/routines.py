@@ -20,6 +20,7 @@ import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -268,6 +269,7 @@ async def _create_routine_impl(
     catch_up_policy: CatchUpPolicy = "skip",
     destination_kind: RoutineDestinationKind | None = None,
     destination_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> RoutineRow:
     tenant_id = auth.tenant_id
     platform_user_id = _require_platform_user_id(auth)
@@ -275,6 +277,10 @@ async def _create_routine_impl(
     budget_channel_id = await _check_destination(
         runtime, auth, kind=destination_kind, destination_id=destination_id
     )
+    if destination_kind is None:
+        budget_channel_id = await origin_budget_channel(
+            runtime.session_factory, auth, origin_context_id
+        )
 
     match = await find_agent_by_daimon_tag(
         runtime.client,
@@ -427,6 +433,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         catch_up_policy: CatchUpPolicy = "skip",
         destination_kind: RoutineDestinationKind | None = None,
         destination_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> RoutineRow:
         """Create a routine in the caller's tenant partition.
 
@@ -438,8 +445,9 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         its final reply there. On Slack a thread is ``<channel id>:<thread
         ts>``. A protected channel is refused. Without a destination the
         result is only recorded (``last_result_tail``), as before. A run's
-        spend counts toward the destination channel's budget, and a run is
-        skipped while that budget is used up.
+        spend counts toward the destination channel's budget, or without a
+        destination the budget of the channel named by ``origin_context_id``
+        (this turn's), and a run is skipped while that budget is used up.
 
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
@@ -475,6 +483,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             catch_up_policy=catch_up_policy,
             destination_kind=destination_kind,
             destination_id=destination_id,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool
