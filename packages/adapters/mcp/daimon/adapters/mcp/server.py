@@ -76,6 +76,7 @@ from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
+from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import TokenVerifier
 from fastmcp.server.transforms import Visibility
@@ -208,6 +209,11 @@ def create_mcp_app(
         effective_anthropic = AsyncAnthropic(
             api_key=effective_settings.anthropic.api_key.get_secret_value(),
             max_retries=MA_MAX_RETRIES,
+            http_client=httpx.AsyncClient(
+                transport=SkillsRateLimitedTransport(
+                    effective_settings.anthropic.skills_requests_per_minute
+                )
+            ),
         )
 
     effective_billing_config = billing_config

@@ -136,6 +136,14 @@ Anthropic API key used to authenticate all Managed Agents SDK calls. Required.
 Base URL for the Anthropic API. Override only when routing through a proxy or a non-
 default API endpoint.
 
+### `DAIMON_ANTHROPIC__SKILLS_REQUESTS_PER_MINUTE`
+
+`int` · optional · default `80`
+
+Maximum Anthropic Skills API requests per minute in this process. Default 80 leaves
+headroom below the 100 requests/minute organization limit. Other deployments in the same
+organization share that limit.
+
 ## CLI
 
 Read from `daimon.core.config.CLISettings`. Prefix `DAIMON_CLI__`.

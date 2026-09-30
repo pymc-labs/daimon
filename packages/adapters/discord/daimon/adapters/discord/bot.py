@@ -402,6 +402,7 @@ class DaimonBot(commands.Bot):
         self._participant: ThreadParticipant | None = None
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
+        self._seed_sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
         # Gateway lifecycle callbacks run as separate tasks. Serialize only the
         # tenant provision/archive transitions so an earlier remove cannot
         # overwrite a later join's archive clear.
@@ -623,13 +624,14 @@ class DaimonBot(commands.Bot):
             else None
         )
         try:
-            report = await reconcile_tenant_defaults(
-                self.runtime.anthropic,
-                self.runtime.sessionmaker,
-                self.runtime.settings.defaults_root,
-                tenant_id=tenant_id,
-                public_url=public_url,
-            )
+            async with self._seed_sem:
+                report = await reconcile_tenant_defaults(
+                    self.runtime.anthropic,
+                    self.runtime.sessionmaker,
+                    self.runtime.settings.defaults_root,
+                    tenant_id=tenant_id,
+                    public_url=public_url,
+                )
             seed_ok = not report.is_failure()
             roster_failure_reason: str | None = None
             if seed_ok:
@@ -946,16 +948,6 @@ class DaimonBot(commands.Bot):
         await self._retire_orphaned_turns()
         tenants = await list_tenants_by_platform(self.runtime.sessionmaker, platform="discord")
         known_tenants = {tr.external_id: tr for tr in tenants}
-        sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
-
-        async def _bounded_seed(
-            *, tenant_id: uuid.UUID, guild: discord.Guild, was_ready: bool
-        ) -> None:
-            async with sem:
-                await self._seed_tenant_defaults(
-                    tenant_id=tenant_id, guild=guild, was_ready=was_ready
-                )
-
         recovered_tenant_ids: set[uuid.UUID] = set()
         # Provision guilds joined while the bot was down. A known archived tenant
         # means the bot left and rejoined while this process was stopped: revive
@@ -970,12 +962,16 @@ class DaimonBot(commands.Bot):
                 continue
             if known_tenant is not None:
                 recovered_tenant_ids.add(tenant_id)
-                self._spawn(_bounded_seed(tenant_id=tenant_id, guild=guild, was_ready=False))
+                self._spawn(
+                    self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False)
+                )
                 continue
             await self._post_to_guild(
                 guild, _build_welcome_embed(_resolve_bot_display_name(self.runtime.settings))
             )
-            self._spawn(_bounded_seed(tenant_id=tenant_id, guild=guild, was_ready=False))
+            self._spawn(
+                self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False)
+            )
 
         # Reconcile every registered, joined tenant against the shipped defaults on
         # every boot, not just the ones stuck in pending/failed. Because every
@@ -992,7 +988,7 @@ class DaimonBot(commands.Bot):
                 continue
             if tr.id not in recovered_tenant_ids:
                 self._spawn(
-                    _bounded_seed(
+                    self._seed_tenant_defaults(
                         tenant_id=tr.id, guild=guild, was_ready=tr.provision_status == "ready"
                     )
                 )

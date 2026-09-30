@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import httpx
 import typer
 from anthropic import AsyncAnthropic
 from daimon.core.config import load_settings
+from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.defaults.platform_export import export_platform
+from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 
 backup_app = typer.Typer(help="Operator backup tools for the dedicated MA workspace.")
 
@@ -22,6 +25,10 @@ def platform_export_command(destination: Path) -> None:
         async with AsyncAnthropic(
             api_key=settings.anthropic.api_key.get_secret_value(),
             base_url=str(settings.anthropic.base_url),
+            max_retries=MA_MAX_RETRIES,
+            http_client=httpx.AsyncClient(
+                transport=SkillsRateLimitedTransport(settings.anthropic.skills_requests_per_minute)
+            ),
         ) as client:
             await export_platform(client, destination)
 

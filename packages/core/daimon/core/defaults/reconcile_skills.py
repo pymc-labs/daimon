@@ -29,8 +29,12 @@ from pathlib import Path
 
 import structlog
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.loader import load_skill_spec
-from daimon.core.defaults.ma_index import find_skills_by_display_title
+from daimon.core.defaults.ma_index import (
+    find_skills_by_display_title,
+    match_skills_by_display_title,
+)
 from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import DefaultsError
@@ -50,12 +54,17 @@ async def reconcile_skill(
     tenant_id: uuid.UUID,
     dry_run: bool,
     db_session: AsyncSession | None = None,
+    skills_view: list[SkillListResponse] | None = None,
 ) -> ResourceOutcome:
     spec, _body = load_skill_spec(skill_dir)
     display_title = tenant_scoped_display_title(tenant_id=tenant_id, name=spec.name)
     # on_truncation="raise": seed is a create context — making decisions on a truncated
     # view is unsafe. A full page surfaces through _run_per_resource as FAILED.
-    matches = await find_skills_by_display_title(client, display_title, on_truncation="raise")
+    matches = (
+        match_skills_by_display_title(skills_view, display_title)
+        if skills_view is not None
+        else await find_skills_by_display_title(client, display_title, on_truncation="raise")
+    )
     ma_match = matches[0] if matches else None
     duplicates = matches[1:] if len(matches) > 1 else []
 

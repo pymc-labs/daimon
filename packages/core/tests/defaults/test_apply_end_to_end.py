@@ -81,6 +81,29 @@ async def _get_tenant_id(session_factory: async_sessionmaker[AsyncSession]) -> s
     return str(tenant.id)
 
 
+async def test_skill_pass_lists_workspace_once_for_multiple_skills(
+    tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    for name in ("one", "two", "three"):
+        skill_dir = tmp_path / "skills" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: test\n---\nbody\n")
+    calls = 0
+    router = _full_router()
+
+    def on_list(req: httpx.Request, _match: object) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return list_response([])
+
+    router.routes.insert(0, ("GET", re.compile(r"/v1/skills"), on_list))
+    client = build_fake_anthropic_http(router.dispatch)
+    report = await apply_defaults(db_session_factory, client, tmp_path, dry_run=True)
+
+    assert not report.is_failure()
+    assert calls == 1, "skill reconcile and sweep should share one complete workspace view"
+
+
 async def test_apply_creates_all_on_fresh_db(
     tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

@@ -292,6 +292,13 @@ async def find_skills_by_display_title(
             )
         _log.warning("ma_index.skills_list_ceiling_hit", limit=_SKILLS_PAGE_LIMIT)
         sentry_sdk.capture_message("skills list truncated at MA API page limit", level="warning")
+    return match_skills_by_display_title(rows, display_title)
+
+
+def match_skills_by_display_title(
+    rows: list[SkillListResponse], display_title: str
+) -> list[SkillListResponse]:
+    """Find canonical and duplicate custom skills in an already validated view."""
     matches = [sk for sk in rows if sk.source == "custom" and sk.display_title == display_title]
     if len(matches) > 1:
         _log.warning("ma_index.multi_match", kind="skills", count=len(matches))
