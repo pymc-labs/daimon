@@ -37,7 +37,6 @@ from rich.console import Console
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from typer.main import get_command
-from typer.testing import CliRunner
 
 from ..harness import build_cli_runtime
 
@@ -58,10 +57,16 @@ def _make_console() -> Console:
 
 
 def test_credit_uses_note_option() -> None:
-    result = CliRunner().invoke(tenants_mod.tenants_app, ["credit", "--help"])
-    assert result.exit_code == 0
-    assert "--note" in result.output
-    assert "--reason" not in result.output
+    command = get_command(tenants_mod.tenants_app)
+    assert isinstance(command, Group)
+    flags = {
+        flag
+        for param in command.commands["credit"].params
+        if isinstance(param, Option)
+        for flag in param.opts
+    }
+    assert "--note" in flags
+    assert "--reason" not in flags
 
 
 @pytest.mark.asyncio
