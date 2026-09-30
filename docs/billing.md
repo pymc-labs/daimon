@@ -272,10 +272,13 @@ after their Stripe events.
 **The sweep.** An MCP `start_turn` creates a session and sends a message but
 never drives the stream, so the inline hook never fires for it.
 `packages/core/daimon/core/usage_sweep.py` closes that hole: each scheduler
-tick it walks Managed Agents sessions, skips any without a `daimon_tenant`
+tick it lists Managed Agents sessions, skips any without a `daimon_tenant`
 stamp, belonging to a tenant this deployment does not own, or stamped
 `daimon_billing_exempt`, and replays the rest's `span.model_request_end`
-events through the same recorder. It is safe to run
+events through the same recorder. After a successful pass, it skips event
+reads for sessions last updated before that pass started minus 15 minutes.
+The watermark stays in scheduler memory; startup and hourly passes read all
+stamped sessions, and a failed pass leaves the watermark in place. It is safe to run
 against already-metered sessions precisely because the idempotency grain is
 the same.
 
@@ -305,9 +308,9 @@ counts, `cost_usd` (the raw price) and `would_be_debit_usd` (with
 `usage_sweep.completed` line carrying `recorded`, `exempt_sessions`,
 `exempt_model_calls`, `exempt_cost_usd` and `exempt_would_be_debit_usd`.
 
-Nothing is written to the database for these sessions, and the sweep has no
-watermark, so an exempt session is logged again on every tick for as long as
-Managed Agents lists it. Total the absorbed spend by distinct
+Nothing is written to the database for these sessions. An exempt session is
+logged again when its events are read, including the hourly full pass. Total
+the absorbed spend by distinct
 `managed_session_id` (taking its latest line), not by summing every line or
 the per-pass totals.
 
