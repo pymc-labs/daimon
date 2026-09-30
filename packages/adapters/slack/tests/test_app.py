@@ -1679,6 +1679,76 @@ async def test_orchestrate_queue_coalesce_when_thread_in_flight_adds_hourglass_a
     )
 
 
+async def test_second_event_during_cap_read_queues_on_one_thread(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    app, _ = make_orchestrate_app(db_session_factory)
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id="T_CAP_READ_RACE")
+    thread_id = "9000000010.000001"
+    cap_read = asyncio.Event()
+    release_cap = asyncio.Event()
+    turn_started = asyncio.Event()
+    release_turn = asyncio.Event()
+    cap_calls = 0
+    active = 0
+    max_active = 0
+    turns = 0
+
+    async def delayed_cap(*args: Any, **kwargs: Any) -> int:
+        nonlocal cap_calls
+        cap_calls += 1
+        if cap_calls == 1:
+            cap_read.set()
+            await release_cap.wait()
+        return 3
+
+    async def turn(*args: Any, **kwargs: Any) -> None:
+        nonlocal active, max_active, turns
+        active += 1
+        max_active = max(max_active, active)
+        turns += 1
+        try:
+            if turns == 1:
+                turn_started.set()
+                await release_turn.wait()
+        finally:
+            active -= 1
+
+    def event(ts: str) -> dict[str, Any]:
+        return {"ts": ts, "thread_ts": thread_id, "user": "U_TEST", "text": "hi"}
+
+    async def orchestrate(ts: str) -> None:
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event(ts),
+            team_id="T_CAP_READ_RACE",
+            channel="C_TEST",
+            event_ts=ts,
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+    with (
+        patch("daimon.adapters.slack.app.get_turn_cap", side_effect=delayed_cap),
+        patch.object(app, "_run_thread_turn", side_effect=turn),
+    ):
+        first = asyncio.create_task(orchestrate("9000000010.000001"))
+        await asyncio.wait_for(cap_read.wait(), timeout=2)
+        second = asyncio.create_task(orchestrate("9000000010.000002"))
+        try:
+            await asyncio.wait_for(turn_started.wait(), timeout=2)
+            release_cap.set()
+            await asyncio.wait_for(first, timeout=2)
+            assert app._pending[thread_id] == [event("9000000010.000001")]  # pyright: ignore[reportPrivateUsage]
+        finally:
+            release_cap.set()
+            release_turn.set()
+            await asyncio.gather(first, second)
+
+    assert turns == 2
+    assert max_active == 1
+
+
 async def test_drain_partitions_queued_mentions_by_author_when_two_users_queue_in_one_thread(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

@@ -6,7 +6,7 @@ downgrade: destructive
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0031_hackathon_tenant_turn_cap"
+revision = "0031_tenant_turn_cap"
 down_revision = "0030_feat085_routine_destination"
 branch_labels = None
 depends_on = None

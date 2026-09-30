@@ -397,6 +397,11 @@ async def run_wizard_submit_turn_observed(
             "run_wizard_submit_turn called without discord settings -- entrypoint must "
             "validate at boot"
         )
+        cap = await get_turn_cap(
+            bot.runtime.sessionmaker,
+            tenant_id=row.tenant_id,
+            default=discord_settings.max_concurrent_turns_per_tenant,
+        )
 
         # --- A protected channel hears nothing: not the capacity notice below,
         # not a refusal, not the reply, not an error. The log is the trace. ---
@@ -416,11 +421,6 @@ async def run_wizard_submit_turn_observed(
         # matching release in this function's `finally`. The claim already
         # committed, so an over-cap submit says the answers were recorded
         # rather than pretending nothing happened. ---
-        cap = await get_turn_cap(
-            bot.runtime.sessionmaker,
-            tenant_id=row.tenant_id,
-            default=discord_settings.max_concurrent_turns_per_tenant,
-        )
         count = bot._inflight.get(row.tenant_id, 0)  # pyright: ignore[reportPrivateUsage]  # the per-tenant cap bookkeeping DaimonBot owns; a wizard turn must count against the same cap the mention path claims
         if not should_admit_turn(current_in_flight=count, cap=cap):
             record_refusal(

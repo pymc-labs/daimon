@@ -1251,14 +1251,13 @@ class DaimonBot(commands.Bot):
                 thread_id=str(thread_id),
             )
             return
-        if self.draining or thread_id in self._processing:
-            return  # re-checked: the protection read above awaited
-
         cap = await get_turn_cap(
             self.runtime.sessionmaker,
             tenant_id=tenant_id,
             default=discord_settings.max_concurrent_turns_per_tenant,
         )
+        if self.draining or thread_id in self._processing:
+            return  # protection and cap reads both awaited
         count = self._inflight.get(tenant_id, 0)
         if not should_admit_turn(current_in_flight=count, cap=cap):
             record_refusal(
