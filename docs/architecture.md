@@ -336,6 +336,7 @@ Who answers where in the setup panel, with `set_channel_isolation`, or with
 Limits: setup threads run as the built-in agent, so C's agents are invisible
 there; archiving C's agent leaves C isolated with nobody of its own (bind a new
 one); `/dm` from C is refused.
+
 **Channel environments.** The environment a turn runs in resolves over the
 same tiers as the agent but on its own (`_pick_environment` in
 `packages/core/daimon/core/scope.py`), so a channel can keep its agent and run
