@@ -343,6 +343,10 @@ lifecycle hook carries it -- the reason rides on the state every lifecycle
 already receives -- so the CLI, headless routines and any new adapter keep
 their existing failure path, and `TerminationNotice.plain_text()` is the
 fallback wording for a surface without markup.
+Anthropic's monthly spend-cap response stops SDK retries at the HTTP transport.
+If Anthropic reports that cap or a user-set spend limit, Discord and Slack
+show a model usage limit notice and log `anthropic.spend_limit_reached` with
+the tenant and limit type.
 
 ### Outside text is data
 

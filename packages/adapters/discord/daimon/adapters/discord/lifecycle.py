@@ -39,6 +39,7 @@ from daimon.adapters.discord.embed import (
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
+from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
 from daimon.core.turn.degraded import render_degraded_notice
@@ -483,6 +484,12 @@ class DiscordTurnLifecycle:
         return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
+        if (limit := spend_limit_error(err)) is not None:
+            log.error(
+                "anthropic.spend_limit_reached",
+                tenant_id=str(self._tenant_id) if self._tenant_id is not None else None,
+                limit=limit,
+            )
         if self._unprompted and self._message_ref is None:
             # Same rule as an empty answer: an unprompted turn that never
             # spoke does not announce its own failure into the thread.
@@ -498,7 +505,9 @@ class DiscordTurnLifecycle:
         try:
             reason = state.termination or termination_reason(err)
             request_id = self._request_id()
-            notice = render_termination_notice(reason, state=state, request_id=request_id)
+            notice = render_termination_notice(
+                reason, state=state, request_id=request_id, error=err
+            )
             if notice is not None:
                 label, body = notice.headline, format_termination_notice(notice)
         except Exception:

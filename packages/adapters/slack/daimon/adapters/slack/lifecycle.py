@@ -66,6 +66,7 @@ from daimon.adapters.slack.feedback import build_feedback_actions_block
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.tables import render_slack_tables
+from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
@@ -643,6 +644,12 @@ class SlackTurnLifecycle:
 
         Does not re-raise — the lifecycle boundary absorbs all failures.
         """
+        if (limit := spend_limit_error(err)) is not None:
+            log.error(
+                "anthropic.spend_limit_reached",
+                tenant_id=str(self._tenant_id) if self._tenant_id is not None else None,
+                limit=limit,
+            )
         try:
             label = str(err)[:100]
             body = ""
@@ -653,7 +660,9 @@ class SlackTurnLifecycle:
             try:
                 reason = state.termination or termination_reason(err)
                 request_id = self._request_id()
-                notice = render_termination_notice(reason, state=state, request_id=request_id)
+                notice = render_termination_notice(
+                    reason, state=state, request_id=request_id, error=err
+                )
                 if notice is not None:
                     label, body = notice.headline, format_termination_notice(notice)
                     fallback_text = fit_notice(

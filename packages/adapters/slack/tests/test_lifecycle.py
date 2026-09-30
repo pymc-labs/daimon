@@ -57,11 +57,14 @@ from typing import Any, NoReturn
 
 import aiohttp
 import daimon.adapters.slack.lifecycle as lifecycle_module
+import httpx
 import pytest
 import structlog
 import yarl
+from anthropic import BadRequestError, RateLimitError
 from daimon.adapters.slack import lifecycle as lifecycle_mod
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
+from daimon.core.errors import TurnError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.tenants import set_funding_mode
@@ -242,6 +245,46 @@ def _make_lifecycle(
         tenant_id=tenant_id,
     )
     return lc, cancel, registered, deregistered
+
+
+@pytest.mark.parametrize("status", [400, 429])
+async def test_spend_limit_posts_notice_and_error_log(
+    fake_slack_web_client: Any, status: int
+) -> None:
+    tenant_id = uuid.uuid4()
+    lc, *_ = _make_lifecycle(fake_slack_web_client, tenant_id=tenant_id)
+    await lc.post_initial()
+    body = (
+        {"type": "rate_limit_error", "details": {"error_code": "enforced_spend_limit_reached"}}
+        if status == 429
+        else {
+            "type": "invalid_request_error",
+            "message": "You have reached your specified workspace API usage limits",
+        }
+    )
+    response = httpx.Response(
+        status,
+        json={"type": "error", "error": body},
+        request=httpx.Request("GET", "https://api.anthropic.com/v1/models"),
+    )
+    error = (
+        RateLimitError("limit", response=response, body=body)
+        if status == 429
+        else BadRequestError("limit", response=response, body=body)
+    )
+    turn_error = TurnError(kind="upstream", cause=error)
+    with structlog.testing.capture_logs() as logs:
+        await lc.on_terminal_failure(TurnState(error=turn_error), turn_error)
+    assert (
+        "Daimon has reached its model usage limit for now. The operators have been notified."
+        in _block_text(_last_update_blocks(fake_slack_web_client))
+    )
+    assert {
+        "event": "anthropic.spend_limit_reached",
+        "log_level": "error",
+        "tenant_id": str(tenant_id),
+        "limit": "org_cap" if status == 429 else "user_limit",
+    } in logs
 
 
 # ---------------------------------------------------------------------------
