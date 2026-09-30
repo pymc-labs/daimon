@@ -227,7 +227,12 @@ continue a sealed conversation. Sealing a channel later covers its existing
 sessions, and a session stamped sealed stays sealed after an unseal. A session
 from before the stamp that a thread ran on (`thread_sessions`) has no known
 parent channel: while the tenant seals anything it is shown only to a turn in
-that same thread. Operators edit the policy with the CLI:
+that same thread. Nor can a sealed turn open or drive another session to carry
+its content out: agent chat's `start_turn`, `ask` and `continue_turn` are off
+the surface a chat turn's token (`chat_agent_id`) sees, and refuse that
+credential outright if they are ever reached with it
+(`_require_outside_chat_turn`), so every session they create comes from a
+headless caller outside every channel. Operators edit the policy with the CLI:
 
 ```bash
 daimon tenants access-policy get discord GUILD_ID [--json]

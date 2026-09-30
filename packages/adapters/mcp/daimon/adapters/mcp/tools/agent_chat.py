@@ -260,6 +260,25 @@ async def _verify_agent_owns_session(
     return s
 
 
+_CHAT_TURN_REFUSED = (
+    "a chat turn can't open or drive another conversation through agent chat. "
+    "Answer in this conversation instead. Do not retry."
+)
+
+
+def _require_outside_chat_turn(auth: AuthIdentity) -> None:
+    """Refuse agent-chat turns driven by a chat turn's own credential.
+
+    These tools are for headless callers (agent keys, the hub), which run
+    outside every channel. A chat turn's token carries ``chat_agent_id`` and
+    is kept off this surface by visibility; this check holds the line if that
+    ever changes. A chat turn in a sealed channel could otherwise open or
+    continue a session with no seal stamp and carry sealed content into it.
+    """
+    if auth.chat_agent_id is not None or auth.slack_turn_context_id is not None:
+        raise ToolError(_CHAT_TURN_REFUSED)
+
+
 def _owned_by_caller(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:
     """True when ``session`` was created for the caller's account.
 
@@ -355,7 +374,10 @@ async def _start_turn_impl(
     ``daimon_billing_exempt="mcp-internal-caller"``, so the usage sweep skips
     it: the operator absorbs that usage. The stamp is the creator's posture
     and covers the whole session, including later ``continue_turn`` calls.
+
+    A chat turn's own credential is refused (``_require_outside_chat_turn``).
     """
+    _require_outside_chat_turn(auth)
     ma_agent = await _resolve_ma_agent(runtime, auth)
     billing_exempt: ExemptReason | None = (
         "mcp-internal-caller" if auth.platform_user_id is None else None
@@ -475,8 +497,10 @@ async def _continue_turn_impl(
     events; ``turn_started_at`` is ``now()`` captured immediately BEFORE that
     send (see ``_start_turn_impl`` for why the echo's own timestamp isn't
     used). ``_verify_agent_owns_session`` guards against cross-tenant AND
-    same-tenant cross-agent handles (Tampering threat mitigation, WR-03).
+    same-tenant cross-agent handles (Tampering threat mitigation, WR-03). A
+    chat turn's own credential is refused (``_require_outside_chat_turn``).
     """
+    _require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle

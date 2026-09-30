@@ -19,10 +19,13 @@ import httpx
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.server import create_mcp_app
 from daimon.adapters.mcp.tools import hub
 from daimon.adapters.mcp.tools.agent_chat import (
+    _ask_impl,  # pyright: ignore[reportPrivateUsage]
     _continue_turn_impl,  # pyright: ignore[reportPrivateUsage]
     _list_events_impl,  # pyright: ignore[reportPrivateUsage]
+    _start_turn_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.agent_chat import (
     _list_sessions_impl as _list_my_sessions_impl,  # pyright: ignore[reportPrivateUsage]
@@ -33,15 +36,19 @@ from daimon.adapters.mcp.tools.sessions import (
     _list_sessions_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_auth import mint_jwt
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing import ma_agent, ma_session
+from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_platform_principal, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.exceptions import ToolError
+from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _AGENT = "ag_acme"
@@ -343,3 +350,67 @@ async def test_hub_lists_no_sealed_conversation(world: _World) -> None:
     listed = await hub._list_my_sessions_impl(world.runtime(), world.agent_key_auth(), ma)  # pyright: ignore[reportPrivateUsage]
 
     assert [s.id for s in listed] == ["ses_mine"]
+
+
+# --- a sealed turn can't open or drive another session -----------------------
+
+
+async def test_a_chat_turn_cannot_start_ask_or_continue_through_agent_chat(
+    world: _World,
+) -> None:
+    """A session opened or continued from a sealed turn would carry sealed
+    content out under no seal stamp, so a chat turn's credential is refused
+    before anything reaches Managed Agents."""
+    await world.seal(_SEALED)
+    world.add_session("ses_open", daimon_channel=_OPEN, daimon_thread="thr-b")
+    runtime = world.runtime()
+    chat_turn = world.auth(agent_id=world.agent_key_auth().agent_id)
+
+    with pytest.raises(ToolError, match="chat turn"):
+        await _start_turn_impl(runtime, chat_turn, _SEALED_TOPIC)
+    with pytest.raises(ToolError, match="chat turn"):
+        await _continue_turn_impl(runtime, chat_turn, "ses_open", _SEALED_TOPIC)
+    with pytest.raises(ToolError, match="chat turn"):
+        await _ask_impl(runtime, chat_turn, _SEALED_TOPIC, handle="ses_open")
+    assert world.sent == []
+
+
+_SECRET = b"s" * 32
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("start_turn", {"message": _SEALED_TOPIC}),
+        ("ask", {"message": _SEALED_TOPIC}),
+        ("continue_turn", {"handle": "ses_open", "message": _SEALED_TOPIC}),
+    ],
+)
+async def test_a_chat_turn_token_does_not_reach_the_agent_chat_turn_tools(
+    world: _World, tool: str, arguments: dict[str, object]
+) -> None:
+    """The token a sealed channel turn holds: account + chat_agent_id."""
+    app = create_mcp_app(
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+            anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+            mcp=McpSettings(
+                jwt_secret=SecretStr(_SECRET.decode()), public_url=HttpUrl("https://x/mcp")
+            ),
+            _env_file=None,  # type: ignore[call-arg]  # isolate from repo .env
+        ),
+        sessionmaker=world.sessionmaker,
+    )
+    token = mint_jwt(
+        account_id=world.account_id,
+        secret=_SECRET,
+        now=dt.datetime.now(dt.UTC),
+        chat_agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT),
+    )
+
+    result = await call_mcp_tool(app, token=token, name=tool, arguments=arguments)
+
+    payload = result.get("result", result)
+    assert payload.get("isError") or "error" in result, f"{tool} must be refused: {result!r}"
+    assert "Unknown tool" in str(result) or "not found" in str(result).lower(), result
+    assert world.sent == []
