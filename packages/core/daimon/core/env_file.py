@@ -17,7 +17,8 @@ Grammar
 - Values take one of three forms:
 
   - ``'…'`` — single-quoted. Everything up to the next ``'`` is literal; there
-    are no escapes, so a single quote cannot appear inside.
+    are no escapes inside. Segments joined by ``\\'`` concatenate with a
+    literal ``'`` at each join, as in the shell: ``'it'\\''s'`` is ``it's``.
   - ``"…"`` — double-quoted. ``\\\\``, ``\\"``, ``\\$``, a backslash before a backtick,
     ``\\n``, ``\\r`` and ``\\t`` are recognised escapes; any other ``\\x`` is kept as a
     literal backslash followed by ``x``.
@@ -42,9 +43,9 @@ Serialization is shell-safe
 The serialized file is loaded in the sandbox with ``set -a; source .env``, so
 `serialize_env_line` must produce a line bash reads as one inert assignment,
 whatever the value holds: a value is left bare only when every character is in
-a small set bash never treats specially, otherwise it is single-quoted, and a
-value that contains a single quote, a newline or a carriage return is
-double-quoted with ``\\``, ``"``, ``$`` and backtick escaped and line breaks
+a small set bash never treats specially, otherwise it is single-quoted (a
+``'`` becomes ``'\\''``), and a value that contains a newline or a carriage
+return is double-quoted with ``\\``, ``"``, ``$`` and backtick escaped and line breaks
 written as ``\\n``/``\\r``. Bash and `parse_env_file` read every such line back
 to the same value, except that an escaped line break is the two characters
 ``\\n``/``\\r`` to bash. A NUL cannot be represented and is refused.
@@ -142,9 +143,9 @@ _DOUBLE_QUOTE_ESCAPES: Final[dict[str, str]] = {
 _BARE_VALUE_CHARS: Final[frozenset[str]] = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-.,:/+=@%"
 )
-#: Characters a single-quoted value cannot hold: the quote itself, and the line
-#: breaks the one-line grammar has no room for.
-_NOT_SINGLE_QUOTABLE: Final[frozenset[str]] = frozenset("'\n\r")
+#: Characters a single-quoted value cannot hold: the line breaks the one-line
+#: grammar has no room for.
+_NOT_SINGLE_QUOTABLE: Final[frozenset[str]] = frozenset("\n\r")
 
 #: Names that change how bash, a dynamic loader, an interpreter, git or an HTTP
 #: client behaves once exported. Compared case-insensitively (curl honours
@@ -200,6 +201,18 @@ _RESERVED_ENV_NAMES: Final[frozenset[str]] = frozenset(
         "CURL_CA_BUNDLE",
         "CURL_HOME",
         "WGETRC",
+        "LANG",
+        "LANGUAGE",
+        "GCONV_PATH",
+        "NLSPATH",
+        "LOCPATH",
+        "HOSTALIASES",
+        "RES_OPTIONS",
+        "LOCALDOMAIN",
+        "TERMINFO",
+        "TERMINFO_DIRS",
+        "TERMCAP",
+        "INPUTRC",
     }
 )
 _RESERVED_ENV_PREFIXES: Final[tuple[str, ...]] = (
@@ -211,6 +224,9 @@ _RESERVED_ENV_PREFIXES: Final[tuple[str, ...]] = (
     "UV_",
     "NPM_CONFIG_",
     "YARN_",
+    # Locale: a multibyte locale such as BIG5 lets a quoted value's backslash
+    # be read as part of a character, which reopens injection.
+    "LC_",
 )
 
 
@@ -305,11 +321,24 @@ def _parse_double_quoted(body: str) -> str | None:
 
 
 def _parse_single_quoted(body: str) -> str | None:
-    """Parse a `'…'` value, returning None when the line is malformed."""
-    close = body.find("'", 1)
-    if close == -1 or body[close + 1 :].strip():
-        return None
-    return body[1:close]
+    """Parse a `'…'` value, returning None when the line is malformed.
+
+    Adjacent segments joined by ``\\'`` (the shell's ``'it'\\''s'``) read as one
+    value with a literal ``'`` at each join.
+    """
+    out: list[str] = []
+    start = 0
+    while True:
+        close = body.find("'", start + 1)
+        if close == -1:
+            return None
+        out.append(body[start + 1 : close])
+        rest = body[close + 1 :]
+        if rest.startswith("\\''"):
+            out.append("'")
+            start = close + 3
+            continue
+        return "".join(out) if not rest.strip() else None
 
 
 def _parse_value(body: str) -> str | None:
@@ -389,10 +418,17 @@ def _is_bare_char(char: str) -> bool:
 def serialize_env_line(name: str, value: str) -> str:
     """Render one `NAME=value` line that bash sources as one inert assignment.
 
-    Bare when every character is in `_BARE_VALUE_CHARS` or non-ASCII, single-quoted when
-    the value holds no single quote or line break, double-quoted with
-    ``\\``, ``"``, ``$`` and backtick escaped otherwise — never a form in
-    which bash expands, substitutes or splits anything.
+    Bare when every character is in `_BARE_VALUE_CHARS` or non-ASCII;
+    single-quoted (a ``'`` written as ``'\\''``) when the value holds no line
+    break; double-quoted with ``\\``, ``"``, ``$`` and backtick escaped
+    otherwise — never a form in which bash expands, substitutes or splits
+    anything.
+
+    Only the double-quoted form uses a backslash inside quotes, and a
+    backslash can be swallowed as the trail byte of a multibyte character in
+    a locale such as BIG5 or GBK. That form is kept to values with a line
+    break, and the locale variables are reserved names, so no key can switch
+    the sandbox into such a locale.
 
     Staying bare wherever that is safe is load-bearing: the assembled bytes are
     hashed into the fingerprint that decides whether a running agent's mounted
@@ -409,7 +445,8 @@ def serialize_env_line(name: str, value: str) -> str:
     if value and value == value.strip() and all(_is_bare_char(char) for char in value):
         return f"{name}={value}"
     if not _NOT_SINGLE_QUOTABLE & set(value):
-        return f"{name}='{value}'"
+        quoted = value.replace("'", "'\\''")
+        return f"{name}='{quoted}'"
     escaped = (
         value.replace("\\", "\\\\")
         .replace('"', '\\"')

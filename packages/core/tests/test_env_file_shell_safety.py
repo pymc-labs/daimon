@@ -9,12 +9,13 @@ the exported variable holds the value byte-for-byte.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
-from daimon.core.env_file import serialize_env_file
+from daimon.core.env_file import EnvFileRejected, parse_env_file, serialize_env_file
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 
@@ -45,7 +46,9 @@ _PAYLOADS: list[tuple[str, str]] = [
 ]
 
 
-def _source_and_print(env_path: Path, name: str, cwd: Path) -> bytes:
+def _source_and_print(
+    env_path: Path, name: str, cwd: Path, env: dict[str, str] | None = None
+) -> bytes:
     """Source like the agent guidance says, then print the variable exactly."""
     script = f'set -a; source "{env_path}"; set +a; printf "%s" "${name}"'
     result = subprocess.run(
@@ -54,6 +57,7 @@ def _source_and_print(env_path: Path, name: str, cwd: Path) -> bytes:
         capture_output=True,
         check=False,
         timeout=10,
+        env=env,
     )
     assert result.returncode == 0, "sourcing the serialized file must not fail"
     return result.stdout
@@ -81,4 +85,68 @@ def test_sourcing_keeps_every_other_line_intact(tmp_path: Path) -> None:
     env_path.write_bytes(serialize_env_file([("NOTE", "x'; AFTER=hijacked; '"), ("AFTER", "kept")]))
     assert _source_and_print(env_path, "AFTER", tmp_path) == b"kept", (
         "a value must not be able to assign another variable"
+    )
+
+
+@pytest.fixture(scope="module")
+def big5_locale(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
+    """An environment running bash in zh_TW.BIG5, where 0x5C can be a trail byte."""
+    if shutil.which("localedef") is None:
+        pytest.skip("needs localedef to build a BIG5 locale")
+    locpath = tmp_path_factory.mktemp("locale")
+    built = subprocess.run(
+        ["localedef", "-i", "zh_TW", "-f", "BIG5", str(locpath / "zh_TW.BIG5")],
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    if not (locpath / "zh_TW.BIG5" / "LC_CTYPE").exists():
+        pytest.skip(f"could not build zh_TW.BIG5 (localedef exit {built.returncode})")
+    return {**os.environ, "LOCPATH": str(locpath), "LC_ALL": "zh_TW.BIG5"}
+
+
+#: U+4E21 is E4 B8 A1 in UTF-8; read as BIG5, A1 is a lead byte that takes the
+#: next byte as its trail, so a backslash escape right after it would be eaten.
+_TRAIL_BYTE_PAYLOADS: list[tuple[str, str]] = [
+    ("double quote after a lead byte", '\u4e21"; touch {marker}; #'),
+    ("single quote after a lead byte", "\u4e21'; touch {marker}; #"),
+    ("both quotes, double after a lead byte", "it's \u4e21\"; touch {marker}; #"),
+    ("dollar after a lead byte", "\u4e21$(touch {marker})"),
+    ("backtick after a lead byte", "\u4e21`touch {marker}`"),
+    ("backslash after a lead byte", "\u4e21\\$(touch {marker})"),
+]
+
+
+def test_the_big5_fixture_reproduces_the_trail_byte_injection(
+    tmp_path: Path, big5_locale: dict[str, str]
+) -> None:
+    """Control: backslash-escaping inside double quotes is unsafe in this locale."""
+    marker = tmp_path / "pwned"
+    env_path = tmp_path / ".env"
+    env_path.write_bytes(f'NOTE="\u4e21\\"; touch {marker}; #"\n'.encode())
+    _source_and_print(env_path, "NOTE", tmp_path, env=big5_locale)
+    assert marker.exists(), "the fixture must be a locale where the attack works"
+
+
+@pytest.mark.parametrize(
+    ("label", "template"), _TRAIL_BYTE_PAYLOADS, ids=[p[0] for p in _TRAIL_BYTE_PAYLOADS]
+)
+def test_sourcing_in_a_big5_locale_runs_nothing(
+    tmp_path: Path, big5_locale: dict[str, str], label: str, template: str
+) -> None:
+    marker = tmp_path / "pwned"
+    env_path = tmp_path / ".env"
+    env_path.write_bytes(serialize_env_file([("NOTE", template.format(marker=marker))]))
+
+    _source_and_print(env_path, "NOTE", tmp_path, env=big5_locale)
+
+    assert not marker.exists(), f"{label}: a multibyte locale reopened injection"
+
+
+@pytest.mark.parametrize("name", ["LC_ALL", "LC_CTYPE", "LANG", "LANGUAGE"])
+def test_a_key_cannot_switch_the_sandbox_locale(name: str) -> None:
+    with pytest.raises(EnvFileRejected) as caught:
+        parse_env_file(f"{name}=zh_TW.BIG5\n")
+    assert caught.value.rejection == "reserved_name", (
+        "a multibyte locale would let a quoted value's backslash join a character"
     )

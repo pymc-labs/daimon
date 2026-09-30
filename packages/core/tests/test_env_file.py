@@ -44,6 +44,8 @@ _DOCUMENTED_SUBSET: list[tuple[str, str, str]] = [
     ("equals inside a quoted value", 'A="b=c"', "b=c"),
     ("CRLF line ending", "A=1\r", "1"),
     ("quotes inside an unquoted value", "A=say'hi", "say'hi"),
+    ("single-quoted segments joined by an escaped quote", r"A='it'\''s'", "it's"),
+    ("value that is only an escaped quote", r"A=''\'''", "'"),
 ]
 
 
@@ -136,6 +138,19 @@ def test_parse_env_file_rejects_a_nul_in_a_value() -> None:
         ("HTTP_PROXY", True),
         ("NO_PROXY", True),
         ("PIP_INDEX_URL", True),
+        ("LC_ALL", True),
+        ("LC_CTYPE", True),
+        ("lc_all", True),
+        ("LANG", True),
+        ("LANGUAGE", True),
+        ("GCONV_PATH", True),
+        ("NLSPATH", True),
+        ("LOCPATH", True),
+        ("HOSTALIASES", True),
+        ("RES_OPTIONS", True),
+        ("LOCALDOMAIN", True),
+        ("TERMINFO", True),
+        ("TERMCAP", True),
         ("OPENAI_API_KEY", False),
         ("GH_TOKEN", False),
         ("GITHUB_TOKEN", False),
@@ -307,6 +322,13 @@ def test_serialize_env_line_quotes_and_escapes_a_value_that_needs_it() -> None:
 def test_serialize_env_line_single_quotes_a_value_with_shell_metacharacters() -> None:
     assert serialize_env_line("KEY", "$(id);`x`") == "KEY='$(id);`x`'", (
         "a value bash would expand is single-quoted, where nothing is special"
+    )
+
+
+def test_serialize_env_line_writes_a_single_quote_without_a_backslash_inside_quotes() -> None:
+    assert serialize_env_line("KEY", 'it\'s "$x"') == r"""KEY='it'\''s "$x"'""", (
+        "a quote closes, is escaped outside any quotes, and reopens; nothing is escaped "
+        "inside quotes, so no locale can merge a backslash into a character"
     )
 
 
