@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Operators can credit tenants with `daimon tenants credit --note` and set default
   or per-person monthly caps with `daimon tenants cap`. Caps apply without Stripe;
   prepaid Discord and Slack turn footers show the remaining balance.
+- Promo codes: operators create credit or timed codes with `daimon promo`, and
+  admins redeem them from `/billing` on Discord and Slack or with the MCP tool
+  `redeem_promo_code`. Timed credit is spent first inside its window and the
+  unspent rest expires. Nothing changes until an operator creates a code.
 - Record content-free turn outcomes across chat, headless, routines and MCP hub/agent-chat, including attributed admission refusals, with bounded best-effort persistence. MCP `ask` records its terminal reason; fire-and-forget `start_turn`/`continue_turn` record dispatch only (`unknown`), without a later terminal update. Pre-attribution and adapter readiness gates are outside coverage.
 - Routines can name an optional destination channel or thread
   (`create_routine`/`update_routine` `destination_kind` + `destination_id`,

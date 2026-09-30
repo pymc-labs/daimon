@@ -484,6 +484,12 @@ MODE`. This stores a per-tenant `prepaid` or `operator_funded` policy. Shared
 balance admission emits a warning instead of a refusal for operator-funded
 tenants; usage recording and configured caps continue through the same path.
 
+`daimon promo create|list|revoke|redemptions` manages deployment-wide promo
+codes. Admins redeem them from `/billing` on Discord and Slack (a Redeem code
+button and modal) or with the MCP tool `redeem_promo_code`; each surface calls
+`daimon.core.promo_credit.redeem_promo_code`. Scheduler housekeeping settles
+timed credit windows. See [billing.md](billing.md#promo-codes).
+
 ### Invocation context fragments
 
 Core adds a `turn_context` block before the user message, chosen by the trusted

@@ -119,7 +119,8 @@ Each tick, 30 seconds apart by default:
    a persistent `RoutineDispatcher`. The tick returns without awaiting those
    turns. Its semaphore and in-flight registry span ticks, so a slow routine
    cannot hold up a later tick or overlap another run of itself.
-4. Housekeeping runs, then the loop sleeps interruptibly. Claimed work keeps its
+4. Housekeeping runs, including [promo credit](billing.md#promo-codes)
+   settlement, then the loop sleeps interruptibly. Claimed work keeps its
    eligibility while waiting for a dispatch slot, preserving the previous batch
    behavior even when a slow sibling runs past the freshness window. Additional
    unclaimed work remains in PostgreSQL when the bounded batch is full.
