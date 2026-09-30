@@ -90,8 +90,9 @@ configured with (`ALLOWED_MODEL_IDS` in
 selectable by an agent.
 
 Opus 5.5 is priced at $4 input, $20 output, $5 five-minute cache write, and
-$0.20 cache read per million tokens. The four-field ledger cannot distinguish
-one-hour cache writes, which Anthropic prices at $8 per million tokens; it
+$0.20 cache read per million tokens; Sonnet 5.5 at $2, $10, $2.50 and $0.20.
+The four-field ledger cannot distinguish one-hour cache writes, which
+Anthropic prices at $8 (Opus 5.5) and $4 (Sonnet 5.5) per million tokens; it
 currently treats all cache writes as five-minute writes.
 
 Two consequences worth knowing before you add a model:
