@@ -1583,7 +1583,7 @@ async def test_env_file_submission_without_crypto_keys_tells_the_person_and_keep
     live_agent = ma_agent(id="agent_env_file", name="specialist", tenant_id=tenant_id)
     token = await _seed_env_file_request(db_session, tenant_id=tenant_id, live_agent=live_agent)
     await db_session.commit()
-    _patch_file_download(monkeypatch, b"ALPHA=alpha-private\n")
+    _patch_file_download(monkeypatch, b"ALPHA_KEY=alpha-private\n")
     runtime = _build_runtime(
         fernet_key, _keyless(db_session_factory), anthropic_handler=_agents_handler(live_agent)
     )

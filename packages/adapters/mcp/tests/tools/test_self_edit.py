@@ -125,7 +125,7 @@ async def test_self_write_then_read_round_trip(
 
     read = await _self_read_file_impl(runtime, auth, key="CONFIG_TOKEN")
     assert read is not None, "read of just-written key must hit"
-    assert read.key == "config.yaml", "read must return the stored row"
+    assert read.key == "CONFIG_TOKEN", "read must return the stored row"
     assert read.content == REDACTED_VALUE, "values never come back as tool output"
 
 
