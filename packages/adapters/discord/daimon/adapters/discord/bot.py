@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
@@ -26,6 +28,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.gating import is_participation_candidate, should_process_message
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -96,6 +99,7 @@ from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from sqlalchemy.exc import SQLAlchemyError
@@ -426,6 +430,8 @@ class DaimonBot(commands.Bot):
         self._guild_lifecycle_locks: dict[int, asyncio.Lock] = {}
         # Track spawned background tasks so they aren't GC'd; discard on done.
         self._bg_tasks: set[asyncio.Task[None]] = set()
+        self._output_sweeps: dict[str, asyncio.Task[None]] = {}
+        self._delivery_notice_thread_ids: set[int] = set()
         # Drain flag — set by _drain_and_close on SIGTERM/SIGINT.
         # While True, on_message rejects new mentions; existing turns finish.
         self.draining: bool = False
@@ -453,6 +459,48 @@ class DaimonBot(commands.Bot):
         task.add_done_callback(self._bg_tasks.discard)
         task.add_done_callback(_log_bg_task_exception)
         return task
+
+    def _forget_output_sweep(self, session_id: str, task: asyncio.Task[None]) -> None:
+        if self._output_sweeps.get(session_id) is task:
+            del self._output_sweeps[session_id]
+
+    async def _sweep_session_outputs(
+        self,
+        previous: asyncio.Task[None] | None,
+        thread: discord.Thread,
+        tenant_id: uuid.UUID,
+        session_id: str,
+    ) -> None:
+        # A previous sweep owns post-then-delete for this MA session until it finishes.
+        if previous is not None:
+            with contextlib.suppress(Exception):
+                await previous
+        try:
+            await deliver_session_outputs(
+                self.runtime.turn_deps.anthropic,
+                thread,
+                session_id=session_id,
+                may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
+                notice_thread_ids=self._delivery_notice_thread_ids,
+            )
+        except Exception as exc:  # detached sweep must not fail the completed turn
+            log.warning(
+                "discord.output_delivery.unhandled_error",
+                session_id=session_id,
+                thread_id=thread.id,
+                error=str(exc)[:300],
+            )
+
+    def _schedule_output_sweep(
+        self, outcome: RunOutcome, *, thread: discord.Thread, tenant_id: uuid.UUID
+    ) -> None:
+        if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
+            return
+        session_id = outcome.ma_session_id
+        previous = self._output_sweeps.get(session_id)
+        task = self._spawn(self._sweep_session_outputs(previous, thread, tenant_id, session_id))
+        self._output_sweeps[session_id] = task
+        task.add_done_callback(functools.partial(self._forget_output_sweep, session_id))
 
     async def _drain_and_close(self) -> None:
         """Graceful shutdown drain.
@@ -2160,6 +2208,7 @@ class DaimonBot(commands.Bot):
                     await session.commit()
             if final_lifecycle.was_answered and final_lifecycle.final_message_id is not None:
                 await seed_feedback_reactions(thread, message_id=final_lifecycle.final_message_id)
+        self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)
 
     async def on_raw_thread_update(self, payload: discord.RawThreadUpdateEvent) -> None:
         metadata = payload.data["thread_metadata"]
@@ -2987,3 +3036,4 @@ class DaimonBot(commands.Bot):
             await self._dispatch_continuations(
                 tenant_id=tenant_id, thread=thread, guild_id=guild_id
             )
+        self._schedule_output_sweep(outcome, thread=thread, tenant_id=tenant_id)
