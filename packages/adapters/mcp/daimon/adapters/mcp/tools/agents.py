@@ -878,10 +878,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Create an agent called, for example, churn-explorer. Pass fields directly —
         there is NO ``spec`` wrapper.
 
-        Required: ``name`` and ``model``. Use ``"claude-sonnet-5"`` when the user
-        asks for Sonnet and ``"claude-opus-5"`` when they ask for Opus — always
-        the current generation. Only pass an older id (``claude-sonnet-4-6``,
-        ``claude-opus-4-8``, …) when the user names that version themselves.
+        Required: ``name`` and ``model``. Use ``"claude-sonnet-5-5"`` when the user
+        asks for Sonnet and ``"claude-opus-5-5"`` when they ask for Opus — always
+        the current generation. Only pass an older id (``claude-sonnet-5``,
+        ``claude-opus-5``, …) when the user names that version themselves.
         Optional: ``description``, ``system`` (the system prompt), ``tools``,
         ``mcp_servers``, and ``skill_repos`` — GitHub repos to sync skills from,
         e.g. ``[{"url": "https://github.com/owner/repo", "branch": "main"}]``.
@@ -919,7 +919,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Change an agent's system prompt or switch its model; add existing skills such as
         build-models. Scalar ``model``, ``description`` and ``system`` fields replace.
 
-        Prefer current-generation ``claude-sonnet-5`` for Sonnet and ``claude-opus-5``
+        Prefer current-generation ``claude-sonnet-5-5`` for Sonnet and ``claude-opus-5-5``
         for Opus unless an older version is explicitly requested. List fields
         (``tools``, ``mcp_servers``, ``skills``) are added to, never replaced; shorter
         lists remove nothing. Use ``remove_skill`` or ``detach_mcp_server`` to remove.
