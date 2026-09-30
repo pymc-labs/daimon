@@ -36,7 +36,7 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.billing_panel.checkout import create_checkout
 from daimon.adapters.slack.billing_panel.read import load_billing_snapshot
-from daimon.adapters.slack.billing_panel.views import build_billing_container, build_loading_view
+from daimon.adapters.slack.billing_panel.views import build_billing_view, build_loading_view
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -100,18 +100,12 @@ async def handle_billing_command(
                 platform_user_id=user_id,
                 is_admin=is_admin,
                 since=since,
+                now=now,
             )
 
-        blocks = build_billing_container(state, now=now, since=since)
-        billing_view: dict[str, Any] = {
-            "type": "modal",
-            "title": {"type": "plain_text", "text": "Billing"},
-            "close": {"type": "plain_text", "text": "Close"},
-            "blocks": blocks,
-        }
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id,
-            view=billing_view,
+            view=build_billing_view(state, now=now, since=since),
         )
 
     except (DaimonError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:

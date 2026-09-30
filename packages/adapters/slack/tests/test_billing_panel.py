@@ -160,6 +160,7 @@ async def test_load_billing_snapshot_member_returns_only_caller_data(
         platform_user_id=_CALLER_ID,
         is_admin=False,
         since=_SINCE,
+        now=_NOW,
     )
 
     assert state.is_admin is False, "is_admin must be False for member path"
@@ -191,6 +192,7 @@ async def test_load_billing_snapshot_admin_returns_sorted_member_rows(
         platform_user_id=_CALLER_ID,
         is_admin=True,
         since=_SINCE,
+        now=_NOW,
     )
 
     assert state.is_admin is True, "is_admin must be True for admin path"
@@ -233,6 +235,7 @@ async def test_load_billing_snapshot_admin_caps_at_25_members(
         platform_user_id="U_MANY_000",
         is_admin=True,
         since=_SINCE,
+        now=_NOW,
     )
 
     assert len(state.member_rows) == 25, "admin path must cap member rows at 25"
@@ -258,6 +261,7 @@ async def test_load_billing_snapshot_member_empty_period(
         platform_user_id="U_EMPTY",
         is_admin=False,
         since=_SINCE,
+        now=_NOW,
     )
 
     assert state.caller_spend == 0.0, "empty period should have 0 caller_spend"

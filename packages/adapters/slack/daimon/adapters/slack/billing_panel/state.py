@@ -13,6 +13,8 @@ from __future__ import annotations
 import dataclasses
 from decimal import Decimal
 
+from daimon.core.promo_credit import ActiveTimedCredit
+
 
 @dataclasses.dataclass(frozen=True)
 class MemberRow:
@@ -41,3 +43,6 @@ class BillingPanelState:
     guild_distinct_members: int  # distinct spending users count
     member_rows: tuple[MemberRow, ...]  # sorted + top-25-capped
     over_cap_count: int  # additional spending members beyond top 25
+
+    # Live timed promo credit (both views), soonest-ending first; empty without promo codes
+    timed_credit: tuple[ActiveTimedCredit, ...] = ()
