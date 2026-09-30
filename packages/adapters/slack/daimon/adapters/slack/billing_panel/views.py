@@ -10,6 +10,7 @@ formatters and container builder adapted from Discord UI to Slack Block Kit.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -267,12 +268,17 @@ def build_billing_container(
 
 
 def build_billing_view(
-    state: BillingPanelState, *, now: datetime, since: datetime
+    state: BillingPanelState, *, now: datetime, since: datetime, channel_id: str | None = None
 ) -> dict[str, Any]:
-    """The /billing modal around ``build_billing_container``."""
+    """The /billing modal around ``build_billing_container``.
+
+    ``channel_id`` is the channel /billing ran in, kept in the view so a
+    refresh from the redeem form still shows that channel's budget.
+    """
     return {
         "type": "modal",
         "title": {"type": "plain_text", "text": "Billing"},
         "close": {"type": "plain_text", "text": "Close"},
+        "private_metadata": json.dumps({"channel_id": channel_id or ""}),
         "blocks": build_billing_container(state, now=now, since=since),
     }
