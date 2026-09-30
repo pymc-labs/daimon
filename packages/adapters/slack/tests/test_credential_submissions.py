@@ -271,7 +271,9 @@ async def test_env_file_submission_writes_every_key_and_makes_the_card_the_recei
     live_agent = ma_agent(id="agent_env_file", name="specialist", tenant_id=tenant_id)
     token = await _seed_env_file_request(db_session, tenant_id=tenant_id, live_agent=live_agent)
     await db_session.commit()
-    _patch_file_download(monkeypatch, b"# keys\nALPHA=alpha-private\nexport BETA='beta-private'\n")
+    _patch_file_download(
+        monkeypatch, b"# keys\nALPHA_KEY=alpha-private\nexport BETA_KEY='beta-private'\n"
+    )
     runtime = _build_runtime(
         fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
     )
@@ -282,8 +284,8 @@ async def test_env_file_submission_writes_every_key_and_makes_the_card_the_recei
         rows = await _agent_file_rows(s)
         row = await peek_credential_request(s, token=token)
     assert [(r["key"], r["content"]) for r in rows] == [
-        ("ALPHA", "alpha-private"),
-        ("BETA", "beta-private"),
+        ("ALPHA_KEY", "alpha-private"),
+        ("BETA_KEY", "beta-private"),
     ], "every key the file declared is stored, parsed by the documented grammar"
     assert row is not None and row.used_at is not None, "the consume commits with the writes"
     assert row.outcome == "applied", "the row records how the import ended"
@@ -293,6 +295,59 @@ async def test_env_file_submission_writes_every_key_and_makes_the_card_the_recei
     assert "alpha-private" not in json.dumps(edits[0]), "no value ever reaches a posted message"
     assert ("POST", _EPHEMERAL_URL) not in fake_slack_web_client.mock.requests, (
         "the card is the receipt; a second one would say the same thing twice"
+    )
+
+
+@pytest.mark.asyncio
+async def test_env_file_submission_refuses_a_non_credential_name_for_a_member(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A member upload may carry only credential names; a tool-control name is refused."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_env_file", name="specialist", tenant_id=tenant_id)
+    token = await _seed_env_file_request(db_session, tenant_id=tenant_id, live_agent=live_agent)
+    await db_session.commit()
+    _patch_file_download(monkeypatch, b"API_KEY=ok\nLD_PRELOAD=/tmp/x.so\n")
+    runtime = _build_runtime(
+        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+    )
+
+    await _run_env_file_submission(runtime, token)
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        row = await peek_credential_request(s, token=token)
+    assert rows == [], "a rejected import writes nothing"
+    assert row is not None and row.used_at is None, "a rejected file must not spend the one click"
+
+
+@pytest.mark.asyncio
+async def test_env_file_submission_lets_an_admin_add_a_non_credential_name(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """An admin may upload a connection string; the hard-deny layer still applies to both."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_env_file", name="specialist", tenant_id=tenant_id)
+    token = await _seed_env_file_request(db_session, tenant_id=tenant_id, live_agent=live_agent)
+    await db_session.commit()
+    _override_users_info_admin(fake_slack_web_client.mock)
+    _patch_file_download(monkeypatch, b"API_KEY=ok\nDATABASE_URL=postgres://x\n")
+    runtime = _build_runtime(
+        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+    )
+
+    await _run_env_file_submission(runtime, token)
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+    assert {r["key"] for r in rows} == {"API_KEY", "DATABASE_URL"}, (
+        "an admin may add a non-credential name; the file still parses as before"
     )
 
 
@@ -312,13 +367,13 @@ async def test_env_file_submission_refuses_the_whole_import_when_a_key_already_e
         db_session,
         tenant_id=tenant_id,
         agent_id=agent_id,
-        key="ALPHA",
+        key="ALPHA_KEY",
         content="already-here",
         set_by_account_id=None,
     )
     token = await _seed_env_file_request(db_session, tenant_id=tenant_id, live_agent=live_agent)
     await db_session.commit()
-    _patch_file_download(monkeypatch, b"BETA=beta-private\nALPHA=alpha-private\n")
+    _patch_file_download(monkeypatch, b"BETA_KEY=beta-private\nALPHA_KEY=alpha-private\n")
     runtime = _build_runtime(
         fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
     )
@@ -328,7 +383,7 @@ async def test_env_file_submission_refuses_the_whole_import_when_a_key_already_e
     async with db_session_factory() as s:
         rows = await _agent_file_rows(s)
         row = await peek_credential_request(s, token=token)
-    assert [(r["key"], r["content"]) for r in rows] == [("ALPHA", "already-here")], (
+    assert [(r["key"], r["content"]) for r in rows] == [("ALPHA_KEY", "already-here")], (
         "a collision writes nothing at all, not even the keys that would have been new"
     )
     assert row is not None and row.used_at is not None, "the click is spent either way"
@@ -339,7 +394,7 @@ async def test_env_file_submission_refuses_the_whole_import_when_a_key_already_e
         "the refused card says what did not happen"
     )
     rendered = json.dumps(edits[0]) + " ".join(_ephemeral_texts(fake_slack_web_client))
-    assert "line 2: ALPHA is already set." in rendered, (
+    assert "line 2: ALPHA_KEY is already set." in rendered, (
         "the refusal names the key and the line it came from"
     )
     assert "alpha-private" not in rendered and "beta-private" not in rendered, (

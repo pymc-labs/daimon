@@ -15,6 +15,7 @@ from daimon.core.env_file import (
     MAX_ENV_VALUE_BYTES,
     EnvFileRejected,
     decode_env_bytes,
+    env_name_member_writable,
     env_name_problem,
     is_reserved_env_name,
     parse_env_file,
@@ -380,3 +381,117 @@ def test_decode_env_bytes_rejects_non_utf8() -> None:
 
 def test_decode_env_bytes_accepts_utf8_text() -> None:
     assert decode_env_bytes("A=café\n".encode()) == "A=café\n", "valid utf-8 decodes unchanged"
+
+
+#: Every known way an environment NAME alone makes some later tool run code or
+#: redirect traffic. None may be storable, by anyone, under any write path.
+_EXEC_ON_ENV_NAMES: list[str] = [
+    "BASH_ENV",
+    "ENV",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "NODE_OPTIONS",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "RUBYLIB",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "TAR_OPTIONS",
+    "GIT_SSH_COMMAND",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_KEY_0",
+    "GIT_CONFIG_VALUE_0",
+    "GIT_EXTERNAL_DIFF",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "LESSOPEN",
+    "LESSCLOSE",
+    "BROWSER",
+    "PAGER",
+    "MANPAGER",
+    "EDITOR",
+    "VISUAL",
+    "PROMPT_COMMAND",
+    "PS4",
+    "BASH_FUNC_x%%",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "PIP_INDEX_URL",
+    "NPM_CONFIG_REGISTRY",
+    "GOFLAGS",
+    "GOPROXY",
+    "CARGO_HOME",
+    "KUBECONFIG",
+    "DOCKER_HOST",
+    "SSL_CERT_FILE",
+    "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_BASE",
+    "GCONV_PATH",
+    "NLSPATH",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LANG",
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "PATH",
+    "SHELL",
+    "TERMINFO",
+    "INPUTRC",
+]
+
+
+@pytest.mark.parametrize("name", _EXEC_ON_ENV_NAMES)
+def test_every_exec_on_env_name_is_hard_denied_for_everyone(name: str) -> None:
+    assert is_reserved_env_name(name), f"{name} must be hard-denied"
+    # An admin is refused too; a name that is not even an identifier (e.g.
+    # BASH_FUNC_x%%) is caught one step earlier, as bad_name.
+    assert env_name_problem(name, is_admin=True) in ("reserved_name", "bad_name"), (
+        f"{name} must be refused even for an admin"
+    )
+    with pytest.raises(EnvFileRejected) as caught:
+        parse_env_file(f"OK_TOKEN=1\n{name}=x\n")
+    assert caught.value.rejection in ("reserved_name", "bad_name")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "OPENAI_API_KEY",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GOOGLE_API_KEY",
+        "AWS_ACCESS_KEY_ID",
+        "ACME_PAT",
+    ],
+)
+def test_ordinary_credential_names_are_writable_by_a_member(name: str) -> None:
+    assert env_name_member_writable(name), f"{name} is an ordinary credential a member may add"
+    assert env_name_problem(name, is_admin=False) is None
+
+
+@pytest.mark.parametrize("name", ["DATABASE_URL", "SERVICE_HOST", "MY_DSN", "NOTES", "CONFIG", "X"])
+def test_a_member_cannot_write_a_non_credential_name_but_an_admin_can(name: str) -> None:
+    # None of these is a tool control, so an admin may set them…
+    assert env_name_problem(name, is_admin=True) is None, f"an admin may set {name}"
+    # …but a member may not: redirect targets and free-form names are refused.
+    assert env_name_problem(name, is_admin=False) == "not_credential_name"
+
+
+def test_a_member_upload_rejects_a_non_credential_name() -> None:
+    with pytest.raises(EnvFileRejected) as caught:
+        parse_env_file("API_KEY=ok\nDATABASE_URL=postgres://x\n", member_writable_only=True)
+    assert caught.value.rejection == "not_credential_name"
+    assert [p.name for p in caught.value.problems] == ["DATABASE_URL"]
+
+
+def test_an_admin_upload_accepts_a_non_credential_name_that_is_not_hard_denied() -> None:
+    entries = parse_env_file("API_KEY=ok\nDATABASE_URL=postgres://x\n")
+    assert {e.name for e in entries} == {"API_KEY", "DATABASE_URL"}

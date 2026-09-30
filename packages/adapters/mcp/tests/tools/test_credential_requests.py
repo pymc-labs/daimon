@@ -789,6 +789,76 @@ async def test_request_agent_key_rejects_invalid_key(
     assert await _row_count(db_session) == 0
 
 
+async def test_request_agent_key_rejects_a_tool_control_name_for_everyone(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """TAR_OPTIONS is hard-denied: even an admin cannot store it as a key."""
+    runtime = _runtime(committing_sessionmaker)
+    admin = _auth_identity(is_admin=True)
+    with pytest.raises(ToolError, match="reserved name"):
+        await _request_agent_key_impl(
+            runtime, admin, agent_name="daimon", key="TAR_OPTIONS", purpose="x", channel_id="222"
+        )
+    assert await _row_count(db_session) == 0
+
+
+async def test_request_agent_key_member_allowlist_but_admin_may_add_any_name(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-admin may add a credential name, not a free-form one; an admin may add either."""
+    runtime = _runtime(committing_sessionmaker)
+    member = _auth_identity()
+    # A member cannot add a non-credential name (no mint, no row).
+    with pytest.raises(ToolError, match="credential name"):
+        await _request_agent_key_impl(
+            runtime, member, agent_name="daimon", key="DATABASE_URL", purpose="x", channel_id="222"
+        )
+    assert await _row_count(db_session) == 0
+
+    # An admin may: this mints a row (full happy path needs an agent + origin).
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_env", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    admin = _auth_identity(tenant_id=tenant.id, is_admin=True)
+    await make_account(db_session, tenant=tenant, id=admin.account_id)
+    await db_session.commit()
+    async with committing_sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=admin.account_id,
+            platform="discord",
+            parent_channel_id="1111",
+            thread_id="222",
+            responder_ma_agent_id="ag_daimon",
+            responder_name="Daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=admin.role,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            now=datetime.now(UTC),
+        )
+    _patch_successful_post(monkeypatch, message_id="9301", posted={})
+    result = await _request_agent_key_impl(
+        runtime,
+        admin,
+        origin_context_id=str(origin.id),
+        expected_ma_agent_id="ag_env",
+        agent_name="daimon",
+        key="DATABASE_URL",
+        purpose="connection string",
+        channel_id="999",
+    )
+    assert result.target == "DATABASE_URL", "an admin may add a non-credential name"
+    assert await _row_count(db_session) == 1
+
+
 @pytest.mark.parametrize(
     "key", ["LD_PRELOAD", "BASH_ENV", "PATH", "GIT_CONFIG_KEY_0", "HTTPS_PROXY", "NODE_OPTIONS"]
 )

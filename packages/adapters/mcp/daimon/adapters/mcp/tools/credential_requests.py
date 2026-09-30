@@ -46,7 +46,7 @@ from daimon.core.credential_requests import (
 )
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.env_file import is_reserved_env_name
+from daimon.core.env_file import env_name_problem
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
@@ -62,7 +62,7 @@ from daimon.core.stores.credential_requests import (
     supersede_credential_request,
     update_credential_request_message,
 )
-from daimon.core.stores.domain import CredentialRequestRow, TurnOriginRow
+from daimon.core.stores.domain import CredentialRequestRow, Role, TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp import Context, FastMCP
@@ -75,6 +75,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # MCP adapter cannot import each other (import-linter's independence
 # contract), and this rule is small enough not to warrant a core lift.
 _POSIX_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _caller_is_admin(auth: AuthIdentity) -> bool:
+    """Whether this caller may store a key outside the member credential allowlist.
+
+    The JWT's `is_admin` (Discord owner/manage-guild/administrator or CLI) or an
+    ADMIN role on the account. An agent-scoped key carries neither, so an agent
+    acting on its own behalf is always a member here.
+    """
+    return auth.is_admin or auth.role is Role.ADMIN
+
 
 # `normalize_owner_repo` does not truncate to two path segments (it only
 # strips a known prefix/suffix), so a URL like
@@ -440,16 +451,24 @@ async def _request_agent_key_impl(
     expected_ma_agent_id: str | None = None,
 ) -> RequestCredentialResult:
     requester = _require_requestable_platform(auth)
-    if key is not None and not _POSIX_KEY_RE.match(key):
-        raise ToolError(
-            "key must match [A-Za-z_][A-Za-z0-9_]* "
-            "(letters, digits, underscores; must not start with a digit)"
-        )
-    if key is not None and is_reserved_env_name(key):
-        raise ToolError(
-            f"{key} is a reserved name: it changes how the agent's shell, git, "
-            "interpreters or HTTP clients run, so it cannot be stored as a key."
-        )
+    if key is not None:
+        problem = env_name_problem(key, is_admin=_caller_is_admin(auth))
+        if problem == "bad_name":
+            raise ToolError(
+                "key must match [A-Za-z_][A-Za-z0-9_]* "
+                "(letters, digits, underscores; must not start with a digit)"
+            )
+        if problem == "reserved_name":
+            raise ToolError(
+                f"{key} is a reserved name: it changes how the agent's shell, git, "
+                "interpreters or HTTP clients run, so it cannot be stored as a key."
+            )
+        if problem == "not_credential_name":
+            raise ToolError(
+                f"{key} is not a credential name a member can add. Use a name ending "
+                "in _KEY, _TOKEN, _SECRET, _PASSWORD or similar. An admin can add "
+                "other names."
+            )
     if key is None:
         named = _named_single_key(purpose)
         if named is not None:

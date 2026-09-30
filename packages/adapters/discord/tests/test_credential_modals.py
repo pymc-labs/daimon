@@ -555,7 +555,7 @@ async def test_env_modal_stores_the_value_even_when_the_card_edit_fails(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    row = await _seed_env_request(db_session_factory, target="EDIT_FAILS", with_origin=True)
+    row = await _seed_env_request(db_session_factory, target="EDIT_FAILS_TOKEN", with_origin=True)
     runtime = _runtime(sessionmaker=db_session_factory)
     modal = EnvCredentialModal(runtime=runtime, request_row=row)
     modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
@@ -2037,7 +2037,7 @@ async def test_env_submission_records_none_requested_work_for_a_save_only_reques
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Nothing was waiting on this key, so the card promises no turn."""
-    row = await _seed_env_request(db_session_factory, target="SAVE_ONLY", with_origin=True)
+    row = await _seed_env_request(db_session_factory, target="SAVE_ONLY_TOKEN", with_origin=True)
     modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
     modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
 
@@ -2049,7 +2049,7 @@ async def test_env_submission_records_none_requested_work_for_a_save_only_reques
         "a save-only request is still recorded, carrying no work to resume"
     )
     card = _card_text(_card_edits(interaction)[-1])
-    assert "SAVE_ONLY saved for tester." in card, "the card reports the key that landed"
+    assert "SAVE_ONLY_TOKEN saved for tester." in card, "the card reports the key that landed"
     assert "next message" not in card, (
         "with nothing waiting on it, the card must not promise a turn"
     )
@@ -2223,7 +2223,7 @@ async def test_success_paths_send_no_ephemeral_receipt(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """The card is the receipt; an ephemeral would say the same thing twice."""
-    env_row = await _seed_env_request(db_session_factory, target="NO_TOAST", with_origin=True)
+    env_row = await _seed_env_request(db_session_factory, target="NO_TOAST_TOKEN", with_origin=True)
     env_modal = EnvCredentialModal(
         runtime=_runtime(sessionmaker=db_session_factory), request_row=env_row
     )
@@ -2231,7 +2231,7 @@ async def test_success_paths_send_no_ephemeral_receipt(
     env_interaction = _card_interaction()
     await env_modal.on_submit(env_interaction)
     env_interaction.followup.send.assert_not_awaited()
-    assert "NO_TOAST saved for tester." in _card_text(_card_edits(env_interaction)[-1]), (
+    assert "NO_TOAST_TOKEN saved for tester." in _card_text(_card_edits(env_interaction)[-1]), (
         "sanity: the card this receipt was dropped in favour of actually rendered"
     )
 

@@ -31,6 +31,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.broker import dispatch_mint_token
 from daimon.core.broker.errors import NoBindingError, ProviderConfigError
+from daimon.core.env_file import env_name_problem
 from daimon.core.errors import StoreError
 from daimon.core.github_visibility import pat_can_access_repo
 from daimon.core.stores.agent_files import (
@@ -141,6 +142,24 @@ async def _self_write_file_impl(
     content: str,
 ) -> AgentFileRow:
     agent_id = _require_agent_id(auth)
+    # An agent key is always a member here, so the value's name must be one a
+    # member may write: a credential name, never a tool-control or redirect
+    # name. The store enforces the hard-deny layer again under this.
+    # Empty key: let the store speak ("key must not be empty"); the name policy
+    # only has something to say about a non-empty name.
+    name_problem = env_name_problem(key, is_admin=False) if key else None
+    if name_problem == "bad_name":
+        raise ToolError(
+            "key must match [A-Za-z_][A-Za-z0-9_]* "
+            "(letters, digits, underscores; must not start with a digit)"
+        )
+    if name_problem == "reserved_name":
+        raise ToolError(f"{key} is a reserved name: it changes how the agent's tools run.")
+    if name_problem == "not_credential_name":
+        raise ToolError(
+            f"{key} is not a credential name. Use a name ending in _KEY, _TOKEN, "
+            "_SECRET, _PASSWORD or similar."
+        )
     try:
         async with runtime.session_factory.begin() as session:
             row = await put_agent_file(

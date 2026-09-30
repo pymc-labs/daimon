@@ -150,3 +150,74 @@ def test_a_key_cannot_switch_the_sandbox_locale(name: str) -> None:
     assert caught.value.rejection == "reserved_name", (
         "a multibyte locale would let a quoted value's backslash join a character"
     )
+
+
+def _run_bash(script: str, cwd: Path, env: dict[str, str] | None = None) -> int:
+    return subprocess.run(
+        ["bash", "--norc", "--noprofile", "-c", script],
+        cwd=cwd,
+        capture_output=True,
+        check=False,
+        timeout=20,
+        env=env,
+    ).returncode
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="needs GNU tar")
+def test_tar_options_is_a_real_exec_vector_but_is_refused(tmp_path: Path) -> None:
+    """TAR_OPTIONS quotes safely yet makes a later `tar` run a command.
+
+    The value is inert to `source` (the fix from the first commit), so the
+    only defence is refusing the NAME. This proves both halves: the control
+    shows a hand-written `.env` under this name executes on the next `tar`,
+    and `serialize_env_file`/`parse_env_file` never let such a name through.
+    """
+    from daimon.core.env_file import EnvFileRejected, is_reserved_env_name, parse_env_file
+
+    marker = tmp_path / "tar_pwned"
+    (tmp_path / "f.txt").write_text("x")
+    # tar splits TAR_OPTIONS on whitespace itself, so the exec target is a
+    # space-free helper script rather than a `touch <path>` with a space.
+    evil = tmp_path / "evil.sh"
+    evil.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    evil.chmod(0o755)
+    # Control: a raw .env an operator could hand-write, sourced, then tar runs.
+    raw_env = tmp_path / "raw.env"
+    raw_env.write_bytes(f"TAR_OPTIONS='--checkpoint=1 --checkpoint-action=exec={evil}'\n".encode())
+    _run_bash(f'set -a; source "{raw_env}"; set +a; tar -cf /dev/null f.txt', tmp_path)
+    if not marker.exists():
+        pytest.skip("this tar build does not honour TAR_OPTIONS checkpoint-action")
+
+    # The fix: the name never reaches a stored key or the mounted file.
+    assert is_reserved_env_name("TAR_OPTIONS")
+    with pytest.raises(EnvFileRejected) as caught:
+        parse_env_file(
+            "API_KEY=ok\nTAR_OPTIONS=--checkpoint=1 --checkpoint-action=exec=touch /tmp/x\n"
+        )
+    assert caught.value.rejection == "reserved_name"
+
+
+def test_assemble_leaves_out_a_legacy_tool_control_row(tmp_path: Path) -> None:
+    """Mount-time hard-deny: a TAR_OPTIONS row stored before the rule never mounts."""
+    import uuid
+
+    from daimon.core.credential_env import assemble_env_bytes
+    from daimon.core.stores.domain import AgentFileRow
+
+    def _row(key: str, content: str) -> AgentFileRow:
+        import datetime as dt
+
+        now = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+        return AgentFileRow(
+            tenant_id=uuid.uuid4(),
+            agent_id=uuid.uuid4(),
+            key=key,
+            content=content,
+            created_at=now,
+            updated_at=now,
+        )
+
+    assembled = assemble_env_bytes(
+        [_row("API_KEY", "ok"), _row("TAR_OPTIONS", "--checkpoint-action=exec=touch /tmp/x")]
+    )
+    assert assembled == b"API_KEY=ok\n", "a hard-denied legacy name must not be exported"

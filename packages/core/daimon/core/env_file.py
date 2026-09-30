@@ -50,14 +50,34 @@ written as ``\\n``/``\\r``. Bash and `parse_env_file` read every such line back
 to the same value, except that an escaped line break is the two characters
 ``\\n``/``\\r`` to bash. A NUL cannot be represented and is refused.
 
-Reserved names
---------------
-A key name that changes how the shell, a loader, git or an HTTP client
-behaves (``PATH``, ``LD_PRELOAD``, ``BASH_ENV``, ``GIT_CONFIG_*``,
-``HTTPS_PROXY`` …) is refused wherever a key is stored and left out of the
-serialized file: exporting it into the sandbox would let whoever set the key
-run code or redirect traffic in every later turn. `env_name_problem` is the
-one rule.
+Two layers of name policy
+-------------------------
+Values are safe to `source` (above), but the NAME a value is exported under
+is itself a capability: ``LD_PRELOAD``, ``BASH_ENV``, ``PYTHONSTARTUP``,
+``TAR_OPTIONS`` and hundreds like them make some later tool run code or
+redirect traffic. A finite denylist cannot keep up, so the rule is
+structural, in two layers.
+
+- **Hard deny** (`env_name_hard_denied`) — applied everywhere a key is
+  stored *and* when the mounted `.env` is assembled, for everyone including
+  admins. Any name that looks like an interpreter/tool control: a set of
+  exact names, plus suffix and prefix classes (``*_OPTIONS``, ``*OPTS``,
+  ``*_PATH``/``PATH``, ``*_COMMAND``, ``*STARTUP``, ``*RC``, ``*_PROXY``,
+  ``*_CONFIG``, ``*_PRELOAD``, ``LD_*``, ``GIT_*``, ``LC_*`` …) and the ones
+  that redirect an SDK's own traffic (``*_BASE_URL``, ``*_API_BASE``,
+  ``*_ENDPOINT``, ``*_INDEX_URL``, ``*_REGISTRY*``).
+- **Member allowlist** (`env_name_member_writable`) — applied when a
+  non-admin writes a key (a Discord/Slack form or upload submitted by a
+  non-admin, ``request_agent_key``, ``self_write_file`` and every agent
+  key). A member may only write ``^[A-Z][A-Z0-9_]{1,63}$`` that ends in a
+  credential suffix (``_KEY``, ``_TOKEN``, ``_SECRET``, ``_PASSWORD`` …) and
+  is not hard-denied — never a ``*_URL``/``*_HOST``/``*_DSN`` (redirection),
+  with ``GH_TOKEN``/``GITHUB_TOKEN`` kept for the documented CLI use. An
+  admin may write any name that is not hard-denied.
+
+`env_name_problem(name, is_admin=…)` is the one entry every write path calls;
+the store and the `.env` assembler apply the hard-deny layer alone, since
+neither knows who is writing.
 
 Rejection is whole-file
 -----------------------
@@ -90,6 +110,8 @@ __all__ = [
     "EnvProblem",
     "EnvRejection",
     "decode_env_bytes",
+    "env_name_hard_denied",
+    "env_name_member_writable",
     "env_name_problem",
     "is_reserved_env_name",
     "parse_env_file",
@@ -108,6 +130,7 @@ EnvRejection = Literal[
     "syntax",
     "bad_name",
     "reserved_name",
+    "not_credential_name",
     "duplicate_name",
     "value_too_large",
     "too_many_entries",
@@ -120,6 +143,7 @@ _REJECTION_PRIORITY: Final[tuple[EnvRejection, ...]] = (
     "syntax",
     "bad_name",
     "reserved_name",
+    "not_credential_name",
     "duplicate_name",
     "value_too_large",
     "too_many_entries",
@@ -147,87 +171,213 @@ _BARE_VALUE_CHARS: Final[frozenset[str]] = frozenset(
 #: grammar has no room for.
 _NOT_SINGLE_QUOTABLE: Final[frozenset[str]] = frozenset("\n\r")
 
-#: Names that change how bash, a dynamic loader, an interpreter, git or an HTTP
-#: client behaves once exported. Compared case-insensitively (curl honours
-#: ``https_proxy``). ``GH_TOKEN``/``GITHUB_TOKEN`` stay allowed: storing a CLI
-#: token under them is the documented use (`defaults/skills/cli-auth`).
-_RESERVED_ENV_NAMES: Final[frozenset[str]] = frozenset(
+#: Names that name a credential value and nothing else. A non-admin member may
+#: only write a key whose name ends in one of these — never a plain ``URL`` or
+#: ``HOST`` (those redirect the agent's own traffic; see `_MEMBER_DENY_SUFFIXES`).
+_MEMBER_ALLOW_SUFFIXES: Final[tuple[str, ...]] = (
+    "_KEY",
+    "_API_KEY",
+    "_TOKEN",
+    "_SECRET",
+    "_PASSWORD",
+    "_PASSWD",
+    "_PAT",
+    "_ID",
+    "_USER",
+    "_USERNAME",
+    "_EMAIL",
+    "_ACCOUNT",
+    "_ORG",
+    "_WORKSPACE",
+    "_PROJECT",
+    "_TENANT",
+    "_REGION",
+    "_DSN",
+)
+#: Suffixes a member never writes even though they look credential-shaped: a
+#: value under them points the agent's own tooling somewhere else.
+_MEMBER_DENY_SUFFIXES: Final[tuple[str, ...]] = ("_URL", "_HOST", "_DSN", "_URI", "_ENDPOINT")
+#: Bare credential words a member may use as a whole key name, plus the two
+#: names kept for the documented CLI-token use (`defaults/skills/cli-auth`).
+_MEMBER_ALLOW_EXACT: Final[frozenset[str]] = frozenset(
+    {
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "TOKEN",
+        "KEY",
+        "APIKEY",
+        "API_KEY",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "PAT",
+        "USERNAME",
+        "EMAIL",
+    }
+)
+_MEMBER_NAME_SHAPE: Final[re.Pattern[str]] = re.compile(r"[A-Z][A-Z0-9_]{1,63}")
+
+#: HARD DENY. Exact names whose mere presence hands control to some later tool.
+#: Compared case-insensitively (curl honours ``https_proxy``, tar ``TAR_OPTIONS``).
+#: ``GH_TOKEN``/``GITHUB_TOKEN`` are NOT here — they are plain credentials.
+_HARD_DENY_EXACT: Final[frozenset[str]] = frozenset(
     {
         "PATH",
         "HOME",
+        "USER",
+        "LOGNAME",
         "SHELL",
+        "TERM",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "IFS",
         "ENV",
         "BASH_ENV",
         "BASHOPTS",
         "SHELLOPTS",
         "CDPATH",
         "GLOBIGNORE",
-        "IFS",
+        "FIGNORE",
         "PROMPT_COMMAND",
+        "PS0",
         "PS1",
         "PS2",
         "PS3",
         "PS4",
-        "TMPDIR",
+        "READLINE_LINE",
         "EDITOR",
         "VISUAL",
         "PAGER",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "FTP_PROXY",
-        "NO_PROXY",
-        "SSH_ASKPASS",
-        "SSH_AUTH_SOCK",
-        "PYTHONPATH",
-        "PYTHONHOME",
-        "PYTHONSTARTUP",
-        "PYTHONINSPECT",
-        "PYTHONUSERBASE",
-        "NODE_OPTIONS",
-        "NODE_PATH",
-        "NODE_EXTRA_CA_CERTS",
-        "PERL5OPT",
-        "PERL5LIB",
-        "PERLLIB",
-        "RUBYOPT",
-        "RUBYLIB",
-        "JAVA_TOOL_OPTIONS",
-        "_JAVA_OPTIONS",
-        "JDK_JAVA_OPTIONS",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-        "CURL_HOME",
-        "WGETRC",
-        "LANG",
-        "LANGUAGE",
+        "MANPAGER",
+        "MANOPT",
+        "BROWSER",
+        "LESS",
+        "LESSOPEN",
+        "LESSCLOSE",
+        "LESSSECURE",
+        "LESSKEY",
+        "TAR_OPTIONS",
+        "ZIPOPT",
+        "ZIP",
+        "UNZIP",
+        "GZIP",
+        "XZ_OPT",
+        "XZ_DEFAULTS",
+        "BZIP2",
         "GCONV_PATH",
         "NLSPATH",
         "LOCPATH",
         "HOSTALIASES",
+        "RESOLV_HOST_CONF",
         "RES_OPTIONS",
         "LOCALDOMAIN",
         "TERMINFO",
         "TERMINFO_DIRS",
         "TERMCAP",
         "INPUTRC",
+        "SSH_ASKPASS",
+        "SSH_AUTH_SOCK",
+        "GIT_PAGER",
+        "KUBECONFIG",
+        "DOCKER_HOST",
+        "DOCKER_CONFIG",
+        "AWS_CONFIG_FILE",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "BOTO_CONFIG",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "CURL_HOME",
+        "WGETRC",
+        "GITCONFIG",
+        "LANG",
+        "LANGUAGE",
+        "GOFLAGS",
+        "GOPROXY",
+        "GOPRIVATE",
+        "GOSUMDB",
+        "GONOSUMDB",
+        "GONOSUMCHECK",
+        "GOPATH",
+        "GOROOT",
+        "GOBIN",
+        "GOENV",
+        "GOCACHE",
+        "GOMODCACHE",
+        "GOTOOLCHAIN",
+        "RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "RUSTC_WRAPPER",
+        "RUSTC",
     }
 )
-_RESERVED_ENV_PREFIXES: Final[tuple[str, ...]] = (
+#: HARD DENY prefixes.
+_HARD_DENY_PREFIXES: Final[tuple[str, ...]] = (
     "LD_",
     "DYLD_",
     "BASH_FUNC_",
     "GIT_",
+    "LC_",
+    "SSL_CERT_",
     "PIP_",
     "UV_",
-    "NPM_CONFIG_",
+    "NPM_",
     "YARN_",
-    # Locale: a multibyte locale such as BIG5 lets a quoted value's backslash
-    # be read as part of a character, which reopens injection.
-    "LC_",
+    "PNPM_",
+    "CARGO_",
+    "RUSTUP_",
+    "MAVEN_",
+    "GRADLE_",
+    "DOCKER_",
+    "PYTHON",
+    "PERL",
+    "RUBY",
 )
+#: HARD DENY suffixes: any name ending one of these is a tool/interpreter
+#: control or a traffic redirect, whatever its prefix.
+_HARD_DENY_SUFFIXES: Final[tuple[str, ...]] = (
+    "PATH",
+    "_OPTIONS",
+    "OPTS",
+    "_OPT",
+    "_ENV",
+    "STARTUP",
+    "_COMMAND",
+    "_CMD",
+    "ASKPASS",
+    "_PROXY",
+    "_HOME",
+    "RC",
+    "_CONFIG",
+    "_CONF",
+    "_PRELOAD",
+    "_LIBRARY",
+    "_LIBRARY_PATH",
+    "_INSERT_LIBRARIES",
+    "_EDITOR",
+    "_PAGER",
+    "_SHELL",
+    "_HOOK",
+    "_HOOKS",
+    "_CA_BUNDLE",
+    "_CA_CERTS",
+    "_CERT_FILE",
+    "_CERT_DIR",
+    "_BASE_URL",
+    "_API_BASE",
+    "_ENDPOINT",
+    "_INDEX_URL",
+    "_REGISTRY",
+    "_REGISTRIES",
+    "_MIRROR",
+    "_MIRRORS",
+    "_CREDENTIALS",
+    "_CREDENTIALS_FILE",
+    "_TOOL_OPTIONS",
+)
+#: HARD DENY substrings: a redirect target can sit mid-name (``*_REGISTRY_*``).
+_HARD_DENY_SUBSTRINGS: Final[tuple[str, ...]] = ("_REGISTRY", "_BASE_URL", "_INDEX_URL")
 
 
 class EnvProblem(BaseModel):
@@ -268,22 +418,68 @@ class EnvFileRejected(DaimonError):
         return f"{self.rejection} (lines {lines})"
 
 
-def is_reserved_env_name(name: str) -> bool:
-    """Whether exporting `name` into the sandbox would change how its tools behave."""
+def env_name_hard_denied(name: str) -> bool:
+    """LAYER 1. Whether exporting `name` would hand control to some later tool.
+
+    Structural, not a bare list: a set of exact names plus prefix, suffix and
+    substring classes covering interpreter and archiver option variables,
+    loader/locale/CA overrides, package-manager config and the endpoint
+    variables that redirect an SDK's own traffic. Applied to every stored key
+    and again when the `.env` is assembled, for admins too.
+    """
     upper = name.upper()
-    return upper in _RESERVED_ENV_NAMES or upper.startswith(_RESERVED_ENV_PREFIXES)
+    if upper in _HARD_DENY_EXACT:
+        return True
+    if upper.startswith(_HARD_DENY_PREFIXES):
+        return True
+    if upper.endswith(_HARD_DENY_SUFFIXES):
+        return True
+    return any(part in upper for part in _HARD_DENY_SUBSTRINGS)
 
 
-def env_name_problem(name: str) -> Literal["bad_name", "reserved_name"] | None:
-    """Why `name` cannot be stored as a key, or None when it can.
+def env_name_member_writable(name: str) -> bool:
+    """LAYER 2. Whether a non-admin may write a key under `name`.
 
-    The single rule every write path applies: a POSIX shell identifier that is
-    not a reserved name.
+    A short upper-snake name that ends in a credential suffix and is neither a
+    redirection suffix (``*_URL``/``*_HOST``) nor hard-denied, plus the two
+    documented CLI-token names. An admin is not bound by this — only by
+    `env_name_hard_denied`.
+    """
+    if env_name_hard_denied(name):
+        return False
+    if name in _MEMBER_ALLOW_EXACT:
+        return True
+    if _MEMBER_NAME_SHAPE.fullmatch(name) is None:
+        return False
+    if name.endswith(_MEMBER_DENY_SUFFIXES):
+        return False
+    return name.endswith(_MEMBER_ALLOW_SUFFIXES)
+
+
+def is_reserved_env_name(name: str) -> bool:
+    """Back-compat alias for the hard-deny layer."""
+    return env_name_hard_denied(name)
+
+
+def env_name_problem(
+    name: str, *, is_admin: bool = False
+) -> Literal["bad_name", "reserved_name", "not_credential_name"] | None:
+    """Why `name` cannot be stored as a key by this writer, or None when it can.
+
+    ``bad_name`` — not a POSIX identifier at all.
+    ``reserved_name`` — hard-denied for everyone (Layer 1).
+    ``not_credential_name`` — a non-admin wrote a name outside the member
+    allowlist (Layer 2); an admin could have.
+
+    Callers that do not know the writer (the store, the `.env` assembler) leave
+    `is_admin` at its default and so apply Layer 1 alone.
     """
     if ENV_NAME_PATTERN.fullmatch(name) is None:
         return "bad_name"
-    if is_reserved_env_name(name):
+    if env_name_hard_denied(name):
         return "reserved_name"
+    if not is_admin and not env_name_member_writable(name):
+        return "not_credential_name"
     return None
 
 
@@ -350,12 +546,16 @@ def _parse_value(body: str) -> str | None:
     return body
 
 
-def parse_env_file(text: str) -> tuple[EnvEntry, ...]:
+def parse_env_file(text: str, *, member_writable_only: bool = False) -> tuple[EnvEntry, ...]:
     """Parse the documented subset, or reject the whole file.
 
     Every line is parsed before anything is raised, so the person gets the
     full picture in one pass rather than one error per upload. Raises
     `EnvFileRejected`; returns at least one entry when it returns.
+
+    Hard-denied names are rejected always. `member_writable_only=True` (an
+    upload submitted by a non-admin) additionally rejects any name outside the
+    member credential allowlist, with `"not_credential_name"`.
     """
     entries: list[EnvEntry] = []
     problems: dict[EnvRejection, list[EnvProblem]] = {kind: [] for kind in _REJECTION_PRIORITY}
@@ -376,12 +576,15 @@ def parse_env_file(text: str) -> tuple[EnvEntry, ...]:
             problems["syntax"].append(EnvProblem(name=None, line=number))
             continue
         name = name_part.strip()
-        name_problem = env_name_problem(name)
+        name_problem = env_name_problem(name, is_admin=not member_writable_only)
         if name_problem == "bad_name":
             problems["bad_name"].append(EnvProblem(name=None, line=number))
             continue
         if name_problem == "reserved_name":
             problems["reserved_name"].append(EnvProblem(name=name, line=number))
+            continue
+        if name_problem == "not_credential_name":
+            problems["not_credential_name"].append(EnvProblem(name=name, line=number))
             continue
         value = _parse_value(value_part.strip())
         if value is None or "\0" in value:
