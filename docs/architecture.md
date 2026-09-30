@@ -217,7 +217,10 @@ daimon tenants access-policy set discord GUILD_ID --invoker USER_ID --invoker US
     --protected-channel CHANNEL_ID --protected-category CATEGORY_ID \
     --sealed-channel CHANNEL_ID [--dm-memory-read-only]
 daimon tenants access-policy set discord GUILD_ID \
-    --pin-agent AGENT=CHANNEL_ID --pin-agent AGENT=CHANNEL_ID
+    --add-pin-agent AGENT=CHANNEL_ID --add-pin-agent AGENT=CHANNEL_ID
+daimon tenants access-policy set discord GUILD_ID --remove-pin-agent AGENT[=CHANNEL_ID]
+daimon tenants access-policy set discord GUILD_ID \
+    --pin-agent AGENT=CHANNEL_ID [--replace-pins]   # replace every pin
 daimon tenants access-policy set discord GUILD_ID --clear   # back to open
 ```
 
@@ -258,6 +261,12 @@ a member could otherwise borrow it:
 
 Each flag given replaces that whole field (repeat it for several ids);
 fields not given keep their stored value, including concurrent CLI edits.
+Pins are edited in place instead: `--add-pin-agent` adds channels to one
+agent's pin and `--remove-pin-agent` drops one channel or the whole pin, and
+every other agent's pin is kept, so onboarding a second client never unpins
+the first. Removing a pin that isn't stored is refused. `--pin-agent` still
+replaces the whole map, but refuses to drop an agent it doesn't name unless
+`--replace-pins` is given. Every `set` prints the resulting policy.
 Edits and clears lock the tenant row for their transaction, even when no policy
 row exists yet. Every supplied id is validated before writing: Discord ids are
 15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with
