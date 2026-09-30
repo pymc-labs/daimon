@@ -33,6 +33,7 @@ Cost/usage footer on terminal.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
@@ -163,6 +164,23 @@ def _fmt_tokens(n: int) -> str:
     return f"{n / 1000:.1f}".rstrip("0").rstrip(".") + "k"
 
 
+def to_fallback_text(state: State, *, now: float | None) -> str:
+    """The running card's headline in plain words, e.g. ``Working · 1m 5s``.
+
+    Slack shows it in notifications and to screen readers instead of the blocks.
+    """
+    return _headline(state, now, bold=lambda word: word)
+
+
+def _headline(state: State, now: float | None, *, bold: Callable[[str], str]) -> str:
+    elapsed_seconds = now - state.started_at if now is not None and state.started_at else None
+    return format_headline(
+        is_working=state.phase is TurnPhase.TOOL_RUNNING,
+        elapsed_seconds=elapsed_seconds,
+        bold=bold,
+    )
+
+
 def to_blocks(
     state: State, *, now: float | None, cancel_key: str | None = None
 ) -> list[dict[str, Any]]:
@@ -209,12 +227,7 @@ def to_blocks(
         return blocks
 
     # Non-terminal: the headline, the tool lines, then the latest draft.
-    elapsed_seconds = now - state.started_at if now is not None and state.started_at else None
-    headline = format_headline(
-        is_working=state.phase is TurnPhase.TOOL_RUNNING,
-        elapsed_seconds=elapsed_seconds,
-        bold=lambda word: f"*{word}*",
-    )
+    headline = _headline(state, now, bold=lambda word: f"*{word}*")
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": headline}},
     ]

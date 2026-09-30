@@ -27,7 +27,7 @@
             'type': 'actions',
           }),
         ]),
-        'text': 'thinking …',
+        'text': 'Thinking · 0s',
       }),
     ]),
     'updates': list([
@@ -56,7 +56,7 @@
             'type': 'actions',
           }),
         ]),
-        'text': 'thinking …',
+        'text': 'Thinking · 12s',
       }),
       dict({
         'blocks': list([
@@ -120,7 +120,7 @@
             'type': 'actions',
           }),
         ]),
-        'text': 'thinking …',
+        'text': 'Thinking · 0s',
       }),
     ]),
     'updates': list([
@@ -160,7 +160,7 @@
             'type': 'actions',
           }),
         ]),
-        'text': 'tool_running …',
+        'text': 'Working · 6s',
       }),
       dict({
         'blocks': list([

@@ -57,6 +57,7 @@ from daimon.adapters.slack.blockkit import (
     TurnPhase,
     format_termination_notice,
     to_blocks,
+    to_fallback_text,
     update,
     update_activity,
 )
@@ -279,7 +280,7 @@ class SlackTurnLifecycle:
         else:
             cancel_key = self._status_ts
         blocks = to_blocks(self._state, now=now, cancel_key=cancel_key)
-        text = f"{self._state.phase.value} …"
+        text = to_fallback_text(self._state, now=now)
 
         if self._status_ts is None:
             # First flush — immediate, no debounce.

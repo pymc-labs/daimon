@@ -20,6 +20,7 @@ from daimon.adapters.slack.blockkit import (
     TurnPhase,
     _fmt_tokens,
     to_blocks,
+    to_fallback_text,
     to_interrupted_blocks,
     update,
     update_activity,
@@ -147,6 +148,12 @@ class TestToBlocks:
         sections = _find_blocks_by_type(to_blocks(state, now=112.0), "section")
         assert sections[0]["text"]["text"] == "*Thinking* · 12s", (
             "the first section is the bold state word and the elapsed time"
+        )
+
+    def test_fallback_text_is_the_headline_in_plain_words(self) -> None:
+        state = _make_state(phase=TurnPhase.TOOL_RUNNING, started_at=1.0)
+        assert to_fallback_text(state, now=66.0) == "Working · 1m 5s", (
+            "notifications read the headline, not an internal phase name"
         )
 
     def test_running_state_has_cancel_button_with_correct_action_id(self) -> None:
