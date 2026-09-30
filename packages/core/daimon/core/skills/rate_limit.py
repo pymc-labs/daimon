@@ -13,6 +13,7 @@ from time import monotonic
 
 import httpx
 from anthropic import DEFAULT_CONNECTION_LIMITS
+from daimon.core.anthropic_spend import spend_limit_response
 
 
 class _Pacer:
@@ -36,7 +37,7 @@ def _process_pacer(requests_per_minute: int) -> _Pacer:
 
 
 class SkillsRateLimitedTransport(httpx.AsyncBaseTransport):
-    """Pace every ``/v1/skills`` request, including SDK retry attempts."""
+    """Pace Skills requests and stop SDK retries at the monthly spend cap."""
 
     def __init__(
         self, requests_per_minute: int, *, inner: httpx.AsyncBaseTransport | None = None
@@ -51,7 +52,12 @@ class SkillsRateLimitedTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.startswith("/v1/skills"):
             await self._pacer.wait()
-        return await self._inner.handle_async_request(request)
+        response = await self._inner.handle_async_request(request)
+        if response.status_code == 429:
+            await response.aread()
+            if spend_limit_response(response) == "org_cap":
+                response.headers["x-should-retry"] = "false"
+        return response
 
     async def aclose(self) -> None:
         await self._inner.aclose()

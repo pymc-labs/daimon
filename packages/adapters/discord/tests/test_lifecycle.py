@@ -17,8 +17,10 @@ from typing import Any, NoReturn
 
 import daimon.adapters.discord.lifecycle as lifecycle_module
 import discord
+import httpx
 import pytest
 import structlog
+from anthropic import BadRequestError, RateLimitError
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
@@ -104,6 +106,52 @@ def _message_event(text: str = "I'll look that up") -> Any:
 
 def _make_success_state(text: str = "Hello response") -> TurnState:
     return TurnState(content=[TextBlock(kind="text", text=text)])
+
+
+@pytest.mark.parametrize("status", [400, 429])
+async def test_spend_limit_posts_notice_and_error_log(
+    status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id = uuid.uuid4()
+    alerts: list[str] = []
+    monkeypatch.setattr(
+        lifecycle_module, "alert_ops", lambda url, *, key, message: alerts.append(key)
+    )
+    lc, _, edits = _make_lifecycle(tenant_id=tenant_id)
+    await lc.post_initial()
+    body = (
+        {"type": "rate_limit_error", "details": {"error_code": "enforced_spend_limit_reached"}}
+        if status == 429
+        else {
+            "type": "invalid_request_error",
+            "message": "You have reached your specified API usage limits",
+        }
+    )
+    response = httpx.Response(
+        status,
+        json={"type": "error", "error": body},
+        request=httpx.Request("GET", "https://api.anthropic.com/v1/models"),
+    )
+    error = (
+        RateLimitError("limit", response=response, body=body)
+        if status == 429
+        else BadRequestError("limit", response=response, body=body)
+    )
+    turn_error = TurnError(kind="upstream", cause=error)
+    with structlog.testing.capture_logs() as logs:
+        await lc.on_terminal_failure(TurnState(error=turn_error), turn_error)
+    assert alerts == [f"spend_limit:{'org_cap' if status == 429 else 'user_limit'}"]
+    embed = edits[-1][1]["embeds"][0]
+    assert (
+        "Daimon has reached its model usage limit for now. The operators have been notified."
+        in embed.description
+    )
+    assert {
+        "event": "anthropic.spend_limit_reached",
+        "log_level": "error",
+        "tenant_id": str(tenant_id),
+        "limit": "org_cap" if status == 429 else "user_limit",
+    } in logs
 
 
 # ---------------------------------------------------------------------------

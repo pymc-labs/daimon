@@ -79,6 +79,16 @@ class LogSettings(BaseModel):
     )
 
 
+class OpsSettings(BaseModel):
+    alert_webhook_url: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Discord webhook URL for short operator alerts about new installs, Stripe top-ups, "
+            "and Anthropic limits. Unset disables alerts. Keep the URL secret."
+        ),
+    )
+
+
 class McpSettings(BaseModel):
     """MCP adapter config.
 
@@ -902,6 +912,7 @@ class Settings(BaseSettings):
     )
     cli: CLISettings = Field(default_factory=CLISettings)
     log: LogSettings = Field(default_factory=LogSettings)
+    ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     discord: DiscordSettings | None = None

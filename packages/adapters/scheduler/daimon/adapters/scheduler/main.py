@@ -35,7 +35,7 @@ import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
-from daimon.core.access_policy import is_invoker_allowed, is_write_protected
+from daimon.core.access_policy import is_invoker_allowed, is_outside_agent_pin, is_write_protected
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -85,7 +85,7 @@ from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
-from daimon.core.usage_sweep import sweep_headless_usage
+from daimon.core.usage_sweep import UsageSweepWatermark, sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sqlalchemy import text
@@ -236,6 +236,15 @@ async def _build_fire(
                     policy, external_user_id=row.created_by_user_id, is_admin=is_admin
                 )
                 policy_error = None if allowed else "invoker_not_allowed"
+                # A pinned agent fires only when it posts straight into one of
+                # its pinned channels; `_check_agent_pin` refuses anything else
+                # at save time, and this holds for a pin added since.
+                if policy_error is None and is_outside_agent_pin(
+                    policy,
+                    agent_names=(row.agent_name,),
+                    channel_id=target.channel_id if target is not None else None,
+                ):
+                    policy_error = "agent_pinned_elsewhere"
             if policy_error is not None:
                 log.info(
                     "routine.skipped.invoker_policy",
@@ -393,14 +402,18 @@ async def _sweep_pending_files(
 
 
 async def _sweep_headless_usage(
-    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession], *, markup: Decimal
+    client: AsyncAnthropic,
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    markup: Decimal,
+    watermark: UsageSweepWatermark,
 ) -> None:
     """Backfill usage for headless MCP turns once. Boundary catch: a sweep
     failure must not kill the scheduler loop — idempotent recording means the
     next tick re-reads and records anything missed.
     """
     try:
-        await sweep_headless_usage(client, sm, markup=markup)
+        await sweep_headless_usage(client, sm, markup=markup, watermark=watermark)
     except (anthropic.APIError, SQLAlchemyError):
         # Named boundary: a sweep failure (upstream MA error OR a DB write that
         # trips a constraint, e.g. a stray foreign-tenant session) must not kill
@@ -565,6 +578,7 @@ async def run(
     )
 
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
+    usage_watermark = UsageSweepWatermark()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -588,7 +602,9 @@ async def run(
                 wait_for_completion=True,
             )
             await _sweep_pending_files(client, sm)
-            await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
+            await _sweep_headless_usage(
+                client, sm, markup=settings.billing.markup, watermark=usage_watermark
+            )
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
@@ -616,7 +632,9 @@ async def run(
                 dispatcher=dispatcher,
             )
             await _sweep_pending_files(client, sm)
-            await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
+            await _sweep_headless_usage(
+                client, sm, markup=settings.billing.markup, watermark=usage_watermark
+            )
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)

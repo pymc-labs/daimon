@@ -367,6 +367,7 @@ def create_mcp_app(
             build_stripe_webhook(
                 sessionmaker=effective_sessionmaker,
                 billing_config=effective_billing_config,
+                alert_webhook_url=effective_settings.ops.alert_webhook_url,
             ),
             methods=["POST"],
         )
