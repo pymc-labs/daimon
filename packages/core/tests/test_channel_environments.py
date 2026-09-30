@@ -8,6 +8,7 @@ import pytest
 from daimon.core.answering_map import AnsweringMap, ChannelEnvironment
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
+    build_archive_environment_note,
     build_clear_environment_note,
     build_environment_resolution_note,
     build_set_environment_note,
@@ -119,6 +120,18 @@ async def test_save_scope_environment_without_a_channel_writes_the_tenant_defaul
     assert previous is None, "the tenant had no environment of its own"
     assert noop is None, "clearing a channel with nothing set is a no-op"
     assert row is not None and row.environment_name == "shared", "the tenant row names it"
+
+
+def test_archive_note_counts_the_cleared_picks() -> None:
+    assert "No channel or workspace picked it" in build_archive_environment_note(
+        environment_name="gpu", cleared=0
+    ), "an unpicked environment says nothing else changed"
+    assert "cleared 1 pick of it" in build_archive_environment_note(
+        environment_name="gpu", cleared=1
+    ), "one pick is singular"
+    assert "cleared 3 picks of it" in build_archive_environment_note(
+        environment_name="gpu", cleared=3
+    ), "the note says how many picks were cleared"
 
 
 def test_environment_notes_name_the_scope_and_the_tier() -> None:

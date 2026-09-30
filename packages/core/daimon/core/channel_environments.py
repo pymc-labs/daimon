@@ -57,6 +57,17 @@ def build_missing_environment_note(environment_name: str) -> str:
     return f"The {environment_name} environment no longer exists. Nothing changed."
 
 
+def build_archive_environment_note(*, environment_name: str, cleared: int) -> str:
+    """What archiving an environment did to the channels and workspace that picked it."""
+    if cleared == 0:
+        return f"Archived the {environment_name} environment. No channel or workspace picked it."
+    picks = "1 pick" if cleared == 1 else f"{cleared} picks"
+    return (
+        f"Archived the {environment_name} environment and cleared {picks} of it; where it "
+        "was picked, the next tier's environment applies from the next message."
+    )
+
+
 def build_clear_environment_note(*, channel: str | None, cleared: bool) -> str:
     """What changed after an environment is cleared; `cleared` False means nothing did."""
     if not cleared:
@@ -203,6 +214,7 @@ __all__ = [
     "ENVIRONMENT_OPTION_INHERIT",
     "NOT_OFFERED_NOTE",
     "EnvironmentPicker",
+    "build_archive_environment_note",
     "build_clear_environment_note",
     "build_environment_resolution_note",
     "build_missing_environment_note",
