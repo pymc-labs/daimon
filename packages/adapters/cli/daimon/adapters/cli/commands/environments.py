@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Annotated, cast
 
@@ -24,6 +25,7 @@ from daimon.core.defaults.metadata import build_metadata
 from daimon.core.errors import StoreError
 from daimon.core.specs import load_environment_spec
 from daimon.core.stores.identity import get_or_create_cli_principal
+from daimon.core.stores.scoped_config_write import clear_environment_references
 from rich.console import Console
 
 environments_app = typer.Typer(
@@ -199,7 +201,21 @@ async def environments_archive(*, rt: CliRuntime, console: Console, name: str, y
     if env is None:
         raise StoreError(f"no environment named {name!r} in your account or system defaults.")
     await rt.anthropic.beta.environments.archive(env.id)
+    await _clear_picks(rt, console, tenant_id=tenant_id, name=name)
     console.print(f"[green]✓ archived environment {name!r}[/green]")
+
+
+async def _clear_picks(
+    rt: CliRuntime, console: Console, *, tenant_id: uuid.UUID, name: str
+) -> None:
+    """Clear channel and tenant picks of a removed environment so they fall through."""
+    async with rt.sessionmaker() as session, session.begin():
+        cleared = await clear_environment_references(
+            session, tenant_id=tenant_id, environment_name=name
+        )
+    if cleared:
+        picks = "pick" if cleared == 1 else "picks"
+        console.print(f"cleared {cleared} channel or tenant {picks} of {name!r}")
 
 
 @environments_app.command("delete")
@@ -237,6 +253,7 @@ async def environments_delete(*, rt: CliRuntime, console: Console, name: str, ye
             archived_instead = True
         else:
             raise
+    await _clear_picks(rt, console, tenant_id=tenant_id, name=name)
     if archived_instead:
         console.print(
             f"[green]✓ archived environment {name!r} (delete blocked: environment in use)[/green]"
