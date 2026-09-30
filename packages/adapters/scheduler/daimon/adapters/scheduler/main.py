@@ -38,6 +38,7 @@ from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core.access_policy import is_invoker_allowed, is_outside_agent_pin, is_write_protected
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.channel_isolation import load_channel_isolation
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -246,6 +247,15 @@ async def _build_fire(
                     channel_id=target.channel_id if target is not None else None,
                 ):
                     policy_error = "agent_pinned_elsewhere"
+                # An isolated channel's own agent posts only inside it, and
+                # only its own agents post there; routing may have changed
+                # since the routine was saved.
+                if policy_error is None and policy.isolated_channel_ids:
+                    isolation = await load_channel_isolation(
+                        s, tenant_id=row.tenant_id, default=deployment_default, policy=policy
+                    )
+                    if isolation.routine_crosses(row):
+                        policy_error = "channel_isolated"
             if policy_error is not None:
                 log.info(
                     "routine.skipped.invoker_policy",
