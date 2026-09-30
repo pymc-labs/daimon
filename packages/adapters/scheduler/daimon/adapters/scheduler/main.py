@@ -271,7 +271,7 @@ async def _build_fire(
             now=datetime.now(UTC),
         ):
             if (observation := current_outcome.get()) is not None:
-                observation.finish(reason=TerminationReason.ADMISSION_DENIED)
+                observation.finish(reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
             log.info(
                 "routine.skipped.over_channel_budget",
                 routine_id=str(row.id),
