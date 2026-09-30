@@ -532,6 +532,7 @@ class TimedPromoGrantRow(BaseModel):
     credit_ends_at: datetime
     granted_at: datetime | None
     expired_at: datetime | None
+    expired_usd: Decimal | None
 
 
 class SeededSkillRow(BaseModel):

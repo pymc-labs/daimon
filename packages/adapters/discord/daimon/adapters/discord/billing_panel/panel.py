@@ -388,7 +388,7 @@ class BillingPanelView(discord.ui.LayoutView):
             self.add_item(lookup_row)
 
         buttons: list[discord.ui.Button[BillingPanelView]] = [_RefreshButton(), _DoneButton()]
-        if is_admin:
+        if is_admin and state.has_redeemable_promo_code:
             buttons.insert(0, _RedeemButton())
         self.add_item(discord.ui.ActionRow(*buttons))
 
@@ -416,7 +416,10 @@ class _RefreshButton(discord.ui.Button["BillingPanelView"]):
 
 
 class _RedeemButton(discord.ui.Button["BillingPanelView"]):
-    """Opens the redeem-code modal. Admin card only; re-gated on click and on submit."""
+    """Opens the redeem-code modal. Admin card only, while a code is redeemable.
+
+    Re-gated on click and on submit.
+    """
 
     def __init__(self) -> None:
         super().__init__(label="🎟️ Redeem code", style=discord.ButtonStyle.secondary)

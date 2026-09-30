@@ -203,28 +203,24 @@ def build_billing_container(
                     "description": {"type": "plain_text", "text": description_text},
                 }
             )
-        blocks.append({"type": "divider"})
-        blocks.append(
+        elements: list[dict[str, Any]] = [
             {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "static_select",
-                        "action_id": "billing_topup",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "💳 Top up server credit…",
-                        },
-                        "options": topup_options,
-                    },
-                    {
-                        "type": "button",
-                        "action_id": REDEEM_OPEN_ACTION_ID,
-                        "text": {"type": "plain_text", "text": "🎟️ Redeem code"},
-                    },
-                ],
+                "type": "static_select",
+                "action_id": "billing_topup",
+                "placeholder": {"type": "plain_text", "text": "💳 Top up server credit…"},
+                "options": topup_options,
             }
-        )
+        ]
+        if state.has_redeemable_promo_code:
+            elements.append(
+                {
+                    "type": "button",
+                    "action_id": REDEEM_OPEN_ACTION_ID,
+                    "text": {"type": "plain_text", "text": "🎟️ Redeem code"},
+                }
+            )
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "actions", "elements": elements})
 
     else:
         # Member (non-admin) branch

@@ -83,8 +83,6 @@ class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
                 code=str(self.code_in.value or ""),
                 now=datetime.now(UTC),
             )
-            if not isinstance(result, PromoRedeemRefused):
-                await self.rerender(interaction)
             await interaction.followup.send(redeem_result_text(result), ephemeral=True)
         except (DaimonError, discord.HTTPException, SQLAlchemyError) as exc:
             # Deferred already, so the admin gets an answer whatever failed.
@@ -99,3 +97,14 @@ class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
             await interaction.followup.send(
                 render_error(exc, request_id=request_id), ephemeral=True
             )
+            return
+        if isinstance(result, PromoRedeemRefused):
+            return
+        try:
+            await self.rerender(interaction)
+        except (DaimonError, discord.HTTPException, SQLAlchemyError) as exc:
+            # The credit landed and the reply said so; only the panel is stale.
+            _log.warning(
+                "billing_redeem.rerender_failed", guild_id=interaction.guild_id, exc_info=exc
+            )
+            capture_exception_with_scope(exc)

@@ -61,7 +61,7 @@ from daimon.core.ma_resolver import (
 from daimon.core.observability import init_sentry
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.pricing import MODEL_PRICING
-from daimon.core.promo_credit import settle_promo_credit
+from daimon.core.promo_settlement import settle_promo_credit
 from daimon.core.routine_delivery import (
     DirectPost,
     agent_posted_to,
@@ -490,8 +490,10 @@ async def _sweep_hub_oauth_kv(sm: async_sessionmaker[AsyncSession]) -> None:
 
 
 async def _settle_promo_credit(sm: async_sessionmaker[AsyncSession]) -> None:
-    """Grant timed promo credit whose window opened and expire what is left where it
-    closed. Idempotent; boundary catch so a DB failure retries on the next tick.
+    """Grant opened timed promo windows, expire closed ones, credit back late spend.
+
+    Runs after the usage sweep, so late debits are on the ledger first.
+    Idempotent; boundary catch so a DB failure retries on the next tick.
     """
     try:
         await settle_promo_credit(sm, now=datetime.now(UTC))
