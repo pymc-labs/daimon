@@ -5189,7 +5189,7 @@ def test_create_spec_accepts_the_current_generation_models() -> None:
         _build_create_spec,  # pyright: ignore[reportPrivateUsage]
     )
 
-    for model in ("claude-sonnet-5", "claude-opus-5"):
+    for model in ("claude-sonnet-5-5", "claude-opus-5-5"):
         spec = _build_create_spec(
             name="a",
             model=model,

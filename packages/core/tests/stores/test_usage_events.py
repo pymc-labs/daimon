@@ -110,7 +110,7 @@ async def test_cost_for_user_in_tenant_since_filters_by_occurred_at(
         platform_user_id="u1",
         since=past,
     )
-    assert cost_past == 15.0, "since filter in the past should match all rows"
+    assert cost_past == 5.0, "since filter in the past should match all rows"
 
 
 async def test_turn_count_for_user_in_tenant_since_returns_zero_when_no_rows(
@@ -231,7 +231,7 @@ async def test_cost_for_tenant_since_excludes_null_user_rows(
         tenant_id=tenant_id,
         since=past,
     )
-    assert cost == 15.0, "tenant cost should exclude rows with NULL platform_user_id"
+    assert cost == 5.0, "tenant cost should exclude rows with NULL platform_user_id"
 
 
 async def test_cost_for_tenant_since_sums_across_users(
@@ -372,7 +372,7 @@ async def test_costs_by_user_in_tenant_since_excludes_null_user_rows(
         since=past,
     )
     assert list(out.keys()) == ["u1"], "costs_by_user should exclude NULL platform_user_id"
-    assert out["u1"] == 15.0, "u1 cost should equal repriced single-row cost"
+    assert out["u1"] == 5.0, "u1 cost should equal repriced single-row cost"
 
 
 async def test_costs_by_user_in_tenant_since_matches_per_user_cost_helper(
@@ -413,7 +413,7 @@ async def test_costs_by_user_in_tenant_since_folds_models_per_user(
     tenant_id: uuid.UUID,
 ) -> None:
     one_million = ma_model_usage(input_tokens=1_000_000, output_tokens=0)
-    # u1 uses opus ($15 / 1M input) and sonnet ($3 / 1M input).
+    # u1 uses opus ($5 / 1M input) and sonnet ($3 / 1M input).
     await usage_events.record(
         db_session,
         tenant_id=tenant_id,
@@ -439,7 +439,7 @@ async def test_costs_by_user_in_tenant_since_folds_models_per_user(
         since=past,
     )
     assert list(out.keys()) == ["u1"], "single user across multiple models should fold to one entry"
-    assert out["u1"] == 18.0, "u1 cost should sum opus ($15) + sonnet ($3) across models"
+    assert out["u1"] == 8.0, "u1 cost should sum opus ($5) + sonnet ($3) across models"
 
 
 async def test_turns_by_user_in_tenant_since_returns_empty_dict_when_no_rows(
