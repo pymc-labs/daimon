@@ -29,6 +29,7 @@ from daimon.adapters.mcp.tools.discord import (
 from daimon.adapters.mcp.tools.discord._credential_button import (
     edit_card_replaced as edit_discord_card_replaced,
 )
+from daimon.adapters.mcp.tools.reachability import target_facts
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin, resolve_setup_agent
 from daimon.adapters.mcp.tools.slack._credential_button import (
     _post_slack_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
@@ -49,11 +50,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
-from daimon.core.operation_policy import (
-    TargetFacts,
-    decide_operation,
-    needs_reachability_read,
-)
+from daimon.core.operation_policy import decide_operation
 from daimon.core.stores.agent_files import get_agent_file
 from daimon.core.stores.credential_requests import (
     create_credential_request,
@@ -62,7 +59,6 @@ from daimon.core.stores.credential_requests import (
     update_credential_request_message,
 )
 from daimon.core.stores.domain import CredentialRequestRow, TurnOriginRow
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -232,26 +228,14 @@ async def _require_key_replacement_allowed(
     `key_replace` is an attachment operation: an admin is allowed on any
     target (that is the first-run onboarding step), a non-admin is refused on
     a defaults-managed agent and on one that currently answers somewhere in
-    the tenant. The reachability read is paid for only when the policy says
-    the answer actually depends on it.
+    the tenant outside the channels they administer. The reachability read is
+    paid for only when the policy says the answer actually depends on it.
     """
     is_daimon_managed = ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    reachable = False
-    if needs_reachability_read(
-        "key_replace", is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
-    ):
-        async with runtime.session_factory() as session:
-            reachable = await is_agent_reachable_in_tenant(
-                session,
-                tenant_id=auth.tenant_id,
-                agent_name=ma_agent.name,
-                default=runtime.deployment_default,
-            )
-    outcome = decide_operation(
-        "key_replace",
-        is_admin=auth.is_admin,
-        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+    facts = await target_facts(
+        runtime, auth, "key_replace", agent_name=ma_agent.name, is_daimon_managed=is_daimon_managed
     )
+    outcome = decide_operation("key_replace", is_admin=auth.is_admin, target=facts)
     if outcome in ("managed_agent", "needs_admin"):
         raise ToolError(
             f"'{ma_agent.name}' is shared with everyone here, so replacing the key "

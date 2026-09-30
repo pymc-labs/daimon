@@ -17,6 +17,8 @@ from __future__ import annotations
 import uuid
 
 from daimon.core.stores.accounts import get_account_with_tenant
+from daimon.core.stores.channel_admins import has_channel_admin_grant
+from daimon.core.stores.domain import Role
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.providers.jwt import JWTVerifier
@@ -73,4 +75,17 @@ class DaimonJWTVerifier(JWTVerifier):
             access.claims["external_id"] = identity_row.external_id
             if identity_row.platform_user_id is not None:
                 access.claims["platform_user_id"] = identity_row.platform_user_id
+            # Always overwritten, so a token can never carry its own grant.
+            access.claims["platform_role_ids"] = list(identity_row.platform_role_ids)
+            access.claims["channel_admin"] = (
+                identity_row.role is not Role.ADMIN
+                and identity_row.platform_user_id is not None
+                and await has_channel_admin_grant(
+                    session,
+                    tenant_id=identity_row.tenant_id,
+                    platform=identity_row.platform,
+                    platform_user_id=identity_row.platform_user_id,
+                    role_ids=identity_row.platform_role_ids,
+                )
+            )
         return access

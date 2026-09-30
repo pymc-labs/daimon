@@ -22,13 +22,66 @@ from typing import Final
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.core.operation_policy import TargetFacts, decide_operation
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.agent_reach import load_target_facts
+from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
+from daimon.core.operation_policy import OperationKind, TargetFacts, decide_operation
+from daimon.core.stores.channel_admins import get_channel_admins
 from fastmcp.exceptions import ToolError
 
 REACHABILITY_GATED_FIELDS: Final[frozenset[str]] = frozenset(
     {"system", "model", "skills", "mcp_servers", "tools"}
 )
+
+
+def channel_admin_caller(auth: AuthIdentity) -> ChannelAdminCaller:
+    """The caller as channel admin grants see them. An agent credential is nobody."""
+    return ChannelAdminCaller(
+        platform_user_id=auth.platform_user_id if auth.agent_id is None else None,
+        role_ids=frozenset(auth.platform_role_ids) if auth.agent_id is None else frozenset(),
+        is_server_admin=auth.is_admin,
+    )
+
+
+async def target_facts(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    operation: OperationKind,
+    *,
+    agent_name: str,
+    is_daimon_managed: bool,
+) -> TargetFacts:
+    """Policy facts for `agent_name` in the caller's own tenant, read only when needed."""
+    async with runtime.session_factory() as session:
+        return await load_target_facts(
+            session,
+            operation,
+            tenant_id=auth.tenant_id,
+            platform=auth.platform or "",
+            agent_name=agent_name,
+            default=runtime.deployment_default,
+            caller=channel_admin_caller(auth),
+            is_daimon_managed=is_daimon_managed,
+        )
+
+
+async def require_channel_admin(
+    runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str
+) -> None:
+    """Raise ``ToolError`` unless the caller is a server admin or administers `channel_id`."""
+    if auth.is_admin:
+        return
+    grant = None
+    if auth.platform is not None and auth.agent_id is None:
+        async with runtime.session_factory() as session:
+            grant = await get_channel_admins(
+                session, tenant_id=auth.tenant_id, platform=auth.platform, channel_id=channel_id
+            )
+    if not is_channel_admin(channel_admin_caller(auth), grant=grant):
+        raise ToolError(
+            "This change needs a workspace or server admin, or an admin of that channel, "
+            "and the caller is neither. Tell them who can make it and give them a sentence "
+            "that admin can say, preserving the requested action and channel. Do not retry."
+        )
 
 
 async def require_admin_for_reachable_agent(
@@ -42,25 +95,18 @@ async def require_admin_for_reachable_agent(
     Returns immediately for an admin caller without touching the database.
     For a non-admin caller, reads the tenant's config cascade and raises when
     ``agent_name`` currently resolves for any user in this tenant (channel,
-    tenant, or deployment tier). ``tenant_id`` always comes from
-    ``auth.tenant_id`` — never from a caller-supplied parameter — so a caller
-    cannot point the read at another tenant's config rows. The decision
-    itself is `daimon.core.operation_policy.decide_operation`'s.
+    tenant, or deployment tier), unless the caller administers every channel
+    the agent answers in. ``tenant_id`` always comes from ``auth.tenant_id`` —
+    never from a caller-supplied parameter — so a caller cannot point the read
+    at another tenant's config rows. The decision itself is
+    `daimon.core.operation_policy.decide_operation`'s.
     """
     if auth.is_admin:
         return
-    async with runtime.session_factory() as session:
-        reachable = await is_agent_reachable_in_tenant(
-            session,
-            tenant_id=auth.tenant_id,
-            agent_name=agent_name,
-            default=runtime.deployment_default,
-        )
-    outcome = decide_operation(
-        "agent_spec_edit",
-        is_admin=False,
-        target=TargetFacts(is_daimon_managed=False, is_reachable_in_tenant=reachable),
+    facts = await target_facts(
+        runtime, auth, "agent_spec_edit", agent_name=agent_name, is_daimon_managed=False
     )
+    outcome = decide_operation("agent_spec_edit", is_admin=False, target=facts)
     if outcome == "needs_admin":
         raise ToolError(
             f"'{agent_name}' is currently the default agent for this workspace or a "

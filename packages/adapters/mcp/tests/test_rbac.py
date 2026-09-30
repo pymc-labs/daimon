@@ -522,3 +522,51 @@ async def test_agent_id_claim_session_discovers_neither_continuity_tool(
     assert not (set(CONTINUITY_TOOL_NAMES) & tool_names), (
         f"an agent_id-claim session must not discover a continuity tool; got: {tool_names}"
     )
+
+
+async def _search(app: ASGIApp, token: str, query: str) -> str:
+    result = await mcp_session(
+        app,
+        token=token,
+        method="tools/call",
+        params={"name": "search_tools", "arguments": {"query": query}},
+    )
+    content = result.get("result", result).get("content", [])  # type: ignore[union-attr]
+    return " ".join(item.get("text", "") for item in content if isinstance(item, dict))
+
+
+async def test_channel_admin_discovers_channel_default_tools_but_not_admin_ones(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A grant shows set/clear_agent_default; other admin tools stay hidden."""
+    from daimon.core.stores.channel_admins import set_channel_admins
+    from daimon.testing.factories import make_platform_principal
+
+    async with sessionmaker() as s, s.begin():
+        tenant = await make_tenant(s, platform="discord", workspace_id="guild-channel-admin")
+        tokens: list[str] = []
+        for user_id in ("u-channel-admin", "u-member"):
+            account = await make_account(s, tenant=tenant)
+            await make_platform_principal(
+                s, platform="discord", external_id=user_id, tenant=tenant, account=account
+            )
+            tokens.append(make_jwt(account_id=account.id))
+        admin = await make_account(s, tenant=tenant)
+        await accounts.set_role(s, admin.id, Role.ADMIN)
+        await set_channel_admins(
+            s,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="c1",
+            role_ids=[],
+            user_ids=["u-channel-admin"],
+            actor_account_id=None,
+        )
+    app = _make_app(sessionmaker)
+    channel_admin, member = tokens
+
+    assert "### set_agent_default" in await _search(app, channel_admin, "set agent default")
+    assert "### set_agent_default" not in await _search(app, member, "set agent default")
+    assert "### set_channel_admins" not in await _search(app, channel_admin, "channel admins")
+    admin_token = make_jwt(account_id=admin.id)
+    assert "### set_channel_admins" in await _search(app, admin_token, "channel admins")

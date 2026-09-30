@@ -473,7 +473,8 @@
         
         When ``channel_id`` is provided only that channel's default is cleared;
         omit it to clear the workspace-wide default.  If the scope had no
-        default the call is a no-op (idempotent).  Requires Manage Server (admin).
+        default the call is a no-op (idempotent).  Requires Manage Server (admin);
+        an admin of the channel may clear that channel's default.
         
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
@@ -496,6 +497,25 @@
             'default': None,
           }),
         }),
+        'type': 'object',
+      }),
+    }),
+    'clear_channel_admins': dict({
+      'description': '''
+        Remove every channel admin from one channel, leaving it to the server admins.
+        For example, stop the @growth-leads role running #growth. A no-op when the
+        channel has none. Requires Manage Server (admin).
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+        ]),
         'type': 'object',
       }),
     }),
@@ -2376,6 +2396,18 @@
         'type': 'object',
       }),
     }),
+    'list_channel_admins': dict({
+      'description': '''
+        Which channels have their own admins, and who they are. For example, who
+        administers #growth besides the server admins. Requires Manage Server (admin).
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'list_channel_budgets': dict({
       'description': 'List every channel budget in this server or workspace with its spend. Admin-only.',
       'parameters': dict({
@@ -3917,7 +3949,8 @@
         When ``channel_id`` is provided the default is scoped to that channel;
         omit it to set the workspace-wide default.  Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
-        core).  Requires Manage Server (admin).
+        core).  Requires Manage Server (admin); an admin of the channel may set
+        that channel's default.
         
         Discord: ``channel_id`` MUST be the parent channel's id — the one
         your context gives as
@@ -3961,6 +3994,48 @@
         }),
         'required': list([
           'agent_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_channel_admins': dict({
+      'description': '''
+        Name who administers one channel, on top of the server admins. For example,
+        let the @growth-leads role run #growth. Replaces that channel's whole list;
+        pass both lists empty to clear it. Requires Manage Server (admin).
+        
+        A channel admin may change agents that answer only in the channels they
+        administer (instructions, skills, keys, MCP servers) and set or clear those
+        channels' default agent. Built-in agents and the workspace default stay with
+        server admins.
+        
+        Ids are the platform's own: Discord role and user ids, Slack user ids (Slack
+        has no roles, so ``role_ids`` must be empty there). ``channel_id`` MUST be the
+        parent channel's id, never a thread's.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'role_ids': dict({
+            'items': dict({
+              'type': 'string',
+            }),
+            'type': 'array',
+          }),
+          'user_ids': dict({
+            'items': dict({
+              'type': 'string',
+            }),
+            'type': 'array',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'role_ids',
+          'user_ids',
         ]),
         'type': 'object',
       }),

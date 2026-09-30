@@ -87,6 +87,7 @@ CONDITIONAL_MODULES = ("channels", "media")
 TAG_LABELS: dict[str, str] = {
     "admin": "admin only",
     "agent-chat": "agent tokens only",
+    "channel-admin": "channel admins too",
     "discord": "Discord callers",
     "slack": "Slack callers",
 }

@@ -39,12 +39,11 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
+from daimon.core.operation_policy import decide_operation
 from daimon.core.stores.agent_files import delete_agent_file, list_agent_files
 from daimon.core.stores.agent_mcp_credentials import (
     delete_credential as delete_agent_mcp_credential,
 )
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
@@ -89,22 +88,10 @@ async def _detach_mcp_server_impl(
     # from an agent nobody has scoped; a member's own attach to a shared agent
     # still needs an admin to undo, because the removal reaches everyone.
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    reachable = False
-    if needs_reachability_read(
-        "mcp_remove", is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
-    ):
-        async with runtime.session_factory() as session:
-            reachable = await is_agent_reachable_in_tenant(
-                session,
-                tenant_id=auth.tenant_id,
-                agent_name=agent_name,
-                default=runtime.deployment_default,
-            )
-    outcome = decide_operation(
-        "mcp_remove",
-        is_admin=auth.is_admin,
-        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+    facts = await reachability.target_facts(
+        runtime, auth, "mcp_remove", agent_name=agent_name, is_daimon_managed=is_daimon_managed
     )
+    outcome = decide_operation("mcp_remove", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":
         raise ToolError(
             f"Disconnecting '{server_name}' from '{agent_name}' needs a workspace or server "
@@ -264,22 +251,10 @@ async def _remove_agent_key_impl(
         runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    reachable = False
-    if needs_reachability_read(
-        "key_remove", is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
-    ):
-        async with runtime.session_factory() as session:
-            reachable = await is_agent_reachable_in_tenant(
-                session,
-                tenant_id=auth.tenant_id,
-                agent_name=agent_name,
-                default=runtime.deployment_default,
-            )
-    outcome = decide_operation(
-        "key_remove",
-        is_admin=auth.is_admin,
-        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+    facts = await reachability.target_facts(
+        runtime, auth, "key_remove", agent_name=agent_name, is_daimon_managed=is_daimon_managed
     )
+    outcome = decide_operation("key_remove", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":
         raise ToolError(
             f"Removing {key} from '{agent_name}' needs a workspace or server admin, and the "
