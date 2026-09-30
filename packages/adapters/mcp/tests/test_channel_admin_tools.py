@@ -19,11 +19,17 @@ from daimon.adapters.mcp.tools.channel_admins import (
 from daimon.adapters.mcp.tools.reachability import require_admin_for_reachable_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.stores import accounts
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import get_tenant
-from daimon.testing.factories import make_account, make_routine, make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_platform_principal,
+    make_routine,
+    make_tenant,
+)
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -209,7 +215,7 @@ async def test_channel_admin_cannot_bind_another_channels_own_agent(
     )
 
 
-async def test_channel_admin_loses_an_agent_that_runs_someone_elses_routine(
+async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = await _tenant(committing_sessionmaker)
@@ -231,6 +237,23 @@ async def test_channel_admin_loses_an_agent_that_runs_someone_elses_routine(
     async with committing_sessionmaker.begin() as session:
         tenant = await get_tenant(session, tenant_id)
         assert tenant is not None, "the tenant exists"
+        await make_routine(
+            session, tenant=tenant, created_by_user_id="777777777777777777", agent_name="helper"
+        )
+    await require_admin_for_reachable_agent(runtime, member, agent_name="helper")
+
+    async with committing_sessionmaker.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None, "the tenant exists"
+        admin = await make_account(session, tenant=tenant)
+        await accounts.set_role(session, admin.id, Role.ADMIN)
+        await make_platform_principal(
+            session,
+            platform=tenant.platform,
+            external_id="666666666666666666",
+            tenant=tenant,
+            account=admin,
+        )
         await make_routine(
             session, tenant=tenant, created_by_user_id="666666666666666666", agent_name="helper"
         )
