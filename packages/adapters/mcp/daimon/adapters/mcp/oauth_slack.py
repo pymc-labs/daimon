@@ -369,6 +369,7 @@ def _success_html(
 <p>next: @mention <code>@{safe_name}</code> in a channel you have invited it to,
 or run <code>/agent-setup</code> to see who answers where and set up an agent with Daimon.</p>
 <p>you get {credit} of credit on us.</p>
+<p>have a promo code? an admin can redeem it in <code>/billing</code>.</p>
 <p class="dim">you can close this tab and head back to Slack.</p>
 """
     return _page(title="daimon installed", state_bar="", body_html=body)

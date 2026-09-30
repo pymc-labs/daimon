@@ -219,6 +219,11 @@ def test_success_html_close_tab_copy() -> None:
     assert "close this tab" in body, "success page should tell the user they can close the tab"
 
 
+def test_success_html_mentions_promo_codes() -> None:
+    body = _success_html(workspace="Acme Corp", signup_credit=Decimal("5.00")).body.decode()
+    assert "redeem it in <code>/billing</code>" in body
+
+
 def test_success_html_status_200() -> None:
     response = _success_html(workspace="Acme Corp", signup_credit=Decimal("5.00"))
     assert response.status_code == 200, "success page should return 200"
