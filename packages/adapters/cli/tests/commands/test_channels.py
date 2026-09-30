@@ -55,7 +55,7 @@ async def test_set_list_and_clear_a_budget(
     assert budget is not None, "a thread id budgets against its channel"
     assert (budget.limit_usd, budget.set_by_account_id) == (Decimal("20"), None)
     assert budget.ends_at == datetime(2026, 7, 3, tzinfo=UTC)
-    assert "channel C1: $0.00 of $20.00 (2026-07-01 to 2026-07-03)" in _out(console)
+    assert "channel C1: $0.00 of $20.00 (2026-07-01 until 2026-07-03)" in _out(console)
 
     json_console = _console()
     await budget_list(**{**args, "console": json_console}, as_json=True)
