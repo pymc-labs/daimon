@@ -28,6 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+import anthropic as anthropic_pkg
 import structlog
 from anthropic.types.beta.beta_managed_agents_system_content_block_param import (
     BetaManagedAgentsSystemContentBlockParam,
@@ -47,7 +48,7 @@ from daimon.core.session_snapshot import (
     hash_env_bytes,
     snapshot_from_created_session,
 )
-from daimon.core.sessions import create_session
+from daimon.core.sessions import create_session, origin_stamp
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import TransferKind
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
@@ -211,7 +212,7 @@ async def create_ma_session(
         private_dm_id=admission.private_dm_id,
         origin_channel_id=admission.origin_channel_id,
         origin_thread_id=admission.origin_thread_id,
-        origin_sealed=admission.origin_sealed,
+        origin_seal_id=admission.origin_seal_id,
     )
 
     has_repo = any(
@@ -408,6 +409,37 @@ async def bind_session(
     return result
 
 
+async def _stamp_reused_seal(deps: TurnDeps, prepared: PreparedTurn) -> None:
+    """Record a seal on a session this sealed turn reuses.
+
+    A fresh session is stamped at creation; one opened before its channel was
+    sealed carries no seal id, and would be readable again after an unseal
+    once this turn has written sealed content into it. A session that has gone
+    away is left to the dead-session recovery, whose replacement is stamped
+    at creation.
+    """
+    admission = prepared.admission
+    if (
+        not prepared.reused
+        or admission.origin_seal_id is None
+        or admission.origin_channel_id is None
+    ):
+        return
+    try:
+        await deps.anthropic.beta.sessions.update(
+            prepared.ma_session_id,
+            metadata=dict(
+                origin_stamp(
+                    channel_id=admission.origin_channel_id,
+                    thread_id=admission.origin_thread_id,
+                    seal_id=admission.origin_seal_id,
+                )
+            ),
+        )
+    except anthropic_pkg.NotFoundError:
+        log.info("turn.seal_stamp_session_gone", ma_session_id=prepared.ma_session_id)
+
+
 async def bind_session_impl(
     deps: TurnDeps,
     admission: Admission,
@@ -518,6 +550,7 @@ async def bind_session_impl(
             now=now,
         )
         if isinstance(outcome, PreparationDeferred):
+            await _stamp_reused_seal(deps, outcome.prepared)
             return outcome.prepared
         if isinstance(outcome, PreparationBusy):
             raise SessionBusyError(
@@ -530,6 +563,7 @@ async def bind_session_impl(
                 retry_after=outcome.retry_after,
                 preserved=outcome.preserved,
             )
+        await _stamp_reused_seal(deps, outcome)
         return outcome
 
     try:

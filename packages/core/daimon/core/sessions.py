@@ -98,6 +98,21 @@ def _session_metadata(
     return metadata
 
 
+def origin_stamp(*, channel_id: str, thread_id: str | None, seal_id: str | None) -> dict[str, str]:
+    """Where a channel conversation runs, for the transcript tools' seal check.
+
+    `seal_id` is the sealed id that seals the turn, when one does. Written at
+    creation, and again on a reused session when a turn runs sealed
+    (`daimon.core.turn.prepare.bind_session`).
+    """
+    stamp = {MA_METADATA_KEY_CHANNEL: channel_id}
+    if thread_id is not None:
+        stamp[MA_METADATA_KEY_THREAD] = thread_id
+    if seal_id is not None:
+        stamp[MA_METADATA_KEY_SEALED] = seal_id
+    return stamp
+
+
 async def create_session(
     anthropic: AsyncAnthropic,
     *,
@@ -121,7 +136,7 @@ async def create_session(
     private_dm_id: str | None = None,
     origin_channel_id: str | None = None,
     origin_thread_id: str | None = None,
-    origin_sealed: bool = False,
+    origin_seal_id: str | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -137,7 +152,7 @@ async def create_session(
     ``slack_turn_context_id`` selects an isolated execution credential for private
     Slack turns. It is absent for channel, headless and MCP-created sessions.
 
-    ``origin_channel_id``/``origin_thread_id``/``origin_sealed`` name the channel
+    ``origin_channel_id``/``origin_thread_id``/``origin_seal_id`` name the channel
     turn a session is opened for; they are stamped on it so the transcript tools
     can refuse a sealed conversation's transcript outside its channel.
 
@@ -457,12 +472,13 @@ async def create_session(
     elif private_dm_id is not None:
         metadata[MA_METADATA_KEY_PRIVATE_DM] = private_dm_id
     if origin_channel_id is not None:
-        # Where the conversation runs, for the transcript tools' seal check.
-        metadata[MA_METADATA_KEY_CHANNEL] = origin_channel_id
-        if origin_thread_id is not None:
-            metadata[MA_METADATA_KEY_THREAD] = origin_thread_id
-        if origin_sealed:
-            metadata[MA_METADATA_KEY_SEALED] = "true"
+        metadata.update(
+            origin_stamp(
+                channel_id=origin_channel_id,
+                thread_id=origin_thread_id,
+                seal_id=origin_seal_id,
+            )
+        )
 
     return await anthropic.beta.sessions.create(
         agent=agent_argument,

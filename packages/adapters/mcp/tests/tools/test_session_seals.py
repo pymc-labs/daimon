@@ -270,13 +270,80 @@ async def test_sealing_a_channel_later_covers_its_old_conversations(world: _Worl
 async def test_unsealing_does_not_open_a_transcript_written_under_the_seal(
     world: _World,
 ) -> None:
-    await world.seal("some-other-channel")
+    await world.seal(_SEALED)
     world.add_session(
-        "ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1", daimon_sealed="true"
+        "ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1", daimon_sealed=_SEALED
     )
+    outside = await world.origin(_OPEN, "thr-b")
+    inside = await world.origin(_SEALED, "thr-2")
+
+    await world.seal("some-other-channel")
 
     with pytest.raises(ToolError, match="sealed channel"):
-        await _list_session_events_impl(world.runtime(), world.auth(), "ses_acme", None, None, None)
+        await _list_session_events_impl(
+            world.runtime(), world.auth(), "ses_acme", None, None, None, outside
+        )
+    page = await _list_session_events_impl(
+        world.runtime(), world.auth(), "ses_acme", None, None, None, inside
+    )
+    assert _SEALED_TOPIC in _events_text(page)
+
+
+async def test_a_thread_sealed_on_its_own_stays_its_own_after_unseal(
+    world: _World,
+) -> None:
+    """The parent was never sealed: only the sealed thread itself is inside."""
+    await world.seal("thr-1")
+    world.add_session(
+        "ses_thread", daimon_channel=_OPEN, daimon_thread="thr-1", daimon_sealed="thr-1"
+    )
+    sibling = await world.origin(_OPEN, "thr-2")
+    same = await world.origin(_OPEN, "thr-1")
+
+    await world.seal("some-other-channel")
+
+    with pytest.raises(ToolError, match="sealed channel"):
+        await _list_session_events_impl(
+            world.runtime(), world.auth(), "ses_thread", None, None, None, sibling
+        )
+    await _list_session_events_impl(
+        world.runtime(), world.auth(), "ses_thread", None, None, None, same
+    )
+
+
+async def test_a_sealed_slack_thread_stays_its_own_after_unseal(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    world = await _world(db_session, sessionmaker, platform="slack")
+    await world.seal("C1:1700000000.000100")
+    world.add_session(
+        "ses_thread",
+        daimon_channel="C1",
+        daimon_thread="1700000000.000100",
+        daimon_sealed="C1:1700000000.000100",
+    )
+    sibling = await world.origin("C1", "1700000000.000999")
+
+    await world.seal()
+
+    assert await _list_sessions_impl(world.runtime(), world.auth(), None, None, sibling) == []
+
+
+async def test_an_agent_key_cannot_claim_a_turn_origin_on_the_session_tools(
+    world: _World,
+) -> None:
+    """Origins belong to chat turns; an agent key is always outside."""
+    await world.seal(_SEALED)
+    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
+    inside = await world.origin(_SEALED, "thr-2")
+
+    with pytest.raises(ToolError, match="sealed channel"):
+        await _list_session_events_impl(
+            world.runtime(), world.agent_key_auth(), "ses_acme", None, None, None, inside
+        )
+    assert (
+        await _list_sessions_impl(world.runtime(), world.agent_key_auth(), None, None, inside) == []
+    )
 
 
 async def test_a_session_from_before_the_stamp_fails_closed_in_a_sealed_tenant(

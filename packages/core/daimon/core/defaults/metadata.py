@@ -9,11 +9,11 @@ from typing import Any
 
 MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
 # Stamped on a session opened for a channel turn: the channel it runs in, the
-# thread under it (when there is one), and "true" when the tenant sealed that
-# channel or thread at creation. The transcript tools judge a session against
-# the current seal policy from the first two, and keep treating a session that
-# started sealed as sealed from the third, so unsealing later never opens up a
-# transcript written under the seal.
+# thread under it (when there is one), and -- once any of its turns ran sealed --
+# the sealed id that sealed it (the channel, or a thread sealed on its own). The
+# transcript tools judge a session against the current seal policy from the
+# first two, and keep it inside the recorded seal from the third, so unsealing
+# later never opens up a transcript written under the seal.
 MA_METADATA_KEY_CHANNEL = "daimon_channel"
 MA_METADATA_KEY_THREAD = "daimon_thread"
 MA_METADATA_KEY_SEALED = "daimon_sealed"

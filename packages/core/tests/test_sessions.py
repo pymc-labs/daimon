@@ -576,18 +576,18 @@ async def test_create_session_stamps_billing_exempt_reason_only_when_given(
 @pytest.mark.parametrize(
     ("thread_id", "sealed", "expected"),
     [
-        (None, False, {"daimon_channel": "chan-1"}),
-        ("thr-1", False, {"daimon_channel": "chan-1", "daimon_thread": "thr-1"}),
+        (None, None, {"daimon_channel": "chan-1"}),
+        ("thr-1", None, {"daimon_channel": "chan-1", "daimon_thread": "thr-1"}),
         (
             "thr-1",
-            True,
-            {"daimon_channel": "chan-1", "daimon_thread": "thr-1", "daimon_sealed": "true"},
+            "thr-1",
+            {"daimon_channel": "chan-1", "daimon_thread": "thr-1", "daimon_sealed": "thr-1"},
         ),
     ],
     ids=["channel", "thread", "sealed-thread"],
 )
 async def test_create_session_stamps_the_channel_turn_it_is_opened_for(
-    thread_id: str | None, sealed: bool, expected: dict[str, str]
+    thread_id: str | None, sealed: str | None, expected: dict[str, str]
 ) -> None:
     """The transcript tools apply the channel seal from these stamps."""
     captured_bodies: list[dict[str, Any]] = []
@@ -611,7 +611,7 @@ async def test_create_session_stamps_the_channel_turn_it_is_opened_for(
         tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000022"),
         origin_channel_id="chan-1",
         origin_thread_id=thread_id,
-        origin_sealed=sealed,
+        origin_seal_id=sealed,
     )
 
     metadata = captured_bodies[0]["metadata"]

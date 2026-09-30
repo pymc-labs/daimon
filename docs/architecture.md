@@ -217,15 +217,19 @@ drops sealed hits.
 
 A session transcript holds everything its turns saw, so the transcript tools
 apply the same seal. `admit()` records the turn's channel and thread on the
-`Admission`, and `create_session` stamps them on the session
-(`daimon_channel`, `daimon_thread`, plus `daimon_sealed=true` when the tenant
-sealed it at creation). Each read or follow-up judges the stamp against the
-current policy, as a channel read of that channel and thread: the main MCP
-server's session tools take the calling turn's `origin_context_id`; agent-chat
-keys and the hub run outside every channel, so they never list, read or
-continue a sealed conversation. Sealing a channel later covers its existing
-sessions, and a session stamped sealed stays sealed after an unseal. A session
-from before the stamp that a thread ran on (`thread_sessions`) has no known
+`Admission`, with the id that seals it (its channel, else a thread sealed on
+its own), and `create_session` stamps them on the session (`daimon_channel`,
+`daimon_thread`, `daimon_sealed=<that id>`); a sealed turn that reuses an
+older session writes the same stamp onto it (`bind_session`). Each read or
+follow-up judges the stamp against the current policy, as a channel read of
+that channel and thread: the main MCP server's session tools take the calling
+turn's `origin_context_id`, claimable only by a chat turn's own credential;
+agent-chat keys and the hub run outside every channel, so they never list,
+read or continue a sealed conversation. Sealing a channel later covers its
+existing sessions, and a session that ran sealed stays inside the id that
+sealed it after an unseal -- only that thread, when the thread was sealed on
+its own. A session from before the stamp that a thread ran on
+(`thread_sessions`) has no known
 parent channel: while the tenant seals anything it is shown only to a turn in
 that same thread. Nor can a sealed turn open or drive another session to carry
 its content out: agent chat's `start_turn`, `ask` and `continue_turn` are off

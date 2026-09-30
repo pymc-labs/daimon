@@ -28,7 +28,6 @@ from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.access_policy import (
     is_invoker_allowed,
     is_outside_agent_pin,
-    is_sealed_source,
     is_write_protected,
 )
 from daimon.core.billing import is_over_cap
@@ -68,12 +67,13 @@ class Admission:
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
     private_dm_id: str | None = None
-    # The channel and thread the turn runs in, and whether the tenant seals
-    # them: stamped on a fresh session so the transcript tools can apply the
-    # seal to it (`daimon.core.sessions.create_session`).
+    # The channel and thread the turn runs in, and the sealed id that seals
+    # them (the channel, or a thread sealed on its own), if any: stamped on the
+    # session so the transcript tools can apply the seal to it
+    # (`daimon.core.sessions.origin_stamp`).
     origin_channel_id: str | None = None
     origin_thread_id: str | None = None
-    origin_sealed: bool = False
+    origin_seal_id: str | None = None
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 
@@ -289,7 +289,21 @@ async def admit_impl(
     ):
         raise AdmissionDenied(reason="cap_exceeded")
 
-    source_sealed = is_sealed_source(policy, channel_id=channel_id, thread_id=thread_id)
+    # The broadest id that seals the turn: its channel, else the thread sealed
+    # on its own (a Discord thread by id, a Slack one as channel_id:thread_ts).
+    seal_id = next(
+        (
+            candidate
+            for candidate in (
+                channel_id,
+                thread_id,
+                f"{channel_id}:{thread_id}" if thread_id is not None else None,
+            )
+            if candidate is not None and candidate in policy.sealed_channel_ids
+        ),
+        None,
+    )
+    source_sealed = seal_id is not None
     memory_read_only = source_sealed or (is_dm and policy.dm_memory_read_only)
 
     return Admission(
@@ -297,7 +311,7 @@ async def admit_impl(
         source_sealed=source_sealed,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
-        origin_sealed=source_sealed,
+        origin_seal_id=seal_id,
         account_id=principal.account_id,
         agent=agent,
         environment=environment,
