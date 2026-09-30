@@ -2417,9 +2417,8 @@ class DaimonBot(commands.Bot):
                 return
             target = thread or message.channel
             await target.send(
-                "The configured agent or environment no longer exists. "
-                "An admin can ask Daimon to pick an existing agent or environment, or "
-                "pick an environment in `/agent-setup` → Who answers where."
+                "The configured agent or environment no longer exists. An admin of this "
+                "server or channel can pick another in `/agent-setup`."
             )
             return
         except AdmissionDenied as err:

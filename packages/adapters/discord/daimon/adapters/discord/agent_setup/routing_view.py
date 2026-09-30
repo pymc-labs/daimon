@@ -32,6 +32,7 @@ from daimon.adapters.discord.agent_setup.channel_environment import (
     build_environment_select,
     load_environment_picker,
     may_pick_environment,
+    panel_tenant_id,
     save_environment_choice,
 )
 from daimon.adapters.discord.agent_setup.isolation_view import (
@@ -53,6 +54,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.roster import Page, paginate
 from daimon.core.routing_facts import PRECEDENCE_LINE, build_routing_request
 from daimon.core.setup_conversations import setup_thread_name
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
@@ -482,9 +484,15 @@ class RoutingView(PanelViewBase):
                 state=self.state,
                 allowed_user_id=self.allowed_user_id,
             )
-        except (DaimonError, anthropic.APIError, discord.HTTPException) as error:
+        except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as error:
             request_id = generate_request_id()
-            log.exception("agent_setup.channel_environment.failed", request_id=request_id)
+            log.exception(
+                "agent_setup.channel_environment.failed",
+                request_id=request_id,
+                tenant_id=str(panel_tenant_id(self.state)),
+                channel_id=str(self.state.channel_id),
+                actor_account_id=str(self.state.account_id),
+            )
             await interaction.followup.send(
                 render_error(error, request_id=request_id), ephemeral=True
             )

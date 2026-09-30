@@ -68,7 +68,8 @@ def build_environment_select(
     )
 
 
-def _tenant_id(state: PanelState) -> uuid.UUID:
+def panel_tenant_id(state: PanelState) -> uuid.UUID:
+    """The tenant the panel's guild maps to."""
     return derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))
 
 
@@ -85,7 +86,7 @@ async def may_pick_environment(
     async with runtime.sessionmaker() as session:
         grant = await get_channel_admins(
             session,
-            tenant_id=_tenant_id(state),
+            tenant_id=panel_tenant_id(state),
             platform="discord",
             channel_id=str(state.channel_id),
         )
@@ -107,7 +108,7 @@ async def load_environment_picker(
     if not await may_pick_environment(interaction, runtime=runtime, state=state, live=False):
         return None
     try:
-        names = await list_environment_names(runtime.anthropic, tenant_id=_tenant_id(state))
+        names = await list_environment_names(runtime.anthropic, tenant_id=panel_tenant_id(state))
     except anthropic.APIError:
         log.warning("agent_setup.environment_picker.list_failed", exc_info=True)
         return None
@@ -126,7 +127,7 @@ async def save_environment_choice(*, runtime: DiscordRuntime, state: PanelState,
     The caller has re-checked the caller live. A value no picker offers, or an
     environment that no longer exists, writes nothing.
     """
-    tenant_id = _tenant_id(state)
+    tenant_id = panel_tenant_id(state)
     channel_id = str(state.channel_id)
     try:
         name = parse_environment_option(value)
