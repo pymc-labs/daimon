@@ -62,9 +62,8 @@ _DEBOUNCE_S = 10.0
 
 # A text block sealed by a later tool use posts permanently once it reaches
 # this size; shorter sealed blocks are pre-tool narration and stay in the
-# ephemeral draft on the status card. Calibrated on prod sessions
-# 2026-07-04..13: the largest narration block was 429 chars, the smallest
-# swallowed answer 542.
+# ephemeral draft on the status card. Calibrated on real sessions: the
+# largest narration block was 429 chars, the smallest swallowed answer 542.
 _SEALED_RESPONSE_MIN_CHARS = 500
 
 
