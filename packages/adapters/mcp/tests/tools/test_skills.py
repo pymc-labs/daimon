@@ -27,7 +27,9 @@ from daimon.adapters.mcp.tools.skills import (
 )
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.testing import ma_agent
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -254,7 +256,9 @@ async def test_get_impl_foreign_tenant_bare_name_raises_not_found() -> None:
         await _get_impl(_runtime(client), auth, "their-skill")
 
 
-async def test_delete_impl_calls_delete_skill_and_versions() -> None:
+async def test_delete_impl_calls_delete_skill_and_versions(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -290,12 +294,14 @@ async def test_delete_impl_calls_delete_skill_and_versions() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-    await _delete_impl(_runtime(client), auth, "doomed")
+    await _delete_impl(_runtime(client, sessionmaker), auth, "doomed")
 
     assert deleted == ["sk_d"], "should delete the correct skill ID"
 
 
-async def test_delete_impl_raises_tool_error_not_found() -> None:
+async def test_delete_impl_raises_tool_error_not_found(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -305,7 +311,37 @@ async def test_delete_impl_raises_tool_error_not_found() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="not found"):
-        await _delete_impl(_runtime(client), auth, "nope")
+        await _delete_impl(_runtime(client, sessionmaker), auth, "nope")
+
+
+async def test_delete_impl_refuses_a_seeded_skill(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Seeded agents mount seeded skills; deleting one would fail all their turns."""
+    async with sessionmaker() as session:
+        tenant = await make_tenant(session)
+        await record_seeded_skill(
+            session, tenant_id=tenant.id, name="eda", content_hash="h", anthropic_id="sk_eda"
+        )
+        await session.commit()
+    deleted: list[str] = []
+
+    def on_delete(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        deleted.append(m.group(1))
+        return httpx.Response(200)
+
+    router = MARouter()
+    router.add("DELETE", r"/v1/skills/([^/]+)", on_delete)
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
+    )
+
+    with pytest.raises(ToolError, match="default skills"):
+        await _delete_impl(
+            _runtime(build_fake_anthropic(router.dispatch), sessionmaker), auth, "eda"
+        )
+
+    assert deleted == [], "the seeded skill must survive, admins included"
 
 
 async def test_sync_impl_returns_outcomes(

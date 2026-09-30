@@ -49,7 +49,7 @@ from daimon.core.stores.agent_skill_repo_credentials import (
     list_skill_repo_credentials_for_repo,
 )
 from daimon.core.stores.domain import RepoProofKind
-from daimon.core.stores.seeded_skills import list_seeded_skill_names
+from daimon.core.stores.seeded_skills import list_seeded_skill_names, load_seeded_skill
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, SecretStr
@@ -467,6 +467,15 @@ async def _delete_impl(
     name: str,
 ) -> None:
     _require_admin(auth)
+    # A seeded skill is mounted by the seeded agents, and deleting a skill an
+    # agent references fails every one of that agent's turns.
+    async with runtime.session_factory() as session:
+        seeded = await load_seeded_skill(session, tenant_id=auth.tenant_id, name=name)
+    if seeded is not None:
+        raise ToolError(
+            f"skill '{name}' is one of this deployment's default skills and cannot be "
+            "deleted from chat. Use remove_skill to detach it from an agent you own."
+        )
     canonical = tenant_scoped_display_title(tenant_id=auth.tenant_id, name=name)
     skill = await find_skill_by_display_title(runtime.client, canonical, on_truncation="degrade")
     if skill is None:
