@@ -19,9 +19,12 @@ import pytest
 from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_CHANNEL_ADMINS,
     ACTION_CODING_TOOLS,
+    ACTION_END_ISOLATION,
     ACTION_EXPAND_CONNECTIONS,
     ACTION_EXPAND_KEYS,
     ACTION_EXPAND_SKILLS,
+    ACTION_ISOLATE,
+    ACTION_ISOLATE_COPY,
     ACTION_NEW,
     ACTION_PAGE_NEXT,
     ACTION_ROUTING,
@@ -1094,7 +1097,9 @@ def test_new_agent_form_metadata_carries_the_page_the_reader_was_on() -> None:
     )
 
 
-def _routing(*, channel_admins: list[ChannelAdminsRow] | None) -> dict[str, Any]:
+def _routing(
+    *, channel_admins: list[ChannelAdminsRow] | None, isolated: bool | None = None
+) -> dict[str, Any]:
     return build_routing_view(
         _answering_map(),
         page=paginate((), page=0, page_size=PANEL_PAGE_SIZE),
@@ -1105,6 +1110,18 @@ def _routing(*, channel_admins: list[ChannelAdminsRow] | None) -> dict[str, Any]
         channel_id=_CHANNEL_ID,
         unrouted_agent_name=None,
         channel_admins=channel_admins,
+        isolated=isolated,
+    )
+
+
+def test_routing_view_offers_isolation_to_admins_by_state() -> None:
+    open_ids = set(_action_ids(_routing(channel_admins=[], isolated=False)))
+    assert {ACTION_ISOLATE, ACTION_ISOLATE_COPY} <= open_ids, "an open channel can be isolated"
+    assert ACTION_END_ISOLATION not in open_ids
+    assert ACTION_END_ISOLATION in _action_ids(_routing(channel_admins=[], isolated=True))
+    member = set(_action_ids(_routing(channel_admins=None)))
+    assert not member & {ACTION_ISOLATE, ACTION_ISOLATE_COPY, ACTION_END_ISOLATION}, (
+        "members get no isolation buttons"
     )
 
 

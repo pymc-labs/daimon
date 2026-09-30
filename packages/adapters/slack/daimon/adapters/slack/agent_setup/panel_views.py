@@ -60,6 +60,9 @@ __all__ = [
     "ACTION_EXPAND_KEYS",
     "ACTION_EXPAND_SKILLS",
     "ACTION_EXPAND_CONNECTIONS",
+    "ACTION_END_ISOLATION",
+    "ACTION_ISOLATE",
+    "ACTION_ISOLATE_COPY",
     "ACTION_NEW",
     "ACTION_PAGE_NEXT",
     "ACTION_PAGE_PREV",
@@ -98,6 +101,11 @@ ACTION_EXPAND_CONNECTIONS: Final = "agent_setup__expand:connections"
 ACTION_NEW: Final = "agent_setup__new"
 ACTION_CHANNEL_ADMINS: Final = "agent_setup__channel_admins"
 """Open the form naming this channel's admins. Workspace admins only."""
+
+ACTION_ISOLATE: Final = "agent_setup__isolation:isolate"
+ACTION_ISOLATE_COPY: Final = "agent_setup__isolation:copy"
+ACTION_END_ISOLATION: Final = "agent_setup__isolation:end"
+"""Isolate this channel (with a copy of its agent when needed) or end it. Admins only."""
 
 ACTION_CODING_TOOLS: Final = "agent_setup__coding_tools"
 """Mint a coding-tool token for the agent named in the button's `value`."""
@@ -170,6 +178,12 @@ CHANNEL_ADMINS_NOTE: Final = (
     "Workspace admins run every channel. A channel's admins may change agents that answer "
     "only in channels they run, and pick those channels' default agent. Built-in agents and "
     "the workspace default stay with workspace admins."
+)
+ISOLATION_NOTE: Final = (
+    "An isolated channel's own agents answer only there and are hidden everywhere else; "
+    "inside it only they are visible. Its messages are readable only from inside it. "
+    "Isolating needs an agent that answers only here. *Isolate with a copy* makes one from "
+    "the agent answering now when there is none."
 )
 
 CODING_TOOLS_UNAVAILABLE_NOTE: Final = "Coding-tool access is not configured for this deployment."
@@ -545,13 +559,15 @@ def build_routing_view(
     channel_id: str,
     unrouted_agent_name: str | None,
     channel_admins: Sequence[ChannelAdminsRow] | None = None,
+    isolated: bool | None = None,
 ) -> dict[str, Any]:
     """The whole cascade, laid out so the precedence is visible, not inferred.
 
     No setup button: this view answers where mentions go, and the change it
     describes is a sentence to say to Daimon rather than a control here.
     `channel_admins` is passed for workspace admins only, who also see every
-    channel's admins and a button to edit this channel's.
+    channel's admins and a button to edit this channel's. `isolated` is too,
+    when the panel has a channel: it adds that channel's isolation buttons.
     """
     blocks: list[dict[str, Any]] = []
     if page.items:
@@ -597,6 +613,8 @@ def build_routing_view(
     blocks.append({"type": "divider"})
     if channel_admins is not None:
         blocks.extend(_channel_admins_blocks(channel_admins, channel_id=channel_id))
+    if isolated is not None and channel_id:
+        blocks.extend(_isolation_blocks(channel_id=channel_id, isolated=isolated))
     blocks.append(
         _context(
             _routing_request_line(
@@ -644,6 +662,24 @@ def _channel_admins_blocks(
     return [
         _section(f"*{CHANNEL_ADMINS_LABEL}*\n{listing}", accessory=edit),
         _context(CHANNEL_ADMINS_NOTE),
+        {"type": "divider"},
+    ]
+
+
+def _isolation_blocks(*, channel_id: str, isolated: bool) -> list[dict[str, Any]]:
+    state = "is isolated" if isolated else "is not isolated"
+    buttons = (
+        [_button(action_id=ACTION_END_ISOLATION, label="End isolation", style="danger")]
+        if isolated
+        else [
+            _button(action_id=ACTION_ISOLATE, label="Isolate", style="primary"),
+            _button(action_id=ACTION_ISOLATE_COPY, label="Isolate with a copy"),
+        ]
+    )
+    return [
+        _section(f"*Isolation*\n<#{channel_id}> {state}."),
+        {"type": "actions", "elements": buttons},
+        _context(ISOLATION_NOTE),
         {"type": "divider"},
     ]
 

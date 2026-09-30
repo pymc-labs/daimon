@@ -128,3 +128,21 @@ async def test_memory_missing_agent_surfaces_ephemeral_error(
     kwargs = web.chat_postEphemeral.call_args.kwargs
     assert "ghost" in kwargs["text"]
     assert "not found" in kwargs["text"].lower()
+
+
+async def test_memory_hides_an_agent_isolation_keeps_out(db_session, db_session_factory) -> None:
+    """In an isolated channel only its own agents are visible, so a shared agent's memory isn't."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    runtime, web = await _setup(db_session, db_session_factory, seed={"/a.md": "alpha"})
+    await set_access_policy(
+        db_session,
+        tenant_id=derive_tenant_uuid(platform="slack", workspace_id=TEAM_ID),
+        policy=TenantAccessPolicy(isolated_channel_ids=("C1",)),
+    )
+    await db_session.commit()
+    with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
+        await handle_memory_command(runtime, _payload())
+    text = web.chat_postEphemeral.call_args.kwargs["text"]
+    assert "no memories" in text.lower(), "the deployment default answers elsewhere too"

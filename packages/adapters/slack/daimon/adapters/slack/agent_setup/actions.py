@@ -60,6 +60,11 @@ from daimon.adapters.slack.agent_setup.coding_tools import (
     handle_coding_tools_click,
     handle_revoke_token_click,
 )
+from daimon.adapters.slack.agent_setup.isolation import (
+    ISOLATION_NEED_ADMIN_MESSAGE,
+    IsolationChoice,
+    change_isolation,
+)
 from daimon.adapters.slack.agent_setup.panel_views import (
     build_agents_view,
     build_details_view,
@@ -92,6 +97,7 @@ from daimon.adapters.slack.setup_conversations import (
     setup_link,
     setup_reply_button,
 )
+from daimon.core.access_policy import is_isolated
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
@@ -100,6 +106,7 @@ from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import get_channel_admins, list_channel_admins
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -225,6 +232,12 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
 # Panel views (Agents / Details / Who answers where)
 # ---------------------------------------------------------------------------
 
+_ISOLATION_ACTIONS: dict[str, IsolationChoice] = {
+    panel_views.ACTION_ISOLATE: "isolate",
+    panel_views.ACTION_ISOLATE_COPY: "copy",
+    panel_views.ACTION_END_ISOLATION: "end",
+}
+
 #: Every action id the three panel views emit. Kept as a set so the dispatcher
 #: routes the in-view ones in one branch and leaves the legacy editor ids to
 #: the chain below it. Revoke is in here too, but reaches its handler earlier:
@@ -242,6 +255,7 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_CODING_TOOLS,
         panel_views.ACTION_REVOKE_TOKEN,
         panel_views.ACTION_CHANNEL_ADMINS,
+        *_ISOLATION_ACTIONS,
     }
 )
 
@@ -367,7 +381,8 @@ async def load_routing_view(
     meta: PanelMetadata,
     is_admin: bool,
 ) -> dict[str, Any]:
-    """Build the Who-answers-where view for `meta`'s page; admins also get the channel admins."""
+    """Build the Who-answers-where view for `meta`'s page; admins also get the channel
+    admins and this channel's isolation."""
     async with runtime.sessionmaker() as session:
         answering_map = await load_panel_answering_map(
             session, tenant_id=tenant_id, default=runtime.deployment_default
@@ -375,6 +390,13 @@ async def load_routing_view(
         channel_admins = (
             await list_channel_admins(session, tenant_id=tenant_id, platform="slack")
             if is_admin
+            else None
+        )
+        isolated = (
+            is_isolated(
+                await load_access_policy(session, tenant_id=tenant_id), channel_id=meta.channel_id
+            )
+            if is_admin and meta.channel_id
             else None
         )
         attributions = await resolve_attributions(
@@ -410,6 +432,7 @@ async def load_routing_view(
         channel_id=meta.channel_id,
         unrouted_agent_name=unrouted_agent_name,
         channel_admins=channel_admins,
+        isolated=isolated,
     )
 
 
@@ -660,6 +683,30 @@ async def _dispatch_panel_action(
                 user_ids=grant.user_ids if grant else (),
             ),
         )
+        return
+
+    if action_id in _ISOLATION_ACTIONS:
+        if not is_admin or not meta.channel_id:
+            text = ISOLATION_NEED_ADMIN_MESSAGE
+        else:
+            text = await change_isolation(
+                runtime,
+                client,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                channel_id=meta.channel_id,
+                choice=_ISOLATION_ACTIONS[action_id],
+            )
+        await post_ephemeral(
+            client, channel_id=meta.channel_id or user_id, user_id=user_id, text=text
+        )
+        if is_admin and view_id:
+            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+                view_id=view_id,
+                view=await load_routing_view(
+                    runtime, tenant_id=tenant_id, meta=meta, is_admin=True
+                ),
+            )
         return
 
     if action_id == panel_views.ACTION_CODING_TOOLS:
