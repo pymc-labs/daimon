@@ -92,11 +92,21 @@ async def _ledger(session: AsyncSession, tenant: TenantRow) -> dict[str, Decimal
 async def test_nothing_changes_without_promo_codes(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
+    """With no code created, settlement, panels, joins and the ledger see nothing."""
     tenant = await make_tenant(db_session)
-    assert await settle_promo_credit(db_session_factory, now=T0) == _settled(0, 0)
-    assert await get_active_timed_credit(db_session, tenant_id=tenant.id, now=T0) == []
-    assert await _redeem(db_session_factory, tenant, "NOSUCHCODE") == PromoRedeemRefused("invalid")
-    assert await _ledger(db_session, tenant) == {}
+    assert await settle_promo_credit(db_session_factory, now=T0) == _settled(0, 0), (
+        "settlement should be a no-op"
+    )
+    assert await get_active_timed_credit(db_session, tenant_id=tenant.id, now=T0) == [], (
+        "panels should show no timed credit"
+    )
+    assert not await promo_store.has_redeemable_promo_code(db_session, now=T0), (
+        "join messages should not mention promo codes"
+    )
+    assert await _redeem(db_session_factory, tenant, "NOSUCHCODE") == PromoRedeemRefused(
+        "invalid"
+    ), "an attempt should be refused as invalid"
+    assert await _ledger(db_session, tenant) == {}, "the ledger should stay empty"
 
 
 async def test_credit_code_grants_once_per_tenant(

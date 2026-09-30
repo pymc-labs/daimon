@@ -257,7 +257,9 @@ all turns; the cap gate applies even without Stripe.
 
 An operator can hand out credit as a code that a tenant admin redeems. Nothing
 changes until a code exists; the only visible surface before that is the
-admin-only **Redeem code** button in `/billing`.
+admin-only **Redeem code** button in `/billing`. The Discord ready message and
+the Slack install page point admins at `/billing` only while some code can be
+redeemed.
 
 ```sh
 daimon promo create --amount 20                    # prints a generated code once

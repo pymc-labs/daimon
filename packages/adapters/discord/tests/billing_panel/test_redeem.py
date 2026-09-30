@@ -112,8 +112,11 @@ def test_timed_credit_shows_under_server_credit_in_both_views() -> None:
     assert "timed credit" not in _text(plain)
 
 
-def test_ready_embed_mentions_redemption() -> None:
-    assert "Redeem it in `/billing`" in (_build_ready_embed().description or "")
+def test_ready_embed_mentions_redemption_only_when_a_code_is_redeemable() -> None:
+    """A deployment without promo codes keeps its ready message unchanged."""
+    assert "promo" not in (_build_ready_embed().description or ""), "no codes, no mention"
+    with_codes = _build_ready_embed(promo_codes=True).description or ""
+    assert "Admins can redeem it in `/billing`" in with_codes, "admins are pointed at /billing"
 
 
 def test_redeem_result_text() -> None:

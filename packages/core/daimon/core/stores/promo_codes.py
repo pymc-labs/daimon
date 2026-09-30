@@ -16,7 +16,7 @@ from typing import Any, cast
 from daimon.core._models import PromoCode, PromoRedeemFailure, PromoRedemption, Tenant
 from daimon.core.promo_codes import PromoCodeTerms
 from daimon.core.stores.domain import PromoCodeRow, PromoRedemptionRow, TimedPromoGrantRow
-from sqlalchemy import ColumnElement, Select, delete, exists, func, select, text, update
+from sqlalchemy import ColumnElement, Select, delete, exists, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +54,25 @@ async def list_promo_codes(session: AsyncSession) -> list[PromoCodeRow]:
 async def get_promo_code(session: AsyncSession, promo_code_id: uuid.UUID) -> PromoCodeRow | None:
     orm = await session.get(PromoCode, promo_code_id)
     return None if orm is None else PromoCodeRow.model_validate(orm)
+
+
+async def has_redeemable_promo_code(session: AsyncSession, *, now: datetime) -> bool:
+    """Whether any code could be redeemed at ``now``; mirrors ``redeem_refusal``."""
+    redeemable = (
+        select(PromoCode.id)
+        .where(
+            PromoCode.revoked_at.is_(None),
+            or_(PromoCode.redeem_starts_at.is_(None), PromoCode.redeem_starts_at <= now),
+            or_(PromoCode.redeem_ends_at.is_(None), PromoCode.redeem_ends_at > now),
+            or_(PromoCode.credit_ends_at.is_(None), PromoCode.credit_ends_at > now),
+            or_(
+                PromoCode.max_redemptions.is_(None),
+                PromoCode.redeemed_count < PromoCode.max_redemptions,
+            ),
+        )
+        .limit(1)
+    )
+    return bool((await session.execute(select(exists(redeemable)))).scalar_one())
 
 
 async def lock_promo_code_by_hash(session: AsyncSession, code_hash: str) -> PromoCodeRow | None:
