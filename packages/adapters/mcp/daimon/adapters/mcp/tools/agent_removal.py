@@ -31,9 +31,9 @@ from daimon.adapters.mcp.tools.agents import (
     AgentInfo,
     _build_agent_info,  # pyright: ignore[reportPrivateUsage]
     _ma_tool_to_param,  # pyright: ignore[reportPrivateUsage]
-    _reject_system_agent,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
+from daimon.adapters.mcp.tools.skill_uploads import require_skill_change
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.skills import resolve_custom_skill_titles
@@ -44,6 +44,7 @@ from daimon.core.stores.agent_files import delete_agent_file, list_agent_files
 from daimon.core.stores.agent_mcp_credentials import (
     delete_credential as delete_agent_mcp_credential,
 )
+from daimon.core.stores.user_skills import delete_uploaded_user_skills
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
@@ -159,8 +160,11 @@ async def _remove_skill_impl(
     agent = await resolve_setup_agent(
         runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
-    _reject_system_agent(agent)
-    await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=agent_name)
+    # Same rule as add_skill: fork a built-in agent first; a channel admin may
+    # change an agent local to their channels.
+    await require_skill_change(
+        runtime, auth, agent, agent_name=agent_name, operation="skill_remove"
+    )
 
     titles, _truncated = await resolve_custom_skill_titles(
         runtime.client, agents=[agent], tenant_id=auth.tenant_id
@@ -199,6 +203,10 @@ async def _remove_skill_impl(
         updated = await update_agent_with_version_retry(runtime.client, agent.id, _apply)
     except anthropic.ConflictError as exc:
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc
+    async with runtime.session_factory.begin() as session:
+        await delete_uploaded_user_skills(
+            session, tenant_id=auth.tenant_id, agent_name=agent_name, anthropic_id=target_id
+        )
     return await _build_agent_info(runtime.client, updated, tenant_id=auth.tenant_id)
 
 
@@ -313,8 +321,9 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         message, not the one running now.
 
         ``delete_skill`` destroys the shared workspace skill instead;
-        ``update_agent`` adds existing skills. Accept a skill name or raw ``skill_id``.
-        The resource and other agents stay intact. Changing a default agent needs admin."""
+        ``update_agent`` adds existing skills and ``add_skill`` new ones. Accept a skill
+        name or raw ``skill_id``. The resource and other agents stay intact. A built-in
+        agent must be forked first; changing a default agent needs admin."""
         return await _remove_skill_impl(
             runtime,
             await _auth(ctx),
