@@ -8,7 +8,8 @@ default; a channel admin sets the channels they run. A scope with no
 environment of its own falls through, so nothing changes until one is set.
 
 The sentences and the setup panels' picker live here so the chat tools and
-both panels say and offer the same.
+both panels say and offer the same. Only the select's length differs by
+platform (`tests/parity/test_environment_select_caps.py`).
 """
 
 from __future__ import annotations
