@@ -6,6 +6,10 @@ the workspace default, the deployment fall-through — so a reader can see the
 precedence rather than infer it from one resolved answer. Adapters render
 this; they never re-derive precedence.
 
+The environment resolves over the same tiers but on its own (a channel may
+keep the tenant's agent and run it in another environment), so it is laid out
+beside the agents rather than folded into them.
+
 `build_answering_map` is pure. `load_answering_map` is its shell: two store
 reads, no decisions of its own.
 """
@@ -16,7 +20,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
-from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
+from daimon.core.scope import ChannelConfigRow, ConfigTier, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.core.stores.thread_agent_bindings import list_active_setup_bindings_for_tenant
@@ -43,6 +47,15 @@ class TenantAnswer(BaseModel):
     agent_name: str
     set_by_account_id: uuid.UUID | None = None
     set_at: datetime | None = None
+
+
+class ChannelEnvironment(BaseModel):
+    """One channel whose own setting names the environment its turns run in."""
+
+    model_config = ConfigDict(frozen=True)
+
+    channel_id: str
+    environment_name: str
 
 
 class SetupThreadRef(BaseModel):
@@ -74,6 +87,20 @@ class AnsweringMap(BaseModel):
     tenant_consumes_fallthrough: bool = False
     setup_threads: tuple[SetupThreadRef, ...] = ()
     setup_threads_truncated: bool = False
+    channel_environments: tuple[ChannelEnvironment, ...] = ()
+    tenant_environment: str | None = None
+    deployment_environment: str | None = None
+
+    def environment_in(self, channel_id: str | None) -> tuple[str | None, ConfigTier | None]:
+        """The environment a turn in `channel_id` runs in, and the tier that chose it."""
+        own = next((row for row in self.channel_environments if row.channel_id == channel_id), None)
+        if own is not None:
+            return own.environment_name, "channel"
+        if self.tenant_environment is not None:
+            return self.tenant_environment, "tenant"
+        if self.deployment_environment is not None:
+            return self.deployment_environment, "deployment"
+        return None, None
 
 
 def build_answering_map(
@@ -88,8 +115,9 @@ def build_answering_map(
 
     A row counts as an override only in mode='agent' with a non-empty
     agent_name — the same gate the cascade applies, so a channel handed to a
-    user-active session is not reported as routing to an agent. Channels come
-    out ordered by channel_id.
+    user-active session is not reported as routing to an agent. An environment
+    counts whatever the mode, as it does in the cascade. Channels come out
+    ordered by channel_id.
 
     Pure — no I/O, no clock.
     """
@@ -126,6 +154,13 @@ def build_answering_map(
             for binding in setup_threads
         ),
         setup_threads_truncated=setup_threads_truncated,
+        channel_environments=tuple(
+            ChannelEnvironment(channel_id=row.channel_id, environment_name=row.environment_name)
+            for row in sorted(channels, key=lambda row: row.channel_id)
+            if row.environment_name
+        ),
+        tenant_environment=(tenant.environment_name or None) if tenant is not None else None,
+        deployment_environment=default.environment_name,
     )
 
 

@@ -104,6 +104,7 @@ source_modules = [
     "daimon.core.bundle_handle",
     "daimon.core.channel_admins",
     "daimon.core.channel_budget",
+    "daimon.core.channel_environments",
     "daimon.core.channel_isolation",
     "daimon.core.channel_isolation_setup",
     "daimon.core.checkpoint_prompt",
