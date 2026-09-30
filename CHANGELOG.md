@@ -205,6 +205,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defer the durable queue job using GitHub's retry deadline; permission 403s
   remain permanent. See `docs/github-push-resync.md` for the covered request
   paths and remaining scope.
+- **Sonnet 5.5 is the default model.** It can be selected for an agent and is
+  metered at its published rates, and the seeded `daimon` and `dev_agent`
+  agents and every new agent now start on it instead of Sonnet 5, at the same
+  per-token price. Asking an agent tool for "Sonnet" or "Opus" now means
+  Sonnet 5.5 or Opus 5.5. Which model a server or workspace runs stays its own
+  choice: Opus 5.5 and the older models remain selectable per agent. Sonnet
+  5.5 returns longer notes between tool calls as thinking, so the in-progress
+  card can show less draft text than it did on Sonnet 5.
 - Opus 5.5 can be selected for an agent and is metered at its published rates.
   The seeded and new-agent defaults remain Sonnet 5.
 - The documentation site carries daimon's own look: the readme sticker as
