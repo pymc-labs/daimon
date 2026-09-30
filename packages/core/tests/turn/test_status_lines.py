@@ -92,7 +92,7 @@ def test_mcp_and_custom_tools_get_humanized_names_and_verb_icons() -> None:
 
 
 def test_tool_lines_never_show_arguments() -> None:
-    """T-13-01: the card names tools only."""
+    """A tool line names the tool and never shows its arguments."""
     lines = format_tool_lines(
         [
             _call(

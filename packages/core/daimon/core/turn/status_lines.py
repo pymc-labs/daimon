@@ -2,8 +2,8 @@
 
 Pure. Discord and Slack both draw a headline, a code block of tool lines and
 the latest draft from the same `TurnState`; this module owns the words so the
-two cards cannot drift, and each adapter adds only its own markup. Per T-13-01
-a tool line names the tool and never shows its arguments.
+two cards cannot drift, and each adapter adds only its own markup. A tool
+line names the tool and never shows its arguments.
 """
 
 from __future__ import annotations

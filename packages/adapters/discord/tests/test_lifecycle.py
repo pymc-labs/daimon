@@ -720,7 +720,7 @@ class TestStatusEmbedFromTurnState:
         description = embeds[0].description or ""
         assert description.startswith("**Working**"), "a pending call reads as working"
         assert "🔍 Search issues (tracker)" in description, "MCP calls get a readable line"
-        assert "private words" not in description, "T-13-01: tool arguments never show"
+        assert "private words" not in description, "a tool line never shows its arguments"
 
     async def test_message_draft_shares_the_status_embed(self) -> None:
         """The latest agent.message text is quoted under the tool lines, in the
