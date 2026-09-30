@@ -87,9 +87,9 @@ four token counts by those rates and returns USD. The table is split in two:
 configured with (`ALLOWED_MODEL_IDS` in
 `packages/core/daimon/core/constants.py` is literally its keys), while
 `TOOL_MODEL_PRICING` covers models pinned by individual MCP tools and never
-selectable by an agent. Every row is the provider's list price. Put any margin
-in `DAIMON_BILLING__MARKUP` (below), not in the table, because reports read
-the table as provider cost.
+selectable by an agent. Every agent-model row is the provider's list price.
+Put any margin in `DAIMON_BILLING__MARKUP` (below), not in the table, because
+reports read the table as provider cost.
 
 Opus 5.5 is priced at $4 input, $20 output, $5 five-minute cache write, and
 $0.20 cache read per million tokens; Sonnet 5.5 at $2, $10, $2.50 and $0.20.

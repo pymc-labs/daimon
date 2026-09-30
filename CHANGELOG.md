@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Upgrade notes
 
 - Agent environment encryption is opt-in through `DAIMON_CRYPTO__KEYS`; keyless deployments retain plaintext storage and initialization still succeeds. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
+- The seeded agents move to Sonnet 5.5 on the next defaults reconcile, so each existing `daimon` and `dev_agent` thread replaces its session on its next message, with one checkpoint turn on the old session if it had replied. Reports and spend caps reprice history at read time, so this month's Sonnet 5 and Opus 4.7 spend drops at once; set `DAIMON_BILLING__MARKUP` if the old rates stood in for a margin.
 
 ### Added
 
@@ -209,12 +210,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metered at its published rates, and the seeded `daimon` and `dev_agent`
   agents and every new agent now start on it instead of Sonnet 5, at the same
   per-token price. Asking an agent tool for "Sonnet" or "Opus" now means
-  Sonnet 5.5 or Opus 5.5. Which model a server or workspace runs stays its own
-  choice: Opus 5.5 and the older models remain selectable per agent. Sonnet
-  5.5 returns longer notes between tool calls as thinking, so the in-progress
+  Sonnet 5.5 or Opus 5.5. Opus 5.5 and the older models remain selectable per
+  agent; fork a seeded agent to keep it on another model. Sonnet 5.5 returns longer notes between tool calls as thinking, so the in-progress
   card can show less draft text than it did on Sonnet 5.
 - Opus 5.5 can be selected for an agent and is metered at its published rates.
-  The seeded and new-agent defaults remain Sonnet 5.
 - The documentation site carries daimon's own look: the readme sticker as
   logo and favicon, and a palette taken from it.
 - Defaults reconciliation serializes writes and sweeps per tenant so concurrent
@@ -226,8 +225,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Sonnet 5 and Opus 4.7 are metered at list price.** Sonnet 5 was charged at
   $3/$15 per million tokens, the rise Anthropic announced and then withdrew;
   its standard price stayed $2/$10. Opus 4.7 was charged Opus 4.1's $15/$75
-  instead of $5/$25. Every row in the pricing table is now the provider's list
-  price. Deployments that want a margin set `DAIMON_BILLING__MARKUP`, which
+  instead of $5/$25. Every agent-model row in the pricing table is now the
+  provider's list price. Deployments that want a margin set `DAIMON_BILLING__MARKUP`, which
   applies the same multiplier to every model and leaves the cost reports
   showing provider cost.
 
