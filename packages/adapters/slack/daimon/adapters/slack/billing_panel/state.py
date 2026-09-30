@@ -46,3 +46,5 @@ class BillingPanelState:
 
     # Live timed promo credit (both views), soonest-ending first; empty without promo codes
     timed_credit: tuple[ActiveTimedCredit, ...] = ()
+    # Some promo code is redeemable now (admin view only); gates the redeem button
+    has_redeemable_promo_code: bool = False

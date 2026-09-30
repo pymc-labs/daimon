@@ -167,6 +167,35 @@ async def handle_redeem_open(runtime: SlackRuntime, payload: dict[str, Any]) -> 
         capture_exception_with_scope(exc)
 
 
+async def _refresh_panel(
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    team_id: str,
+    user_id: str,
+    root_view_id: str,
+    now: datetime,
+) -> None:
+    """Redraw the /billing panel under the form. A failure leaves the success reply alone."""
+    since = datetime(now.year, now.month, 1, tzinfo=UTC)
+    try:
+        async with runtime.sessionmaker() as session:
+            state = await load_billing_snapshot(
+                session,
+                team_id=team_id,
+                platform_user_id=user_id,
+                is_admin=True,
+                since=since,
+                now=now,
+            )
+        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+            view_id=root_view_id, view=build_billing_view(state, now=now, since=since)
+        )
+    except (DaimonError, SlackApiError, SQLAlchemyError) as exc:
+        log.warning("slack.billing_redeem_refresh_failed", team_id=team_id, exc_info=exc)
+        capture_exception_with_scope(exc)
+
+
 async def run_redeem_submission(
     runtime: SlackRuntime,
     client: AsyncWebClient,
@@ -207,19 +236,13 @@ async def run_redeem_submission(
             view_id=decision.view_id, view=_text_view(redeem_result_text(result))
         )
         if decision.root_view_id:
-            since = datetime(now.year, now.month, 1, tzinfo=UTC)
-            async with runtime.sessionmaker() as session:
-                state = await load_billing_snapshot(
-                    session,
-                    team_id=team_id,
-                    platform_user_id=user_id,
-                    is_admin=True,
-                    since=since,
-                    now=now,
-                )
-            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-                view_id=decision.root_view_id,
-                view=build_billing_view(state, now=now, since=since),
+            await _refresh_panel(
+                runtime,
+                client,
+                team_id=team_id,
+                user_id=user_id,
+                root_view_id=decision.root_view_id,
+                now=now,
             )
     except (DaimonError, SlackApiError, SQLAlchemyError) as exc:
         request_id = generate_request_id()
