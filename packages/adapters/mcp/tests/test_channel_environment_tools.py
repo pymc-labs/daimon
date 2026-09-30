@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools import channel_environments as tool_module
 from daimon.adapters.mcp.tools.channel_admins import (
     _set_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -18,6 +19,7 @@ from daimon.adapters.mcp.tools.channel_environments import (
 from daimon.adapters.mcp.tools.propagation import (
     _explain_agent_resolution_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.channel_environments import save_scope_environment
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
@@ -30,6 +32,24 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 CHANNEL = "111111111111111111"
 OTHER_CHANNEL = "222222222222222222"
 USER = "444444444444444444"
+THREAD = "333333333333333333"
+"""A thread under CHANNEL."""
+ROLE = "666666666666666666"
+OTHER_ROLE = "777777777777777777"
+HIDDEN = "555555555555555555"
+"""A channel the Discord lookup refuses: deleted, or not visible to the caller."""
+
+
+@pytest.fixture(autouse=True)
+def _visible(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for the Discord channel lookup: THREAD's parent is CHANNEL."""
+
+    async def fake(_runtime: McpRuntime, _auth: AuthIdentity, channel_id: str) -> str:
+        if channel_id == HIDDEN:
+            raise ToolError("that channel is not visible to the caller")
+        return CHANNEL if channel_id == THREAD else channel_id
+
+    monkeypatch.setattr(tool_module, "resolve_visible_channel", fake)
 
 
 async def _seed(sessionmaker: async_sessionmaker[AsyncSession]) -> tuple[uuid.UUID, uuid.UUID]:
@@ -53,14 +73,41 @@ def _runtime(
     )
 
 
-def _auth(tenant_id: uuid.UUID, account_id: uuid.UUID, *, admin: bool = False) -> AuthIdentity:
+def _auth(
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    *,
+    admin: bool = False,
+    platform: str = "discord",
+    role_ids: tuple[str, ...] = (),
+    agent_id: uuid.UUID | None = None,
+) -> AuthIdentity:
     return AuthIdentity(
         account_id=account_id,
         tenant_id=tenant_id,
         role=Role.ADMIN if admin else Role.USER,
-        platform="discord",
+        platform=platform,
         platform_user_id=USER,
         is_admin=admin,
+        platform_role_ids=role_ids,
+        agent_id=agent_id,
+    )
+
+
+async def _grant(
+    runtime: McpRuntime,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    *,
+    role_ids: list[str] | None = None,
+    user_ids: list[str] | None = None,
+) -> None:
+    await _set_channel_admins_impl(
+        runtime,
+        _auth(tenant_id, account_id, admin=True),
+        channel_id=CHANNEL,
+        role_ids=role_ids or [],
+        user_ids=user_ids or [],
     )
 
 
@@ -96,7 +143,9 @@ async def test_server_admin_sets_a_channel_and_the_workspace_environment(
     tenant_row = await get_scope(db_session, scope=TenantScopeRef(tenant_id=tenant_id))
     assert row is not None and row.environment_name == "science", "the channel row is committed"
     assert row.agent_name is None, "picking an environment leaves the channel's agent alone"
-    assert tenant_row is not None and tenant_row.environment_name == "shared"
+    assert tenant_row is not None and tenant_row.environment_name == "shared", (
+        "the workspace row is committed"
+    )
 
 
 async def test_unknown_environment_is_refused_without_a_write(
@@ -169,7 +218,9 @@ async def test_members_are_refused_and_channel_admins_act_on_their_channel_only(
 
     cleared = await _clear_channel_environment_impl(runtime, member, channel_id=CHANNEL)
     again = await _clear_channel_environment_impl(runtime, member, channel_id=CHANNEL)
-    assert cleared.changed and cleared.previous_environment_name == "science"
+    assert cleared.changed and cleared.previous_environment_name == "science", (
+        "a channel admin clears their channel's pick"
+    )
     assert not again.changed and "nothing changed" in again.note, "a second clear is a no-op"
     assert (
         await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
@@ -195,12 +246,141 @@ async def test_explain_reports_each_tiers_environment(
         "default",
         "deployment",
     ), "with nothing set the deployment default decides"
-    assert "deployment default" in before.environment_explanation
+    assert "deployment default" in before.environment_explanation, "the note names the tier"
     assert (after.channel_environment, after.tenant_environment, after.deployment_environment) == (
         "science",
         "shared",
         "default",
     ), "every tier's own environment is reported"
     assert after.environment_winning_tier == "channel", "the channel's own pick wins"
-    assert "science" in after.environment_explanation
+    assert "science" in after.environment_explanation, "the note names the environment"
     assert after.effective_agent_name == "daimon", "the agent is untouched by an environment"
+
+
+async def test_a_channel_admin_in_a_thread_picks_its_parent_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "science")
+    await _grant(runtime, tenant_id, account_id, user_ids=[USER])
+    member = _auth(tenant_id, account_id)
+
+    result = await _set_channel_environment_impl(
+        runtime, member, environment_name="science", channel_id=THREAD
+    )
+    cleared = await _clear_channel_environment_impl(runtime, member, channel_id=THREAD)
+
+    assert result.scope == f"channel:{CHANNEL}", "a thread id is stored under its parent"
+    assert cleared.changed, "clearing from the thread clears the parent's pick"
+    assert (
+        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=THREAD))
+        is None
+    ), "nothing is ever stored under the thread id"
+
+
+async def test_a_slack_thread_id_resolves_to_its_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "science")
+    admin = _auth(tenant_id, account_id, admin=True, platform="slack")
+
+    result = await _set_channel_environment_impl(
+        runtime, admin, environment_name="science", channel_id="C0GROWTH:1717.5"
+    )
+
+    assert result.scope == "channel:C0GROWTH", "a Slack thread id is stored under its channel"
+    row = await get_scope(
+        db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="C0GROWTH")
+    )
+    assert row is not None and row.environment_name == "science", "the channel row is written"
+
+
+@pytest.mark.parametrize("channel_id", ["", "  "])
+async def test_an_empty_channel_id_is_refused_rather_than_read_as_the_workspace(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    channel_id: str,
+) -> None:
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "science")
+    admin = _auth(tenant_id, account_id, admin=True)
+
+    with pytest.raises(ToolError, match="channel_id is empty"):
+        await _set_channel_environment_impl(
+            runtime, admin, environment_name="science", channel_id=channel_id
+        )
+    with pytest.raises(ToolError, match="channel_id is empty"):
+        await _clear_channel_environment_impl(runtime, admin, channel_id=channel_id)
+    assert await get_scope(db_session, scope=TenantScopeRef(tenant_id=tenant_id)) is None, (
+        "an empty id never writes the workspace default"
+    )
+
+
+async def test_a_role_grant_admits_holders_of_that_role_only(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "science")
+    await _grant(runtime, tenant_id, account_id, role_ids=[ROLE])
+
+    result = await _set_channel_environment_impl(
+        runtime,
+        _auth(tenant_id, account_id, role_ids=(ROLE,)),
+        environment_name="science",
+        channel_id=CHANNEL,
+    )
+    assert result.changed, "a member holding the granted role picks the channel's environment"
+    with pytest.raises(ToolError, match="admin of that channel"):
+        await _set_channel_environment_impl(
+            runtime,
+            _auth(tenant_id, account_id, role_ids=(OTHER_ROLE,)),
+            environment_name="science",
+            channel_id=CHANNEL,
+        )
+
+
+async def test_an_agent_credential_is_never_a_channel_admin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "science")
+    await _grant(runtime, tenant_id, account_id, user_ids=[USER])
+    agent = _auth(tenant_id, account_id, agent_id=uuid.uuid4())
+
+    with pytest.raises(ToolError, match="admin of that channel"):
+        await _set_channel_environment_impl(
+            runtime, agent, environment_name="science", channel_id=CHANNEL
+        )
+    assert (
+        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
+        is None
+    ), "an agent acting for a granted user still writes nothing"
+
+
+async def test_a_pick_on_a_channel_the_lookup_refuses_is_refused_but_can_be_cleared(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, tenant_id, "science")
+    admin = _auth(tenant_id, account_id, admin=True)
+    async with committing_sessionmaker.begin() as session:
+        await save_scope_environment(
+            session,
+            tenant_id=tenant_id,
+            channel_id=HIDDEN,
+            environment_name="science",
+            actor_account_id=account_id,
+        )
+
+    with pytest.raises(ToolError, match="not visible"):
+        await _set_channel_environment_impl(
+            runtime, admin, environment_name="science", channel_id=HIDDEN
+        )
+    cleared = await _clear_channel_environment_impl(runtime, admin, channel_id=HIDDEN)
+
+    assert cleared.changed, "a deleted or hidden channel's pick can still be cleared"
+    assert (
+        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=HIDDEN))
+        is None
+    ), "the cleared row is gone"

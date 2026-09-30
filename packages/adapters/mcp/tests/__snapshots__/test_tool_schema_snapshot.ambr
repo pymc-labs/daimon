@@ -546,8 +546,8 @@
         
         Omit ``channel_id`` to clear the workspace default, leaving the deployment
         default. The workspace default requires Manage Server (admin); an admin of the
-        channel may clear that channel's environment. ``channel_id`` MUST be the parent
-        channel's id, never a thread's.
+        channel may clear that channel's environment. A thread id resolves to its
+        parent channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4178,9 +4178,9 @@
         The workspace default requires Manage Server (admin); an admin of the channel
         may set that channel's environment.
         
-        ``channel_id`` MUST be the parent channel's id, never a thread's: Discord
+        Pass the parent channel's id: Discord
         ``<channel platform="discord" id="..." role="parent_channel">``, Slack
-        ``<channel platform="slack" id="...">``.
+        ``<channel platform="slack" id="...">``; a thread id resolves to its parent.
       ''',
       'parameters': dict({
         'additionalProperties': False,

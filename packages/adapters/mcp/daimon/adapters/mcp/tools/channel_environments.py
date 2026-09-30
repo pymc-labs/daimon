@@ -9,11 +9,13 @@ does.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.discord import resolve_visible_channel
 from daimon.adapters.mcp.tools.reachability import require_scope_admin
 from daimon.core.channel_environments import (
     build_clear_environment_note,
@@ -44,6 +46,36 @@ def _scope_label(channel_id: str | None) -> str:
     return f"channel:{channel_id}" if channel_id is not None else "workspace"
 
 
+async def _environment_channel(
+    runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None, *, lenient: bool = False
+) -> str | None:
+    """The channel an environment is stored under; None is the workspace default.
+
+    A thread id resolves to its parent: Slack's `<channel>:<thread ts>` by
+    splitting, a Discord thread through a lookup that also checks the caller
+    can see it. `lenient` takes a Discord id the lookup refuses as given, so a
+    deleted channel's pick can still be cleared.
+    """
+    if channel_id is None:
+        return None
+    target = channel_id.strip()
+    if not target:
+        raise ToolError(
+            "channel_id is empty. Omit it for the workspace default, or pass the channel's id."
+        )
+    if auth.platform == "slack":
+        return target.partition(":")[0]
+    if auth.platform != "discord":
+        return target
+    if not target.isdigit():
+        raise ToolError(f"{target!r} is not a Discord channel id")
+    if lenient:
+        with contextlib.suppress(ToolError):
+            return await resolve_visible_channel(runtime, auth, target)
+        return target
+    return await resolve_visible_channel(runtime, auth, target)
+
+
 async def _set_channel_environment_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -51,6 +83,7 @@ async def _set_channel_environment_impl(
     environment_name: str,
     channel_id: str | None,
 ) -> ChannelEnvironmentResult:
+    channel_id = await _environment_channel(runtime, auth, channel_id)
     await require_scope_admin(runtime, auth, channel_id=channel_id)
     name = environment_name.strip()
     environment = await find_environment_by_daimon_tag(
@@ -84,6 +117,7 @@ async def _clear_channel_environment_impl(
     *,
     channel_id: str | None,
 ) -> ChannelEnvironmentResult:
+    channel_id = await _environment_channel(runtime, auth, channel_id, lenient=True)
     await require_scope_admin(runtime, auth, channel_id=channel_id)
     async with runtime.session_factory.begin() as session:
         previous = await save_scope_environment(
@@ -119,9 +153,9 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         The workspace default requires Manage Server (admin); an admin of the channel
         may set that channel's environment.
 
-        ``channel_id`` MUST be the parent channel's id, never a thread's: Discord
+        Pass the parent channel's id: Discord
         ``<channel platform="discord" id="..." role="parent_channel">``, Slack
-        ``<channel platform="slack" id="...">``.
+        ``<channel platform="slack" id="...">``; a thread id resolves to its parent.
         """
         return await _set_channel_environment_impl(
             runtime, await _auth(ctx), environment_name=environment_name, channel_id=channel_id
@@ -138,8 +172,8 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
 
         Omit ``channel_id`` to clear the workspace default, leaving the deployment
         default. The workspace default requires Manage Server (admin); an admin of the
-        channel may clear that channel's environment. ``channel_id`` MUST be the parent
-        channel's id, never a thread's.
+        channel may clear that channel's environment. A thread id resolves to its
+        parent channel.
         """
         return await _clear_channel_environment_impl(
             runtime, await _auth(ctx), channel_id=channel_id

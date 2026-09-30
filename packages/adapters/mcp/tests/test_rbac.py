@@ -329,8 +329,10 @@ STILL_ADMIN_TOOL_NAMES = (
     "set_channel_environment",
     "clear_channel_environment",
 )
-"""Tools whose blast radius is the whole tenant, and stay admin-only.
+"""Tools a plain member never sees.
 
+Most are tenant-wide and admin-only. The agent default and channel environment
+tools also admit channel admins, but only for channels they run.
 `create_environment` is deliberately absent: a new environment is inert until an
 admin scopes an agent onto it, so its blast radius is nothing until a gated call
 widens it. Mutating an environment others already resolve to is a different
