@@ -50,13 +50,14 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
     build_metadata,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.skills import resolve_custom_skill_titles, resolve_skill_names
 from daimon.core.defaults.spec_merge import merge_mcp_servers_with_ma, merge_skills_with_ma
-from daimon.core.errors import DaimonError, DefaultsError
+from daimon.core.errors import DefaultsError
 from daimon.core.github_app_auth import build_app_jwt, get_installation_id_for_repo
 from daimon.core.github_repo_auth import InstallationLookup
 from daimon.core.ma import update_agent_with_version_retry
@@ -70,6 +71,7 @@ from daimon.core.specs import (
     SkillRepo,
     merge_default_agent_toolset,
 )
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from fastmcp import Context, FastMCP
@@ -726,10 +728,32 @@ async def _fork_agent_impl(
     new_name: str,
     expected_ma_agent_id: str | None = None,
 ) -> AgentInfo:
+    # Forking is an admin's call: a fork routes nowhere and has no channel
+    # pin of its own, so it is free to run anywhere the source can't.
+    _require_admin(auth)
     await _reject_guild_name_collision(runtime, auth, new_name)
     source = await resolve_setup_agent(
         runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
     )
+    # A copy of a pinned agent would be an unpinned agent with its prompt,
+    # skills and connectors. Refuse rather than guess which channels the copy
+    # belongs in; an operator pins the copy by name if it should exist.
+    async with runtime.session_factory() as session:
+        try:
+            policy = await load_access_policy(session, tenant_id=auth.tenant_id)
+        except AccessPolicyUnreadable as exc:
+            raise ToolError(
+                "fork_agent: the workspace access policy could not be read; nothing was created."
+            ) from exc
+    if any(
+        name in policy.agent_channel_pins
+        for name in (source.name, source.metadata.get(MA_METADATA_KEY_NAME))
+        if name is not None
+    ):
+        raise ToolError(
+            f"fork_agent: {source_name} is pinned to specific channels by an operator, so it "
+            "can't be copied. Nothing was created. Do not retry."
+        )
     source_ma = await runtime.client.beta.agents.retrieve(source.id)
     params = source_ma.model_dump(mode="json")
     fork_params = {k: params[k] for k in _FORK_COPY_FIELDS if k in params}
@@ -769,32 +793,21 @@ async def _fork_agent_impl(
             cast("str", fork_params.get("system") or "")
         )
 
-    # Narrow the cached fernet BEFORE any partial write — the create
-    # below is the first write, so this must gate ahead of it.
-    fernet = runtime.fernet
-    if fernet is None:
-        raise ToolError(
-            f"fork_agent: cannot copy '{source_name}' to '{new_name}' because this deployment "
-            "is not fully configured. Tell the user an operator must finish setup; "
-            "nothing was created. Do not ask the user to change deployment settings."
-        )
+    # A fork starts with no credentials: no GitHub access, repo binding or
+    # proof, and no agent-wide MCP token. Servers that only work with one are
+    # left off the copy rather than mounted broken.
+    source_agent_uuid = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(source.id))
+    servers, tools = await agent_lifecycle.strip_credentialed_mcp_servers(
+        sessionmaker=runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        source_agent_uuid=source_agent_uuid,
+        mcp_servers=cast("list[dict[str, object]] | None", fork_params.get("mcp_servers")),
+        tools=cast("list[dict[str, object]] | None", fork_params.get("tools")),
+    )
+    fork_params["mcp_servers"] = servers
+    fork_params["tools"] = tools
 
     new_ma = await runtime.client.beta.agents.create(**fork_params)
-
-    source_agent_uuid = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(source.id))
-    fork_agent_uuid = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(new_ma.id))
-    try:
-        await agent_lifecycle.copy_credential_and_repo_binding(
-            anthropic=runtime.client,
-            sessionmaker=runtime.session_factory,
-            fernet=fernet,
-            oauth_scopes=tuple(runtime.settings.github.oauth_scopes),
-            tenant_id=auth.tenant_id,
-            source_agent_uuid=source_agent_uuid,
-            fork_agent_uuid=fork_agent_uuid,
-        )
-    except DaimonError as exc:
-        raise ToolError(str(exc)) from exc
 
     info = await _build_agent_info(runtime.client, new_ma, tenant_id=auth.tenant_id)
     return await _with_answering_note(runtime, auth, info)
@@ -975,10 +988,12 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context, source_name: str, new_name: str, expected_ma_agent_id: str | None = None
     ) -> AgentInfo:
         """Make a copy of Daimon or another agent that you can edit under a new name.
-        Copies its prompt, model, skills, MCP definitions, working-repo binding and
-        recorded GitHub access. Copying access does not freshly verify it.
+        Admin-only. Copies its prompt, model, skills and the MCP servers that need
+        no stored token. The copy starts with no credentials: no repo binding or
+        GitHub access, no API/service keys and no connector tokens; attach its own
+        with ``request_agent_key`` and the repo tools. An agent an operator pinned
+        to channels can't be copied.
 
-        API/service keys are not copied; add them with ``request_agent_key``.
         Use ``update_agent`` to edit the copy. Daimon cannot be edited directly.
 
         Continue configuring it through Daimon with the copy named as the setup

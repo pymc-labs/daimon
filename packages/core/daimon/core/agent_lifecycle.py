@@ -1,4 +1,4 @@
-"""Cross-adapter primitives for fork-copy and best-effort delete archival.
+"""Cross-adapter primitives for forking and best-effort delete archival.
 
 Extracted from Discord's `agent_setup.write` module (the original,
 audited implementation) so Slack and MCP get a behavior-identical copy of
@@ -18,148 +18,67 @@ import uuid
 import anthropic as anthropic_errors
 import structlog
 from anthropic import AsyncAnthropic
-from cryptography.fernet import MultiFernet
-from daimon.core.errors import DaimonError
-from daimon.core.github_credentials import get_pat, upsert_credential_encrypted
 from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.stores import agent_mcp_credentials as mcp_credentials_store
-from daimon.core.stores.agent_github_binding import set_agent_github_binding
-from daimon.core.stores.agent_repo_binding import copy_binding, get_binding
-from daimon.core.stores.domain import AgentRepoBindingRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger()
 
 
-async def copy_credential_and_repo_binding(
+async def strip_credentialed_mcp_servers(
     *,
-    anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
-    fernet: MultiFernet,
-    oauth_scopes: tuple[str, ...],
     tenant_id: uuid.UUID,
     source_agent_uuid: uuid.UUID,
-    fork_agent_uuid: uuid.UUID,
-) -> None:
-    """Re-key the source's per-agent GitHub credential onto the fork, copy
-    its repo binding, and copy its agent-wide MCP tokens.
+    mcp_servers: list[dict[str, object]] | None,
+    tools: list[dict[str, object]] | None,
+) -> tuple[list[dict[str, object]] | None, list[dict[str, object]] | None]:
+    """The source's MCP servers and tools minus every server backed by a stored token.
 
-    Every fork path copies the source's `mcp_servers` raw; the tokens in
-    `agent_mcp_credentials` now travel with them, or the fork mounted servers
-    nothing could authenticate. OAuth grants cannot travel — they sit in MA
-    vaults keyed by (person, source agent) — so a copied sign-in server
-    stays hidden on the fork until someone signs in there
-    (`mcp_personal_servers`). This helper is the single place fork
-    credentials are re-keyed, so a further credential-backed kind is
-    additive here rather than a new branch in a caller's fork_agent.
+    A fork starts with no credentials: no GitHub credential, no repo binding
+    or recorded proof of repo access, and no agent-wide MCP token. Copying
+    them made every fork an independent holder of the source's access, with
+    no pin and no routing of its own, so one fork was enough to take another
+    project's repo and connectors out of the channels they serve, and to keep
+    them after the source was revoked. Whoever needs the copy to reach a repo
+    or a connector attaches its own credential.
 
-    The one check that can fail the fork runs before any write, and the
-    token copy is the last write, so a fork reported as failed does not
-    leave the source's tokens behind.
-
-    The fork's credential is written under `principal_id=fork_agent_uuid`
-    — never aliased to the source principal — mirroring `store_inline_pat`.
-    The repo binding is copied with `ma_secret_ref` rewritten to the
-    fork's own `inline-pat:` ref for private repos; `anon:` (and any other
-    non-inline-pat ref) is copied verbatim.
-    A source binding backed by `inline-pat:` with no resolvable/
-    decryptable source credential fails the fork loud.
-
-    Fork is a deep copy, by design: the fork inherits the source agent's
-    credential AND the source agent's recorded proof of repo access exactly
-    as they stand (via `copy_binding`, which carries `repo_url`,
-    `default_branch`, and all three proof columns forward verbatim,
-    including when they are NULL), and it may later be re-pointed at any
-    repo the inherited credential can read. This is intended, not an
-    oversight — do not "harden" this by re-deriving proof against the
-    forking principal or by gating fork behind an authorization check. A
-    source binding with no recorded proof yields a fork binding with no
-    recorded proof, which fails closed at clone time exactly the way the
-    source does.
+    A server whose token lives in ``agent_mcp_credentials`` would fail every
+    turn's MCP init on a fork without that token, so it is dropped together
+    with its ``mcp_toolset`` entries. Servers with no stored token (anonymous
+    ones, and sign-in servers whose grants live in per-person vaults keyed by
+    the source agent) carry no secret and are kept.
     """
     async with sessionmaker() as session:
-        source_binding = await get_binding(session, tenant_id=tenant_id, agent_id=source_agent_uuid)
-
-    source_pat: str | None = None
-    if source_binding is not None and source_binding.ma_secret_ref.startswith("inline-pat:"):
-        source_pat = await get_pat(
-            principal_id=source_agent_uuid,
-            agent_id=source_agent_uuid,
-            sessionmaker=sessionmaker,
-            fernet=fernet,
+        credentials = await mcp_credentials_store.list_credentials(
+            session, tenant_id=tenant_id, agent_id=source_agent_uuid
         )
-        if source_pat is None:
-            raise DaimonError(
-                "Fork failed: the source agent's github git-proxy has no resolvable "
-                "credential to copy — reconnect GitHub on the source agent and try again."
-            )
-
-    if source_binding is not None:
-        await _copy_repo_binding(
-            sessionmaker,
-            fernet=fernet,
-            oauth_scopes=oauth_scopes,
-            tenant_id=tenant_id,
-            source_agent_uuid=source_agent_uuid,
-            fork_agent_uuid=fork_agent_uuid,
-            source_binding=source_binding,
-            source_pat=source_pat,
-        )
-
-    async with sessionmaker.begin() as session:
-        copied = await mcp_credentials_store.copy_credentials(
-            session,
-            tenant_id=tenant_id,
-            source_agent_id=source_agent_uuid,
-            target_agent_id=fork_agent_uuid,
-        )
-    if copied:
-        _log.info(
-            "agent_lifecycle.mcp_credentials_copied",
-            source_agent_id=str(source_agent_uuid),
-            fork_agent_id=str(fork_agent_uuid),
-            count=copied,
-        )
-
-
-async def _copy_repo_binding(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    fernet: MultiFernet,
-    oauth_scopes: tuple[str, ...],
-    tenant_id: uuid.UUID,
-    source_agent_uuid: uuid.UUID,
-    fork_agent_uuid: uuid.UUID,
-    source_binding: AgentRepoBindingRow,
-    source_pat: str | None,
-) -> None:
-    """The GitHub half: re-key an inline PAT under the fork, copy the binding."""
-    if source_pat is not None:
-        await upsert_credential_encrypted(
-            sessionmaker=sessionmaker,
-            fernet=fernet,
-            principal_id=fork_agent_uuid,
-            github_login="(inline-pat)",
-            plaintext_token=source_pat,
-            scopes=oauth_scopes,
-        )
-        async with sessionmaker.begin() as session:
-            await set_agent_github_binding(
-                session, agent_id=fork_agent_uuid, principal_id=fork_agent_uuid
-            )
-        fork_secret_ref = f"inline-pat:{fork_agent_uuid}"
-    else:
-        # anon: (or any other non-per-agent-secret ref) carries no secret — copy verbatim.
-        fork_secret_ref = source_binding.ma_secret_ref
-
-    async with sessionmaker.begin() as session:
-        await copy_binding(
-            session,
-            tenant_id=tenant_id,
-            source_agent_id=source_agent_uuid,
-            target_agent_id=fork_agent_uuid,
-            ma_secret_ref=fork_secret_ref,
-        )
+    credentialed_urls = {row.mcp_server_url.rstrip("/") for row in credentials}
+    if not credentialed_urls or mcp_servers is None:
+        return mcp_servers, tools
+    dropped = {
+        str(server.get("name"))
+        for server in mcp_servers
+        if str(server.get("url") or "").rstrip("/") in credentialed_urls
+    }
+    if not dropped:
+        return mcp_servers, tools
+    _log.info(
+        "agent_lifecycle.fork_dropped_credentialed_mcp_servers",
+        source_agent_id=str(source_agent_uuid),
+        count=len(dropped),
+    )
+    kept_servers = [server for server in mcp_servers if server.get("name") not in dropped]
+    kept_tools = (
+        None
+        if tools is None
+        else [
+            tool
+            for tool in tools
+            if not (tool.get("type") == "mcp_toolset" and tool.get("mcp_server_name") in dropped)
+        ]
+    )
+    return kept_servers, kept_tools
 
 
 async def archive_memory_store_best_effort(

@@ -184,7 +184,7 @@ and skips the policy, as it skips billing. Ids are the platform's own (Discord s
 | `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord and Slack write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
 | `sealed_channel_ids` | nothing is sealed | the channel read tools (`read_channel`, `read_thread`, `get_message`, `list_threads`, `search_messages`) via `ChannelReadPolicy`, which the dispatcher in `tools/channels.py` loads per call; `admit()` also sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
-| `agent_channel_pins` | every agent runs wherever the cascade sends it | `admit()` after the agent is retrieved (every turn path: mention, follow-up, wizard submit, continuation, handoff thread, DM), `hand_off_task` via `decide_handoff`, and routines at save (`_check_agent_pin`) and at every fire (scheduler) |
+| `agent_channel_pins` | every agent runs wherever the cascade sends it | `admit()` after the agent is retrieved (every turn path: mention, follow-up, wizard submit, continuation, handoff thread, DM), `hand_off_task` via `decide_handoff`, `fork_agent` (a pinned agent can't be copied), and routines at save (`_check_agent_pin`) and at every fire (scheduler) |
 
 Protection covers threads under a protected channel and, on Discord, channels
 in a protected category; it applies to admins too, and runs after the caller's
@@ -232,6 +232,12 @@ agent's routine must post straight into a pinned channel (a channel
 destination, not a thread or none), because the scheduler cannot resolve a
 Discord thread's parent at fire time; it is refused at save and skipped at
 fire otherwise.
+
+`fork_agent` is admin-only and refuses a pinned source: a copy would be the
+agent's prompt, skills and connectors under a name with no pin. A fork also
+starts with no credentials (no GitHub access, repo binding or proof, and no
+agent-wide MCP token), so copying an agent never hands out another project's
+access; MCP servers that only work with a stored token are left off the copy.
 
 Each flag given replaces that whole field (repeat it for several ids);
 fields not given keep their stored value, including concurrent CLI edits.
