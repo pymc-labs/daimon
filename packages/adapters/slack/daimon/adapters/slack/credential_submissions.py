@@ -1129,6 +1129,17 @@ async def _attach_skills_to_requested_agent(
             agent_name=None,
             skill_count=len(skill_ids),
         )
+    if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+        # Admins included: an attach never stamps the reconciler's spec hash,
+        # so the seeded agent would drift for good.
+        return SkillAttachOutcome(
+            note=(
+                f"Not attached: `{agent.name}` is a built-in agent. The skills are in the library."
+            ),
+            attached=False,
+            agent_name=agent.name,
+            skill_count=len(skill_ids),
+        )
     new_skills: list[BetaManagedAgentsSkillParams] = [
         {"type": "custom", "skill_id": skill_id} for skill_id in skill_ids
     ]
@@ -1245,8 +1256,9 @@ async def run_skill_repo_credential_submission(
     The credential lands in the skill-repo store, NOT in the agent's working
     repo binding: somebody who offers a token so an agent can read skills out
     of a repo has not asked for that repo to become the agent's checkout, and
-    the card they clicked said as much. No admin gate, matching the env/mcp
-    kinds — `sync_skills` itself gates imports at request time.
+    the card they clicked said as much. The import attaches skills to the
+    agent, so `skill_repo_connect` is decided again before the consume, as the
+    repo bind does, and the attach never lands on a defaults-managed agent.
     """
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
@@ -1265,6 +1277,25 @@ async def run_skill_repo_credential_submission(
     channel_id = request.parent_channel_id or channel_id
     message_ts = request.posted_message_id or message_ts
     thread_ts = request.origin_thread_id
+
+    if await refuse_unless_allowed(
+        runtime,
+        client,
+        operation="skill_repo_connect",
+        tenant_id=request.tenant_id,
+        agent_id=request.agent_id,
+        channel_id=channel_id,
+        user_id=user_id,
+        thread_ts=thread_ts,
+    ):
+        # Same shape as the repo bind: nothing is spent, and the card stops
+        # offering a form this submitter could never finish.
+        async with runtime.sessionmaker() as session, session.begin():
+            await credential_requests_store.set_credential_request_outcome(
+                session, token=token, outcome="write_failed"
+            )
+        await edit_posted_card(client, row=request, state="refused", refusal="admin_required")
+        return
 
     now = datetime.now(UTC)
     consumed = await _consume(runtime, token=token, now=now)
