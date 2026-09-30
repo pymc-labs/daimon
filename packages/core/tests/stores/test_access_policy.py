@@ -67,3 +67,21 @@ async def test_clear_removes_the_row_and_reports_whether_one_existed(
     assert await clear_access_policy(db_session, tenant_id=tenant.id) is True
     assert await clear_access_policy(db_session, tenant_id=tenant.id) is False, "nothing left"
     assert await load_access_policy(db_session, tenant_id=tenant.id) == OPEN_ACCESS_POLICY
+
+
+async def test_an_empty_pin_map_is_left_out_of_the_stored_row(db_session: AsyncSession) -> None:
+    """A process built before pins existed must still read the row."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(sealed_channel_ids=("c1",))
+    )
+    stored = (
+        await db_session.execute(
+            text("SELECT policy FROM tenant_access_policies WHERE tenant_id = :t"),
+            {"t": tenant.id},
+        )
+    ).scalar_one()
+    assert "agent_channel_pins" not in stored
+    assert await load_access_policy(db_session, tenant_id=tenant.id) == TenantAccessPolicy(
+        sealed_channel_ids=("c1",)
+    )

@@ -15,8 +15,11 @@ from datetime import datetime
 from typing import Any, cast
 
 from daimon.core._models import CredentialRequest
+from daimon.core.access_policy import is_outside_agent_pin, origin_pin_location
 from daimon.core.credential_requests import CredentialRequestKind, CredentialRequestOutcome
-from daimon.core.stores.domain import CredentialRequestRow
+from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.accounts import get_account
+from daimon.core.stores.domain import CredentialRequestRow, Role
 from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -111,7 +114,9 @@ async def consume_credential_request(
     One statement is the authoritative single-use gate: the UPDATE's own row
     lock serializes concurrent consumers, so the loser's WHERE clause simply
     matches zero rows — no advisory lock needed. Returns None for "not
-    consumable" (unknown token, already used, or expired); the caller cannot
+    consumable" (unknown token, already used, expired, or a pinned target
+    added to from outside its channels by a non-admin, which spends the
+    token and writes nothing); the caller cannot
     and must not distinguish those cases from this return value alone (use
     `peek_credential_request` for that).
     """
@@ -130,7 +135,38 @@ async def consume_credential_request(
     await session.flush()
     if orm is None:
         return None
-    return CredentialRequestRow.model_validate(orm)
+    row = CredentialRequestRow.model_validate(orm)
+    if await _outside_target_pin(session, row):
+        # Spent, and nothing is written: the request was minted for a pinned
+        # agent from outside its channels by someone who is not an admin now.
+        return None
+    return row
+
+
+async def _outside_target_pin(session: AsyncSession, row: CredentialRequestRow) -> bool:
+    """Whether this request adds to a pinned agent from outside its channels.
+
+    The same rule the MCP request tools apply before minting, re-checked at
+    consume so a pin added (or an admin role removed) since the card was
+    posted still holds. The target is the name recorded on the row; the
+    origin is the conversation the request was made in; admin is the
+    requester's stored role, the signal the MCP gate reads too.
+    """
+    if row.target_name is None:
+        return False
+    policy = await load_access_policy(session, tenant_id=row.tenant_id)
+    channel_id, parent_channel_id = origin_pin_location(
+        parent_channel_id=row.parent_channel_id, thread_id=row.origin_thread_id
+    )
+    if not is_outside_agent_pin(
+        policy,
+        agent_names=(row.target_name,),
+        channel_id=channel_id,
+        parent_channel_id=parent_channel_id,
+    ):
+        return False
+    account = await get_account(session, row.account_id)
+    return account is None or account.role is not Role.ADMIN
 
 
 async def list_live_credential_requests(

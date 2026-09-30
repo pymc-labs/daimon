@@ -40,6 +40,7 @@ from daimon.adapters.mcp.tools.teams._send import (
     _post_teams_credential_card_impl,  # pyright: ignore[reportPrivateUsage]
     edit_teams_card_state,
 )
+from daimon.core.access_policy import is_outside_agent_pin, origin_pin_location
 from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.credential_requests import (
     DEFAULT_TTL,
@@ -65,6 +66,7 @@ from daimon.core.operation_policy import (
     decide_operation,
     needs_reachability_read,
 )
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.agent_files import agent_env_writes_allowed, get_agent_file
 from daimon.core.stores.credential_requests import (
     create_credential_request,
@@ -384,6 +386,48 @@ async def _supersede_live_siblings(
     return retired
 
 
+async def _require_inside_agent_pin(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    ma_agent: BetaManagedAgentsAgent,
+    origin: TurnOriginRow,
+) -> None:
+    """Refuse a member adding anything to a pinned agent from outside its channels.
+
+    A key, connector token, skill-repo token or repo binding becomes part of
+    what the agent reaches, so a member of one client's channel must not add
+    one to another client's pinned agent. Inside the agent's own channels (the
+    request's turn origin decides) and for admins this is allowed, and an
+    unpinned agent is unchanged. The form's submit path re-checks the same
+    rule when it consumes the request.
+    """
+    if auth.is_admin:
+        return
+    async with runtime.session_factory() as session:
+        try:
+            policy = await load_access_policy(session, tenant_id=auth.tenant_id)
+        except AccessPolicyUnreadable as exc:
+            raise ToolError(
+                "The workspace access policy could not be read, so no card was posted."
+            ) from exc
+    channel_id, parent_channel_id = origin_pin_location(
+        parent_channel_id=origin.parent_channel_id, thread_id=origin.thread_id
+    )
+    if is_outside_agent_pin(
+        policy,
+        agent_names=(ma_agent.name, ma_agent.metadata.get(MA_METADATA_KEY_NAME)),
+        channel_id=channel_id,
+        parent_channel_id=parent_channel_id,
+    ):
+        raise ToolError(
+            f"An operator pinned '{ma_agent.name}' to its own channels, so its keys and "
+            "connections can only be added from a conversation inside them, or by a server "
+            "or workspace admin. Nothing changed and no card was posted. Tell the caller to "
+            "ask in one of that agent's channels. Do not retry."
+        )
+
+
 async def _mint_and_post(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -402,6 +446,7 @@ async def _mint_and_post(
     replaces_updated_at: datetime | None = None,
     branch: str | None = None,
 ) -> RequestCredentialResult:
+    await _require_inside_agent_pin(runtime, auth, ma_agent=ma_agent, origin=origin)
     # A tool-supplied channel cannot redirect a private-input request.
     channel_id = origin.parent_channel_id if auth.platform == "slack" else origin.thread_id
     if auth.platform == "teams" and runtime.teams_client is None:

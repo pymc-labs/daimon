@@ -905,3 +905,55 @@ async def test_a_timer_set_with_another_agent_is_refused_before_bind(
     run_turn.assert_not_called()
     assert "set with old-agent" in refused.value.message
     assert "uat-agent answers here now" in refused.value.message
+
+
+class _StopAtAdmit(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("thread_id", "is_dm"),
+    [(_THREAD_ID, False), ("dm:3f1c0a52-0000-4000-8000-000000000000", True)],
+    ids=["channel-thread", "dm-scope"],
+)
+async def test_continuation_admits_a_dm_scope_as_a_dm(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    thread_id: str,
+    is_dm: bool,
+) -> None:
+    """A continuation owed to a private DM conversation must be admitted as a DM:
+    outside every pin and under the DM memory rule."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=f"T_DM_{is_dm}")
+    requester = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
+    )
+    await db_session.commit()
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
+    row = _make_continuation_row(
+        tenant_id=tenant.id, account_id=requester.account_id, reason="task_handoff"
+    ).model_copy(update={"thread_id": thread_id})
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_admin_status",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "daimon.adapters.slack.app.admit", new_callable=AsyncMock, side_effect=_StopAtAdmit
+        ) as admit,
+        pytest.raises(_StopAtAdmit),
+    ):
+        await app._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
+            row,
+            "finish the migration",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant.id,
+            channel=_CHANNEL,
+            thread_id=thread_id,
+        )
+
+    assert admit.await_args is not None
+    assert admit.await_args.kwargs["is_dm"] is is_dm

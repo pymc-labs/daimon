@@ -28,6 +28,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -48,8 +49,12 @@ from daimon.core.defaults.metadata import (
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.posted_controls import REPLACED_HEADLINE
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_files import put_agent_file
-from daimon.core.stores.credential_requests import peek_credential_request
+from daimon.core.stores.credential_requests import (
+    consume_credential_request,
+    peek_credential_request,
+)
 from daimon.core.stores.domain import Role
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing import ma_agent, ma_model_config
@@ -2622,3 +2627,148 @@ async def test_request_agent_key_treats_adding_to_a_stored_aws_family_as_a_repla
         )
     assert await _row_count(db_session) == 0
     assert posted == {}
+
+
+_ACME_CHANNEL = "555555555555555555"
+
+
+_CLIENTB_CHANNEL = "666666666666666666"
+
+
+@pytest.mark.parametrize("tool", ["agent_key", "mcp_token"])
+@pytest.mark.parametrize(
+    ("origin_channel", "is_admin", "allowed"),
+    [
+        (_CLIENTB_CHANNEL, False, False),
+        (_ACME_CHANNEL, False, True),
+        (_CLIENTB_CHANNEL, True, True),
+    ],
+    ids=["member-in-other-client-channel", "member-in-agents-channel", "admin"],
+)
+async def test_requests_for_a_pinned_agent_need_its_channel_or_an_admin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: str,
+    origin_channel: str,
+    is_admin: bool,
+    allowed: bool,
+) -> None:
+    """A key or connector becomes part of what a pinned client agent reaches, so a
+    member of another client's channel must not add one; the check runs again when
+    the form is consumed."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"acme-project": (_ACME_CHANNEL,)}),
+    )
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_acme", name="acme-project", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=is_admin)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    async with committing_sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=auth.account_id,
+            platform="discord",
+            parent_channel_id=origin_channel,
+            thread_id="222",
+            responder_ma_agent_id="ag_clientb",
+            responder_name="clientb-project",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=auth.role,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            now=datetime.now(UTC),
+        )
+    _patch_successful_post(monkeypatch, message_id="9301")
+
+    async def request() -> object:
+        if tool == "agent_key":
+            return await _request_agent_key_impl(
+                runtime,
+                auth,
+                origin_context_id=str(origin.id),
+                expected_ma_agent_id="ag_acme",
+                agent_name="acme-project",
+                key="NOTE",
+                purpose="notes",
+                channel_id="222",
+            )
+        return await _request_mcp_token_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin.id),
+            expected_ma_agent_id="ag_acme",
+            agent_name="acme-project",
+            server_name="linear",
+            url="https://mcp.linear.app/sse",
+            channel_id="222",
+        )
+
+    assert posted == {}
+
+
+async def test_consuming_a_request_rechecks_the_pin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pin added after the card was posted still holds when the form is submitted."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_acme", name="acme-project", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = _auth_identity(tenant_id=tenant.id)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    async with committing_sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=auth.account_id,
+            platform="discord",
+            parent_channel_id=_CLIENTB_CHANNEL,
+            thread_id="222",
+            responder_ma_agent_id="ag_clientb",
+            responder_name="clientb-project",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=auth.role,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            now=datetime.now(UTC),
+        )
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9302", posted=posted)
+    await _request_agent_key_impl(
+        runtime,
+        auth,
+        origin_context_id=str(origin.id),
+        expected_ma_agent_id="ag_acme",
+        agent_name="acme-project",
+        key="NOTE",
+        purpose="notes",
+        channel_id="222",
+    )
+    token = _token_from_posted(posted)
+    async with committing_sessionmaker.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(agent_channel_pins={"acme-project": (_ACME_CHANNEL,)}),
+        )
+
+    async with committing_sessionmaker.begin() as session:
+        consumed = await consume_credential_request(session, token=token, now=datetime.now(UTC))
+    assert consumed is None, "the submit path must refuse a pinned target from outside"
+    async with committing_sessionmaker() as session:
+        row = await peek_credential_request(session, token=token)
+    assert row is not None and row.used_at is not None, "the refused request is spent"

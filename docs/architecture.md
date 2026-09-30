@@ -280,9 +280,11 @@ policy is read on every call, and a pinned agent is refused before any session
 is created or message sent. Only the operator's internal tokens, which carry
 no platform user, bypass it.
 
-Pins are not the only boundary between projects in one workspace. Whatever an
-agent can reach (its repo, keys, connectors and memory) is also guarded where
-a member could otherwise borrow it:
+Cross-agent protection is complete only for pinned agents: an unpinned agent
+still answers wherever the cascade sends it, so pin every client project
+agent. Beyond the pin, whatever an agent can reach (its repo, keys,
+connectors and memory) is also guarded where a member could otherwise borrow
+it:
 
 - `hand_off_task` lets a member hand a thread only to the agent the channel
   itself answers with; any other destination needs an admin.
@@ -296,9 +298,27 @@ fields not given keep their stored value, including concurrent CLI edits.
 Pins are edited in place instead: `--add-pin-agent` adds channels to one
 agent's pin and `--remove-pin-agent` drops one channel or the whole pin, and
 every other agent's pin is kept, so onboarding a second client never unpins
-the first. Removing a pin that isn't stored is refused. `--pin-agent` still
-replaces the whole map, but refuses to drop an agent it doesn't name unless
-`--replace-pins` is given. Every `set` prints the resulting policy.
+the first. An unpinned agent runs anywhere (pins fail open), so every way of
+dropping a pin is explicit and refused otherwise: removing a pin or channel
+that isn't stored, removing an agent's last channel by id (use the bare
+`--remove-pin-agent AGENT`), naming one agent in both `--add-pin-agent` and
+`--remove-pin-agent`, or mixing the bare and `AGENT=CHANNEL_ID` remove forms
+for one agent. Pin names must match an agent of the tenant exactly; a name
+that only matches after NFKC and case folding is refused with the right one.
+A Slack `D…` id is never a pin channel. `--pin-agent` still replaces the whole
+map (rewriting the channels of every agent it names), but refuses to drop an
+agent it doesn't name unless `--replace-pins` is given, and `--clear` needs
+`--replace-pins` when pins exist. Every `set` prints the resulting policy and
+a line for each agent left unpinned. Onboarding a client uses
+`--add-pin-agent`. An empty pin map is left out of the stored row.
+
+A private DM conversation (`dm:` scope) is outside every pin wherever it is
+checked: admission, `hand_off_task`, and continuations owed to a DM, which are
+admitted as DM turns. Adding a key, connector token, skill-repo token or repo
+binding to a pinned agent (`request_agent_key`, `request_mcp_token`,
+`request_mcp_oauth`, and the other request tools) needs an admin or a request
+made inside one of its channels; the form's submit re-checks the rule and
+spends the request without writing if it no longer holds.
 Edits and clears lock the tenant row for their transaction, even when no policy
 row exists yet. Every supplied id is validated before writing: Discord ids are
 15–21 decimal digits; Slack user ids start with `U` or `W`, channel ids with

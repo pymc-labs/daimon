@@ -1389,3 +1389,54 @@ async def test_routine_reads_hide_other_members_routines(
         await _get_routine_impl(runtime, member, routine_id=theirs.id)
     admin = _auth_identity(tenant_id=tenant.id, is_admin=True)
     assert {row.id for row in await _list_routines_impl(runtime, admin)} == {theirs.id, mine.id}
+
+
+_PINNED_CHANNEL = "111111111111111111"
+
+
+@pytest.mark.parametrize("change", ["clear-destination", "switch-to-pinned-agent"])
+async def test_update_routine_refuses_moving_a_pinned_agent_out_of_its_channels(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    change: str,
+) -> None:
+    """An update is a save too: it must not leave a pinned agent's routine posting
+    anywhere but a pinned channel, whether by dropping the destination or by
+    switching an unpinned routine onto the pinned agent. Admins included."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"daimon": (_PINNED_CHANNEL,)}),
+    )
+    pinned_routine = change == "clear-destination"
+    created = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u_test",
+        agent_id="ag_resolved" if pinned_routine else "ag_other",
+        agent_name="daimon" if pinned_routine else "other",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="daily",
+        destination_kind="channel" if pinned_routine else None,
+        destination_id=_PINNED_CHANNEL if pinned_routine else None,
+    )
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    admin = _auth_identity(tenant_id=tenant.id, is_admin=True)
+
+    with pytest.raises(ToolError, match="pinned to specific channels"):
+        if pinned_routine:
+            await _update_routine_impl(
+                runtime, admin, routine_id=created.id, clear_destination=True
+            )
+        else:
+            await _update_routine_impl(runtime, admin, routine_id=created.id, agent_name="daimon")
+    async with committing_sessionmaker() as session:
+        row = await get_routine(session, created.id, tenant_id=tenant.id)
+    assert row is not None and row.agent_id == created.agent_id
+    assert row.destination_id == created.destination_id, "a refused update changes nothing"

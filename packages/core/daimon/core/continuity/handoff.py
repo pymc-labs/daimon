@@ -88,8 +88,8 @@ def decide_handoff(
     existing_binding_kind: Literal["setup", "handoff"] | None,
     origin_responder_ma_agent_id: str,
     destination_pinned_elsewhere: bool = False,
-    destination_answers_channel: bool = True,
-    caller_is_admin: bool = True,
+    destination_answers_channel: bool,
+    caller_is_admin: bool,
 ) -> HandoffDecision:
     """Decide whether this task may move to `destination_ma_agent_id`.
 
