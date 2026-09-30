@@ -37,6 +37,7 @@ from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core.access_policy import is_invoker_allowed, is_write_protected
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
+from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -260,6 +261,27 @@ async def _build_fire(
                 await record_result(s, row.id, tail=None, error="balance_depleted")
             return
 
+        # Admission gate: the budget of the channel the routine posts to, after
+        # the cap (run_one_tick) and balance gates. No channel, no budget gate.
+        if await is_over_channel_budget(
+            sessionmaker=sm,
+            tenant_id=row.tenant_id,
+            platform=platform,
+            channel_id=row.channel_id,
+            now=datetime.now(UTC),
+        ):
+            if (observation := current_outcome.get()) is not None:
+                observation.finish(reason=TerminationReason.ADMISSION_DENIED)
+            log.info(
+                "routine.skipped.over_channel_budget",
+                routine_id=str(row.id),
+                tenant_id=str(row.tenant_id),
+                channel_id=row.channel_id,
+            )
+            async with sm() as s, s.begin():
+                await record_result(s, row.id, tail=None, error="channel_budget_exceeded")
+            return
+
         # Bind routine context now; headless_runner calls the factory once
         # (session_id, model_id) are known after create_session.
         platform_user_id = row.created_by_user_id
@@ -274,6 +296,7 @@ async def _build_fire(
                 tenant_id=row.tenant_id,
                 markup=settings.billing.markup,
                 pricing=MODEL_PRICING.get(model_id),
+                channel_id=row.channel_id,
             )
 
         # Resolve agent + environment by daimon-tag at fire time,
@@ -355,6 +378,7 @@ async def _build_fire(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             tool_safety=settings.tool_safety,
+            channel_id=row.channel_id,
         )
 
         if row.destination_kind is None:

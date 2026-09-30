@@ -43,7 +43,7 @@ from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.core.usage_recording import record_turn_usage
 from daimon.testing import ma_model_usage
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -461,6 +461,75 @@ async def test_fire_rejects_routine_when_tenant_balance_depleted(
     )
 
     await fake_client.close()
+
+
+@pytest.mark.parametrize("limit", [Decimal("0"), Decimal("5")], ids=["over", "under"])
+async def test_fire_gates_on_and_attributes_to_the_routine_channel(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    limit: Decimal,
+) -> None:
+    """A routine's channel budget is checked after the balance gate, and a fire
+    it admits bills that channel through both the live recorder and the stamp."""
+    now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await make_channel_budget(db_session, tenant=tenant, channel_id="chan-9", limit_usd=limit)
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u3",
+        agent_id="agent_z",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        channel_id="chan-9",
+    )
+    await db_session.commit()
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    calls: list[dict[str, object]] = []
+
+    async def capturing_run_turn(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return "tail"
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_z"
+
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
+        ),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", fake_resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", fake_resolve),
+    ):
+        await fire(row)
+    await fake_client.close()
+
+    async with db_session_factory() as s:
+        fetched = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert fetched is not None
+    if limit == 0:
+        assert calls == [], "an exhausted channel budget must refuse the fire"
+        assert fetched.last_error == "channel_budget_exceeded"
+        return
+    assert fetched.last_error is None
+    assert calls[0]["channel_id"] == "chan-9"
+    factory = calls[0]["usage_record_factory"]
+    assert callable(factory)
+    partial = factory("sess_abc", "claude-opus-4-7")
+    assert isinstance(partial, functools.partial)
+    assert partial.keywords["channel_id"] == "chan-9"
 
 
 async def test_fire_balance_gate_passes_threads_tenant_id_markup_pricing_into_usage_record_factory(
