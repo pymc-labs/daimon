@@ -19,6 +19,8 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_admins import (
     MAX_CHANNEL_ADMIN_IDS,
     InvalidChannelAdminIds,
+    fit_lines,
+    fold_mentions,
     normalize_channel_admin_ids,
 )
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -37,6 +39,8 @@ CHANNEL_ADMINS_LABEL: Final = "Channel admins"
 EDIT_LABEL: Final = "Edit this channel"
 BACK_LABEL: Final = "◀ Back"
 MAX_LISTED: Final = 15
+LISTING_MAX_CHARS: Final = 3_000
+"""Room for the listing inside Discord's 4000-character cap on a message's text."""
 EXPLAINER: Final = (
     "-# Server admins run every channel. A channel's admins may change agents that answer "
     "only in channels they run, and pick those channels' default agent. Built-in agents and "
@@ -46,16 +50,17 @@ EXPLAINER: Final = (
 
 def grant_line(row: ChannelAdminsRow) -> str:
     who = [f"<@&{role_id}>" for role_id in row.role_ids] + [f"<@{uid}>" for uid in row.user_ids]
-    return f"<#{row.channel_id}> → {', '.join(who)}"
+    return f"<#{row.channel_id}> → {fold_mentions(who)}"
 
 
 def build_channel_admins_container(
     grants: Sequence[ChannelAdminsRow],
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """Fold every channel's admins into the panel card. Pure — no I/O."""
-    shown = [grant_line(row) for row in grants[:MAX_LISTED]]
-    if len(grants) > MAX_LISTED:
-        shown.append(f"-# and {len(grants) - MAX_LISTED} more")
+    lines = (grant_line(row) for row in grants[:MAX_LISTED])
+    shown = fit_lines(lines, max_chars=LISTING_MAX_CHARS)
+    if len(shown) < len(grants):
+        shown.append(f"-# and {len(grants) - len(shown)} more")
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
     container.add_item(header(CHANNEL_ADMINS_LABEL))
     container.add_item(

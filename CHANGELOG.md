@@ -24,8 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_channel_budget`, `clear_channel_budget` and `list_channel_budgets`, or
   `daimon channels budget set|clear|list`. Once a channel's debits (markup
   included, threads counting toward their channel) reach its limit, new turns
-  there are refused, as are unprompted replies, wakes and routine fires that
-  post there. Members can read a budget with `get_channel_budget`, and
+  there are refused, as are unprompted replies, wakes, `/dm`, YouTube
+  transcripts asked for there and routine fires that post there or were made
+  there. Members can read a budget with `get_channel_budget`, and
   `/billing` shows the channel's spend against it. Nothing changes until a
   budget is set, with or without Stripe. Usage and debits now record their
   channel from this release on.
@@ -49,7 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Promo codes: operators create credit or timed codes with `daimon promo`, and
   admins redeem them from `/billing` on Discord and Slack or with the MCP tool
   `redeem_promo_code`. Timed credit is spent first inside its window and the
-  unspent rest expires. Nothing changes until an operator creates a code.
+  unspent rest expires. Nothing changes until an operator creates a code, apart
+  from the admin-only Redeem code button; join messages mention redemption only
+  while a code is redeemable.
 - Record content-free turn outcomes across chat, headless, routines and MCP hub/agent-chat, including attributed admission refusals, with bounded best-effort persistence. MCP `ask` records its terminal reason; fire-and-forget `start_turn`/`continue_turn` record dispatch only (`unknown`), without a later terminal update. Pre-attribution and adapter readiness gates are outside coverage.
 - Routines can name an optional destination channel or thread
   (`create_routine`/`update_routine` `destination_kind` + `destination_id`,

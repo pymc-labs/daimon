@@ -20,8 +20,7 @@ from daimon.core.promo_codes import (
     build_promo_code_terms,
     generate_promo_code,
     hash_promo_code,
-    is_well_formed_promo_code,
-    normalize_promo_code,
+    normalize_chosen_promo_code,
     parse_utc_timestamp,
 )
 from daimon.core.stores import promo_codes as promo_store
@@ -71,7 +70,8 @@ def promo_create_command(
         int | None, typer.Option("--max-redemptions", help="Tenants that may redeem it.")
     ] = None,
     code: Annotated[
-        str | None, typer.Option("--code", help="Use this code instead of a generated one.")
+        str | None,
+        typer.Option("--code", help="Use this code (12+ characters) instead of a generated one."),
     ] = None,
     note: Annotated[str | None, typer.Option("--note", help="Operator note.")] = None,
 ) -> None:
@@ -122,12 +122,10 @@ async def promo_create(
             max_redemptions=max_redemptions,
             note=note,
         )
+        shown = code.strip() if code is not None else generate_promo_code()
+        normalized = normalize_chosen_promo_code(shown)
     except PromoCodeError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    shown = code.strip() if code is not None else generate_promo_code()
-    normalized = normalize_promo_code(shown)
-    if not is_well_formed_promo_code(normalized):
-        raise typer.BadParameter("code must be 6-64 letters or digits (dashes and spaces ignored)")
     async with rt.sessionmaker() as session, session.begin():
         row = await promo_store.insert_promo_code(
             session, code_hash=hash_promo_code(normalized), terms=terms
@@ -161,6 +159,7 @@ async def promo_list(*, rt: CliRuntime, console: Console, as_json: bool) -> None
             "max_redemptions",
             "credit_starts_at",
             "credit_ends_at",
+            "redeem_starts_at",
             "redeem_ends_at",
             "revoked_at",
             "note",

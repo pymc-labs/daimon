@@ -26,10 +26,12 @@ import yarl
 from aioresponses import aioresponses as AioResponsesMock
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.agent_setup.actions import (
+    CHANNEL_ADMINS_NEED_ADMIN_MESSAGE,
     handle_agent_setup_action,
     handle_agent_setup_command,
 )
 from daimon.adapters.slack.agent_setup.panel_views import (
+    ACTION_CHANNEL_ADMINS,
     ACTION_CODING_TOOLS,
     ACTION_DETAILS,
     ACTION_EXPAND_CONNECTIONS,
@@ -811,3 +813,28 @@ async def test_conversation_action_from_details_targets_that_agent(
     assert binding.configuration_target_name == _OTHER_AGENT, (
         "the conversation configures the agent Details was showing"
     )
+
+
+async def test_channel_admins_click_refuses_a_member(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The rendered button is a hint: a member's click is refused and no form opens."""
+    _, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
+
+    await handle_agent_setup_action(
+        runtime,
+        _action_payload(ACTION_CHANNEL_ADMINS, meta=_meta(view="routing"), view_id="V_ROUTING"),
+    )
+
+    ephemerals = _sent(
+        fake_slack_web_client.mock,
+        ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")),
+    )
+    assert [e["text"] for e in ephemerals] == [CHANNEL_ADMINS_NEED_ADMIN_MESSAGE], (
+        "the member is told only a workspace admin may do this"
+    )
+    assert _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY) == [], "no form is pushed"

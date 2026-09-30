@@ -11,15 +11,20 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
+import structlog
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.observability import capture_exception_with_scope
 from daimon.core.promo_codes import describe_refusal
 from daimon.core.promo_credit import PromoRedeemRefused, PromoRedeemResult, redeem_promo_code
+from sqlalchemy.exc import SQLAlchemyError
 
 import discord
+
+_log = structlog.get_logger()
 
 Rerender = Callable[[discord.Interaction], Awaitable[None]]
 
@@ -81,7 +86,16 @@ class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
             if not isinstance(result, PromoRedeemRefused):
                 await self.rerender(interaction)
             await interaction.followup.send(redeem_result_text(result), ephemeral=True)
-        except (DaimonError, discord.HTTPException) as exc:
+        except (DaimonError, discord.HTTPException, SQLAlchemyError) as exc:
+            # Deferred already, so the admin gets an answer whatever failed.
+            request_id = generate_request_id()
+            _log.error(
+                "billing_redeem.failed",
+                guild_id=interaction.guild_id,
+                request_id=request_id,
+                exc_info=exc,
+            )
+            capture_exception_with_scope(exc)
             await interaction.followup.send(
-                render_error(exc, request_id=generate_request_id()), ephemeral=True
+                render_error(exc, request_id=request_id), ephemeral=True
             )

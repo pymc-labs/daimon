@@ -1258,7 +1258,7 @@ async def test_settle_promo_credit_grants_a_due_timed_code(
     async with db_session_factory.begin() as s:
         tenant = await make_tenant(s)
         code = await promo_store.insert_promo_code(s, code_hash="h", terms=terms)
-        assert code is not None
+        assert code is not None, "the promo code should be inserted"
         await promo_store.insert_redemption(
             s,
             promo_code_id=code.id,
@@ -1269,12 +1269,15 @@ async def test_settle_promo_credit_grants_a_due_timed_code(
         )
     await _settle_promo_credit(db_session_factory)
     async with db_session_factory() as s:
-        assert await tenant_ledger.get_balance(s, tenant_id=tenant.id) == Decimal("10")
+        assert await tenant_ledger.get_balance(s, tenant_id=tenant.id) == Decimal("10"), (
+            "the due timed credit should be granted"
+        )
 
 
 async def test_settle_promo_credit_swallows_sqlalchemy_error(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A database error in promo settlement is logged, not raised into the tick."""
     with unittest.mock.patch(
         "daimon.adapters.scheduler.main.settle_promo_credit",
         side_effect=SQLAlchemyError("boom"),

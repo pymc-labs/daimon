@@ -16,6 +16,7 @@ from daimon.adapters.discord.agent_setup.channel_admins_view import (
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.channel_admins import MAX_CHANNEL_ADMIN_IDS
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
@@ -101,8 +102,19 @@ def _button(view: discord.ui.LayoutView, label: str) -> discord.ui.Button[Any] |
 
 def test_container_lists_each_channels_roles_and_members() -> None:
     text = _text(build_channel_admins_container([_row("500", roles=("77",), users=("88",))]))
-    assert "<#500> → <@&77>, <@88>" in text
-    assert "no channel has its own admins yet" in _text(build_channel_admins_container([]))
+    assert "<#500> → <@&77>, <@88>" in text, "roles then members, by mention"
+    assert "no channel has its own admins yet" in _text(build_channel_admins_container([])), (
+        "an empty tenant says so"
+    )
+
+
+def test_container_stays_inside_discords_text_cap_with_full_grants() -> None:
+    ids = tuple(str(10**20 + n) for n in range(MAX_CHANNEL_ADMIN_IDS))
+    grants = [_row(str(10**20 + n), roles=ids, users=ids) for n in range(40)]
+    text = _text(build_channel_admins_container(grants))
+    assert len(text) <= 4000, f"{len(text)} characters exceed Discord's message text cap"
+    assert f"+{2 * MAX_CHANNEL_ADMIN_IDS - 5} more" in text, "extra mentions fold per channel"
+    assert "-# and 25 more" in text, "channels past the listed ones are counted"
 
 
 def test_edit_is_offered_only_when_the_panel_has_a_channel(account_id: uuid.UUID) -> None:
@@ -113,8 +125,8 @@ def test_edit_is_offered_only_when_the_panel_has_a_channel(account_id: uuid.UUID
     without = ChannelAdminsView(
         _state(account_id=account_id, channel_id=0), runtime=runtime, allowed_user_id=42, grants=[]
     )
-    assert _button(with_channel, EDIT_LABEL) is not None
-    assert _button(without, EDIT_LABEL) is None
+    assert _button(with_channel, EDIT_LABEL) is not None, "edit this panel's channel"
+    assert _button(without, EDIT_LABEL) is None, "no channel, nothing to edit"
 
 
 async def test_edit_rechecks_manage_server_before_opening_the_modal(
@@ -124,7 +136,7 @@ async def test_edit_rechecks_manage_server_before_opening_the_modal(
         _state(account_id=account_id), runtime=_runtime(MagicMock()), allowed_user_id=42, grants=[]
     )
     button = _button(view, EDIT_LABEL)
-    assert button is not None
+    assert button is not None, "the edit button is offered"
     member = _interaction(admin=False)
     await button.callback(member)
     member.response.send_modal.assert_not_awaited()

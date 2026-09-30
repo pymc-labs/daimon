@@ -23,7 +23,12 @@ PROMO_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _GROUP_COUNT = 4
 _GROUP_LENGTH = 5  # 20 characters = 100 bits of entropy
 _CODE_PATTERN = re.compile(r"^[A-Z0-9]{6,64}$")
+MIN_CHOSEN_CODE_LENGTH = 12
 _SEPARATORS = re.compile(r"[\s-]+")
+_LOOK_ALIKES = str.maketrans({"O": "0", "I": "1", "L": "1"})
+# Largest amount per redemption. The ledger holds Numeric(12, 6), so a grant
+# above this would overflow at write time instead of at creation.
+MAX_PROMO_AMOUNT_USD = Decimal("999999.99")
 
 PromoRefusal = Literal[
     "invalid", "revoked", "not_started", "expired", "exhausted", "already_redeemed", "throttled"
@@ -51,12 +56,30 @@ class PromoCodeError(ValueError):
 
 
 def normalize_promo_code(raw: str) -> str:
-    """Case-insensitive, separator-insensitive form a code is hashed in."""
-    return _SEPARATORS.sub("", raw).upper()
+    """The form a code is hashed in: no case, no separators, Crockford look-alikes folded.
+
+    O reads as 0 and I or L as 1, so a code misread from print still matches.
+    """
+    return _SEPARATORS.sub("", raw).upper().translate(_LOOK_ALIKES)
 
 
 def is_well_formed_promo_code(normalized: str) -> bool:
     return _CODE_PATTERN.fullmatch(normalized) is not None
+
+
+def normalize_chosen_promo_code(raw: str) -> str:
+    """Normalize a code an operator picked, refusing one short enough to guess.
+
+    Generated codes carry 100 bits; a chosen code must be at least
+    ``MIN_CHOSEN_CODE_LENGTH`` characters, about 60 bits.
+    """
+    normalized = normalize_promo_code(raw)
+    if len(normalized) < MIN_CHOSEN_CODE_LENGTH or not is_well_formed_promo_code(normalized):
+        raise PromoCodeError(
+            f"a chosen code must be {MIN_CHOSEN_CODE_LENGTH}-64 letters or digits"
+            " (dashes and spaces ignored)"
+        )
+    return normalized
 
 
 def hash_promo_code(normalized: str) -> str:
@@ -109,6 +132,8 @@ def build_promo_code_terms(
     """Validate operator input. A timed code's redemption ends with its credit by default."""
     if not amount_usd.is_finite() or amount_usd <= 0:
         raise PromoCodeError("amount must be a positive dollar amount")
+    if amount_usd > MAX_PROMO_AMOUNT_USD:
+        raise PromoCodeError(f"amount must be at most ${MAX_PROMO_AMOUNT_USD:,}")
     exponent = amount_usd.as_tuple().exponent
     if isinstance(exponent, int) and exponent < -2:
         raise PromoCodeError("amount must have at most two decimal places")

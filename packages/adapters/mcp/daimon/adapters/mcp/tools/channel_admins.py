@@ -139,8 +139,9 @@ def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def list_channel_admins(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
     ) -> ChannelAdminsList:
-        """Which channels have their own admins, and who they are. For example, who
-        administers #growth besides the server admins. Requires Manage Server (admin).
+        """List the channels that have their own admins, with the roles and members
+        named for each. For example, list the admins of #support. Requires Manage
+        Server (admin).
         """
         return await _list_channel_admins_impl(runtime, await _auth(ctx))
 
@@ -152,7 +153,7 @@ def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         user_ids: list[str],
     ) -> SetChannelAdminsResult:
         """Name who administers one channel, on top of the server admins. For example,
-        let the @growth-leads role run #growth. Replaces that channel's whole list;
+        let the @support-leads role run #support. Replaces that channel's whole list;
         pass both lists empty to clear it. Requires Manage Server (admin).
 
         A channel admin may change agents that answer only in the channels they
@@ -174,7 +175,7 @@ def register_channel_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel_id: str,
     ) -> SetChannelAdminsResult:
         """Remove every channel admin from one channel, leaving it to the server admins.
-        For example, stop the @growth-leads role running #growth. A no-op when the
+        For example, stop the @support-leads role running #support. A no-op when the
         channel has none. Requires Manage Server (admin).
         """
         return await _clear_channel_admins_impl(runtime, await _auth(ctx), channel_id=channel_id)

@@ -8,6 +8,7 @@ swallowed here.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, cast
@@ -15,7 +16,7 @@ from typing import Any, cast
 from daimon.core._models import PromoCode, PromoRedeemFailure, PromoRedemption, Tenant
 from daimon.core.promo_codes import PromoCodeTerms
 from daimon.core.stores.domain import PromoCodeRow, PromoRedemptionRow, TimedPromoGrantRow
-from sqlalchemy import ColumnElement, Select, delete, exists, func, select, update
+from sqlalchemy import ColumnElement, Select, delete, exists, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +54,25 @@ async def list_promo_codes(session: AsyncSession) -> list[PromoCodeRow]:
 async def get_promo_code(session: AsyncSession, promo_code_id: uuid.UUID) -> PromoCodeRow | None:
     orm = await session.get(PromoCode, promo_code_id)
     return None if orm is None else PromoCodeRow.model_validate(orm)
+
+
+async def has_redeemable_promo_code(session: AsyncSession, *, now: datetime) -> bool:
+    """Whether any code could be redeemed at ``now``; mirrors ``redeem_refusal``."""
+    redeemable = (
+        select(PromoCode.id)
+        .where(
+            PromoCode.revoked_at.is_(None),
+            or_(PromoCode.redeem_starts_at.is_(None), PromoCode.redeem_starts_at <= now),
+            or_(PromoCode.redeem_ends_at.is_(None), PromoCode.redeem_ends_at > now),
+            or_(PromoCode.credit_ends_at.is_(None), PromoCode.credit_ends_at > now),
+            or_(
+                PromoCode.max_redemptions.is_(None),
+                PromoCode.redeemed_count < PromoCode.max_redemptions,
+            ),
+        )
+        .limit(1)
+    )
+    return bool((await session.execute(select(exists(redeemable)))).scalar_one())
 
 
 async def lock_promo_code_by_hash(session: AsyncSession, code_hash: str) -> PromoCodeRow | None:
@@ -144,6 +164,18 @@ async def list_redemptions(
     return [PromoRedemptionRow.model_validate(dict(row)) for row in rows]
 
 
+async def lock_tenant_redemptions(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """Serialize one tenant's redemption attempts for this transaction.
+
+    Without it, concurrent guesses all read the same failure count and slip
+    past the throttle together. Hashed inside Postgres (``hashtextextended``).
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"promo_redeem:{tenant_id}"},
+    )
+
+
 async def count_redeem_failures(
     session: AsyncSession, *, tenant_id: uuid.UUID, since: datetime
 ) -> int:
@@ -190,14 +222,18 @@ async def _grants(session: AsyncSession, stmt: Select[Any]) -> list[TimedPromoGr
 
 
 async def lock_due_grants(
-    session: AsyncSession, *, now: datetime, limit: int
+    session: AsyncSession, *, now: datetime, limit: int, exclude: Collection[uuid.UUID] = ()
 ) -> list[TimedPromoGrantRow]:
-    """Timed redemptions whose credit window has opened but whose credit is not yet granted."""
+    """Timed redemptions whose credit window has opened but whose credit is not yet granted.
+
+    ``exclude`` holds redemption ids to pass over, such as rows that already failed.
+    """
     stmt = (
         _grant_select(
             PromoRedemption.granted_at.is_(None),
             PromoRedemption.expired_at.is_(None),
             PromoCode.credit_starts_at <= now,
+            PromoRedemption.id.not_in(exclude),
         )
         .order_by(PromoCode.credit_starts_at, PromoRedemption.id)
         .limit(limit)
@@ -207,14 +243,19 @@ async def lock_due_grants(
 
 
 async def lock_due_expiries(
-    session: AsyncSession, *, now: datetime, limit: int
+    session: AsyncSession,
+    *,
+    closed_by: datetime,
+    limit: int,
+    exclude: Collection[uuid.UUID] = (),
 ) -> list[TimedPromoGrantRow]:
-    """Granted timed redemptions whose credit window has closed and not yet been settled."""
+    """Granted timed redemptions whose window closed by ``closed_by`` and is not yet settled."""
     stmt = (
         _grant_select(
             PromoRedemption.granted_at.is_not(None),
             PromoRedemption.expired_at.is_(None),
-            PromoCode.credit_ends_at <= now,
+            PromoCode.credit_ends_at <= closed_by,
+            PromoRedemption.id.not_in(exclude),
         )
         .order_by(PromoCode.credit_ends_at, PromoRedemption.id)
         .limit(limit)

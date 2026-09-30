@@ -143,7 +143,9 @@ A denial raises `AdmissionDenied` carrying only the reason literal
 belongs to each adapter. The turn aborts — it never silently degrades to a
 cheaper model. The balance and cap checks are re-run, with the same order, by
 the MCP tools that start a turn (`_admit` in
-`packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py`). Each scheduled
+`packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py`); the billed media
+tool (`fetch_youtube_transcript`) adds the budget of the calling turn's
+channel, found from its `origin_context_id`. Each scheduled
 routine fire runs all three, the budget against the routine's channel, and
 records the reason as that run's error instead of raising. Wakes pass through
 chat admission, so all three apply. Discord's unprompted thread participation
@@ -223,11 +225,15 @@ What a budget does not cover:
   before it have no channel and count toward no budget.
 - **DMs.** A DM carries no channel. That includes a conversation moved to DMs
   with `/dm`: it keeps only the DM channel, not the channel it started from,
-  so its turns are neither attributed nor gated.
+  so its turns are neither attributed nor gated. `/dm` itself is refused in
+  a channel whose budget is used up.
 - **MCP turns.** The MCP tools that start a turn (`start_turn`, `ask` and the
-  like) record no channel and do not check budgets yet.
-- **Routines without a destination**, and Discord thread destinations saved
-  before this release (see [routines.md](routines.md#turning-routines-on)).
+  like) record no channel and do not check budgets yet. A media tool call
+  without a live `origin_context_id` is not attributed either.
+- **Routines with no channel**: made without a destination outside a
+  channel (no `origin_context_id`, or from a DM), and Discord thread
+  destinations saved before this release (see
+  [routines.md](routines.md#turning-routines-on)).
 
 ## The signup credit
 
@@ -301,7 +307,9 @@ all turns; the cap gate applies even without Stripe.
 
 An operator can hand out credit as a code that a tenant admin redeems. Nothing
 changes until a code exists; the only visible surface before that is the
-admin-only **Redeem code** button in `/billing`.
+admin-only **Redeem code** button in `/billing`. The Discord ready message and
+the Slack install page point admins at `/billing` only while some code can be
+redeemed.
 
 ```sh
 daimon promo create --amount 20                    # prints a generated code once
@@ -314,8 +322,8 @@ daimon promo revoke CODE_ID
 
 Codes are deployment-wide and stored only as a SHA-256 hash, so a lost code
 cannot be shown again. Generated codes are 20 Crockford base32 characters in
-dash-separated groups of five; matching ignores case, spaces and dashes.
-`--code` sets a chosen code instead. `--redeem-from` and `--redeem-until`
+dash-separated groups of five; matching ignores case, spaces and dashes, and reads O as 0 and I or L as 1.
+`--code` sets a chosen code of at least 12 characters instead. `--amount` is at most $999,999.99. `--redeem-from` and `--redeem-until`
 bound when it can be redeemed, and `--max-redemptions` how many tenants may
 redeem it. Each tenant redeems a code at most once.
 
@@ -324,11 +332,17 @@ redeem it. Each tenant redeems a code at most once.
 - **Timed** codes grant their amount only between `--starts` and `--ends`.
   Redemption stays open until `--ends` unless `--redeem-until` is earlier. A
   code redeemed before its start is granted by the scheduler when the window
-  opens (same key). When the window closes, a `promo_expiry` entry, keyed
-  `promo_expiry:{code_id}:{tenant_id}`, removes only what was not spent. Spend
-  inside a window draws on timed credit first, the credit that ends earliest
-  first, then on ordinary credit. A window that opens and closes while the
-  scheduler is down expires without a grant.
+  opens (same key). Fifteen minutes after the window closes, a `promo_expiry`
+  entry, keyed `promo_expiry:{code_id}:{tenant_id}`, removes only what was not
+  spent. Spend inside a window draws on timed credit first, the credit that
+  ends earliest first, then on ordinary credit. A window that opens and closes
+  while the scheduler is down expires without a grant.
+- **Late spend.** Turn debits are dated by the model call, not by when they
+  were written, so a call the [sweep](#the-tables) records after the window
+  closed still draws on the timed credit. The fifteen-minute wait bounds that
+  lag: spend recorded later counts as ordinary spend. Until the expiry runs,
+  the leftover credit still counts toward the balance, so turns in those
+  minutes can leave a tenant with no other credit slightly negative.
 
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
 timed credit only changes what the ledger holds. `/billing` shows live timed
@@ -336,7 +350,8 @@ credit and when it ends. Admins redeem from `/billing` on Discord or Slack, or
 with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
 `invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
 `already_redeemed` and `throttled`; five refusals in 15 minutes pause a
-tenant's attempts. Revoking stops new redemptions only: redeemed credit,
+tenant's attempts, which are serialized per tenant so parallel guesses
+cannot slip past. Revoking stops new redemptions only: redeemed credit,
 including timed credit not yet started, stays.
 
 ## The tables

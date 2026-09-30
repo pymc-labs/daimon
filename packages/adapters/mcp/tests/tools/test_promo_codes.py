@@ -53,21 +53,29 @@ async def _code(session: AsyncSession, code: str, **kwargs: object) -> None:
 
 
 async def test_admin_redeems_credit(db_session: AsyncSession, db_session_factory: Factory) -> None:
+    """An admin redeems a credit code and the tenant balance grows by it."""
     auth = await _setup(db_session)
     await _code(db_session, "WELCOME-2026", timed=False)
     result = await _redeem_promo_code_impl(_runtime(db_session_factory), auth, "welcome 2026")
-    assert result.redeemed and result.kind == "credit"
-    assert (result.amount_usd, result.balance_usd) == ("12.50", "12.50")
-    assert result.message == "Redeemed $12.50 of credit."
-    assert await tenant_ledger.get_balance(db_session, tenant_id=auth.tenant_id) == Decimal("12.5")
+    assert result.redeemed and result.kind == "credit", "a plain code should redeem as credit"
+    assert (result.amount_usd, result.balance_usd) == ("12.50", "12.50"), (
+        "amount and balance should be shown to the cent"
+    )
+    assert result.message == "Redeemed $12.50 of credit.", "the message should name the amount"
+    assert await tenant_ledger.get_balance(db_session, tenant_id=auth.tenant_id) == Decimal(
+        "12.5"
+    ), "the credit should land in the tenant ledger"
     [row] = await promo_store.list_promo_codes(db_session)
     [redemption] = await promo_store.list_redemptions(db_session, promo_code_id=row.id)
-    assert redemption.redeemed_by_account_id == auth.account_id
+    assert redemption.redeemed_by_account_id == auth.account_id, (
+        "the redemption should record the redeeming account"
+    )
 
 
 async def test_timed_credit_that_starts_later_names_its_window(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
+    """A timed code that starts later adds no balance yet and names its window."""
     auth = await _setup(db_session)
     start = datetime.now(UTC).replace(microsecond=0) + timedelta(days=1)
     await _code(
@@ -78,25 +86,37 @@ async def test_timed_credit_that_starts_later_names_its_window(
         credit_ends_at=start + timedelta(days=2),
     )
     result = await _redeem_promo_code_impl(_runtime(db_session_factory), auth, "TIMED-2026")
-    assert result.redeemed and result.kind == "timed" and result.balance_usd == "0.00"
-    assert result.credit_starts_at == start
-    assert f"from {start:%Y-%m-%d %H:%M} UTC until" in result.message
+    assert result.redeemed and result.kind == "timed" and result.balance_usd == "0.00", (
+        "a future timed code should redeem without adding balance"
+    )
+    assert result.credit_starts_at == start, "the result should carry the window start"
+    assert f"from {start:%Y-%m-%d %H:%M} UTC until" in result.message, (
+        "the message should name the window"
+    )
 
 
 async def test_refusal_is_a_result_not_an_error(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
+    """An unknown code comes back as a refusal result instead of raising."""
     auth = await _setup(db_session)
     result = await _redeem_promo_code_impl(_runtime(db_session_factory), auth, "NOPE-NOPE")
-    assert (result.redeemed, result.refusal) == (False, "invalid")
-    assert result.message == "That code is not valid. Check it and try again."
+    assert (result.redeemed, result.refusal) == (False, "invalid"), (
+        "an unknown code should be refused as invalid"
+    )
+    assert result.message == "That code is not valid. Check it and try again.", (
+        "the refusal should be explained"
+    )
 
 
 async def test_non_admin_is_refused_before_redeeming(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
+    """A non-admin gets a tool error and the code grants nothing."""
     auth = await _setup(db_session, is_admin=False)
     await _code(db_session, "WELCOME-2026", timed=False)
     with pytest.raises(ToolError, match="requires a workspace or server admin"):
         await _redeem_promo_code_impl(_runtime(db_session_factory), auth, "WELCOME-2026")
-    assert await tenant_ledger.get_balance(db_session, tenant_id=auth.tenant_id) == 0
+    assert await tenant_ledger.get_balance(db_session, tenant_id=auth.tenant_id) == 0, (
+        "a refused non-admin should add no credit"
+    )

@@ -260,7 +260,9 @@ async def test_admit_refuses_a_turn_in_a_channel_over_its_budget(
     await drain_outcomes()
     async with db_session_factory() as session:
         outcomes = await list_for_tenant(session, tenant.id)
-    assert [o.reason for o in outcomes] == ["admission_denied"]
+    assert [o.reason for o in outcomes] == ["admission_channel_budget_exceeded"], (
+        "a budget refusal is recorded as its own outcome"
+    )
 
 
 async def test_admit_attributes_the_channel_and_never_gates_a_dm(
