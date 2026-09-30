@@ -96,6 +96,7 @@ SkipReason = Literal[
     "destination_unavailable",
     "post_failed",
     "no_result",
+    "channel_isolated",
 ]
 
 

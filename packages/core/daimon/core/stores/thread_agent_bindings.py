@@ -191,7 +191,8 @@ async def list_handoff_parent_channel_ids(
     """Responder name -> sorted parent channels of its live handed-over threads.
 
     Setup conversations are left out: they answer as the built-in Daimon to
-    configure some other agent, which routes nobody to it.
+    configure some other agent, which routes nobody to it. So are private
+    conversation scopes; see `list_dm_bindings`.
     """
     rows = await session.execute(
         select(ThreadAgentBinding.responder_name, ThreadAgentBinding.parent_channel_id)
@@ -199,6 +200,7 @@ async def list_handoff_parent_channel_ids(
             ThreadAgentBinding.tenant_id == tenant_id,
             ThreadAgentBinding.kind == "handoff",
             ThreadAgentBinding.deleted.is_(False),
+            ThreadAgentBinding.thread_id.not_like(f"{DM_SCOPE_PREFIX}%"),
         )
         .distinct()
         .order_by(ThreadAgentBinding.responder_name, ThreadAgentBinding.parent_channel_id)

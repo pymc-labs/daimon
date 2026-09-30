@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Literal
 
 from daimon.core.access_policy import TenantAccessPolicy, is_isolated
+from daimon.core.answering_map import (
+    AnsweringMap,
+    ChannelAnswer,
+    SetupThreadRef,
+    hide_across_isolation,
+)
 from daimon.core.channel_isolation import (
     NO_ISOLATION,
     ChannelIsolation,
+    IsolationViewer,
     build_channel_isolation,
     load_channel_isolation,
 )
 from daimon.core.scope import ChannelConfigRow, ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.direct_messages import DmOrigin
+from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import (
     create_binding,
@@ -98,6 +108,94 @@ def test_isolated_location_counts_threads_under_the_channel() -> None:
     assert is_isolated(policy, channel_id="t1", parent_channel_id="c1")
     assert not is_isolated(policy, channel_id="c2"), "other channels stay open"
     assert not is_isolated(TenantAccessPolicy(), channel_id="c1"), "default policy isolates none"
+
+
+def test_crossing_keeps_own_agents_in_and_others_out() -> None:
+    isolation = _isolation()
+    assert not isolation.crosses("local", "c1"), "the channel's own agent, at home"
+    assert not isolation.crosses("local", "t1", "c1"), "a thread under it is inside"
+    assert isolation.crosses("local", "c2"), "its own agent never acts elsewhere"
+    assert isolation.crosses("local", None), "nor in a DM, which is outside every channel"
+    assert isolation.crosses("shared", "c1"), "inside, only its own agents act"
+    assert not isolation.crosses("shared", "c2") and not isolation.crosses("shared", None)
+
+
+def _routine(agent: str, destination: str | None) -> RoutineRow:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    return RoutineRow(
+        id=uuid.uuid4(),
+        tenant_id=TENANT,
+        created_by_user_id="u1",
+        agent_id="a",
+        agent_name=agent,
+        cron_expr="0 * * * *",
+        timezone="UTC",
+        trigger_message="hi",
+        enabled=True,
+        next_fire_at=None,
+        last_fired_at=None,
+        last_error=None,
+        last_result_tail=None,
+        destination_kind="channel" if destination else None,
+        destination_id=destination,
+        channel_id=destination,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_routines_deliver_only_on_their_agents_side() -> None:
+    isolation = _isolation()
+    assert not isolation.routine_crosses(_routine("local", "c1"))
+    assert isolation.routine_crosses(_routine("local", "c2")), "own agent posting outside"
+    assert isolation.routine_crosses(_routine("local", None)), "its DM report is outside too"
+    assert isolation.routine_crosses(_routine("shared", "c1")), "outside agent posting inside"
+    assert not isolation.routine_crosses(_routine("shared", None))
+    assert isolation.keeps_routine_inside(_routine("local", "c1")), "never falls back to a DM"
+    assert not isolation.keeps_routine_inside(_routine("shared", "c2"))
+
+
+def test_a_dm_without_a_source_takes_an_agent_out_of_its_channel() -> None:
+    def owner(*, source: str | None) -> str | None:
+        return build_channel_isolation(
+            {"c1"},
+            tenant=None,
+            channels=[_channel("c1", "local")],
+            default=DEFAULT,
+            thread_parent_channel_ids={},
+            dm_origins=[DmOrigin(channel_id="dm1", scope_id="dm:1", source_channel_id=source)],
+            dm_bindings=[("dm1", "dm:1", "local")],
+        ).channel_of("local")
+
+    assert owner(source="c1") == "c1", "a DM started from the channel is inside it"
+    assert owner(source=None) is None, "an unmapped DM counts as outside the channel"
+
+
+def test_a_viewer_sees_only_its_side_of_the_routing() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    answering = AnsweringMap(
+        channel_overrides=(
+            ChannelAnswer(channel_id="c1", agent_name="local"),
+            ChannelAnswer(channel_id="c2", agent_name="shared"),
+        ),
+        deployment_default="daimon",
+        setup_threads=(
+            SetupThreadRef(
+                thread_id="t1", parent_channel_id="c1", target_name="local", updated_at=now
+            ),
+            SetupThreadRef(
+                thread_id="t2", parent_channel_id="c2", target_name="shared", updated_at=now
+            ),
+        ),
+    )
+    inside = hide_across_isolation(answering, IsolationViewer(_isolation(), "c1"))
+    assert [row.channel_id for row in inside.channel_overrides] == ["c1"]
+    assert inside.deployment_default is None, "the shared fallback is across the line"
+    assert [ref.thread_id for ref in inside.setup_threads] == ["t1"]
+    outside = hide_across_isolation(answering, IsolationViewer(_isolation(), None))
+    assert [row.channel_id for row in outside.channel_overrides] == ["c2"]
+    assert outside.deployment_default == "daimon"
+    assert [ref.thread_id for ref in outside.setup_threads] == ["t2"]
 
 
 async def test_loader_reads_the_cascade_and_handoff_threads(db_session: AsyncSession) -> None:

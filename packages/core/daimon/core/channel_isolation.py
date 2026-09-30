@@ -1,9 +1,10 @@
 """Channel isolation: an isolated channel's own agents stay inside it.
 
 A server admin isolates channel C (`TenantAccessPolicy.isolated_channel_ids`).
-C's *local agents* are the agents whose every answering place lies in C: the
-channel default and handed-over threads under C, never the tenant default
-(see `daimon.core.agent_reach`). While C is isolated they may not be bound
+C's *own agents* are those whose reach stays inside C
+(`daimon.core.agent_reach.AgentReach.stays_inside`): the channel default and
+handed-over threads under C, never the tenant default, and a DM with no
+recorded source counts as outside C. While C is isolated they may not be bound
 anywhere else, they are invisible from outside C, and from inside C only
 they are visible. A call is *inside C* when it runs in C or its threads, or
 when the agent executing it is C-local. Everything else is outside every
@@ -11,21 +12,28 @@ isolated channel. A tenant that isolates nothing loads `NO_ISOLATION` and
 nothing changes.
 
 `build_channel_isolation` and the refusal rules are pure; `load_channel_isolation`
-is their shell.
+is their shell. Admission, the scheduler and the routine posters enforce it at
+run time; the routing writes and the tools keep it from being set up wrong.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Literal
 
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_reach import build_agent_reach
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.direct_messages import DmOrigin, list_dm_origins
+from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
-from daimon.core.stores.thread_agent_bindings import list_handoff_parent_channel_ids
+from daimon.core.stores.thread_agent_bindings import (
+    list_dm_bindings,
+    list_handoff_parent_channel_ids,
+)
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -70,6 +78,29 @@ class ChannelIsolation(BaseModel):
         """Visible from inside C only when C-local; from outside only when shared."""
         return self.channel_of(agent_name) == inside_channel_id
 
+    def crosses(
+        self, agent_name: str, channel_id: str | None, parent_channel_id: str | None = None
+    ) -> bool:
+        """Whether `agent_name` acting at a place (None: a DM or no channel) crosses a line.
+
+        C's own agents act only inside C, and inside C only they act.
+        """
+        return self.channel_of(agent_name) != self.isolated_channel(channel_id, parent_channel_id)
+
+    def routine_crosses(self, row: RoutineRow) -> bool:
+        """Whether a routine delivers across a line.
+
+        One without a destination reports by DM, which is outside every channel.
+        """
+        return self.crosses(row.agent_name, routine_destination_channel(row))
+
+    def keeps_routine_inside(self, row: RoutineRow) -> bool:
+        """Whether a routine's result must stay in an isolated channel, so never goes by DM."""
+        return (
+            self.channel_of(row.agent_name) is not None
+            or self.isolated_channel(routine_destination_channel(row)) is not None
+        )
+
     def binding_refusal(
         self, agent_name: str, *, channel_id: str | None, is_daimon_managed: bool = False
     ) -> BindingRefusal | None:
@@ -95,18 +126,48 @@ class ChannelIsolation(BaseModel):
 NO_ISOLATION = ChannelIsolation()
 
 
+def routine_destination_channel(row: RoutineRow) -> str | None:
+    """The channel a routine delivers into (a thread's parent), or None without a destination.
+
+    The saved `channel_id` is the destination's parent; a row saved before it
+    was recorded falls back to the destination id's channel part.
+    """
+    if row.destination_kind is None or row.destination_id is None:
+        return None
+    return row.channel_id or row.destination_id.partition(":")[0]
+
+
+@dataclass(frozen=True)
+class IsolationViewer:
+    """What one reader, standing at a place, may see of an isolated tenant."""
+
+    isolation: ChannelIsolation
+    inside_channel_id: str | None = None
+
+    def sees(self, agent_name: str) -> bool:
+        return self.isolation.is_visible(agent_name, inside_channel_id=self.inside_channel_id)
+
+    def sees_place(self, channel_id: str | None) -> bool:
+        """A channel (None: a tenant-wide place) on the reader's side of every line."""
+        return self.isolation.isolated_channel(channel_id) == self.inside_channel_id
+
+
 def build_channel_isolation(
     isolated_channel_ids: Collection[str],
     *,
     tenant: TenantConfigRow | None,
-    channels: Collection[ChannelConfigRow],
+    channels: Sequence[ChannelConfigRow],
     default: DeploymentDefault,
     thread_parent_channel_ids: Mapping[str, Collection[str]],
+    dm_origins: Sequence[DmOrigin] = (),
+    dm_bindings: Iterable[tuple[str, str, str]] = (),
 ) -> ChannelIsolation:
     isolated = frozenset(isolated_channel_ids)
     if not isolated:
         return NO_ISOLATION
+    dm_bindings = tuple(dm_bindings)
     names = {row.agent_name for row in channels if row.agent_name} | set(thread_parent_channel_ids)
+    names |= {responder for _, _, responder in dm_bindings}
     names |= {name for name in (tenant.agent_name if tenant else None, default.agent_name) if name}
     confined: dict[str, str] = {}
     answering: set[str] = set()
@@ -114,16 +175,18 @@ def build_channel_isolation(
         reach = build_agent_reach(
             name,
             tenant=tenant,
-            channels=list(channels),
+            channels=channels,
             default=default,
             thread_parent_channel_ids=thread_parent_channel_ids.get(name, ()),
+            dm_origins=dm_origins,
+            dm_bindings=dm_bindings,
+            unmapped_dms_outside=True,
         )
         if reach.places or reach.thread_parent_channel_ids:
             answering.add(name)
-        if not reach.is_tenant_wide and len(reach.channel_ids) == 1:
-            (only,) = reach.channel_ids
-            if only in isolated:
-                confined[name] = only
+        owner = next((c for c in reach.channel_ids if c in isolated), None)
+        if owner is not None and reach.stays_inside({owner}):
+            confined[name] = owner
     return ChannelIsolation(
         isolated_channel_ids=isolated,
         agent_channel_ids=confined,
@@ -137,31 +200,61 @@ async def load_channel_isolation(
     tenant_id: uuid.UUID,
     default: DeploymentDefault,
     policy: TenantAccessPolicy | None = None,
+    isolated_channel_ids: Collection[str] | None = None,
 ) -> ChannelIsolation:
     """Shell half: one policy read when nothing is isolated, the cascade when something is.
 
-    Pass `policy` when the caller already holds it. An unreadable policy
-    raises `AccessPolicyUnreadable`, so callers refuse rather than fall open.
+    Pass `policy` when the caller already holds it, or `isolated_channel_ids`
+    to ask what isolating those would mean. An unreadable policy raises
+    `AccessPolicyUnreadable`, so callers refuse rather than fall open.
     """
-    if policy is None:
-        policy = await load_access_policy(session, tenant_id=tenant_id)
-    if not policy.isolated_channel_ids:
+    if isolated_channel_ids is None:
+        if policy is None:
+            policy = await load_access_policy(session, tenant_id=tenant_id)
+        isolated_channel_ids = policy.isolated_channel_ids
+    if not isolated_channel_ids:
         return NO_ISOLATION
     tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
-    parents = await list_handoff_parent_channel_ids(session, tenant_id=tenant_id)
     return build_channel_isolation(
-        policy.isolated_channel_ids,
+        isolated_channel_ids,
         tenant=tenant,
         channels=channels,
         default=default,
-        thread_parent_channel_ids=parents,
+        thread_parent_channel_ids=await list_handoff_parent_channel_ids(
+            session, tenant_id=tenant_id
+        ),
+        dm_origins=await list_dm_origins(session, tenant_id=tenant_id),
+        dm_bindings=await list_dm_bindings(session, tenant_id=tenant_id),
     )
+
+
+async def load_isolation_viewer(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    default: DeploymentDefault,
+    channel_id: str | None,
+    is_admin: bool,
+) -> IsolationViewer | None:
+    """What a reader at `channel_id` (a thread's parent) sees; None sees everything.
+
+    Admins see everything, and so does everyone while nothing is isolated.
+    """
+    if is_admin:
+        return None
+    isolation = await load_channel_isolation(session, tenant_id=tenant_id, default=default)
+    if not isolation.is_active:
+        return None
+    return IsolationViewer(isolation, isolation.isolated_channel(channel_id))
 
 
 __all__ = [
     "NO_ISOLATION",
     "BindingRefusal",
     "ChannelIsolation",
+    "IsolationViewer",
     "build_channel_isolation",
     "load_channel_isolation",
+    "load_isolation_viewer",
+    "routine_destination_channel",
 ]
