@@ -51,13 +51,15 @@ async def _drain(app: SlackApp) -> None:
 
 
 async def test_redeem_submission_acks_first_then_redeems_in_the_background() -> None:
+    """The form submission is acked before the redemption runs in the background."""
     client, app, calls = _FakeSocketClient(), _app(), list[str]()
 
     async def _fake_client(runtime: Any, *, team_id: str) -> MagicMock:
         return MagicMock()
 
     async def _fake_run(runtime: Any, wc: Any, **kwargs: Any) -> None:
-        assert client.call_log == ["ack"]  # a failure here leaves ``calls`` empty
+        # a failure here leaves ``calls`` empty
+        assert client.call_log == ["ack"], "the ack should go out before redeeming"
         calls.append(kwargs["decision"].code)
 
     payload = {
@@ -79,11 +81,12 @@ async def test_redeem_submission_acks_first_then_redeems_in_the_background() -> 
         await _drain(app)
 
     ack: dict[str, Any] = client.sent[0].payload or {}  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-    assert ack.get("response_action") == "update"
-    assert calls == ["WELCOME-2026"]
+    assert ack.get("response_action") == "update", "the ack should update the form in place"
+    assert calls == ["WELCOME-2026"], "the submitted code should be redeemed"
 
 
 async def test_redeem_button_is_routed() -> None:
+    """The redeem button is acked and handed to the redeem-form opener."""
     client, app, calls = _FakeSocketClient(), _app(), list[str]()
 
     async def _fake_open(runtime: Any, payload: dict[str, Any]) -> None:
@@ -99,5 +102,5 @@ async def test_redeem_button_is_routed() -> None:
         await app.on_request(client, SocketModeRequest("interactive", "env2", payload))  # type: ignore[arg-type]
         await _drain(app)
 
-    assert client.call_log[0] == "ack"
-    assert calls == ["billing_redeem_open"]
+    assert client.call_log[0] == "ack", "the button press should be acked first"
+    assert calls == ["billing_redeem_open"], "the button should open the redeem form"

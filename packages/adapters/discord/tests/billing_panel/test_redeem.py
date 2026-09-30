@@ -96,20 +96,28 @@ def _buttons(view: BillingPanelView) -> list[str | None]:
 
 
 def test_only_the_admin_view_offers_redemption() -> None:
-    assert _buttons(_view(is_admin=True)) == ["🎟️ Redeem code", "🔄 Refresh", "Done"]
-    assert "🎟️ Redeem code" not in _buttons(_view(is_admin=False))
+    """Only the admin panel shows the redeem-code button."""
+    assert _buttons(_view(is_admin=True)) == ["🎟️ Redeem code", "🔄 Refresh", "Done"], (
+        "the admin view should offer redemption first"
+    )
+    assert "🎟️ Redeem code" not in _buttons(_view(is_admin=False)), (
+        "a member view should not offer redemption"
+    )
 
 
 def test_timed_credit_shows_under_server_credit_in_both_views() -> None:
+    """Live timed credit shows in both views and is absent without any."""
     credit = (ActiveTimedCredit(remaining_usd=Decimal("7.5"), ends_at=END),)
     for is_admin in (True, False):
         container = build_billing_container(
             _state(is_admin=is_admin, timed_credit=credit), now=NOW, since=SINCE
         )
         text = _text(container)
-        assert f"$7.50 timed credit left · ends <t:{int(END.timestamp())}:f>" in text
+        assert f"$7.50 timed credit left · ends <t:{int(END.timestamp())}:f>" in text, (
+            "each view should show the timed credit and its end"
+        )
     plain = build_billing_container(_state(), now=NOW, since=SINCE)
-    assert "timed credit" not in _text(plain)
+    assert "timed credit" not in _text(plain), "no timed credit should mean no line"
 
 
 def test_ready_embed_mentions_redemption_only_when_a_code_is_redeemable() -> None:
@@ -120,6 +128,8 @@ def test_ready_embed_mentions_redemption_only_when_a_code_is_redeemable() -> Non
 
 
 def test_redeem_result_text() -> None:
+    """Each redeem outcome renders its own reply."""
+
     def redeemed(**kw: Any) -> PromoRedeemed:
         base: dict[str, Any] = {
             "promo_code_id": uuid.uuid4(),
@@ -134,29 +144,39 @@ def test_redeem_result_text() -> None:
 
     assert redeem_result_text(redeemed()) == (
         "🎟️ Redeemed **$10.00** of credit. Balance: **$12.50**."
-    )
+    ), "a credit reply should name the amount and balance"
     later = redeemed(kind="timed", credit_starts_at=NOW, credit_ends_at=END, granted=False)
-    assert f"usable from <t:{int(NOW.timestamp())}:f> until" in redeem_result_text(later)
-    assert redeem_result_text(PromoRedeemRefused("expired")) == "🎟️ That code has expired."
+    assert f"usable from <t:{int(NOW.timestamp())}:f> until" in redeem_result_text(later), (
+        "a timed credit not yet granted should name its window"
+    )
+    assert redeem_result_text(PromoRedeemRefused("expired")) == "🎟️ That code has expired.", (
+        "a refusal should explain itself"
+    )
 
 
 @pytest.mark.asyncio
 async def test_redeem_button_opens_the_modal_only_for_a_live_admin() -> None:
+    """The button rechecks admin rights before opening the redeem modal."""
     view = _view(is_admin=True)
     button = next(c for c in view.walk_children() if isinstance(c, _RedeemButton))
 
     demoted = _interaction(admin=False)
     await button.callback(demoted)
     demoted.response.send_modal.assert_not_awaited()
-    assert "Manage Server" in demoted.response.send_message.call_args.args[0]
+    assert "Manage Server" in demoted.response.send_message.call_args.args[0], (
+        "a demoted admin should be told the permission they lack"
+    )
 
     admin = _interaction(admin=True)
     await button.callback(admin)
-    assert isinstance(admin.response.send_modal.call_args.args[0], RedeemCodeModal)
+    assert isinstance(admin.response.send_modal.call_args.args[0], RedeemCodeModal), (
+        "a live admin should get the redeem modal"
+    )
 
 
 @pytest.mark.asyncio
 async def test_modal_submit_from_a_demoted_admin_redeems_nothing() -> None:
+    """A submit from a user who lost admin rights is refused before any lookup."""
     runtime = MagicMock(spec=DiscordRuntime)
     runtime.sessionmaker = MagicMock(side_effect=AssertionError("must not open a session"))
     rerender = AsyncMock()
@@ -164,7 +184,9 @@ async def test_modal_submit_from_a_demoted_admin_redeems_nothing() -> None:
     modal.code_in._value = "WELCOME-2026"
     interaction = _interaction(admin=False)
     await modal.on_submit(interaction)
-    assert "Manage Server" in interaction.response.send_message.call_args.args[0]
+    assert "Manage Server" in interaction.response.send_message.call_args.args[0], (
+        "a demoted admin should be told the permission they lack"
+    )
     rerender.assert_not_awaited()
 
 
@@ -193,6 +215,7 @@ async def test_modal_submit_answers_when_the_database_fails() -> None:
 async def test_modal_submit_redeems_rerenders_and_replies(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
+    """A valid code credits the server, rerenders the panel and replies; a repeat is refused."""
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
     tenant = await make_tenant(db_session, id=tenant_id, workspace_id=str(GUILD_ID))
     account = await make_account(db_session, tenant=tenant)
@@ -211,17 +234,24 @@ async def test_modal_submit_redeems_rerenders_and_replies(
 
     interaction.response.defer.assert_awaited_once()
     rerender.assert_awaited_once_with(interaction)
-    assert "Redeemed **$10.00**" in interaction.followup.send.call_args.args[0]
-    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == Decimal("10")
+    assert "Redeemed **$10.00**" in interaction.followup.send.call_args.args[0], (
+        "the reply should confirm the credit"
+    )
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == Decimal("10"), (
+        "the credit should land in the server ledger"
+    )
 
     again = _interaction(admin=True)
     await modal.on_submit(again)
-    assert again.followup.send.call_args.args[0] == "🎟️ That code was already redeemed here."
-    assert rerender.await_count == 1
+    assert again.followup.send.call_args.args[0] == "🎟️ That code was already redeemed here.", (
+        "a second redemption should be refused"
+    )
+    assert rerender.await_count == 1, "a refused repeat should not rerender the panel"
 
 
 @pytest.mark.asyncio
 async def test_snapshot_carries_live_timed_credit(db_session: AsyncSession) -> None:
+    """The billing snapshot includes timed credit whose window is open."""
     now = datetime.now(UTC)
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
     await make_tenant(db_session, id=tenant_id, workspace_id=str(GUILD_ID))
@@ -232,7 +262,7 @@ async def test_snapshot_carries_live_timed_credit(db_session: AsyncSession) -> N
         credit_ends_at=now + timedelta(days=1),
     )
     code = await promo_store.insert_promo_code(db_session, code_hash="h", terms=terms)
-    assert code is not None
+    assert code is not None, "the promo code should be inserted"
     await promo_store.insert_redemption(
         db_session,
         promo_code_id=code.id,
@@ -250,4 +280,6 @@ async def test_snapshot_carries_live_timed_credit(db_session: AsyncSession) -> N
         since=SINCE,
         now=now,
     )
-    assert [c.remaining_usd for c in state.timed_credit] == [Decimal("5")]
+    assert [c.remaining_usd for c in state.timed_credit] == [Decimal("5")], (
+        "the snapshot should carry the live timed credit"
+    )

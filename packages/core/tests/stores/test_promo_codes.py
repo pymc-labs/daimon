@@ -16,6 +16,7 @@ HOUR = timedelta(hours=1)
 
 
 async def test_no_code_is_redeemable_on_a_fresh_deployment(db_session: AsyncSession) -> None:
+    """An empty table answers no, so join messages stay unchanged."""
     assert not await promo_store.has_redeemable_promo_code(db_session, now=NOW), (
         "with no promo codes nothing should advertise redemption"
     )
@@ -34,6 +35,7 @@ async def test_no_code_is_redeemable_on_a_fresh_deployment(db_session: AsyncSess
 async def test_has_redeemable_promo_code_follows_the_redemption_windows(
     db_session: AsyncSession, terms: dict[str, Any], redeemable: bool
 ) -> None:
+    """Only a code inside its redemption window, with credit still to come, counts."""
     kwargs: dict[str, Any] = {"timed": False, **terms}
     await promo_store.insert_promo_code(
         db_session, code_hash="h", terms=build_promo_code_terms(amount_usd=Decimal("5"), **kwargs)
@@ -44,6 +46,7 @@ async def test_has_redeemable_promo_code_follows_the_redemption_windows(
 
 
 async def test_a_revoked_code_is_not_redeemable(db_session: AsyncSession) -> None:
+    """Revoking the only code turns the answer back to no."""
     code = await promo_store.insert_promo_code(
         db_session,
         code_hash="h",
