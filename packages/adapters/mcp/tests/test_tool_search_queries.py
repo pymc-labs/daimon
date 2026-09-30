@@ -144,6 +144,10 @@ CASES = [
         "how much of its budget has this channel spent", "get_channel_budget", frozenset([])
     ),
     SearchCase("remove the spending limit on #growth", "clear_channel_budget", frozenset([])),
+    SearchCase("run #growth in the pymc environment", "set_channel_environment", frozenset([])),
+    SearchCase(
+        "put #growth back on the default environment", "clear_channel_environment", frozenset([])
+    ),
 ]
 
 

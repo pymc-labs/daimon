@@ -17,16 +17,14 @@ from dataclasses import dataclass
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._ctx import (
-    _auth,  # pyright: ignore[reportPrivateUsage]
-    _require_admin,  # pyright: ignore[reportPrivateUsage]
-)
+from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._isolation import load_isolation, refuse, require_bindable
 from daimon.adapters.mcp.tools.reachability import (
     require_bindable_by_channel_admin,
-    require_channel_admin,
+    require_scope_admin,
 )
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
+from daimon.core.channel_environments import build_environment_resolution_note
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.routing_facts import (
@@ -79,16 +77,6 @@ class ClearDefaultResult:
     requirement. Supplied by the tool rather than recalled from a prompt."""
 
 
-async def _require_scope_admin(
-    runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None
-) -> None:
-    """The workspace default needs a server admin; a channel's also admits its channel admins."""
-    if channel_id is None:
-        _require_admin(auth)
-    else:
-        await require_channel_admin(runtime, auth, channel_id=channel_id)
-
-
 async def _set_agent_default_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -96,7 +84,7 @@ async def _set_agent_default_impl(
     channel_id: str | None,
     expected_ma_agent_id: str | None = None,
 ) -> SetDefaultResult:
-    await _require_scope_admin(runtime, auth, channel_id)
+    await require_scope_admin(runtime, auth, channel_id=channel_id)
     agent = None
     if expected_ma_agent_id is not None or auth.platform in ("discord", "slack"):
         agent = await resolve_setup_agent(
@@ -153,7 +141,7 @@ async def _clear_agent_default_impl(
     auth: AuthIdentity,
     channel_id: str | None,
 ) -> ClearDefaultResult:
-    await _require_scope_admin(runtime, auth, channel_id)
+    await require_scope_admin(runtime, auth, channel_id=channel_id)
     if channel_id is not None:
         isolation = await load_isolation(runtime, auth.tenant_id)
         refuse(isolation.clear_refusal(channel_id=channel_id), agent_name=None)
@@ -206,6 +194,15 @@ class AgentResolutionExplanation:
     """The environment that would be used, resolved over the same cascade."""
     environment_winning_tier: str | None
     """Which tier supplied the environment."""
+    channel_environment: str | None
+    """The channel tier's own environment, or None if it has none."""
+    tenant_environment: str | None
+    """The workspace tier's own environment, or None if it has none."""
+    deployment_environment: str | None
+    """The deployment fallback environment from defaults/config.yaml."""
+    environment_explanation: str
+    """One sentence naming the environment and the tier it came from; a thread
+    binding changes who answers, never the environment."""
     responder_ma_agent_id: str | None
     configuration_target_ma_agent_id: str | None
     configuration_target_name: str | None
@@ -308,6 +305,14 @@ async def _explain_agent_resolution_impl(
         deployment_default=runtime.deployment_default.agent_name,
         effective_environment_name=resolved.environment_name,
         environment_winning_tier=resolved.environment_name_tier,
+        channel_environment=channel_cfg.environment_name if channel_cfg is not None else None,
+        tenant_environment=tenant_cfg.environment_name if tenant_cfg is not None else None,
+        deployment_environment=runtime.deployment_default.environment_name,
+        environment_explanation=build_environment_resolution_note(
+            environment_name=resolved.environment_name,
+            tier=resolved.environment_name_tier,
+            channel_id=channel_id,
+        ),
         responder_ma_agent_id=binding.responder_ma_agent_id if binding else None,
         configuration_target_ma_agent_id=binding.configuration_target_ma_agent_id
         if binding
@@ -387,8 +392,8 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel_id: str,
         thread_id: str | None = None,
     ) -> AgentResolutionExplanation:
-        """Who answers in this channel, for example #growth? Report who answers and
-        which routing tier decided it.
+        """Who answers in this channel, for example #growth? Report who answers, the
+        environment it runs in, and which routing tier decided each.
 
         Supply thread_id to include its setup binding. Thread responder wins, else
         the channel's own default, else the workspace default, else the deployment

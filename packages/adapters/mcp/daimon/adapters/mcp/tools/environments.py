@@ -89,8 +89,8 @@ async def _create_environment_impl(
     spec: EnvironmentSpec,
 ) -> EnvironmentInfo:
     # Deliberately ungated, unlike update/archive below. A freshly created
-    # environment is inert: nothing routes to it until an admin scopes an agent
-    # onto a channel or the workspace via set_agent_default, which is gated. So
+    # environment is inert: nothing runs in it until an admin picks it for a
+    # channel or the workspace via set_channel_environment, which is gated. So
     # the gate here bought no isolation while blocking the ordinary onboarding
     # ask -- "make me an agent that can run pymc" -- for every non-admin.
     # Matches create_agent / fork_agent, which are ungated for the same reason.
@@ -138,7 +138,7 @@ def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     # matching the agents/skills read tools. Mutations carry tags={"admin"} plus
     # the _require_admin impl gate, with one deliberate exception:
     # create_environment is ungated, because a new environment is inert until an
-    # admin scopes an agent onto it. See the comment on _create_environment_impl.
+    # admin picks it for a channel. See the comment on _create_environment_impl.
     @mcp.tool
     async def list_environments(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
@@ -170,9 +170,9 @@ def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         than merges, so omitting a previously-installed package removes it.
         Always send the full intended list for every ecosystem you care about.
 
-        The new environment is inert until an admin scopes an agent onto it
-        (an admin-only action) — creating one here does not change what any
-        agent runs on yet.
+        The new environment is inert until an admin picks it for a channel or
+        the workspace with ``set_channel_environment`` — creating one here does
+        not change what any agent runs on yet.
         """
         return await _create_environment_impl(runtime, await _auth(ctx), spec)
 

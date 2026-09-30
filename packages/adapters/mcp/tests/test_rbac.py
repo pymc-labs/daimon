@@ -326,6 +326,8 @@ STILL_ADMIN_TOOL_NAMES = (
     "list_channel_budgets",
     "set_channel_budget",
     "clear_channel_budget",
+    "set_channel_environment",
+    "clear_channel_environment",
 )
 """Tools whose blast radius is the whole tenant, and stay admin-only.
 
@@ -567,6 +569,12 @@ async def test_channel_admin_discovers_channel_default_tools_but_not_admin_ones(
 
     assert "### set_agent_default" in await _search(app, channel_admin, "set agent default")
     assert "### set_agent_default" not in await _search(app, member, "set agent default")
+    assert "### set_channel_environment" in await _search(
+        app, channel_admin, "set channel environment"
+    ), "a channel admin may pick their channel's environment"
+    assert "### set_channel_environment" not in await _search(
+        app, member, "set channel environment"
+    )
     assert "### set_channel_admins" not in await _search(app, channel_admin, "channel admins")
     admin_token = make_jwt(account_id=admin.id)
     assert "### set_channel_admins" in await _search(app, admin_token, "channel admins")

@@ -22,6 +22,7 @@ from typing import Final
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._ctx import _require_admin  # pyright: ignore[reportPrivateUsage]
 from daimon.core.agent_reach import load_target_facts, may_bind_as_channel_default
 from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
 from daimon.core.operation_policy import OperationKind, TargetFacts, decide_operation
@@ -82,6 +83,16 @@ async def require_channel_admin(
             "and the caller is neither. Tell them who can make it and give them a sentence "
             "that admin can say, preserving the requested action and channel. Do not retry."
         )
+
+
+async def require_scope_admin(
+    runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str | None
+) -> None:
+    """The workspace scope needs a server admin; a channel's also admits its channel admins."""
+    if channel_id is None:
+        _require_admin(auth)
+    else:
+        await require_channel_admin(runtime, auth, channel_id=channel_id)
 
 
 async def require_bindable_by_channel_admin(

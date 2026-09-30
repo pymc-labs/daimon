@@ -534,6 +534,35 @@
         'type': 'object',
       }),
     }),
+    'clear_channel_environment': dict({
+      'description': '''
+        Stop a channel picking its own environment, so it uses the workspace default.
+        For example, put #growth back on the default environment. A no-op when the
+        channel has none of its own.
+        
+        Omit ``channel_id`` to clear the workspace default, leaving the deployment
+        default. The workspace default requires Manage Server (admin); an admin of the
+        channel may clear that channel's environment. ``channel_id`` MUST be the parent
+        channel's id, never a thread's.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'clear_repo_binding': dict({
       'description': '''
         Remove the repo binding for your agent.
@@ -1131,9 +1160,9 @@
         than merges, so omitting a previously-installed package removes it.
         Always send the full intended list for every ecosystem you care about.
         
-        The new environment is inert until an admin scopes an agent onto it
-        (an admin-only action) — creating one here does not change what any
-        agent runs on yet.
+        The new environment is inert until an admin picks it for a channel or
+        the workspace with ``set_channel_environment`` — creating one here does
+        not change what any agent runs on yet.
       ''',
       'parameters': dict({
         '$defs': dict({
@@ -1845,8 +1874,8 @@
     }),
     'explain_agent_resolution': dict({
       'description': '''
-        Who answers in this channel, for example #growth? Report who answers and
-        which routing tier decided it.
+        Who answers in this channel, for example #growth? Report who answers, the
+        environment it runs in, and which routing tier decided each.
         
         Supply thread_id to include its setup binding. Thread responder wins, else
         the channel's own default, else the workspace default, else the deployment
@@ -4101,6 +4130,46 @@
           'channel_id',
           'limit_usd',
           'window',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_channel_environment': dict({
+      'description': '''
+        Choose the environment a channel's turns run in, or the workspace default.
+        For example, run #growth in the pymc environment. Changes where the agent runs,
+        not which agent answers; use ``set_agent_default`` for that.
+        
+        Omit ``channel_id`` to set the workspace default, which every channel without
+        its own environment uses. The environment must already exist
+        (``list_environments``). Conversations pick it up from their next message.
+        The workspace default requires Manage Server (admin); an admin of the channel
+        may set that channel's environment.
+        
+        ``channel_id`` MUST be the parent channel's id, never a thread's: Discord
+        ``<channel platform="discord" id="..." role="parent_channel">``, Slack
+        ``<channel platform="slack" id="...">``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'environment_name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'environment_name',
         ]),
         'type': 'object',
       }),

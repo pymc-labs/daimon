@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 98 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 100 tools daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -92,6 +92,15 @@ Channel budget tools: read a channel's spending budget; admins set, clear and li
 | `get_channel_budget` | Discord callers, Slack callers | Show a channel's spending budget: its limit, window and what it has spent. |
 | `list_channel_budgets` | admin only | List every channel budget in this server or workspace with its spend. |
 | `set_channel_budget` | admin only | Set or replace a channel's spending budget. |
+
+## `channel_environments`
+
+Channel environment tools: which environment a channel's turns run in.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `clear_channel_environment` | admin only, channel admins too | Stop a channel picking its own environment, so it uses the workspace default. |
+| `set_channel_environment` | admin only, channel admins too | Choose the environment a channel's turns run in, or the workspace default. |
 
 ## `channel_isolation`
 
@@ -195,7 +204,7 @@ Propagation tools: set and clear agent defaults at workspace or channel scope.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `clear_agent_default` | admin only, channel admins too | Stop an agent answering in a channel by clearing its default routing. |
-| `explain_agent_resolution` | all callers | Who answers in this channel, for example #growth? Report who answers and which routing tier decided it. |
+| `explain_agent_resolution` | all callers | Who answers in this channel, for example #growth? Report who answers, the environment it runs in, and which routing tier decided each. |
 | `set_agent_default` | admin only, channel admins too | Make an agent answer in a channel or become the whole server/workspace default. |
 
 ## `publish`
