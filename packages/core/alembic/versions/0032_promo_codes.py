@@ -87,6 +87,7 @@ def upgrade() -> None:
         sa.Column("granted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("expired_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("expired_usd", sa.Numeric(12, 6), nullable=True),
+        sa.Column("reconciled_at", sa.DateTime(timezone=True), nullable=True),
         sa.UniqueConstraint("promo_code_id", "tenant_id", name="uq_promo_redemptions_code_tenant"),
         sa.CheckConstraint(
             "expired_usd IS NULL OR expired_usd >= 0", name="ck_promo_redemptions_expired_usd"

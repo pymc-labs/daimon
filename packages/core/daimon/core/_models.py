@@ -860,9 +860,9 @@ class TenantLedger(Base):
         nullable=False,
     )
     delta_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
-    reason: Mapped[str] = mapped_column(
-        Text, nullable=False
-    )  # topup|manual_credit|trial|promo_credit|promo_expiry|*_debit|charge.*; see billing.md
+    # topup|manual_credit|trial|promo_credit|promo_expiry|promo_expiry_refund|*_debit|charge.*;
+    # see billing.md
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
     payment_event_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("payment_events.id", ondelete="SET NULL"), nullable=True
@@ -937,7 +937,9 @@ class PromoRedemption(Base):
 
     `granted_at` is when the credit reached the ledger (a timed code redeemed
     before its window waits for the scheduler); `expired_at`/`expired_usd`
-    record the unspent remainder a timed code removed at its window's end.
+    record the unspent remainder a timed code removed at its window's end,
+    and `reconciled_at` when late-recorded spend inside the window was
+    credited back out of that remainder.
     The redeeming account is attribution only, severed by account erasure.
     """
 
@@ -966,6 +968,7 @@ class PromoRedemption(Base):
     granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expired_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class PromoRedeemFailure(Base):

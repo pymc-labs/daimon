@@ -155,6 +155,7 @@ source_modules = [
     "daimon.core.promo_allocation",
     "daimon.core.promo_codes",
     "daimon.core.promo_credit",
+    "daimon.core.promo_settlement",
     "daimon.core.purge",
     "daimon.core.reader_agent",
     "daimon.core.repo_resource",
