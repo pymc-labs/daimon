@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -22,6 +23,7 @@ from daimon.adapters.discord.agent_setup.channel_environment import (
 )
 from daimon.adapters.discord.agent_setup.routing_view import (
     MAX_ENVIRONMENT_LINES,
+    MAX_SETUP_CONVERSATION_LINKS,
     RoutingLine,
     RoutingView,
     build_environments_block,
@@ -29,10 +31,15 @@ from daimon.adapters.discord.agent_setup.routing_view import (
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.answering_map import AnsweringMap, ChannelEnvironment
-from daimon.core.channel_environments import ENVIRONMENT_OPTION_INHERIT, EnvironmentPicker
+from daimon.core.answering_map import AnsweringMap, ChannelEnvironment, SetupThreadRef
+from daimon.core.channel_environments import (
+    ENVIRONMENT_OPTION_INHERIT,
+    NOT_OFFERED_NOTE,
+    EnvironmentPicker,
+)
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
+from daimon.core.roster import RosterAgent
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_read import get_scope
@@ -82,18 +89,25 @@ def _runtime(sessionmaker: Any, anthropic: AsyncAnthropic) -> DiscordRuntime:
 
 
 def _state(
-    account_id: uuid.UUID, *, is_admin: bool, answering_map: AnsweringMap | None = None
+    account_id: uuid.UUID,
+    *,
+    is_admin: bool,
+    answering_map: AnsweringMap | None = None,
+    guild_id: int = GUILD_ID,
+    channel_name: str = "growth",
+    roster_agents: tuple[RosterAgent, ...] = (),
 ) -> PanelState:
     return PanelState(
         roster=[],
         selected=None,
         account_id=account_id,
         is_admin=is_admin,
-        guild_id=GUILD_ID,
+        guild_id=guild_id,
         channel_id=CHANNEL_ID,
-        channel_name="growth",
+        channel_name=channel_name,
         deployment_default=DEFAULT,
         answering_map=answering_map,
+        roster_agents=roster_agents,
     )
 
 
@@ -136,13 +150,15 @@ def _select(view: Any) -> discord.ui.Select[Any] | None:
     return selects[0] if selects else None
 
 
-async def _grant_channel(factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> None:
+async def _grant_channel(
+    factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, *, channel_id: int = CHANNEL_ID
+) -> None:
     async with factory() as session, session.begin():
         await set_channel_admins(
             session,
             tenant_id=tenant_id,
             platform="discord",
-            channel_id=str(CHANNEL_ID),
+            channel_id=str(channel_id),
             role_ids=[],
             user_ids=[str(USER_ID)],
             actor_account_id=None,
@@ -165,6 +181,7 @@ def test_the_block_lists_channels_then_the_defaults() -> None:
         )
     )
 
+    assert text is not None, "the block fits the whole card's budget"
     assert "<#0> → **env-0**" in text, "a channel line reads channel → environment"
     assert f"<#{MAX_ENVIRONMENT_LINES}>" not in text and "-# and 2 more" in text, (
         "the list is bounded and counts what it cut"
@@ -172,14 +189,17 @@ def test_the_block_lists_channels_then_the_defaults() -> None:
     assert text.index("Server default → **shared**") < text.index("Deployment default"), (
         "the server default comes before the deployment fall-through"
     )
-    assert "-# not in effect while a server default is set" in text
+    assert "-# not in effect while a server default is set" in text, (
+        "a server default takes the deployment default out of the cascade"
+    )
 
 
 def test_the_block_with_nothing_set_names_only_the_deployment_default() -> None:
     text = build_environments_block(AnsweringMap(deployment_environment="default"))
 
-    assert "-# no channel picks its own environment yet" in text
-    assert "-# no server default" in text
+    assert text is not None, "the block fits the whole card's budget"
+    assert "-# no channel picks its own environment yet" in text, "no channel rows"
+    assert "-# no server default" in text, "no tenant row"
     assert "Deployment default → **default**" in text and "not in effect" not in text, (
         "with no rows at all, every channel runs where it did before"
     )
@@ -203,7 +223,28 @@ def test_the_select_leads_with_the_default_and_marks_the_current_pick() -> None:
         ("env:gpu", False),
         ("env:science", True),
     ], "the channel's own pick is pre-selected"
-    assert select.placeholder == "Environment for #growth"
+    assert select.placeholder == "Environment for #growth", "the select names its channel"
+
+
+def test_the_block_cuts_channel_lines_to_the_room_left_and_keeps_the_defaults() -> None:
+    answering_map = AnsweringMap(
+        channel_environments=tuple(
+            ChannelEnvironment(channel_id=str(CHANNEL_ID + i), environment_name="e" * 40)
+            for i in range(MAX_ENVIRONMENT_LINES)
+        ),
+        tenant_environment="shared",
+        deployment_environment="default",
+    )
+
+    text = build_environments_block(answering_map, max_chars=300)
+    squeezed = build_environments_block(answering_map, max_chars=20)
+
+    assert text is not None and len(text) <= 300, "the block stays inside the room it is given"
+    assert f"<#{CHANNEL_ID}>" in text and "more" in text, (
+        "it keeps the first lines and counts the rest"
+    )
+    assert "Server default → **shared**" in text, "the defaults always show"
+    assert squeezed is None, "a block whose defaults do not fit is left off, not cut mid-line"
 
 
 # ---------------------------------------------------------------------------
@@ -259,10 +300,16 @@ async def test_a_failed_listing_hides_only_the_picker(
         db_session_factory, build_no_retry_anthropic(lambda _r: httpx.Response(500, json={}))
     )
     state = _state(account_id, is_admin=True, answering_map=AnsweringMap())
+    interaction = _interaction(admin=True)
 
-    assert await load_environment_picker(
-        _interaction(admin=True), runtime=runtime, state=state
-    ) is (None)
+    picker = await load_environment_picker(interaction, runtime=runtime, state=state)
+    view = await build_routing_view(
+        interaction, runtime=runtime, state=state, allowed_user_id=USER_ID
+    )
+
+    assert picker is None, "a failed listing offers no picker"
+    assert _select(view) is None, "the screen draws without the select"
+    assert "**Environments**" in _text(view), "and still shows every channel's environment"
 
 
 # ---------------------------------------------------------------------------
@@ -291,12 +338,14 @@ async def test_picking_saves_this_channel_and_clearing_removes_the_row(
     assert row is not None and row.environment_name == "science", "the pick is stored"
     assert row.agent_name is None, "picking an environment leaves the channel's agent alone"
     rerendered = interaction.edit_original_response.call_args.kwargs["view"]
-    assert isinstance(rerendered, RoutingView)
+    assert isinstance(rerendered, RoutingView), "the pick redraws the routing screen"
     assert f"<#{CHANNEL_ID}> → **science**" in _text(rerendered), "the screen shows the pick"
-    assert "now runs in the science environment" in interaction.followup.send.call_args.args[0]
+    assert "now runs in the science environment" in interaction.followup.send.call_args.args[0], (
+        "the reader is told what changed"
+    )
 
     cleared = _select(rerendered)
-    assert cleared is not None
+    assert cleared is not None, "the redrawn screen keeps the select"
     cleared._values = [ENVIRONMENT_OPTION_INHERIT]  # pyright: ignore[reportPrivateUsage]  # a real dispatch sets this
     await cleared.callback(_interaction(admin=True))
 
@@ -320,7 +369,7 @@ async def test_a_pick_is_refused_when_the_caller_is_no_longer_allowed(
         ),
     )
     select = _select(view)
-    assert select is not None
+    assert select is not None, "the rendered picker offers the select"
     select._values = ["env:science"]  # pyright: ignore[reportPrivateUsage]  # a real dispatch sets this
     interaction = _interaction(admin=False)
 
@@ -350,19 +399,85 @@ async def test_an_environment_gone_since_render_writes_nothing(
         ),
     )
     select = _select(view)
-    assert select is not None
+    assert select is not None, "the rendered picker offers the select"
     select._values = ["env:gone"]  # pyright: ignore[reportPrivateUsage]  # a real dispatch sets this
     interaction = _interaction(admin=True)
 
     await select.callback(interaction)
 
-    assert "no longer exists" in interaction.followup.send.call_args.args[0]
+    assert "no longer exists" in interaction.followup.send.call_args.args[0], (
+        "the reader is told the environment is gone"
+    )
     assert (
         await get_scope(
             db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=str(CHANNEL_ID))
         )
         is None
+    ), "nothing is written for a deleted environment"
+
+
+async def test_a_forged_value_is_answered_and_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    tenant_id, account_id = await _seed(db_session_factory)
+    runtime = _runtime(db_session_factory, _anthropic(tenant_id, "science"))
+    view = RoutingView(
+        _state(account_id, is_admin=True, answering_map=AnsweringMap()),
+        runtime=runtime,
+        allowed_user_id=USER_ID,
+        environment_picker=EnvironmentPicker(
+            channel_id=str(CHANNEL_ID), own=None, inherited=None, names=("science",)
+        ),
     )
+    select = _select(view)
+    assert select is not None, "the rendered picker offers the select"
+    select._values = ["science"]  # pyright: ignore[reportPrivateUsage]  # a value no option carries
+    interaction = _interaction(admin=True)
+
+    await select.callback(interaction)
+
+    assert interaction.followup.send.call_args.args[0] == NOT_OFFERED_NOTE, (
+        "the deferred click gets an answer instead of hanging"
+    )
+    assert (
+        await get_scope(
+            db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=str(CHANNEL_ID))
+        )
+        is None
+    ), "a forged value writes nothing"
+
+
+async def test_an_admin_of_another_channel_is_refused_by_the_select(
+    db_session_factory: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    tenant_id, account_id = await _seed(db_session_factory)
+    await _grant_channel(db_session_factory, tenant_id, channel_id=CHANNEL_ID + 1)
+    runtime = _runtime(db_session_factory, _anthropic(tenant_id, "science"))
+    state = _state(account_id, is_admin=False, answering_map=AnsweringMap())
+    view = RoutingView(
+        state,
+        runtime=runtime,
+        allowed_user_id=USER_ID,
+        environment_picker=EnvironmentPicker(
+            channel_id=str(CHANNEL_ID), own=None, inherited=None, names=("science",)
+        ),
+    )
+    select = _select(view)
+    assert select is not None, "the rendered picker offers the select"
+    select._values = ["env:science"]  # pyright: ignore[reportPrivateUsage]  # a real dispatch sets this
+    interaction = _interaction(admin=False)
+
+    picker = await load_environment_picker(interaction, runtime=runtime, state=state)
+    await select.callback(interaction)
+
+    assert picker is None, "another channel's grant draws no picker here"
+    interaction.response.send_message.assert_awaited_once_with(REFUSED_MESSAGE, ephemeral=True)
+    assert (
+        await get_scope(
+            db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=str(CHANNEL_ID))
+        )
+        is None
+    ), "a grant on another channel writes nothing here"
 
 
 # ---------------------------------------------------------------------------
@@ -371,24 +486,44 @@ async def test_an_environment_gone_since_render_writes_nothing(
 
 
 def test_the_widest_routing_screen_with_a_picker_fits_discords_budget() -> None:
+    snowflake = 900000000000000000
     answering_map = AnsweringMap(
         channel_environments=tuple(
-            ChannelEnvironment(channel_id=str(CHANNEL_ID + i), environment_name="e" * 40)
+            ChannelEnvironment(channel_id=str(snowflake + i), environment_name="e" * 60)
             for i in range(MAX_ENVIRONMENT_LINES + 5)
         ),
-        tenant_environment="e" * 40,
-        deployment_environment="e" * 40,
+        tenant_environment="e" * 60,
+        deployment_environment="e" * 60,
+        setup_threads=tuple(
+            SetupThreadRef(
+                thread_id=str(snowflake + 100 + i),
+                parent_channel_id=str(snowflake),
+                target_name="t" * 100,
+                updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+            for i in range(MAX_SETUP_CONVERSATION_LINKS + 1)
+        ),
     )
     lines = [
         RoutingLine(
             channel_label=f"#{'c' * 30}-{i}",
             agent_name="a" * 30,
-            audit_line="set by <@900000000000000001> on <t:1700000000:d>",
+            audit_line=f"set by <@{snowflake}> on <t:1700000000:d>",
         )
         for i in range(ROUTING_PAGE_SIZE + 1)
     ]
+    unrouted = RosterAgent(
+        name="u" * 40, ma_agent_id="agent_u", model_id="claude-sonnet-4-5", is_built_in=False
+    )
     view = RoutingView(
-        _state(uuid.uuid4(), is_admin=True, answering_map=answering_map),
+        _state(
+            uuid.uuid4(),
+            is_admin=True,
+            answering_map=answering_map,
+            guild_id=snowflake,
+            channel_name="c" * 100,
+            roster_agents=(unrouted,),
+        ),
         runtime=_runtime(MagicMock(), build_fake_anthropic(lambda _r: httpx.Response(200))),
         allowed_user_id=USER_ID,
         lines=lines,
@@ -396,12 +531,15 @@ def test_the_widest_routing_screen_with_a_picker_fits_discords_budget() -> None:
         environment_picker=EnvironmentPicker(
             channel_id=str(CHANNEL_ID),
             own=None,
-            inherited="e" * 40,
+            inherited="e" * 60,
             names=tuple(f"{'n' * 90}{i}" for i in range(MAX_ENVIRONMENT_OPTIONS)),
         ),
     )
 
-    assert view.total_children_count <= LAYOUT_COMPONENT_BUDGET
-    assert view.content_length() <= LAYOUT_TEXT_BUDGET
+    assert view.total_children_count <= LAYOUT_COMPONENT_BUDGET, "within the component cap"
+    assert view.content_length() <= LAYOUT_TEXT_BUDGET, "within the 4000-character cap"
+    assert "**Environments**" in _text(view), "the environments block is cut, not dropped"
     select = _select(view)
-    assert select is not None and len(select.options) == MAX_ENVIRONMENT_OPTIONS + 1 <= 25
+    assert select is not None and len(select.options) == MAX_ENVIRONMENT_OPTIONS + 1 <= 25, (
+        "the select holds the default plus every offered environment"
+    )

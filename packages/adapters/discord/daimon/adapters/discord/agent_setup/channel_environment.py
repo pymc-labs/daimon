@@ -19,8 +19,10 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_admins import is_channel_admin
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
+    NOT_OFFERED_NOTE,
     EnvironmentPicker,
     build_clear_environment_note,
+    build_missing_environment_note,
     build_set_environment_note,
     environment_option_value,
     list_environment_names,
@@ -121,17 +123,20 @@ async def load_environment_picker(
 async def save_environment_choice(*, runtime: DiscordRuntime, state: PanelState, value: str) -> str:
     """Write the pick for the panel's channel and return what to tell the reader.
 
-    The caller has re-checked the caller live. An environment that no longer
-    exists writes nothing; a value no picker offers raises ValueError.
+    The caller has re-checked the caller live. A value no picker offers, or an
+    environment that no longer exists, writes nothing.
     """
     tenant_id = _tenant_id(state)
     channel_id = str(state.channel_id)
-    name = parse_environment_option(value)
+    try:
+        name = parse_environment_option(value)
+    except ValueError:
+        return NOT_OFFERED_NOTE
     if name is not None and (
         await find_environment_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
         is None
     ):
-        return f"The {name} environment no longer exists. Nothing changed."
+        return build_missing_environment_note(name)
     async with runtime.sessionmaker.begin() as session:
         previous = await save_scope_environment(
             session,
@@ -140,7 +145,14 @@ async def save_environment_choice(*, runtime: DiscordRuntime, state: PanelState,
             environment_name=name,
             actor_account_id=state.account_id,
         )
-    log.info("agent_setup.channel_environment.saved", cleared=name is None)
+    log.info(
+        "agent_setup.channel_environment.saved",
+        tenant_id=str(tenant_id),
+        channel_id=channel_id,
+        actor_account_id=str(state.account_id),
+        environment_name=name,
+        previous_environment_name=previous,
+    )
     if name is None:
         return build_clear_environment_note(
             channel=f"<#{channel_id}>", cleared=previous is not None

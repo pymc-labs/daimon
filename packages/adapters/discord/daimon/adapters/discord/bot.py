@@ -2366,7 +2366,7 @@ class DaimonBot(commands.Bot):
             if "environment" in err.missing:
                 hints.append(
                     "An admin of this server or channel can pick an environment in "
-                    "`/agent-setup` → Who answers where, or tell Daimon which one to run here."
+                    "`/agent-setup` → Who answers where."
                 )
             await target.send(
                 f"No {' or '.join(err.missing)} configured for this channel. " + " ".join(hints)

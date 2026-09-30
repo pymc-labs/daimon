@@ -21,7 +21,7 @@ from datetime import datetime
 
 import anthropic
 import structlog
-from daimon.adapters.discord.agent_setup.budget import ROUTING_PAGE_SIZE
+from daimon.adapters.discord.agent_setup.budget import LAYOUT_TEXT_BUDGET, ROUTING_PAGE_SIZE
 from daimon.adapters.discord.agent_setup.channel_admins_view import (
     CHANNEL_ADMINS_LABEL,
     ChannelAdminsView,
@@ -47,6 +47,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.answering_map import AnsweringMap
+from daimon.core.channel_admins import fit_lines
 from daimon.core.channel_environments import EnvironmentPicker
 from daimon.core.errors import DaimonError
 from daimon.core.roster import Page, paginate
@@ -63,6 +64,7 @@ SERVER_DEFAULT_LABEL = "Server default"
 DEPLOYMENT_NOT_IN_EFFECT = "not in effect while a server default is set"
 MAX_SETUP_CONVERSATION_LINKS = 5
 MAX_ENVIRONMENT_LINES = 10
+_MORE_LINE_RESERVE = len("\n-# and 9999 more")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -249,24 +251,34 @@ def _defaults_block(
     return "\n".join(lines)
 
 
-def build_environments_block(answering_map: AnsweringMap) -> str:
-    """Each channel's own environment, then the server and deployment defaults. Pure."""
-    rows = answering_map.channel_environments
-    lines = ["**Environments**"]
-    lines += [
-        f"<#{row.channel_id}> → **{row.environment_name}**" for row in rows[:MAX_ENVIRONMENT_LINES]
-    ]
-    if len(rows) > MAX_ENVIRONMENT_LINES:
-        lines.append(f"-# and {len(rows) - MAX_ENVIRONMENT_LINES} more")
-    if not rows:
-        lines.append("-# no channel picks its own environment yet")
+def build_environments_block(
+    answering_map: AnsweringMap, *, max_chars: int = LAYOUT_TEXT_BUDGET
+) -> str | None:
+    """Each channel's own environment, then the server and deployment defaults. Pure.
+
+    Channel lines are cut to fit `max_chars`; None when even the defaults do not.
+    """
+    heading = "**Environments**"
     tenant, deployment = answering_map.tenant_environment, answering_map.deployment_environment
-    lines.append(f"{SERVER_DEFAULT_LABEL} → **{tenant}**" if tenant else "-# no server default")
+    defaults = [f"{SERVER_DEFAULT_LABEL} → **{tenant}**" if tenant else "-# no server default"]
     if deployment is not None:
-        lines.append(f"Deployment default → **{deployment}**")
+        defaults.append(f"Deployment default → **{deployment}**")
         if tenant is not None:
-            lines.append(f"-# {DEPLOYMENT_NOT_IN_EFFECT}")
-    return "\n".join(lines)
+            defaults.append(f"-# {DEPLOYMENT_NOT_IN_EFFECT}")
+    fixed = len("\n".join([heading, *defaults]))
+    rows = answering_map.channel_environments
+    shown = fit_lines(
+        (
+            f"<#{row.channel_id}> → **{row.environment_name}**"
+            for row in rows[:MAX_ENVIRONMENT_LINES]
+        ),
+        max_chars=max_chars - fixed - 1 - _MORE_LINE_RESERVE,
+    )
+    if len(shown) < len(rows):
+        shown.append(f"-# and {len(rows) - len(shown)} more")
+    body = shown or ["-# no channel picks its own environment yet"]
+    text = "\n".join([heading, *body, *defaults])
+    return text if len(text) <= max_chars else None
 
 
 def _conversations_block(conversations: Sequence[str]) -> str:
@@ -288,36 +300,49 @@ def build_routing_container(
     deployment_in_effect: bool,
     conversations: Sequence[str],
     sentence: str,
-    environments: str | None = None,
+    environment_map: AnsweringMap | None = None,
     environment_select: discord.ui.Select[discord.ui.LayoutView] | None = None,
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """Fold one page of the cascade into the panel card. Pure — no I/O, no clock.
 
-    ``environment_select`` sits right under ``environments``, the block it edits.
+    ``environment_map`` adds the environments block, cut to the text the rest
+    of the card leaves; ``environment_select`` sits right under it.
     """
-    container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
-    container.add_item(header("Who answers where"))
-    container.add_item(discord.ui.TextDisplay(_channel_block(page)))
-    container.add_item(
-        discord.ui.TextDisplay(
-            _defaults_block(
-                server_default,
-                deployment_default=deployment_default,
-                deployment_in_effect=deployment_in_effect,
-            )
+    heading = header("Who answers where")
+    channels = discord.ui.TextDisplay[discord.ui.LayoutView](_channel_block(page))
+    defaults = discord.ui.TextDisplay[discord.ui.LayoutView](
+        _defaults_block(
+            server_default,
+            deployment_default=deployment_default,
+            deployment_in_effect=deployment_in_effect,
         )
     )
-    if environments is not None:
+    setup = discord.ui.TextDisplay[discord.ui.LayoutView](_conversations_block(conversations))
+    rule = discord.ui.TextDisplay[discord.ui.LayoutView](f"-# {sentence}")
+    room = LAYOUT_TEXT_BUDGET - sum(
+        len(item.content) for item in (heading, channels, defaults, setup, rule)
+    )
+    container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
+    container.add_item(heading)
+    container.add_item(channels)
+    container.add_item(defaults)
+    environments = (
+        build_environments_block(environment_map, max_chars=room)
+        if environment_map is not None
+        else None
+    )
+    if environments is not None or environment_select is not None:
         container.add_item(hairline())
+    if environments is not None:
         container.add_item(discord.ui.TextDisplay(environments))
-        if environment_select is not None:
-            select_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
-            select_row.add_item(environment_select)
-            container.add_item(select_row)
+    if environment_select is not None:
+        select_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+        select_row.add_item(environment_select)
+        container.add_item(select_row)
     container.add_item(hairline())
-    container.add_item(discord.ui.TextDisplay(_conversations_block(conversations)))
+    container.add_item(setup)
     container.add_item(hairline())
-    container.add_item(discord.ui.TextDisplay(f"-# {sentence}"))
+    container.add_item(rule)
     return container
 
 
@@ -368,7 +393,7 @@ class RoutingView(PanelViewBase):
             deployment_in_effect=not answering_map.tenant_consumes_fallthrough,
             conversations=setup_conversation_links(answering_map, guild_id=state.guild_id),
             sentence=build_routing_sentence(state, answering_map),
-            environments=build_environments_block(answering_map),
+            environment_map=answering_map,
             environment_select=self.environment_select,
         )
 
