@@ -87,3 +87,6 @@ async def test_dm_from_a_channel_over_its_budget_is_refused(
     else:
         assert reply == "Ready in your DMs.", "a channel within its budget opens the DM"
         start_dm.assert_awaited_once()
+        assert start_dm.await_args.kwargs["source_channel_id"] == str(_CHANNEL), (
+            "the DM records the channel it was started from"
+        )
