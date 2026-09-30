@@ -29,6 +29,7 @@ same-named import is refused and must be renamed.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -166,3 +167,13 @@ async def sync_skills(
                 )
             )
     return outcomes
+
+
+def summarize_failed_imports(outcomes: Sequence[ResourceOutcome]) -> str | None:
+    """One person-facing line on the skills that did not import, or None."""
+    failed = [outcome for outcome in outcomes if outcome.action is Action.FAILED]
+    if not failed:
+        return None
+    others = len(failed) - 1
+    tail = f" {others} more did not import either." if others else ""
+    return f"Not imported: {failed[0].error or failed[0].name}{tail}"

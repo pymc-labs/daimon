@@ -16,9 +16,9 @@ import httpx
 from anthropic.types.beta import SkillListResponse
 from anthropic.types.beta.skills import VersionCreateResponse
 from daimon.core.defaults.metadata import tenant_scoped_display_title
-from daimon.core.defaults.report import Action
+from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.skills.discover import DiscoveredSkill
-from daimon.core.skills.sync import sync_skills
+from daimon.core.skills.sync import summarize_failed_imports, sync_skills
 from daimon.core.specs import SkillSpec
 from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
@@ -450,3 +450,17 @@ async def test_sync_refuses_a_seeded_skill_name_without_touching_ma(tmp_path: Pa
     assert outcomes[0].action is Action.FAILED, "the seeded name is refused"
     assert "default skill" in (outcomes[0].error or ""), "the refusal says why"
     assert outcomes[1].action is Action.CREATED, "the rest of the batch still syncs"
+
+
+def test_summarize_failed_imports_names_the_first_reason_and_counts_the_rest() -> None:
+    def outcome(name: str, action: Action, error: str | None = None) -> ResourceOutcome:
+        return ResourceOutcome(kind="skill", name=name, action=action, error=error)
+
+    assert summarize_failed_imports([outcome("a", Action.CREATED)]) is None
+    assert summarize_failed_imports(
+        [
+            outcome("a", Action.CREATED),
+            outcome("b", Action.FAILED, "Rename b."),
+            outcome("c", Action.FAILED),
+        ]
+    ) == ("Not imported: Rename b. 1 more did not import either.")

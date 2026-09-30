@@ -655,17 +655,26 @@ def test_render_change_confirmation_raises_when_skills_bulk_missing_repo() -> No
         render_change_confirmation(change)
 
 
-def test_render_change_confirmation_raises_when_skills_bulk_has_detail() -> None:
-    change = ConfigurationChange(
-        target_name="Ada",
-        kind="skills_bulk",
-        availability="saved",
-        count=2,
-        repo="acme/widgets",
-        detail="pdf-tools",
-    )
-    with pytest.raises(ValueError, match="does not use detail"):
-        render_change_confirmation(change)
+def test_render_change_confirmation_skills_bulk_detail_names_what_did_not_land() -> None:
+    def render(availability: ChangeAvailability, detail: str | None = "Not imported: eda.") -> str:
+        return render_change_confirmation(
+            ConfigurationChange(
+                target_name="Ada",
+                kind="skills_bulk",
+                availability=availability,
+                count=2,
+                repo="acme/widgets",
+                detail=detail,
+            )
+        )
+
+    assert render("next_message").endswith("\nNot imported: eda."), "a partial import says so"
+    assert render("preparation_failed") == (
+        "Your GitHub token is saved for Ada.\nThe skills did not import.\nNot imported: eda."
+    ), "the reason replaces the retry hint, which a refusal would make wrong"
+    assert render("saved", None) == (
+        "2 skills imported from acme/widgets, but not added to Ada."
+    ), "an import that did not attach does not claim the agent has the skills"
 
 
 # --- env import -------------------------------------------------------------
