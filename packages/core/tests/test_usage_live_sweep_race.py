@@ -73,6 +73,7 @@ async def test_failed_usage_debit_rolls_back_and_retries(
         idempotency_key: str,
         payment_event_id: str | None = None,
         payment_intent: str | None = None,
+        occurred_at: datetime | None = None,
     ) -> bool:
         await insert_entry(
             session,
@@ -82,6 +83,7 @@ async def test_failed_usage_debit_rolls_back_and_retries(
             idempotency_key=idempotency_key,
             payment_event_id=payment_event_id,
             payment_intent=payment_intent,
+            occurred_at=occurred_at,
         )
         raise RuntimeError("injected failure after ledger insert")
 
