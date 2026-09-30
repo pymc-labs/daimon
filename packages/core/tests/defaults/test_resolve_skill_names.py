@@ -141,7 +141,10 @@ async def test_resolve_skill_names_error_excludes_foreign_tenant_titles() -> Non
     )
 
 
-async def test_resolve_skill_names_hides_skills_of_hidden_owners() -> None:
+async def test_resolve_skill_names_hides_skills_the_caller_may_not_see() -> None:
+    def _hide(skill_id: str, body: str) -> bool:
+        return skill_id == "skill_hidden" and body == "local/notes"
+
     hidden = tenant_scoped_display_title(tenant_id=_TENANT_A, name="local/notes")
     shown = tenant_scoped_display_title(tenant_id=_TENANT_A, name="shared/notes")
     client = _make_client(
@@ -152,14 +155,14 @@ async def test_resolve_skill_names_hides_skills_of_hidden_owners() -> None:
     )
     with pytest.raises(DefaultsError) as exc_info:
         await resolve_skill_names(
-            client, ["local/notes"], tenant_id=_TENANT_A, is_owner_hidden=lambda o: o == "local"
+            client, ["local/notes"], tenant_id=_TENANT_A, is_skill_hidden=_hide
         )
     message = str(exc_info.value)
     assert "shared/notes" in message, "visible skills stay listed as available"
     assert "skill_hidden" not in message and message.count("local/notes") == 1, (
-        "a hidden owner's skill resolves as missing and is not offered back"
+        "a hidden skill resolves as missing and is not offered back"
     )
     result = await resolve_skill_names(
-        client, ["shared/notes"], tenant_id=_TENANT_A, is_owner_hidden=lambda o: o == "local"
+        client, ["shared/notes"], tenant_id=_TENANT_A, is_skill_hidden=_hide
     )
-    assert result == [{"type": "custom", "skill_id": "skill_shown"}], "visible owners resolve"
+    assert result == [{"type": "custom", "skill_id": "skill_shown"}], "visible skills resolve"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Iterable
 from typing import Any
 
 MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
@@ -149,6 +150,37 @@ def tenant_scoped_display_title(
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:4]
     keep = _DISPLAY_TITLE_MAX - len(prefix) - 5  # 5 = "~" + 4 hex chars
     return f"{prefix}{body[:keep]}~{digest}"
+
+
+_TENANT_PREFIX_LEN = 9  # f"{str(tenant_id)[:8]}-"
+_HEX = frozenset("0123456789abcdef")
+
+
+def truncated_body_head(body: str) -> str | None:
+    """The part `tenant_scoped_display_title` kept of a body it shortened, else None."""
+    keep = _DISPLAY_TITLE_MAX - _TENANT_PREFIX_LEN - 5
+    shortened = len(body) == keep + 5 and body[keep] == "~" and set(body[keep + 1 :]) <= _HEX
+    return body[:keep] if shortened else None
+
+
+def skill_owner_candidates(
+    body: str, *, stored_owner: str | None, agent_names: Iterable[str]
+) -> frozenset[str]:
+    """The agents a tenant skill may be scoped to; empty for a library skill.
+
+    `stored_owner` (the agent its upload row names) wins. Otherwise the title
+    is read: a long `agent/name` body is shortened and may have lost its "/",
+    so every known agent whose name the kept part could begin counts too, and a
+    caller hiding skills hides on doubt.
+    """
+    if stored_owner is not None:
+        return frozenset({stored_owner})
+    owner, sep, _ = body.partition("/")
+    owners: set[str] = {owner} if sep else set()
+    head = truncated_body_head(body)
+    if head is not None:
+        owners |= {name for name in agent_names if f"{name}/".startswith(head)}
+    return frozenset(owners)
 
 
 def find_conflicting_skill_body(
