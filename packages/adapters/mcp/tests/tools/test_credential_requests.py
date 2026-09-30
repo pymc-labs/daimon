@@ -2119,3 +2119,44 @@ async def test_second_slack_request_in_same_thread_supersedes_the_live_one_and_e
     assert old_row is not None and old_row.outcome == "replaced_by_newer", (
         "the retired Slack request records why it was never clicked"
     )
+
+
+@pytest.mark.parametrize("key", ["OPENAI_API_KEY", None], ids=["one-key", "env-file"])
+async def test_request_agent_key_refuses_before_posting_when_no_crypto_keys(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str | None,
+) -> None:
+    """H3: without DAIMON_CRYPTO__KEYS nobody is asked for a value that would be stored plain."""
+    keyless = async_sessionmaker(
+        bind=committing_sessionmaker.kw["bind"],
+        expire_on_commit=False,
+        info={"crypto_keys": (), "crypto_allow_plaintext": False},
+    )
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_env", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(keyless, client=client)
+    auth = _auth_identity(tenant_id=tenant.id)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9501", posted=posted)
+
+    with pytest.raises(ToolError, match="DAIMON_CRYPTO__KEYS"):
+        await _request_agent_key_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin_id),
+            expected_ma_agent_id="ag_env",
+            agent_name="daimon",
+            key=key,
+            purpose="the CRM key",
+            channel_id="222",
+        )
+    assert await _row_count(db_session) == 0
+    assert posted == {}

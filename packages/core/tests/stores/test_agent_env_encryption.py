@@ -79,6 +79,8 @@ async def test_keyless_writes_legacy_reads_and_lazy_encryption(
     db_session: AsyncSession, value: str
 ) -> None:
     db_session.info["crypto_keys"] = ()
+    # Keyless writes are the local-development opt-in; without it they refuse.
+    db_session.info["crypto_allow_plaintext"] = True
     tenant = await make_tenant(db_session)
     agent = uuid.uuid4()
     args = dict(tenant_id=tenant.id, agent_id=agent, key="TOKEN")
@@ -150,6 +152,7 @@ async def test_conditional_insert_preserves_prefix_plaintext(
 ) -> None:
     key = Fernet.generate_key()
     db_session.info["crypto_keys"] = (key.decode(),) if keyed else ()
+    db_session.info["crypto_allow_plaintext"] = not keyed
     tenant = await make_tenant(db_session)
     args = dict(tenant_id=tenant.id, agent_id=uuid.uuid4(), key="TOKEN")
     value = "enc:v1:literal"
@@ -388,3 +391,85 @@ async def test_legacy_update_after_encryption_remains_readable_and_reversible(
     """)
         )
     ).scalar_one()
+
+
+@pytest.mark.parametrize("conditional", [False, True], ids=["upsert", "compare-and-set"])
+async def test_keyless_write_fails_closed_without_the_plaintext_opt_in(
+    db_session: AsyncSession, conditional: bool
+) -> None:
+    """H3/H6: no crypto keys and no opt-in means no agent key is stored at all."""
+    from daimon.core.stores.agent_files import (
+        AgentEnvEncryptionRequiredError,
+        agent_env_writes_allowed,
+    )
+
+    db_session.info["crypto_keys"] = ()
+    db_session.info["crypto_allow_plaintext"] = False
+    tenant = await make_tenant(db_session)
+    args = dict(tenant_id=tenant.id, agent_id=uuid.uuid4(), key="TOKEN")
+
+    assert agent_env_writes_allowed(db_session) is False
+    with pytest.raises(AgentEnvEncryptionRequiredError, match="DAIMON_CRYPTO__KEYS"):
+        if conditional:
+            await put_agent_file_if_unchanged(
+                db_session,
+                **args,
+                content="secret",
+                set_by_account_id=None,
+                expected_updated_at=None,
+            )
+        else:
+            await put_agent_file(db_session, **args, content="secret", set_by_account_id=None)
+    assert await _stored(db_session) == {}, "nothing may be written in plaintext"
+
+    db_session.info["crypto_allow_plaintext"] = True
+    assert agent_env_writes_allowed(db_session) is True
+    await put_agent_file(db_session, **args, content="dev-only", set_by_account_id=None)
+    assert (await _stored(db_session))["TOKEN"] == ("dev-only", "plain")
+
+
+async def test_encrypt_plaintext_rewrites_legacy_rows_and_verify_counts_them(
+    db_session: AsyncSession,
+) -> None:
+    """The operator step after enabling keys: find plaintext rows, encrypt them in place."""
+    from daimon.core.stores.agent_files import (
+        count_plaintext_agent_files,
+        encrypt_plaintext_agent_files,
+    )
+
+    db_session.info["crypto_keys"] = ()
+    db_session.info["crypto_allow_plaintext"] = True
+    tenant = await make_tenant(db_session)
+    agent = uuid.uuid4()
+    for key in ("A", "B"):
+        await put_agent_file(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id=agent,
+            key=key,
+            content=f"value-{key}",
+            set_by_account_id=None,
+        )
+    before = {
+        r.key: r.updated_at
+        for r in await list_agent_files(db_session, tenant_id=tenant.id, agent_id=agent)
+    }
+    assert await count_plaintext_agent_files(db_session) == {tenant.id: 2}
+
+    key = Fernet.generate_key()
+    db_session.info["crypto_keys"] = (key.decode(),)
+    assert await encrypt_plaintext_agent_files(db_session) == 2
+    db_session.expire_all()
+
+    assert await count_plaintext_agent_files(db_session) == {}
+    stored = await _stored(db_session)
+    for name in ("A", "B"):
+        ciphertext, encoding = stored[name]
+        assert encoding == "fernet_v1"
+        assert Fernet(key).decrypt(ciphertext.encode()).decode() == f"value-{name}"
+    rows = await list_agent_files(db_session, tenant_id=tenant.id, agent_id=agent)
+    assert {r.key: r.content for r in rows} == {"A": "value-A", "B": "value-B"}
+    assert {r.key: r.updated_at for r in rows} == before, (
+        "encrypting in place must not move updated_at, which posted cards compare against"
+    )
+    assert await encrypt_plaintext_agent_files(db_session) == 0, "idempotent"

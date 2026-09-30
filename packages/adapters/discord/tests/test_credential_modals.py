@@ -1371,11 +1371,9 @@ async def test_repo_modal_never_leaks_the_pasted_token(
         assert hygiene_pat not in repr(entry), (
             f"[{scenario}] no log record may contain the pasted token"
         )
-        pat_masked = entry.get("pat_masked")
-        if pat_masked is not None:
-            assert pat_masked != hygiene_pat, (
-                f"[{scenario}] the mask itself must not equal the full value"
-            )
+        assert not {"pat_masked", "token_masked", "masked"} & entry.keys(), (
+            f"[{scenario}] no log record may carry even a masked tail of the token"
+        )
 
     minted_custom_id = build_custom_id(row.token)
     assert hygiene_pat not in minted_custom_id, (

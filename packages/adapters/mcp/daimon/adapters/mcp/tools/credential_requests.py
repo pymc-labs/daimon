@@ -54,7 +54,7 @@ from daimon.core.operation_policy import (
     decide_operation,
     needs_reachability_read,
 )
-from daimon.core.stores.agent_files import get_agent_file
+from daimon.core.stores.agent_files import agent_env_writes_allowed, get_agent_file
 from daimon.core.stores.credential_requests import (
     create_credential_request,
     list_live_credential_requests,
@@ -450,6 +450,16 @@ async def _request_agent_key_impl(
             raise ToolError(
                 f"You named one key ({named}); pass it as `key` instead of requesting a file."
             )
+    async with runtime.session_factory() as session:
+        writable = agent_env_writes_allowed(session)
+    if not writable:
+        # Fail closed before anyone is asked for a value that could not be stored
+        # encrypted. Tell the model plainly so it relays the operator step.
+        raise ToolError(
+            "This deployment has no encryption keys (DAIMON_CRYPTO__KEYS), so agent keys "
+            "can't be saved and no card was posted. Tell them the operator must set "
+            "DAIMON_CRYPTO__KEYS first. Do not ask for the value in chat."
+        )
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     agent_id, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin

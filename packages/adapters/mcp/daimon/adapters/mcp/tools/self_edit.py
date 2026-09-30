@@ -162,6 +162,22 @@ async def _self_write_file_impl(
     return row
 
 
+REDACTED_VALUE = "[redacted: a person set this value; it is available in the session .env]"
+LISTED_VALUE = "[not listed: read one key with self_read_file]"
+
+
+def _withhold_value(row: AgentFileRow, *, reader_account_id: uuid.UUID) -> AgentFileRow:
+    """Keep a value a person entered (a credential form, an import) out of tool output.
+
+    Only values this agent key wrote itself come back. Everything else is a
+    credential someone submitted privately; the sandbox already mounts it, and
+    a tool result would put it in the model's context and transcript.
+    """
+    if row.last_set_by_account_id == reader_account_id:
+        return row
+    return row.model_copy(update={"content": REDACTED_VALUE})
+
+
 async def _self_read_file_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -182,7 +198,7 @@ async def _self_read_file_impl(
         agent_id,
         key,
     )
-    return row
+    return None if row is None else _withhold_value(row, reader_account_id=auth.account_id)
 
 
 async def _self_list_files_impl(
@@ -197,7 +213,8 @@ async def _self_list_files_impl(
             agent_id=agent_id,
         )
     logger.info("self_list_files outcome=success agent=%s count=%d", agent_id, len(rows))
-    return rows
+    # Keys and metadata only: no value, however it was written.
+    return [row.model_copy(update={"content": LISTED_VALUE}) for row in rows]
 
 
 async def _self_delete_file_impl(
@@ -537,14 +554,18 @@ def register_self_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         key: str,
     ) -> AgentFileRow | None:
-        """Read a per-agent file by `key`. Returns null if no file exists at that key."""
+        """Read a per-agent file by `key`. Returns null if no file exists at that key.
+
+        Values a person entered through a credential form are redacted; use them
+        from the session `.env` without echoing them.
+        """
         return await _self_read_file_impl(runtime, await _auth(ctx), key=key)
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def self_list_files(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
     ) -> list[AgentFileRow]:
-        """List all keys + metadata for files in your private agent_files namespace."""
+        """List all keys + metadata (no values) in your private agent_files namespace."""
         return await _self_list_files_impl(runtime, await _auth(ctx))
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]

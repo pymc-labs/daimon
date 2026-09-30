@@ -1148,3 +1148,37 @@ async def test_no_identity_args_in_self_edit_tool_schemas(
 
     missing = _SELF_EDIT_TOOL_NAMES - seen
     assert not missing, f"register_self_edit_tools did not register all 7 tools; missing: {missing}"
+
+
+async def test_self_read_and_list_withhold_values_a_person_entered(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """H3: a key submitted through a credential form never comes back as tool output."""
+    from daimon.core.stores.agent_files import put_agent_file
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    agent_id = uuid.uuid4()
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+    async with committing_sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            key="CRM_TOKEN",
+            content="crm-secret-value",
+            set_by_account_id=uuid.uuid4(),  # the person who filled in the form
+        )
+    await _self_write_file_impl(runtime, auth, key="notes.md", content="my own note")
+
+    secret = await _self_read_file_impl(runtime, auth, key="CRM_TOKEN")
+    own = await _self_read_file_impl(runtime, auth, key="notes.md")
+    listed = await _self_list_files_impl(runtime, auth)
+
+    assert secret is not None and "crm-secret-value" not in secret.content
+    assert "redacted" in secret.content
+    assert own is not None and own.content == "my own note", "the agent's own writes read back"
+    assert [r.key for r in listed] == ["CRM_TOKEN", "notes.md"]
+    assert all(
+        "crm-secret-value" not in r.content and "my own note" not in r.content for r in listed
+    )

@@ -74,13 +74,6 @@ _FORK_COPY_FIELDS: Final = frozenset(
 # ---------------------------------------------------------------------------
 
 
-def mask_tail(secret: str) -> str:
-    """Display-only mask. Never call from a logger that records ``secret`` plain."""
-    if len(secret) < 4:
-        return "****"
-    return f"****{secret[-4:]}"
-
-
 def owner_repo_from_url(url: str) -> str:
     """Extract canonical ``owner/repo`` from a GitHub URL or short path.
 
@@ -436,7 +429,7 @@ async def store_inline_pat(
     )
     async with runtime.sessionmaker.begin() as session:
         await set_agent_github_binding(session, agent_id=agent_id, principal_id=agent_id)
-    _log.info("repo_auth.pat_stored", masked=mask_tail(plaintext_pat))
+    _log.info("repo_auth.pat_stored")
     return f"inline-pat:{agent_id}"
 
 

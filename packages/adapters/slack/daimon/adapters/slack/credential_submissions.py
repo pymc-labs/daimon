@@ -35,7 +35,6 @@ from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_policy import AGENT_GONE_MESSAGE, refuse_unless_allowed
 from daimon.adapters.slack.agent_setup.write import (
     load_agent_inline_pat,
-    mask_tail,
     store_inline_pat,
 )
 from daimon.adapters.slack.credential_forms import refusal_text
@@ -76,7 +75,11 @@ from daimon.core.posted_controls import (
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores import credential_requests as credential_requests_store
-from daimon.core.stores.agent_files import list_agent_files, put_agent_file_if_unchanged
+from daimon.core.stores.agent_files import (
+    AgentEnvEncryptionRequiredError,
+    list_agent_files,
+    put_agent_file_if_unchanged,
+)
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
@@ -418,6 +421,13 @@ async def run_env_credential_submission(
                     state = "superseded"
                 else:
                     queued = await _record_input_continuation(session, row=consumed)
+    except AgentEnvEncryptionRequiredError as err:
+        # Rolled back with the consume: nothing stored, the request stays live.
+        log.error("credential_request.env_write_refused_no_crypto_keys")
+        await post_ephemeral(
+            client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
+        )
+        return
     except Exception:
         log.exception("credential_request.env_write_failed", key_present=True)
         await post_ephemeral(
@@ -848,7 +858,7 @@ async def run_mcp_credential_submission(
     log.info(
         "credential_request.mcp.submit",
         mcp_server_url=mcp_server_url,
-        token_masked=mask_tail(value),
+        token_present=bool(value),
     )
     # Ask the server first, as on Discord: a rejected token must not be
     # stored, mirrored and attached only to fail every later turn (#79).
@@ -1286,7 +1296,7 @@ async def run_skill_repo_credential_submission(
         repo_url=url,
         branch=branch,
         path=path,
-        pat_masked=mask_tail(value),
+        pat_present=bool(value),
     )
 
     is_token_stored = False
@@ -1487,7 +1497,7 @@ async def run_repo_bind_credential_submission(
         "credential_request.repo.submit",
         repo_url=repo_url,
         branch=branch,
-        pat_masked=mask_tail(pat) if pat else None,
+        pat_present=bool(pat),
     )
 
     try:

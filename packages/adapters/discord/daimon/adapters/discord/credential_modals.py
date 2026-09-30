@@ -96,7 +96,6 @@ import httpx
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAgentsSkillParams
-from daimon.adapters.discord.agent_setup.write import mask_tail
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.credential_origin import (
@@ -155,7 +154,11 @@ from daimon.core.posted_controls import (
 )
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.stores import credential_requests
-from daimon.core.stores.agent_files import list_agent_files, put_agent_file_if_unchanged
+from daimon.core.stores.agent_files import (
+    AgentEnvEncryptionRequiredError,
+    list_agent_files,
+    put_agent_file_if_unchanged,
+)
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow
@@ -520,6 +523,11 @@ class EnvCredentialModal(discord.ui.Modal):
                 await credential_requests.set_credential_request_outcome(
                     session, token=consumed_row.token, outcome=outcome
                 )
+        except AgentEnvEncryptionRequiredError as err:
+            # Rolled back with the consume: nothing stored, the request stays live.
+            _log.error("credential_modal.env_write_refused_no_crypto_keys")
+            await interaction.followup.send(str(err), ephemeral=True)
+            return
         except Exception:
             _log.exception("credential_modal.env_write_failed", key=self._row.target)
             await interaction.followup.send(
@@ -727,6 +735,11 @@ class EnvFileModal(discord.ui.Modal):
                     token=consumed_row.token,
                     outcome="stale_replacement" if collisions else "applied",
                 )
+        except AgentEnvEncryptionRequiredError as err:
+            # Rolled back with the consume: nothing stored, the request stays live.
+            _log.error("credential_modal.env_write_refused_no_crypto_keys")
+            await interaction.followup.send(str(err), ephemeral=True)
+            return
         except Exception:
             # Named boundary: discord.py swallows whatever escapes on_submit.
             _log.exception("credential_modal.env_file_write_failed", key_count=len(entries))
@@ -848,7 +861,7 @@ class McpCredentialModal(discord.ui.Modal):
         _log.info(
             "credential_modal.mcp.submit",
             mcp_server_url=mcp_server_url,
-            token_masked=mask_tail(token_value),
+            token_present=bool(token_value),
         )
         # Ask the server first. A token it rejects would otherwise be stored,
         # mirrored into every caller's vault and attached, and every turn from
@@ -1086,7 +1099,7 @@ class SkillRepoModal(discord.ui.Modal):
             repo_url=url,
             branch=branch,
             path=path,
-            pat_masked=mask_tail(pat),
+            pat_present=bool(pat),
         )
 
         is_token_saved = False
@@ -1401,7 +1414,7 @@ class RepoBindModal(discord.ui.Modal):
             "credential_modal.repo.submit",
             repo_url=repo_url,
             branch=branch,
-            pat_masked=mask_tail(pat) if pat else None,
+            pat_present=bool(pat),
         )
 
         try:
