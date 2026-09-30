@@ -1624,6 +1624,22 @@ class SlackApp:
                         "A workspace admin can add you."
                     ),
                 )
+            elif err.reason == "agent_pinned_elsewhere":
+                log.info(
+                    "turn.skipped.agent_pinned_elsewhere",
+                    tenant_id=str(tenant_id),
+                    team_id=team_id,
+                    channel_id=channel,
+                    thread_id=thread_id,
+                )
+                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel,
+                    thread_ts=thread_id,
+                    text=(
+                        "This agent only runs in the channels an operator pinned it to, "
+                        "so it can't answer here."
+                    ),
+                )
             elif err.reason == "balance_depleted":
                 log.info(
                     "turn.skipped.over_balance",

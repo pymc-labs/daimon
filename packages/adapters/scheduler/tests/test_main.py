@@ -874,8 +874,9 @@ async def test_sweep_retired_turn_card_intents_forwards_sessionmaker_and_now(
     [
         ('{"invoker_user_ids": ["staff"]}', "invoker_not_allowed"),
         ("null", "access_policy_unreadable"),
+        ('{"agent_channel_pins": {"daimon": ["rx-chan"]}}', "agent_pinned_elsewhere"),
     ],
-    ids=["creator-not-allowlisted", "unreadable-policy"],
+    ids=["creator-not-allowlisted", "unreadable-policy", "agent-pinned-elsewhere"],
 )
 async def test_fire_skips_routine_the_invoker_policy_refuses(
     db_session: AsyncSession,

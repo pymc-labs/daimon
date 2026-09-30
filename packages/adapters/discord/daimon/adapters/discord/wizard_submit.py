@@ -69,6 +69,7 @@ import anthropic as _anthropic
 import sentry_sdk
 import structlog
 from daimon.adapters.discord.bot import (
+    AGENT_PINNED_ELSEWHERE_NOTICE,
     INVOKER_NOT_ALLOWED_NOTICE,
     DaimonBot,
     _channel_protection_state,  # pyright: ignore[reportPrivateUsage]  # the same may-post decision the mention path makes
@@ -508,6 +509,11 @@ async def run_wizard_submit_turn_observed(
                     "wizard_submit.skipped.invoker_not_allowed", user_id=str(interaction.user.id)
                 )
                 await channel.send("Your answers were recorded, but " + INVOKER_NOT_ALLOWED_NOTICE)
+            elif err.reason == "agent_pinned_elsewhere":
+                _log.info("wizard_submit.skipped.agent_pinned_elsewhere", short_id=row.id)
+                await channel.send(
+                    "Your answers were recorded, but " + AGENT_PINNED_ELSEWHERE_NOTICE
+                )
             elif err.reason == "balance_depleted":
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
                 await channel.send(

@@ -234,6 +234,10 @@ INVOKER_NOT_ALLOWED_NOTICE = (
     "you aren't on this server's list of people who can start a turn. A server admin can add you."
 )
 
+AGENT_PINNED_ELSEWHERE_NOTICE = (
+    "this agent only runs in the channels an operator pinned it to, so it can't answer here."
+)
+
 
 def _credit_depleted_message(bot_display_name: str) -> str:
     return (
@@ -2431,6 +2435,14 @@ class DaimonBot(commands.Bot):
                     user_id=str(message.author.id),
                 )
                 await target.send("Sorry, " + INVOKER_NOT_ALLOWED_NOTICE)
+            elif err.reason == "agent_pinned_elsewhere":
+                log.info(
+                    "turn.skipped.agent_pinned_elsewhere",
+                    guild_id=guild_id,
+                    channel_id=parent_channel_id,
+                    user_id=str(message.author.id),
+                )
+                await target.send("Sorry, " + AGENT_PINNED_ELSEWHERE_NOTICE)
             elif err.reason == "balance_depleted":
                 log.info("turn.skipped.over_balance", guild_id=guild_id, tenant_id=str(tenant_id))
                 await target.send(

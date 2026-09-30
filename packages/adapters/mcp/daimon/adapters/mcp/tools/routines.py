@@ -38,7 +38,7 @@ from daimon.adapters.mcp.tools.slack._client import (
     slack_web_client,
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
-from daimon.core.access_policy import is_write_protected
+from daimon.core.access_policy import TenantAccessPolicy, is_outside_agent_pin, is_write_protected
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.routine_delivery import destination_shape_error
@@ -49,6 +49,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 from slack_sdk.errors import SlackApiError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class DeleteResult(BaseModel):
@@ -252,6 +253,44 @@ async def _check_destination(
         )
 
 
+async def _load_policy_for_save(session: AsyncSession, *, tenant_id: UUID) -> TenantAccessPolicy:
+    try:
+        return await load_access_policy(session, tenant_id=tenant_id)
+    except AccessPolicyUnreadable as err:
+        raise ToolError("the workspace access policy could not be read; nothing was saved") from err
+
+
+def _check_agent_pin(
+    policy: TenantAccessPolicy,
+    *,
+    platform: str,
+    agent_name: str,
+    kind: RoutineDestinationKind | None,
+    destination_id: str | None,
+) -> None:
+    """Refuse a routine that would run a pinned agent outside its channels.
+
+    A pinned agent's routine must post straight into one of its pinned
+    channels: the scheduler can't resolve a Discord thread's parent at fire
+    time, so a thread destination is refused here rather than skipped later.
+    The scheduler re-checks at every fire, so a pin added later still holds.
+    """
+    if agent_name not in policy.agent_channel_pins:
+        return
+    target_channel_id: str | None = None
+    if kind is not None and destination_id is not None:
+        if kind == "channel":
+            target_channel_id = destination_id
+        elif platform == "slack":
+            target_channel_id = destination_id.partition(":")[0]
+    if is_outside_agent_pin(policy, agent_names=(agent_name,), channel_id=target_channel_id):
+        raise ToolError(
+            f"{agent_name} is pinned to specific channels by an operator, so its routines "
+            "must post straight into one of them (a channel destination, not a thread "
+            "or none). Nothing was saved."
+        )
+
+
 async def _create_routine_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -269,6 +308,15 @@ async def _create_routine_impl(
     platform_user_id = _require_platform_user_id(auth)
     next_fire_at = _compute_next_fire_at(cron_expr, timezone)
     await _check_destination(runtime, auth, kind=destination_kind, destination_id=destination_id)
+    async with runtime.session_factory() as session:
+        policy = await _load_policy_for_save(session, tenant_id=tenant_id)
+    _check_agent_pin(
+        policy,
+        platform=auth.platform or "",
+        agent_name=agent_name,
+        kind=destination_kind,
+        destination_id=destination_id,
+    )
 
     match = await find_agent_by_daimon_tag(
         runtime.client,
@@ -344,6 +392,19 @@ async def _update_routine_impl(
         if row is None:
             raise ToolError("routine not found")
         _require_routine_owner(auth, row)
+        if clear_destination:
+            effective_kind, effective_id = None, None
+        elif destination_kind is not None:
+            effective_kind, effective_id = destination_kind, destination_id
+        else:
+            effective_kind, effective_id = row.destination_kind, row.destination_id
+        _check_agent_pin(
+            await _load_policy_for_save(session, tenant_id=tenant_id),
+            platform=auth.platform or "",
+            agent_name=agent_name if agent_name is not None else row.agent_name,
+            kind=effective_kind,
+            destination_id=effective_id,
+        )
 
         # Recompute next_fire_at only when cron or timezone is being changed.
         next_fire_at: datetime | None = None

@@ -35,7 +35,7 @@ import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
-from daimon.core.access_policy import is_invoker_allowed, is_write_protected
+from daimon.core.access_policy import is_invoker_allowed, is_outside_agent_pin, is_write_protected
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -235,6 +235,15 @@ async def _build_fire(
                     policy, external_user_id=row.created_by_user_id, is_admin=is_admin
                 )
                 policy_error = None if allowed else "invoker_not_allowed"
+                # A pinned agent fires only when it posts straight into one of
+                # its pinned channels; `_check_agent_pin` refuses anything else
+                # at save time, and this holds for a pin added since.
+                if policy_error is None and is_outside_agent_pin(
+                    policy,
+                    agent_names=(row.agent_name,),
+                    channel_id=target.channel_id if target is not None else None,
+                ):
+                    policy_error = "agent_pinned_elsewhere"
             if policy_error is not None:
                 log.info(
                     "routine.skipped.invoker_policy",
