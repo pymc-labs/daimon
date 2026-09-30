@@ -41,7 +41,7 @@ def test_parse_budget_spec_reads_money_and_bounds() -> None:
         starts_at="2026-07-01",
         ends_at="2026-07-03T00:00:00+02:00",
     )
-    assert spec.limit_usd == Decimal("12.50")
+    assert spec.limit_usd == Decimal("12.50"), "surrounding space is ignored"
     assert spec.starts_at == datetime(2026, 7, 1, tzinfo=UTC), "no offset reads as UTC"
     assert spec.ends_at == datetime(2026, 7, 2, 22, tzinfo=UTC), "offsets convert to UTC"
 
@@ -80,22 +80,24 @@ async def test_budget_period_and_activity_follow_the_window(db_session: AsyncSes
     total = await make_channel_budget(db_session, window="total", starts_at=start)
     fixed = await make_channel_budget(db_session, window="fixed", starts_at=start, ends_at=end)
 
-    assert budget_period(monthly, now=_NOW).since == datetime(2026, 7, 1, tzinfo=UTC)
-    assert budget_period(total, now=_NOW).since == start
-    assert (budget_period(fixed, now=_NOW).since, budget_period(fixed, now=_NOW).until) == (
-        start,
-        end,
+    assert budget_period(monthly, now=_NOW).since == datetime(2026, 7, 1, tzinfo=UTC), (
+        "a monthly window starts on the 1st, UTC"
     )
-    assert is_budget_active(fixed, now=_NOW)
+    assert budget_period(total, now=_NOW).since == start, "a total window counts from its start"
+    fixed_period = budget_period(fixed, now=_NOW)
+    assert (fixed_period.since, fixed_period.until) == (start, end), "a fixed window is its bounds"
+    assert is_budget_active(fixed, now=_NOW), "inside a fixed window"
     assert not is_budget_active(fixed, now=end), "a fixed window is half-open"
-    assert is_budget_active(total, now=start - timedelta(days=30))
+    assert is_budget_active(total, now=start - timedelta(days=30)), (
+        "a total window is active before its start; it just counts nothing yet"
+    )
     spent = Decimal("1234.5")
     assert describe_budget(ChannelBudgetStatus(monthly, spent, True)) == (
         "$1,234.50 of $5.00 (monthly)"
-    )
+    ), "money shows in cents with separators"
     assert describe_budget(ChannelBudgetStatus(fixed, spent, True)).endswith(
         "(2026-07-14 12:00 UTC to 2026-07-16 12:00 UTC)"
-    )
+    ), "a fixed window shows its bounds"
 
 
 async def test_set_replaces_the_budget_and_clear_removes_it(db_session: AsyncSession) -> None:
@@ -110,13 +112,15 @@ async def test_set_replaces_the_budget_and_clear_removes_it(db_session: AsyncSes
     await make_channel_budget(db_session, tenant=tenant, channel_id="chan-0")
 
     assert second.id == first.id, "one row per channel"
-    assert (second.limit_usd, second.window) == (Decimal("9.99"), "total")
+    assert (second.limit_usd, second.window) == (Decimal("9.99"), "total"), "set replaces"
     listed = await channel_budgets.list_channel_budgets(db_session, tenant_id=tenant.id)
-    assert [b.channel_id for b in listed] == ["chan-0", "chan-1"]
+    assert [b.channel_id for b in listed] == ["chan-0", "chan-1"], "listed by channel id"
     args = {"tenant_id": tenant.id, "platform": tenant.platform, "channel_id": "chan-1"}
-    assert await channel_budgets.delete_channel_budget(db_session, **args)
-    assert not await channel_budgets.delete_channel_budget(db_session, **args)
-    assert await channel_budgets.get_channel_budget(db_session, **args) is None
+    assert await channel_budgets.delete_channel_budget(db_session, **args), "clear removes it"
+    assert not await channel_budgets.delete_channel_budget(db_session, **args), (
+        "a second clear finds nothing"
+    )
+    assert await channel_budgets.get_channel_budget(db_session, **args) is None, "it is gone"
 
 
 async def test_the_table_refuses_a_fixed_window_without_bounds(db_session: AsyncSession) -> None:
@@ -144,11 +148,11 @@ async def test_spend_counts_only_the_channels_debits_in_range(db_session: AsyncS
     spent = await get_channel_spend(
         db_session, tenant_id=tenant.id, channel_id="chan-1", since=since, until=None
     )
-    assert spent == Decimal("5")
+    assert spent == Decimal("5"), "only this tenant's and channel's debits since the start"
     ever = await get_channel_spend(
         db_session, tenant_id=tenant.id, channel_id="chan-1", since=None, until=None
     )
-    assert ever == Decimal("18")
+    assert ever == Decimal("18"), "no start counts every debit of the channel"
 
 
 async def test_no_budget_means_no_gate(
@@ -165,7 +169,7 @@ async def test_no_budget_means_no_gate(
             platform=tenant.platform,
             channel_id=channel_id,
             now=_NOW,
-        )
+        ), f"no budget on {channel_id!r} means no gate"
 
 
 @pytest.mark.parametrize(
@@ -209,13 +213,15 @@ async def test_the_gate_compares_window_spend_with_the_limit(
         channel_id="chan-1",
         now=_NOW,
     )
-    assert gated is over
+    assert gated is over, "the gate closes once window spend reaches the limit"
     async with db_session_factory() as s:
         status = await get_channel_budget_status(
             s, tenant_id=tenant.id, platform=tenant.platform, channel_id="chan-1", now=_NOW
         )
-    assert status is not None
-    assert status.remaining_usd == max(Decimal("0"), limit - status.spent_usd)
+    assert status is not None, "the budget reads back"
+    assert status.remaining_usd == max(Decimal("0"), limit - status.spent_usd), (
+        "remaining is never negative"
+    )
 
 
 async def test_a_budget_is_per_platform(
@@ -233,7 +239,7 @@ async def test_a_budget_is_per_platform(
         platform="discord",
         channel_id="c",
         now=_NOW,
-    )
+    ), "a Slack budget does not gate the same id on Discord"
 
 
 async def test_recorders_stamp_the_channel_on_both_rows(
@@ -272,5 +278,7 @@ async def test_recorders_stamp_the_channel_on_both_rows(
 
     usage = (await db_session.execute(select(UsageEvent.channel_id))).scalars().all()
     ledger = (await db_session.execute(select(TenantLedger.channel_id))).scalars().all()
-    assert sorted(usage) == ["chan-1", "chan-2"]
-    assert sorted(c for c in ledger if c is not None) == ["chan-1", "chan-2"]
+    assert sorted(usage) == ["chan-1", "chan-2"], "each usage row carries its channel"
+    assert sorted(c for c in ledger if c is not None) == ["chan-1", "chan-2"], (
+        "each debit carries its channel"
+    )
