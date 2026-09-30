@@ -1679,7 +1679,9 @@ async def test_skill_repo_modal_refuses_a_member_on_a_reachable_unmanaged_agent(
     assert _sent_message(interaction) == _SHARED_AGENT_SKILLS_MESSAGE
 
 
+@pytest.mark.parametrize("is_admin", [False, True])
 async def test_skill_repo_modal_passes_seeded_names_and_admin_status_to_the_sync(
+    is_admin: bool,
     monkeypatch: pytest.MonkeyPatch,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1711,10 +1713,11 @@ async def test_skill_repo_modal_passes_seeded_names_and_admin_status_to_the_sync
     modal = SkillRepoModal(runtime=runtime, request_row=row)
     modal.pat_in._value = "ghp_private_token"  # pyright: ignore[reportPrivateUsage]
 
-    await modal.on_submit(_as_card_interaction(_member_interaction()))
+    interaction = _admin_interaction() if is_admin else _member_interaction()
+    await modal.on_submit(_as_card_interaction(interaction))
 
     assert sync.call_args.kwargs["seeded_skill_names"] == frozenset({"eda"})
-    assert sync.call_args.kwargs["is_admin"] is False
+    assert sync.call_args.kwargs["is_admin"] is is_admin
 
 
 async def test_skill_repo_modal_puts_a_refused_import_on_the_card(
