@@ -7,6 +7,7 @@ resolver itself is covered in `tools/test_thread_participation_verify.py`.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock
 
@@ -25,6 +26,7 @@ from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings,
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.domain import Role, TenantRow
+from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.factories import (
     make_account,
     make_channel_budget,
@@ -126,6 +128,58 @@ async def test_a_channel_without_a_budget_reads_as_none(
         _runtime(committing_sessionmaker), _auth(tenant, account_id, admin=False), "333"
     )
     assert lookup.budget is None
+
+
+async def _origin(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant: TenantRow,
+    account_id: uuid.UUID,
+    *,
+    parent_channel_id: str,
+    thread_id: str,
+) -> str:
+    now = datetime.now(UTC)
+    async with sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=account_id,
+            platform="discord",
+            parent_channel_id=parent_channel_id,
+            thread_id=thread_id,
+            responder_ma_agent_id="agent_x",
+            responder_name="daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.USER,
+            expires_at=now + timedelta(minutes=10),
+            now=now,
+        )
+    return str(origin.id)
+
+
+async def test_get_without_a_channel_reads_the_calling_turns_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], visible: list[str]
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        await make_channel_budget(session, tenant=tenant, channel_id=_PARENT)
+    runtime = _runtime(committing_sessionmaker)
+    member = _auth(tenant, account_id, admin=False)
+    here = await _origin(
+        committing_sessionmaker, tenant, account_id, parent_channel_id=_PARENT, thread_id=_THREAD
+    )
+    dm = await _origin(
+        committing_sessionmaker, tenant, account_id, parent_channel_id="dm-chan", thread_id="dm:x"
+    )
+
+    lookup = await _get_channel_budget_impl(runtime, member, None, here)
+    assert lookup.channel_id == _PARENT and lookup.budget is not None
+    assert visible == [], "the origin already places the caller in the channel"
+    with pytest.raises(ToolError, match="direct message belongs to no channel"):
+        await _get_channel_budget_impl(runtime, member, None, dm)
+    with pytest.raises(ToolError, match="unavailable or expired"):
+        await _get_channel_budget_impl(runtime, member, None, str(uuid.uuid4()))
 
 
 async def test_get_without_a_channel_asks_for_one(

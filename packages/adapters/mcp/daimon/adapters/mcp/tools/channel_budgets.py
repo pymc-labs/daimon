@@ -20,6 +20,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord import resolve_visible_channel
+from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.adapters.mcp.tools.slack._client import (
     _require_slack_identity,  # pyright: ignore[reportPrivateUsage]
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
@@ -41,8 +42,8 @@ from slack_sdk.errors import SlackApiError
 
 _PLATFORMS = ("discord", "slack")
 _NEEDS_CHANNEL = (
-    'channel_id is required: pass the id from <channel role="parent_channel"> '
-    "(or the channel the user named)."
+    "channel_id is required: pass this turn's origin_context_id, the id from "
+    '<channel role="parent_channel">, or the channel the user named.'
 )
 
 
@@ -105,7 +106,10 @@ def _require_platform(auth: AuthIdentity) -> str:
 
 def _require_channel_id(channel_id: str | None) -> str:
     if channel_id is None or not channel_id.strip():
-        raise ToolError(_NEEDS_CHANNEL)
+        raise ToolError(
+            'channel_id is required: the id from <channel role="parent_channel"> '
+            "or the channel the user named."
+        )
     return channel_id.strip()
 
 
@@ -131,11 +135,29 @@ async def _budget_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: s
     return await _resolve_slack_channel(runtime, auth, channel_id)
 
 
+async def _origin_channel(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
+) -> str:
+    """The calling turn's parent channel; the origin already proves the caller is there."""
+    if not origin_context_id:
+        raise ToolError(_NEEDS_CHANNEL)
+    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    if origin.thread_id.startswith("dm:"):
+        raise ToolError("a direct message belongs to no channel, so no channel budget applies")
+    return origin.parent_channel_id
+
+
 async def _get_channel_budget_impl(
-    runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    channel_id: str | None,
+    origin_context_id: str | None = None,
 ) -> ChannelBudgetLookup:
     platform = _require_platform(auth)
-    target = await _budget_channel(runtime, auth, _require_channel_id(channel_id))
+    if channel_id is not None and channel_id.strip():
+        target = await _budget_channel(runtime, auth, channel_id.strip())
+    else:
+        target = await _origin_channel(runtime, auth, origin_context_id)
     async with runtime.session_factory() as session:
         status = await get_channel_budget_status(
             session,
@@ -216,16 +238,19 @@ async def _clear_channel_budget_impl(
 def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def get_channel_budget(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, channel_id: str | None = None
+        ctx: Context, channel_id: str | None = None, origin_context_id: str | None = None
     ) -> ChannelBudgetLookup:
         """Show a channel's spending budget: its limit, window and what it has spent.
 
-        ``channel_id`` from ``<channel role="parent_channel">``, or a channel
-        the user named; a thread id resolves to its parent channel. Any
-        member may read the budget of a channel they can see. ``budget`` is
-        null when the channel has none. Read ``summary`` back to the user.
+        For the channel this turn is in, omit ``channel_id`` and pass this
+        turn's ``origin_context_id``. For another channel, pass its id; a
+        thread id resolves to its parent channel. Any member may read the
+        budget of a channel they can see. ``budget`` is null when the
+        channel has none. Read ``summary`` back to the user.
         """
-        return await _get_channel_budget_impl(runtime, await _auth(ctx), channel_id)
+        return await _get_channel_budget_impl(
+            runtime, await _auth(ctx), channel_id, origin_context_id
+        )
 
     @mcp.tool(tags={"admin"})
     async def list_channel_budgets(ctx: Context) -> list[ChannelBudgetResult]:  # pyright: ignore[reportUnusedFunction]
