@@ -355,6 +355,23 @@ channel with no environment of its own falls through, so nothing changes until
 one is set. Chat over MCP has no channel, so it uses the tenant or deployment
 default.
 
+**Skill uploads.** One skill can be added to one agent by hand
+(`packages/core/daimon/core/skills/ingest.py` checks it, `skills/add.py` adds
+it): a pasted SKILL.md, a `.md` or `.zip` attached on the caller's own platform,
+or a GitHub folder read through the skill-repo fetch. Archives refuse links,
+absolute or `..` paths, encryption and the repo sync's size caps; the
+frontmatter needs a lowercase name and a bounded description. The skill is
+uploaded under the agent-scoped title, never the shared library, and a name a
+shared or built-in skill already holds is refused. Its `user_skills` row has
+`source = "upload"`, an origin and the adding account, so no repo sync replaces
+or deletes it, and removing the skill forgets it. `add_skill` previews first
+and adds only when called again with the preview's hash; Details in both setup
+panels has Add skill (Discord takes a paste or a file, Slack a paste). The
+`skill_add` and `skill_remove` operations follow one rule: built-in agents
+never, server admins on any other, channel admins on agents local to their
+channels, anyone on agents that answer nowhere. Uploads of an isolated
+channel's agents are hidden outside it like its other agent-scoped skills.
+
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA
 session, assembles every `create_session` argument (credential env mount, MCP
@@ -428,7 +445,10 @@ shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
 and an adapter that passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
 the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
-their `operation_policy` checks), but only as the deployment's verified
+their `operation_policy` checks), except `add_skill`: its confirming call, the
+one naming a preview's `content_hash`, is sent `always_ask`, so it waits on
+the same card in chat and is refused in a routine unless allowed there. The
+exemption holds only for the deployment's verified
 endpoint: with the policy on, `create_session` re-points a `daimon-mcp` entry
 naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
 reserved name is gated like any other server. A pending card is owned by the

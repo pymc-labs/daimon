@@ -70,6 +70,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The missing-environment notice now points at the panel instead of the
   operator. With no channel or workspace environment set, nothing changes;
   see the upgrade notes for routines where one already is.
+- **Skill uploads.** Add one skill to one agent from a pasted SKILL.md, a
+  `.md` or `.zip` attached on Discord or Slack, or a GitHub folder, with
+  `add_skill` or Add skill on the setup panel's agent details (Slack takes a
+  paste; attach files in chat). Each add previews the name, description, files
+  and any runnable scripts first. The skill becomes that agent's own copy and
+  never touches shared or built-in skills; archives are unpacked safely and
+  size-capped. Built-in agents are refused (fork first); otherwise the rule is
+  the one for skills: server admins, channel admins on agents local to their
+  channels, anyone on agents that answer nowhere. `remove_skill` follows it
+  too. Nothing changes until someone adds a skill.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.
