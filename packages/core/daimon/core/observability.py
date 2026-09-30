@@ -10,6 +10,7 @@ Adapters call init_sentry once at their entrypoint (Plan 02).
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Literal, cast
 
 import sentry_sdk
@@ -39,6 +40,42 @@ _SECRET_KEYS: frozenset[str] = frozenset(
         *_APP_DENYLIST,
     ]
 )
+
+
+# Secret-shaped substrings inside free text: key=value pairs whose key names a
+# secret, bearer credentials, and Fernet tokens/keys.
+_SECRET_TEXT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
+    re.compile(
+        r"(?i)((?:access_token|refresh_token|token|api_key|apikey|secret|password|"
+        r"passwd|authorization|code_verifier|client_secret)(?:%3D|=|:\s*)"
+        r"['\"]?)[^\s&'\",;]+"
+    ),
+    re.compile(r"()gAAAAA[A-Za-z0-9_-]{20,}={0,2}"),
+    re.compile(r"()\b[A-Za-z0-9_-]{43}=(?![A-Za-z0-9_-])"),
+)
+
+
+def _redact_secret_text(text: str) -> str:
+    for pattern in _SECRET_TEXT_PATTERNS:
+        text = pattern.sub(r"\1[redacted]", text)
+    return text
+
+
+def _redact_secret_keys(mapping: dict[str, object]) -> None:
+    """Redact values whose key is on the secret denylist, recursing into dicts/lists."""
+    for key in list(mapping.keys()):
+        value = mapping[key]
+        if key.lower() in _SECRET_KEYS:
+            mapping[key] = "[redacted]"
+        elif isinstance(value, dict):
+            _redact_secret_keys(cast("dict[str, object]", value))
+        elif isinstance(value, list):
+            for item in cast("list[object]", value):
+                if isinstance(item, dict):
+                    _redact_secret_keys(cast("dict[str, object]", item))
+        elif isinstance(value, str):
+            mapping[key] = _redact_secret_text(value)
 
 
 def _drop_frame_vars(section: object) -> None:
@@ -83,6 +120,25 @@ def _scrub_event(event: Event, hint: Hint) -> Event | None:
     # include_local_variables off; this covers any other client config.
     for section in ("exception", "threads"):
         _drop_frame_vars(event.get(section))
+
+    # Breadcrumbs replay earlier log lines and HTTP calls (URLs with tokens);
+    # init_sentry records none, and any another config sends are dropped.
+    event.pop("breadcrumbs", None)
+
+    # Contexts are free-form mappings: redact secret-keyed values at any depth.
+    contexts = event.get("contexts")
+    if isinstance(contexts, dict):
+        _redact_secret_keys(cast("dict[str, object]", contexts))
+
+    # Exception messages can quote a secret (a URL query, a header, a key).
+    exceptions = event.get("exception")
+    if isinstance(exceptions, dict):
+        for exc_value in cast("list[object]", exceptions.get("values") or []):
+            if isinstance(exc_value, dict):
+                entry = cast("dict[str, object]", exc_value)
+                text = entry.get("value")
+                if isinstance(text, str):
+                    entry["value"] = _redact_secret_text(text)
 
     # Redact secret-keyed values anywhere in the event tags mapping.
     tags = event.get("tags")
@@ -155,6 +211,7 @@ def init_sentry(
         release=release,
         send_default_pii=False,
         include_local_variables=False,
+        max_breadcrumbs=0,
         traces_sample_rate=traces_sample_rate,
         before_send=_scrub_event,
         event_scrubber=_event_scrubber(),

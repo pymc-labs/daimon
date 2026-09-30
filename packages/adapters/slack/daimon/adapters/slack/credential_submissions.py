@@ -82,6 +82,7 @@ from daimon.core.mcp_token_connect import (
     McpTokenWriteFailedError,
     connect_mcp_server_with_token,
 )
+from daimon.core.observability import capture_exception_with_scope
 from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
@@ -792,11 +793,12 @@ async def run_env_file_credential_submission(
             client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
         )
         return
-    except Exception:
-        # Handled here, not in the spawned task: an escaped error would reach
-        # Sentry with the parsed values in its frames and leave the person
-        # without a reply. Rolled back with the consume, so the request stays live.
+    except Exception as exc:
+        # Handled here, not in the spawned task, so the person gets a reply.
+        # Rolled back with the consume, so the request stays live. The Sentry
+        # capture carries id tags only; frame locals are never sent.
         log.exception("credential_request.env_file_write_failed", key_count=len(entries))
+        capture_exception_with_scope(exc)
         await post_ephemeral(
             client,
             thread_ts=thread_ts,

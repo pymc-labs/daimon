@@ -711,7 +711,13 @@ class CryptoSettings(BaseModel):
         if not text:
             return ()
         if text.startswith("["):
-            parsed = json.loads(text)
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                # Fixed message: the decoder's error quotes the input, i.e. key text.
+                raise ValueError(
+                    "DAIMON_CRYPTO__KEYS starts with '[' but is not a valid JSON list"
+                ) from None
             if not isinstance(parsed, list):
                 raise ValueError(
                     "DAIMON_CRYPTO__KEYS must be a key, a comma-separated list or a JSON list"
@@ -1110,6 +1116,8 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # Validation errors must never echo a raw value (crypto keys, API keys).
+        hide_input_in_errors=True,
     )
 
 
@@ -1127,7 +1135,11 @@ class _CryptoSettingsSource(BaseSettings):
 
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     model_config = SettingsConfigDict(
-        env_prefix="DAIMON_", env_nested_delimiter="__", env_file=".env", extra="ignore"
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
     )
 
 

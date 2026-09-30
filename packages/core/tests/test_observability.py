@@ -264,3 +264,37 @@ def test_init_sentry_turns_off_local_variable_capture(monkeypatch: pytest.Monkey
     )
 
     assert seen.get("include_local_variables") is False
+
+
+def test_scrub_event_drops_breadcrumbs_and_redacts_contexts_and_exception_text() -> None:
+    event: Event = {
+        "breadcrumbs": {"values": [{"message": "GET /n/s/?access_token=leaky-crumb"}]},
+        "contexts": {"request": {"api_key": "leaky-ctx", "url": "https://x/?token=leaky-url"}},
+        "exception": {
+            "values": [{"type": "HTTPError", "value": "GET https://h/p?access_token=leaky-exc"}]
+        },
+    }
+
+    scrubbed = _scrub_event(event, {})
+
+    rendered = repr(scrubbed)
+    for canary in ("leaky-crumb", "leaky-ctx", "leaky-url", "leaky-exc"):
+        assert canary not in rendered, canary
+    assert scrubbed is not None and "HTTPError" in rendered
+
+
+def test_init_sentry_records_no_breadcrumbs(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(sentry_sdk, "init", lambda *a, **k: seen.update(k))
+    monkeypatch.setattr(sentry_sdk, "set_tag", lambda *a, **k: None)
+
+    init_sentry(
+        dsn="https://public@o0.ingest.sentry.io/0",
+        environment="production",
+        process="mcp",
+        release=None,
+        traces_sample_rate=0.0,
+        integrations=[],
+    )
+
+    assert seen.get("max_breadcrumbs") == 0

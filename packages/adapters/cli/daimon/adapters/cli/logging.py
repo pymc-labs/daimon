@@ -19,7 +19,14 @@ def _base_processors() -> list[structlog.typing.Processor]:
 
 def configure_bootstrap_logging() -> None:
     structlog.configure(
-        processors=[*_base_processors(), structlog.dev.ConsoleRenderer(colors=True)],
+        processors=[
+            *_base_processors(),
+            structlog.dev.ConsoleRenderer(
+                colors=True,
+                # Tracebacks must not print frame locals: they can hold decrypted keys.
+                exception_formatter=structlog.dev.RichTracebackFormatter(show_locals=False),
+            ),
+        ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
         cache_logger_on_first_use=False,

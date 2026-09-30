@@ -670,7 +670,7 @@ class McpOAuthFlowRow(BaseModel):
 
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
-    state: str
+    state: str = Field(repr=False)
     request_token: str = Field(repr=False)
     tenant_id: uuid.UUID
     account_id: uuid.UUID
@@ -678,7 +678,7 @@ class McpOAuthFlowRow(BaseModel):
     server_name: str
     mcp_server_url: str
     redirect_uri: str
-    code_verifier: str
+    code_verifier: str = Field(repr=False)
     client_id: str | None
     client_secret_encrypted: str | None
     token_endpoint_auth_method: str | None

@@ -822,3 +822,21 @@ def test_crypto_keys_empty_env_means_no_keys(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("DAIMON_CRYPTO__KEYS", "")
 
     assert load_settings(_env_file=None).crypto.keys == ()
+
+
+def test_malformed_crypto_keys_json_never_echoes_key_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A typo in the JSON form must not print fragments of the keys in the boot error."""
+    from daimon.core.config import load_crypto_settings
+
+    first, second = Fernet.generate_key().decode(), Fernet.generate_key().decode()
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_CRYPTO__KEYS", f'["{first}", "{second}]')
+
+    for load in (lambda: load_settings(_env_file=None), load_crypto_settings):
+        with pytest.raises(Exception) as exc_info:
+            load()
+        rendered = f"{exc_info.value}\n{exc_info.value!r}"
+        for key in (first, second):
+            assert key[:12] not in rendered, "a key fragment leaked into the error"
+            assert key[-12:] not in rendered, "a key fragment leaked into the error"

@@ -100,7 +100,7 @@ from collections.abc import Iterable, Sequence
 from typing import Final, Literal
 
 from daimon.core.errors import DaimonError
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "ENV_NAME_PATTERN",
@@ -513,7 +513,7 @@ class EnvEntry(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
-    value: str
+    value: str = Field(repr=False)
     line: int
 
 
