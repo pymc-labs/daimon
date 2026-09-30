@@ -67,13 +67,13 @@ class Admission:
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
     private_dm_id: str | None = None
-    # The channel and thread the turn runs in, and the sealed id that seals
-    # them (the channel, or a thread sealed on its own), if any: stamped on the
-    # session so the transcript tools can apply the seal to it
-    # (`daimon.core.sessions.origin_stamp`).
+    # The channel and thread the turn runs in, and every sealed id that seals
+    # them (the channel and a thread sealed on its own): stamped on the session
+    # so the transcript tools can apply the seal to it
+    # (`daimon.core.session_seal.origin_stamp`).
     origin_channel_id: str | None = None
     origin_thread_id: str | None = None
-    origin_seal_id: str | None = None
+    origin_seal_ids: frozenset[str] = frozenset()
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
 
 
@@ -289,21 +289,19 @@ async def admit_impl(
     ):
         raise AdmissionDenied(reason="cap_exceeded")
 
-    # The broadest id that seals the turn: its channel, else the thread sealed
-    # on its own (a Discord thread by id, a Slack one as channel_id:thread_ts).
-    seal_id = next(
-        (
-            candidate
-            for candidate in (
-                channel_id,
-                thread_id,
-                f"{channel_id}:{thread_id}" if thread_id is not None else None,
-            )
-            if candidate is not None and candidate in policy.sealed_channel_ids
-        ),
-        None,
+    # Every id that seals the turn: its channel, and the thread sealed on its
+    # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
+    # them are recorded, so unsealing one later leaves the others holding.
+    seal_ids = frozenset(
+        candidate
+        for candidate in (
+            channel_id,
+            thread_id,
+            f"{channel_id}:{thread_id}" if thread_id is not None else None,
+        )
+        if candidate is not None and candidate in policy.sealed_channel_ids
     )
-    source_sealed = seal_id is not None
+    source_sealed = bool(seal_ids)
     memory_read_only = source_sealed or (is_dm and policy.dm_memory_read_only)
 
     return Admission(
@@ -311,7 +309,7 @@ async def admit_impl(
         source_sealed=source_sealed,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
-        origin_seal_id=seal_id,
+        origin_seal_ids=seal_ids,
         account_id=principal.account_id,
         agent=agent,
         environment=environment,

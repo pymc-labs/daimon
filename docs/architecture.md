@@ -217,7 +217,7 @@ drops sealed hits.
 
 A session transcript holds everything its turns saw, so the transcript tools
 apply the same seal. `admit()` records the turn's channel and thread on the
-`Admission`, with the id that seals it (its channel, else a thread sealed on
+`Admission`, with every id that seals it (its channel and a thread sealed on
 its own), and `create_session` stamps them on the session (`daimon_channel`,
 `daimon_thread`, `daimon_sealed=<ids>`; `daimon.core.session_seal`). The
 recorded seal only grows: a sealed turn that reuses a session adds its id

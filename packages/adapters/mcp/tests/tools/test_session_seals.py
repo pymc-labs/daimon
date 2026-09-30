@@ -548,3 +548,71 @@ async def test_a_session_stamped_sealed_by_the_first_release_stays_sealed_to_its
         await _list_session_events_impl(
             world.runtime(), world.auth(), "ses_acme", None, None, None, outside
         )
+
+
+# --- a thread sealed twice: under its parent's seal and on its own -----------
+
+
+async def test_unsealing_the_parent_keeps_a_thread_sealed_on_its_own_sealed(
+    world: _World,
+) -> None:
+    """Parent and thread both sealed when the conversation ran; the parent is
+    unsealed later. The thread's own seal still holds: siblings are refused."""
+    from daimon.core.session_seal import origin_stamp
+
+    world.add_session(
+        "ses_thread",
+        **origin_stamp(channel_id=_SEALED, thread_id="thr-1", seal={_SEALED, "thr-1"}),
+    )
+    same = await world.origin(_SEALED, "thr-1")
+    sibling = await world.origin(_SEALED, "thr-2")
+    await world.seal("thr-1")
+
+    with pytest.raises(ToolError, match="sealed channel"):
+        await _list_session_events_impl(
+            world.runtime(), world.auth(), "ses_thread", None, None, None, sibling
+        )
+    await _list_session_events_impl(
+        world.runtime(), world.auth(), "ses_thread", None, None, None, same
+    )
+
+
+async def test_unsealing_the_parent_keeps_a_slack_thread_sealed_on_its_own_sealed(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.session_seal import origin_stamp
+
+    world = await _world(db_session, sessionmaker, platform="slack")
+    world.add_session(
+        "ses_thread",
+        **origin_stamp(
+            channel_id="C1",
+            thread_id="1700000000.000100",
+            seal={"C1", "C1:1700000000.000100"},
+        ),
+    )
+    same = await world.origin("C1", "1700000000.000100")
+    sibling = await world.origin("C1", "1700000000.000999")
+    await world.seal("C1:1700000000.000100")
+
+    assert await _list_sessions_impl(world.runtime(), world.auth(), None, None, sibling) == []
+    listed = await _list_sessions_impl(world.runtime(), world.auth(), None, None, same)
+    assert [s.id for s in listed] == ["ses_thread"]
+
+
+async def test_unsealing_the_thread_keeps_the_parent_seal(world: _World) -> None:
+    from daimon.core.session_seal import origin_stamp
+
+    world.add_session(
+        "ses_thread",
+        **origin_stamp(channel_id=_SEALED, thread_id="thr-1", seal={_SEALED, "thr-1"}),
+    )
+    sibling = await world.origin(_SEALED, "thr-2")
+    outside = await world.origin(_OPEN, "thr-b")
+    await world.seal(_SEALED)
+
+    for origin in (sibling, outside):
+        with pytest.raises(ToolError, match="sealed channel"):
+            await _list_session_events_impl(
+                world.runtime(), world.auth(), "ses_thread", None, None, None, origin
+            )

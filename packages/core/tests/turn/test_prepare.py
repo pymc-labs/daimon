@@ -309,7 +309,7 @@ async def test_bind_session_stamps_the_seal_on_a_session_reused_after_sealing(
         _admission(account_id=account.id, agent=agent, env=env),
         origin_channel_id="vault",
         origin_thread_id="thread-1",
-        origin_seal_id=seal_id,
+        origin_seal_ids=frozenset() if seal_id is None else frozenset({seal_id}),
         memory_read_only=seal_id is not None,
     )
 
@@ -381,7 +381,7 @@ async def test_bind_session_blocks_a_sealed_turn_ma_will_not_stamp_mid_turn(
         ),
         origin_channel_id="vault",
         origin_thread_id="thread-1",
-        origin_seal_id="vault",
+        origin_seal_ids=frozenset({"vault"}),
         memory_read_only=True,
     )
 

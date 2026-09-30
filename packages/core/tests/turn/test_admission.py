@@ -935,18 +935,56 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
 
     assert admission.memory_read_only is expected, "memory_read_only must follow the policy"
     assert (admission.origin_channel_id, admission.origin_thread_id) == (channel_id, thread_id)
-    # The seal stamp names the id that seals the turn -- the parent before a
-    # thread sealed on its own -- and follows the channel seal only.
-    expected_seal = (
-        None
+    # The seal stamp names every id that seals the turn, and follows the
+    # channel seal only.
+    expected_seals = (
+        frozenset()
         if not expected or is_dm
-        else next(
+        else frozenset(
             c
             for c in (channel_id, thread_id, f"{channel_id}:{thread_id}")
             if policy is not None and c in policy.sealed_channel_ids
         )
     )
-    assert admission.origin_seal_id == expected_seal
+    assert admission.origin_seal_ids == expected_seals
+
+
+@pytest.mark.parametrize(
+    ("sealed", "thread_id", "expected"),
+    [
+        (("vault", "thr-1"), "thr-1", {"vault", "thr-1"}),
+        (("C1", "C1:1700000000.000100"), "1700000000.000100", {"C1", "C1:1700000000.000100"}),
+    ],
+    ids=["discord-parent-and-thread", "slack-parent-and-thread"],
+)
+async def test_admit_records_every_seal_on_a_thread_sealed_twice(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    sealed: tuple[str, ...],
+    thread_id: str,
+    expected: set[str],
+) -> None:
+    """Unsealing the parent later must not drop the thread's own seal."""
+    tenant = await _seed_admittable_tenant(
+        db_session, policy=TenantAccessPolicy(sealed_channel_ids=sealed)
+    )
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="anyone",
+        channel_id=sealed[0],
+        thread_id=thread_id,
+        now=_NOW,
+        role=Role.USER,
+    )
+
+    assert admission.origin_seal_ids == frozenset(expected)
 
 
 @pytest.mark.parametrize(

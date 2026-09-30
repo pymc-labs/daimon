@@ -1259,13 +1259,15 @@ async def test_restricted_turn_replaces_a_missing_legacy_session_safely(
 # --- the seal a successor inherits -------------------------------------------
 
 
-def _sealed(admission: Admission, *, seal_id: str | None) -> Admission:
+def _sealed(
+    admission: Admission, *, seal_id: str | None, also: frozenset[str] = frozenset()
+) -> Admission:
     """A channel turn in thread-1 under vault, sealed by `seal_id` (or open)."""
     return replace(
         admission,
         origin_channel_id="vault",
         origin_thread_id="thread-1",
-        origin_seal_id=seal_id,
+        origin_seal_ids=also | (frozenset() if seal_id is None else frozenset({seal_id})),
     )
 
 
@@ -1454,3 +1456,21 @@ async def test_a_successor_of_an_unreadable_predecessor_is_sealed_to_its_thread(
     )
 
     assert _sealed_stamp(transport, fresh.ma_session_id) == "thread-1"
+
+
+async def test_a_thread_sealed_with_its_parent_records_both_seals(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Fresh and reused alike: unsealing the parent must leave the thread seal."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    both = _sealed(_admission(account=account), seal_id="vault", also=frozenset({"thread-1"}))
+
+    first = await _prepare(deps, both, tenant=tenant, account=account)
+
+    assert isinstance(first, PreparedTurn)
+    assert _sealed_stamp(transport, first.ma_session_id) == "thread-1,vault"

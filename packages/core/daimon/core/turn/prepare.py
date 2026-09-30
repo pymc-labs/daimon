@@ -202,9 +202,7 @@ async def create_ma_session(
     predecessor's work, so it is stamped with its predecessor's seal as well
     as this turn's (`daimon.core.session_seal.inherited_seal_ids`).
     """
-    seal: set[str] = set()
-    if admission.origin_seal_id is not None:
-        seal.add(admission.origin_seal_id)
+    seal: set[str] = set(admission.origin_seal_ids)
     if predecessor_session_id is not None and admission.origin_channel_id is not None:
         async with deps.sessionmaker() as db:
             policy = await load_access_policy(db, tenant_id=tenant_id)
@@ -460,16 +458,12 @@ async def _stamp_reused_seal(
     this turn: running it unstamped is the leak this exists to close.
     """
     admission = prepared.admission
-    if (
-        not prepared.reused
-        or admission.origin_seal_id is None
-        or admission.origin_channel_id is None
-    ):
+    if not prepared.reused or not admission.origin_seal_ids or admission.origin_channel_id is None:
         return
     try:
         current = await deps.anthropic.beta.sessions.retrieve(prepared.ma_session_id)
         recorded = seal_ids(current.metadata)
-        if admission.origin_seal_id in recorded:
+        if admission.origin_seal_ids <= recorded:
             return
         await deps.anthropic.beta.sessions.update(
             prepared.ma_session_id,
@@ -477,7 +471,7 @@ async def _stamp_reused_seal(
                 origin_stamp(
                     channel_id=admission.origin_channel_id,
                     thread_id=admission.origin_thread_id,
-                    seal=recorded | {admission.origin_seal_id},
+                    seal=recorded | admission.origin_seal_ids,
                 )
             ),
         )
