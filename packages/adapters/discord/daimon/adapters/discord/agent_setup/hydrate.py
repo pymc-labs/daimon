@@ -24,12 +24,14 @@ from daimon.adapters.discord.agent_setup.state import PanelState, ThreadContext
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.answering_map import AnsweringMap, load_answering_map
+from daimon.core.channel_isolation import IsolationViewer, load_isolation_viewer
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.roster import RosterAgent, load_roster
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import get_binding
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
 
@@ -130,6 +132,13 @@ async def load_roster_state(
             channel_id=channel_id,
             thread_id=thread_id,
             default=runtime.deployment_default,
+            viewer=await load_isolation_viewer(
+                session,
+                tenant_id=tenant_id,
+                default=runtime.deployment_default,
+                channel_id=channel_id,
+                is_admin=is_admin,
+            ),
         )
         cascade = await list_guild_propagations(session, tenant_id=tenant_id)
         binding = (
@@ -208,14 +217,31 @@ async def load_details_for(
 
 
 async def load_answering_map_for(runtime: DiscordRuntime, *, state: PanelState) -> AnsweringMap:
-    """Read every tier of this install's routing, plus its setup conversations."""
+    """Read every tier of this install's routing, plus its setup conversations.
+
+    A non-admin sees only their side of every isolated channel's line.
+    """
     async with runtime.sessionmaker() as session:
         return await load_answering_map(
             session,
             tenant_id=_tenant_id(state),
             platform="discord",
             default=state.deployment_default,
+            viewer=await panel_viewer(session, runtime, state=state),
         )
+
+
+async def panel_viewer(
+    session: AsyncSession, runtime: DiscordRuntime, *, state: PanelState
+) -> IsolationViewer | None:
+    """What this panel's reader sees of isolated channels; None for admins."""
+    return await load_isolation_viewer(
+        session,
+        tenant_id=_tenant_id(state),
+        default=state.deployment_default,
+        channel_id=str(state.channel_id) if state.channel_id else None,
+        is_admin=state.is_admin,
+    )
 
 
 async def resolve_attributions(

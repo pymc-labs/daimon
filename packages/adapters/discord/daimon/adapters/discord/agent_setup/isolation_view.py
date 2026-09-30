@@ -9,7 +9,7 @@ re-checks Manage Server live; the rules live in `daimon.core.channel_isolation_s
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Final
 
 import structlog
@@ -20,7 +20,11 @@ from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import is_isolated
 from daimon.core.agent_fork import fork_agent
-from daimon.core.channel_isolation_setup import ForkAgent, set_channel_isolation
+from daimon.core.channel_isolation_setup import (
+    END_ISOLATION_WARNING,
+    ForkAgent,
+    set_channel_isolation,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import load_access_policy
@@ -55,6 +59,8 @@ def build_isolation_container(
     container.add_item(discord.ui.TextDisplay(status if notice is None else f"{status}\n{notice}"))
     container.add_item(hairline())
     container.add_item(discord.ui.TextDisplay(EXPLAINER))
+    if isolated:
+        container.add_item(discord.ui.TextDisplay(f"-# Ending isolation: {END_ISOLATION_WARNING}"))
     return container
 
 
@@ -71,8 +77,8 @@ async def load_is_isolated(runtime: DiscordRuntime, *, state: PanelState) -> boo
 def _fork(runtime: DiscordRuntime, tenant_id: uuid.UUID) -> ForkAgent:
     public_url = runtime.settings.mcp.public_url
 
-    async def fork(source: str, new_name: str) -> None:
-        await fork_agent(
+    async def fork(source: str, new_name: str) -> Sequence[str]:
+        copy = await fork_agent(
             runtime.anthropic,
             runtime.sessionmaker,
             tenant_id=tenant_id,
@@ -80,6 +86,7 @@ def _fork(runtime: DiscordRuntime, tenant_id: uuid.UUID) -> ForkAgent:
             new_name=new_name,
             public_url=str(public_url) if public_url is not None else None,
         )
+        return copy.dropped_skills
 
     return fork
 
@@ -148,11 +155,12 @@ class IsolationView(PanelViewBase):
             )
             if change.forked_from is not None:
                 copied = f"**{change.agent_name}**, a copy of **{change.forked_from}**"
-                notice = f"-# {copied}, now answers only here."
+                dropped = change.dropped_skills_note
+                notice = f"-# {copied}, now answers only here." + (f" {dropped}" if dropped else "")
             elif change.isolated:
                 notice = f"-# **{change.agent_name}** answers only here."
             else:
-                notice = None
+                notice = f"-# {END_ISOLATION_WARNING}"
         await self.swap_to(
             interaction,
             IsolationView(
