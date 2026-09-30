@@ -59,21 +59,21 @@ _WORD_BREAK = re.compile(r"[\s_.-]+|(?<=[a-z0-9])(?=[A-Z])")
 
 
 def format_duration(seconds: float) -> str:
-    """``12s``, ``1m 05s`` or ``2h 03m``; negative durations clamp to zero."""
+    """``12s``, ``1m 5s`` or ``2h 3m``; negative durations clamp to zero."""
     total = max(0, int(seconds))
     if total < 60:
         return f"{total}s"
     minutes, secs = divmod(total, 60)
     if minutes < 60:
-        return f"{minutes}m {secs:02d}s"
+        return f"{minutes}m {secs}s"
     hours, minutes = divmod(minutes, 60)
-    return f"{hours}h {minutes:02d}m"
+    return f"{hours}h {minutes}m"
 
 
 def format_headline(
     *, is_working: bool, elapsed_seconds: float | None, bold: Callable[[str], str]
 ) -> str:
-    """``Thinking · 12s`` or ``Working · 1m 05s``, the word bolded by the adapter."""
+    """``Thinking · 12s`` or ``Working · 1m 5s``, the word bolded by the adapter."""
     label = bold("Working" if is_working else "Thinking")
     return label if elapsed_seconds is None else f"{label} · {format_duration(elapsed_seconds)}"
 

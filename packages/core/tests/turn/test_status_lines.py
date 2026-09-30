@@ -37,8 +37,8 @@ def _call(
 
 def test_format_duration_covers_seconds_minutes_and_hours() -> None:
     assert format_duration(12.9) == "12s", "under a minute shows whole seconds"
-    assert format_duration(65) == "1m 05s", "minutes pad their seconds"
-    assert format_duration(3 * 3600 + 7 * 60 + 30) == "3h 07m", "hours drop the seconds"
+    assert format_duration(65) == "1m 5s", "minutes then seconds, unpadded"
+    assert format_duration(3 * 3600 + 7 * 60 + 30) == "3h 7m", "hours drop the seconds"
     assert format_duration(-4) == "0s", "a clock skew never shows a negative duration"
 
 

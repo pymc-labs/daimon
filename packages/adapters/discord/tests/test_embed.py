@@ -129,7 +129,7 @@ class TestToEmbedData:
         data = to_embed_data(state, now=165.0)
         assert data.title == "", "the headline lives in the description, not a title"
         assert data.description == (
-            "**Working** · 1m 05s\n```\n✔️ Ran a command\n🔍 Reading a file\n```\n"
+            "**Working** · 1m 5s\n```\n✔️ Ran a command\n🔍 Reading a file\n```\n"
             "> Checking \\*the\\* logs"
         ), "headline, code-fenced tool lines, then the escaped draft as a quote"
 
@@ -247,7 +247,7 @@ class TestHeadline:
     def test_headline_runs_to_hours(self) -> None:
         state = _make_state(phase=TurnPhase.TOOL_RUNNING, started_at=1.0)
         data = to_embed_data(state, now=1.0 + 2 * 3600 + 3 * 60)
-        assert data.description.splitlines()[0] == "**Working** · 2h 03m", "long turns show hours"
+        assert data.description.splitlines()[0] == "**Working** · 2h 3m", "long turns show hours"
 
     def test_in_progress_without_now_has_no_elapsed(self) -> None:
         data = to_embed_data(_make_state(started_at=100.0))

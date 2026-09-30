@@ -164,7 +164,7 @@ class TestToBlocks:
         )
         blocks = to_blocks(state, now=66.0)
         sections = _find_blocks_by_type(blocks, "section")
-        assert sections[0]["text"]["text"] == "*Working* · 1m 05s", "a running call reads working"
+        assert sections[0]["text"]["text"] == "*Working* · 1m 5s", "a running call reads working"
         assert sections[1]["text"]["text"] == "```\n✔️ Read a file\n🖋️ Q&amp;A sync\n```", (
             "tool lines are fenced and entity-escaped"
         )
