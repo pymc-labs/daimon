@@ -3,7 +3,6 @@
 Covers:
 - do_propagate persists agent_name at the scope (set_fields); second call returns prior name
 - do_unpropagate clears the agent_name (unset_fields)
-- mask_tail covers the full-length and short-string cases
 - fork_agent copies no credential or repo binding (mirrors Discord)
 - delete_agent archives the memory store via core.agent_lifecycle (mirrors Discord)
 """
@@ -29,7 +28,6 @@ from daimon.adapters.slack.agent_setup.write import (
     do_propagate,
     do_unpropagate,
     load_agent_inline_pat,
-    mask_tail,
     owner_repo_from_url,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -77,26 +75,6 @@ async def _seed_account(session: AsyncSession, tenant_id: uuid.UUID) -> uuid.UUI
     assert tenant_row is not None, "_seed_account requires a tenant seeded via _seed_tenant"
     account = await make_account(session, tenant=tenant_row)
     return account.id
-
-
-# ---------------------------------------------------------------------------
-# mask_tail (pure, no DB)
-# ---------------------------------------------------------------------------
-
-
-def test_mask_tail_returns_last4_chars_when_secret_is_long_enough() -> None:
-    result = mask_tail("ghp_abcd1234")
-    assert result == "****1234", "mask_tail should render ****<last4> for secrets >= 4 chars"
-
-
-def test_mask_tail_returns_four_stars_when_secret_is_shorter_than_four_chars() -> None:
-    result = mask_tail("xy")
-    assert result == "****", "mask_tail should return **** for secrets shorter than 4 chars"
-
-
-def test_mask_tail_returns_four_stars_for_empty_string() -> None:
-    result = mask_tail("")
-    assert result == "****", "mask_tail should return **** for empty string"
 
 
 # ---------------------------------------------------------------------------

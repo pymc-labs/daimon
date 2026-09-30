@@ -3664,7 +3664,7 @@
       }),
     }),
     'self_list_files': dict({
-      'description': 'List all keys + metadata for files in your private agent_files namespace.',
+      'description': 'List all keys + metadata (no values) in your private agent_files namespace.',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3673,7 +3673,12 @@
       }),
     }),
     'self_read_file': dict({
-      'description': 'Read a per-agent file by `key`. Returns null if no file exists at that key.',
+      'description': '''
+        Check a per-agent file by `key`. Returns null if no file exists at that key.
+        
+        The value is always redacted: use it from the session `.env` without
+        echoing it. The result shows when it was last set.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({

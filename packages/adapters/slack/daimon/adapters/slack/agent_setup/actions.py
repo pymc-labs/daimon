@@ -30,8 +30,8 @@ agent:
     submit.py. Creating an unscoped agent has no tenant-wide blast radius, so
     it is open to every member.
   - Use from your coding tools mints a scoped bearer token behind a live admin
-    check resolved post-ack, server-side (hiding ≠ gating). Token values are
-    never logged — presence and last4 only.
+    check resolved post-ack, server-side (hiding ≠ gating). Token values
+    are never logged, not even in part.
   - The setup-conversation button opens a thread with Daimon. Every change to
     an existing agent, and every routing change, happens in that conversation,
     where the chat tool owns the authorization.

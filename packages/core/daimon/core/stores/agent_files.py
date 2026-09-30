@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import structlog
-from cryptography.fernet import MultiFernet
+from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.core._models import AgentFile
 from daimon.core.agent_env_crypto import decode_value, encode_value
 from daimon.core.config import load_crypto_settings
@@ -28,6 +28,39 @@ def _cipher(session: AsyncSession) -> MultiFernet | None:
     if keys is None:
         keys = tuple(k.get_secret_value() for k in load_crypto_settings().keys)
     return build_multifernet(keys) if keys else None
+
+
+class AgentEnvEncryptionRequiredError(StoreError):
+    """No crypto keys are configured and plaintext storage was not opted into."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This deployment has no encryption keys, so agent keys can't be saved. "
+            "Ask the operator to set DAIMON_CRYPTO__KEYS. Nothing was saved."
+        )
+
+
+def _allow_plaintext(session: AsyncSession) -> bool:
+    allowed = session.info.get(
+        "crypto_allow_plaintext",
+        session.get_bind().get_execution_options().get("crypto_allow_plaintext"),
+    )
+    if allowed is None:
+        allowed = load_crypto_settings().allow_plaintext
+    return bool(allowed)
+
+
+def _write_cipher(session: AsyncSession) -> MultiFernet | None:
+    """The cipher for a write; fail closed when there is none and plaintext is not allowed."""
+    cipher = _cipher(session)
+    if cipher is None and not _allow_plaintext(session):
+        raise AgentEnvEncryptionRequiredError()
+    return cipher
+
+
+def agent_env_writes_allowed(session: AsyncSession) -> bool:
+    """Whether `put_agent_file` can store a value here, checked before asking for one."""
+    return _cipher(session) is not None or _allow_plaintext(session)
 
 
 def _row(cipher: MultiFernet | None, orm: AgentFile) -> AgentFileRow:
@@ -91,7 +124,7 @@ async def put_agent_file(
     if key == "":
         raise StoreError("key must not be empty")
 
-    cipher = _cipher(session)
+    cipher = _write_cipher(session)
     content, encoding = encode_value(cipher, content)
     stmt = (
         pg_insert(AgentFile)
@@ -159,7 +192,7 @@ async def put_agent_file_if_unchanged(
     if key == "":
         raise StoreError("key must not be empty")
 
-    cipher = _cipher(session)
+    cipher = _write_cipher(session)
     content, encoding = encode_value(cipher, content)
     if expected_updated_at is None:
         insert_stmt = (
@@ -256,3 +289,64 @@ async def delete_agent_file(
         )
     )
     await session.flush()
+
+
+async def count_plaintext_agent_files(session: AsyncSession) -> dict[uuid.UUID, int]:
+    """Plaintext agent environment rows per tenant, across the deployment."""
+    result = await session.execute(
+        select(AgentFile.tenant_id, func.count())
+        .where(AgentFile.encoding == "plain")
+        .group_by(AgentFile.tenant_id)
+    )
+    return {tenant_id: int(count) for tenant_id, count in result.all()}
+
+
+async def count_undecryptable_agent_files(session: AsyncSession) -> dict[uuid.UUID, int]:
+    """Encrypted agent environment rows per tenant that the current keys can't open.
+
+    Catches a key retired from DAIMON_CRYPTO__KEYS while rows still use it.
+    Without keys every encrypted row counts. Values are never returned.
+    """
+    cipher = _cipher(session)
+    result = await session.execute(
+        select(AgentFile.tenant_id, AgentFile.content).where(AgentFile.encoding == "fernet_v1")
+    )
+    counts: dict[uuid.UUID, int] = {}
+    for tenant_id, content in result.all():
+        try:
+            if cipher is None:
+                raise InvalidToken
+            cipher.decrypt(content.encode("utf-8"))
+        except (InvalidToken, UnicodeDecodeError):
+            counts[tenant_id] = counts.get(tenant_id, 0) + 1
+    return counts
+
+
+async def encrypt_plaintext_agent_files(session: AsyncSession) -> int:
+    """Encrypt every plaintext agent environment row in place; return how many.
+
+    Values, timestamps and attribution are unchanged; only the stored form and
+    its encoding tag move together. Requires crypto keys.
+    """
+    cipher = _cipher(session)
+    if cipher is None:
+        raise AgentEnvEncryptionRequiredError()
+    result = await session.execute(
+        select(AgentFile).where(AgentFile.encoding == "plain").with_for_update()
+    )
+    rows = result.scalars().all()
+    async with _encoding_writer(session):
+        for orm in rows:
+            content, encoding = encode_value(cipher, orm.content)
+            await session.execute(
+                update(AgentFile)
+                .where(
+                    AgentFile.tenant_id == orm.tenant_id,
+                    AgentFile.agent_id == orm.agent_id,
+                    AgentFile.key == orm.key,
+                )
+                .values(content=content, encoding=encoding, updated_at=orm.updated_at)
+                .execution_options(synchronize_session=False)
+            )
+    await session.flush()
+    return len(rows)

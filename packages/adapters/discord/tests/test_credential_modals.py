@@ -709,6 +709,32 @@ async def test_env_modal_never_logs_the_secret_value(
 _MA_AGENT_ID = "agent_01CredModal"
 
 
+async def test_env_modal_without_crypto_keys_tells_the_person_and_keeps_the_request(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """H6: no DAIMON_CRYPTO__KEYS means nothing is stored and the person learns why."""
+    row = await _seed_env_request(db_session_factory, target="OPENAI_API_KEY")
+    keyless = async_sessionmaker(
+        bind=db_session_factory.kw["bind"],
+        expire_on_commit=False,
+        info={"crypto_keys": (), "crypto_allow_plaintext": False},
+    )
+    runtime = _runtime(sessionmaker=keyless)
+    modal = EnvCredentialModal(runtime=runtime, request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _interaction()
+    await modal.on_submit(interaction)
+
+    rows = await list_agent_files(db_session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert rows == [], "nothing is stored without encryption keys"
+    spent = await peek_credential_request(db_session, token=row.token)
+    assert spent is not None and spent.used_at is None, "the request stays live for a retry"
+    assert "DAIMON_CRYPTO__KEYS" in _sent_message(interaction), "the operator step is named"
+    _assert_secret_absent_from_every_reply(interaction, _SECRET_VALUE)
+
+
 def _ma_agent_json(tenant_id: str, *, mcp_servers: list[dict[str, str]] | None = None) -> Any:
     """One MA agent payload, shaped as the SDK parses it."""
     return {
@@ -1371,11 +1397,9 @@ async def test_repo_modal_never_leaks_the_pasted_token(
         assert hygiene_pat not in repr(entry), (
             f"[{scenario}] no log record may contain the pasted token"
         )
-        pat_masked = entry.get("pat_masked")
-        if pat_masked is not None:
-            assert pat_masked != hygiene_pat, (
-                f"[{scenario}] the mask itself must not equal the full value"
-            )
+        assert not {"pat_masked", "token_masked", "masked"} & entry.keys(), (
+            f"[{scenario}] no log record may carry even a masked tail of the token"
+        )
 
     minted_custom_id = build_custom_id(row.token)
     assert hygiene_pat not in minted_custom_id, (

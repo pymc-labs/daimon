@@ -10,6 +10,7 @@ from daimon.adapters.cli.commands.agents import agents_app
 from daimon.adapters.cli.commands.audit import audit_app
 from daimon.adapters.cli.commands.backup import backup_app
 from daimon.adapters.cli.commands.config import config_app
+from daimon.adapters.cli.commands.crypto import crypto_app
 from daimon.adapters.cli.commands.defaults import defaults_app
 from daimon.adapters.cli.commands.environments import environments_app
 from daimon.adapters.cli.commands.help import help_app
@@ -34,6 +35,7 @@ app.add_typer(usage_app, name="usage")
 app.add_typer(audit_app, name="audit")
 app.add_typer(sessions_app, name="sessions")
 app.add_typer(config_app, name="config")
+app.add_typer(crypto_app, name="crypto")
 app.add_typer(defaults_app, name="defaults")
 app.add_typer(skills_app, name="skills")
 app.add_typer(help_app, name="help")

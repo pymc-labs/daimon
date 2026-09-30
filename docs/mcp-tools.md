@@ -199,8 +199,8 @@ MCP tools for an agent to edit its own ``agent_files`` and manage its
 | `clear_repo_binding` | agent tokens only | Remove the repo binding for your agent. |
 | `get_repo_binding` | agent tokens only | Return the current repo binding for your agent, or null if unbound. |
 | `self_delete_file` | agent tokens only | Delete a per-agent file by `key`. |
-| `self_list_files` | agent tokens only | List all keys + metadata for files in your private agent_files namespace. |
-| `self_read_file` | agent tokens only | Read a per-agent file by `key`. |
+| `self_list_files` | agent tokens only | List all keys + metadata (no values) in your private agent_files namespace. |
+| `self_read_file` | agent tokens only | Check a per-agent file by `key`. |
 | `self_write_file` | agent tokens only | Write or overwrite a per-agent file under `key`. |
 | `set_repo_binding` | agent tokens only | Bind your agent to a git repo. |
 

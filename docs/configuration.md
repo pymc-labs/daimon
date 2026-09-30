@@ -553,17 +553,26 @@ Read from `daimon.core.config.CryptoSettings`. Prefix `DAIMON_CRYPTO__`.
 MultiFernet keys for at-rest token encryption.
 
 A single deployment ships one key; rotation means prepending a new key. Each key must be
-a Fernet.generate_key()-style base64-urlsafe 32-byte string. Empty default lets
-deployments without any encrypted credentials boot without crypto config.
+a Fernet.generate_key()-style base64-urlsafe 32-byte string. A deployment without keys
+still boots, but refuses to save agent keys unless `allow_plaintext` opts into plaintext
+storage for local development.
 
 ### `DAIMON_CRYPTO__KEYS`
 
 `tuple[SecretStr, ...]` · optional · default unset · secret
 
-Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. Agent
-environment values encrypt when keys are configured; without keys they remain plaintext.
-The first key encrypts new values; older keys remain valid for decrypting existing
-ciphertext during rotation.
+Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. Required to
+save agent keys: without keys, saving an agent environment value is refused unless
+`allow_plaintext` is set. The first key encrypts new values; older keys remain valid for
+decrypting existing ciphertext during rotation. Run `daimon crypto verify` to confirm no
+plaintext rows remain.
+
+### `DAIMON_CRYPTO__ALLOW_PLAINTEXT`
+
+`bool` · optional · default `False`
+
+Store agent environment values (agent keys) in plaintext when no `keys` are configured.
+For local development only: with this off and no keys, every agent key write is refused.
 
 ## Credentials
 

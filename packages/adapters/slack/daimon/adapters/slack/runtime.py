@@ -107,7 +107,9 @@ def build_turn_deps(
 async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
     engine = build_engine(str(settings.database.url))
     sm = build_session_factory(
-        engine, crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys)
+        engine,
+        crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys),
+        allow_plaintext=settings.crypto.allow_plaintext,
     )
     deployment_default = parse_deployment_default(settings.defaults_root)
     # Shared, process-lifetime resolver cache (D-12) — Slack adopts Discord's
