@@ -154,6 +154,7 @@ from daimon.core.posted_controls import (
     card_text,
 )
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import list_agent_files, put_agent_file_if_unchanged
 from daimon.core.stores.agent_repo_binding import set_binding
@@ -1202,23 +1203,44 @@ class SkillRepoModal(discord.ui.Modal):
                 await self._render_import_failed(interaction, consumed_row, repo=owner_repo)
             return
 
-        if not outcomes:
-            # The token is stored and the repo was readable, but it carried
-            # nothing to import — which is the same thing to say as a failed
-            # import, and the opposite of what an `applied` card would claim.
-            await self._render_import_failed(interaction, consumed_row, repo=owner_repo)
+        imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
+        failure_detail = summarize_failed_imports(outcomes)
+        if not imported:
+            # Nothing reached the library (an empty repo, or every skill
+            # refused or failed), which the `applied` card must not claim.
+            await self._render_import_failed(
+                interaction, consumed_row, repo=owner_repo, detail=failure_detail
+            )
             return
 
         attach_failure = await self._attach_to_requested_agent(
             tenant_id=consumed_row.tenant_id,
             agent_id=consumed_row.agent_id,
-            outcomes=outcomes,
+            outcomes=imported,
         )
         if attach_failure is not None:
-            # Only the attach half failed: the skills are in the library, so
-            # this is reported to the submitter rather than rewritten onto
-            # the card as an import that did not happen.
+            # The skills are in the library but not on the agent: the waiting
+            # task gets nothing to resume with, and the card says so.
             await interaction.followup.send(attach_failure, ephemeral=True)
+            is_queued = await _settle_spent_request(
+                self._runtime, row=consumed_row, outcome="write_failed", carries_work=False
+            )
+            await edit_posted_card(
+                interaction.client,
+                row=consumed_row,
+                state="partial",
+                outcome=ConfigurationChange(
+                    target_name=_agent_name(consumed_row),
+                    kind="skills_bulk",
+                    availability="saved",
+                    count=len(imported),
+                    repo=owner_repo,
+                    detail=failure_detail,
+                ),
+            )
+            if is_queued:
+                await _dispatch_origin_thread(interaction, consumed_row)
+            return
         is_continuation_queued = await _settle_spent_request(
             self._runtime, row=consumed_row, outcome="applied", carries_work=True
         )
@@ -1230,15 +1252,21 @@ class SkillRepoModal(discord.ui.Modal):
                 target_name=_agent_name(consumed_row),
                 kind="skills_bulk",
                 availability="next_message",
-                count=len(outcomes),
+                count=len(imported),
                 repo=owner_repo,
+                detail=failure_detail,
             ),
         )
         if is_continuation_queued:
             await _dispatch_origin_thread(interaction, consumed_row)
 
     async def _render_import_failed(
-        self, interaction: discord.Interaction, row: CredentialRequestRow, *, repo: str
+        self,
+        interaction: discord.Interaction,
+        row: CredentialRequestRow,
+        *,
+        repo: str,
+        detail: str | None = None,
     ) -> None:
         """Card and trail for a stored token whose skills did not import.
 
@@ -1260,6 +1288,7 @@ class SkillRepoModal(discord.ui.Modal):
                 # requires one, and nothing was imported to count.
                 count=1,
                 repo=repo,
+                detail=detail,
             ),
         )
         if is_queued:

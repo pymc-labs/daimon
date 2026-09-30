@@ -53,7 +53,8 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.posted_controls import RECEIVED_FOOTER
-from daimon.core.scope import DeploymentDefault
+from daimon.core.scope import DeploymentDefault, TenantScopeRef
+from daimon.core.stores import scoped_config_write
 from daimon.core.stores.agent_files import list_agent_files, put_agent_file
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.agent_skill_repo_credentials import get_skill_repo_credential
@@ -67,6 +68,7 @@ from daimon.core.stores.domain import (
     TaskContinuationRow,
     TenantRow,
 )
+from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing import ma_agent
@@ -1563,6 +1565,7 @@ async def test_skill_repo_modal_never_attaches_to_a_managed_agent_even_for_admin
         db_session_factory,
         ma_agent_id=ma_agent_id,
         target=build_skill_repo_target("https://github.com/o/seeded-repo", "main", ""),
+        with_origin=True,
     )
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID))
     agent = _make_agent(ma_agent_id=ma_agent_id, tenant_id=tenant_id, name="daimon", managed=True)
@@ -1590,6 +1593,8 @@ async def test_skill_repo_modal_never_attaches_to_a_managed_agent_even_for_admin
     assert "built-in agent" in interaction.followup.send.call_args.args[0], (
         "the submitter is told why the skills were not attached"
     )
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "but not added to tester" in card, "the card must not claim the agent has them"
 
 
 async def test_skill_repo_modal_refuses_a_member_on_a_shared_agent_before_consuming(
@@ -1631,6 +1636,137 @@ async def test_skill_repo_modal_refuses_a_member_on_a_shared_agent_before_consum
     assert _sent_message(interaction) == _SHARED_AGENT_SKILLS_MESSAGE, (
         "the refusal names the skills case, not the working-repo one"
     )
+
+
+async def test_skill_repo_modal_refuses_a_member_on_a_reachable_unmanaged_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Not built-in, but it answers for the whole server, so a member still needs an admin."""
+    ma_agent_id = "agent_skill_repo_reachable"
+    sync = AsyncMock(return_value=[])
+    monkeypatch.setattr(credential_modals_mod, "run_skill_sync", sync)
+    row = await _seed_skill_repo_request(
+        db_session_factory,
+        ma_agent_id=ma_agent_id,
+        target=build_skill_repo_target("https://github.com/o/reachable-repo", "main", ""),
+    )
+    async with db_session_factory() as session, session.begin():
+        await scoped_config_write.set_fields(
+            session,
+            scope=TenantScopeRef(tenant_id=row.tenant_id),
+            tenant_id=row.tenant_id,
+            agent_name="shared",
+        )
+    agent = _make_agent(
+        ma_agent_id=ma_agent_id, tenant_id=row.tenant_id, name="shared", managed=False
+    )
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(_list_agents_handler([agent])),
+    )
+    modal = SkillRepoModal(runtime=runtime, request_row=row)
+    modal.pat_in._value = "ghp_member_token"  # pyright: ignore[reportPrivateUsage]
+    interaction = _as_card_interaction(_member_interaction())
+
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        consumed = await peek_credential_request(session, token=row.token)
+    assert consumed is not None and consumed.used_at is None, "the refusal spends nothing"
+    assert not sync.called, "nothing is imported"
+    assert _sent_message(interaction) == _SHARED_AGENT_SKILLS_MESSAGE
+
+
+async def test_skill_repo_modal_passes_seeded_names_and_admin_status_to_the_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The sync can only refuse seeded names and member replacements it is told about."""
+    ma_agent_id = "agent_skill_repo_private"
+    monkeypatch.setattr(
+        credential_repo_bind_mod, "pat_can_access_repo", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(credential_modals_mod, "pat_can_access_repo", AsyncMock(return_value=True))
+    sync = AsyncMock(return_value=[])
+    monkeypatch.setattr(credential_modals_mod, "run_skill_sync", sync)
+    row = await _seed_skill_repo_request(
+        db_session_factory,
+        ma_agent_id=ma_agent_id,
+        target=build_skill_repo_target("https://github.com/o/private-repo", "main", ""),
+    )
+    async with db_session_factory() as session, session.begin():
+        await record_seeded_skill(
+            session, tenant_id=row.tenant_id, name="eda", content_hash="h", anthropic_id="sk_eda"
+        )
+    agent = _make_agent(
+        ma_agent_id=ma_agent_id, tenant_id=row.tenant_id, name="private", managed=False
+    )
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(_list_agents_handler([agent])),
+        crypto_keys=(Fernet.generate_key().decode(),),
+    )
+    modal = SkillRepoModal(runtime=runtime, request_row=row)
+    modal.pat_in._value = "ghp_private_token"  # pyright: ignore[reportPrivateUsage]
+
+    await modal.on_submit(_as_card_interaction(_member_interaction()))
+
+    assert sync.call_args.kwargs["seeded_skill_names"] == frozenset({"eda"})
+    assert sync.call_args.kwargs["is_admin"] is False
+
+
+async def test_skill_repo_modal_puts_a_refused_import_on_the_card(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A refusal is not a success: nothing attaches, and the card says why."""
+    ma_agent_id = "agent_skill_repo_refused"
+    monkeypatch.setattr(
+        credential_repo_bind_mod, "pat_can_access_repo", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(credential_modals_mod, "pat_can_access_repo", AsyncMock(return_value=True))
+    reason = "skill name 'eda' belongs to a default skill. Rename the skill and re-sync."
+    monkeypatch.setattr(
+        credential_modals_mod,
+        "run_skill_sync",
+        AsyncMock(
+            return_value=[
+                ResourceOutcome(kind="skill", name="eda", action=Action.FAILED, error=reason)
+            ]
+        ),
+    )
+    row = await _seed_skill_repo_request(
+        db_session_factory,
+        ma_agent_id=ma_agent_id,
+        target=build_skill_repo_target("https://github.com/o/refused-repo", "main", ""),
+        with_origin=True,
+    )
+    agent = _make_agent(
+        ma_agent_id=ma_agent_id, tenant_id=row.tenant_id, name="daimon", managed=False
+    )
+    updates: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method in ("POST", "PATCH"):
+            updates.append(request.url.path)
+        return list_response([agent.model_dump(mode="json")])
+
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(handler),
+        crypto_keys=(Fernet.generate_key().decode(),),
+    )
+    modal = SkillRepoModal(runtime=runtime, request_row=row)
+    modal.pat_in._value = "ghp_refused_token"  # pyright: ignore[reportPrivateUsage]
+    interaction = _as_card_interaction(_admin_interaction())
+
+    await modal.on_submit(interaction)
+
+    card = _card_text(_card_edits(interaction)[-1])
+    assert updates == [], "nothing imported, so nothing is attached"
+    assert "The skills did not import." in card and reason in card
+    assert "added to" not in card and "again to retry" not in card
 
 
 @pytest.mark.parametrize("failure_stage", ["verification", "authorization", "import"])
