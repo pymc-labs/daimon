@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Operators can pin an agent to named channels (`daimon tenants access-policy set --pin-agent AGENT=CHANNEL_ID`). A pinned agent refuses turns anywhere else, including DMs and threads handed to it from other channels, and its routines must post into a pinned channel. Agents without a pin are unchanged.
 - Encrypt agent environment values with rotatable deployment keys when configured, including existing rows on upgrade. Store encoding separately from user text so every literal value, including `enc:v1:` prefixes, remains valid. A database trigger keeps writes from older code tagged as plaintext; decryption errors identify the affected row without exposing values.
 
 ### Upgrade notes

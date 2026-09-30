@@ -131,3 +131,32 @@ def test_handoff_refused_in_setup_thread_is_a_daimon_error() -> None:
     """Adapters catch `DaimonError` at their edge; this refusal must land there."""
     with pytest.raises(DaimonError):
         raise HandoffRefusedInSetupThread("setup conversation")
+
+
+def test_decide_handoff_refuses_an_agent_pinned_to_other_channels() -> None:
+    decision = decide_handoff(
+        destination_ma_agent_id="agt_rx",
+        destination_name="daimon-rx",
+        destination_reachable=True,
+        existing_binding_kind=None,
+        origin_responder_ma_agent_id="agt_daimon",
+        destination_pinned_elsewhere=True,
+    )
+
+    assert decision == HandoffRefused(reason="pinned_elsewhere", destination_name="daimon-rx"), (
+        "a pinned agent is reachable in its own channels, which must not carry it here"
+    )
+
+
+def test_decide_handoff_setup_thread_refusal_wins_over_the_pin() -> None:
+    decision = decide_handoff(
+        destination_ma_agent_id="agt_rx",
+        destination_name="daimon-rx",
+        destination_reachable=True,
+        existing_binding_kind="setup",
+        origin_responder_ma_agent_id="agt_daimon",
+        destination_pinned_elsewhere=True,
+    )
+
+    assert isinstance(decision, HandoffRefused)
+    assert decision.reason == "setup_thread"

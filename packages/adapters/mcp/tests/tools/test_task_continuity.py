@@ -19,10 +19,12 @@ from daimon.adapters.mcp.tools.task_continuity import (
     _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
     _start_fresh_task_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_snapshot import SessionSnapshot
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.core.stores.task_continuations import list_pending_continuations
@@ -922,3 +924,92 @@ async def test_handoff_with_an_answer_and_no_live_session_still_switches_the_res
     assert binding is not None and binding.kind == "handoff", (
         "the responder switch is the part that must not depend on a session existing"
     )
+
+
+async def test_handoff_refuses_an_agent_pinned_to_other_channels_and_writes_nothing(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A pinned agent is reachable (it answers in its own channels), which must
+    not let anyone carry it into a conversation elsewhere."""
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={_DESTINATION_NAME: ("C_RX",)}),
+    )
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform="discord",
+        platform_user_id="42",
+    )
+
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.ADMIN,
+    ) as origin:
+        with pytest.raises(ToolError, match="pinned to other channels"):
+            await _hand_off_task_impl(
+                runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+            )
+
+    async with committing_sessionmaker() as session:
+        binding = await get_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="C_PARENT",
+            thread_id="T_THREAD",
+        )
+    assert binding is None, "a refused handoff must leave the thread unbound"
+
+
+async def test_handoff_admits_a_pinned_agent_inside_its_own_channel(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={_DESTINATION_NAME: ("C_RX",)}),
+    )
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
+    )
+
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_RX",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+    ) as origin:
+        result = await _hand_off_task_impl(
+            runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+        )
+
+    assert result.destination_name == _DESTINATION_NAME

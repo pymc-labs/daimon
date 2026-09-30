@@ -616,6 +616,7 @@ def test_access_policy_set_is_registered_with_its_flags() -> None:
         "--protected-category",
         "--sealed-channel",
         "--dm-memory-read-only",
+        "--pin-agent",
         "--clear",
     ):
         assert flag in flags, f"{flag} missing from registered options"
@@ -849,3 +850,48 @@ async def test_access_policy_seals_a_single_slack_thread(
     )
     async with db_session_factory() as session:
         assert await load_access_policy(session, tenant_id=tenant.id) == OPEN_ACCESS_POLICY
+
+
+@pytest.mark.asyncio
+async def test_access_policy_set_pins_an_agent_to_channels(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-pin")
+
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="guild-pin",
+        pin_agent=[
+            "daimon-rx=666666666666666666",
+            "daimon-rx=777777777777777777",
+            "daimon-rx=666666666666666666",
+        ],
+    )
+
+    assert await _policy(db_session_factory, workspace_id="guild-pin") == TenantAccessPolicy(
+        agent_channel_pins={"daimon-rx": ("666666666666666666", "777777777777777777")}
+    ), "repeating an agent adds channels; a repeated channel is kept once"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["daimon-rx", "=666666666666666666", "daimon-rx=general"])
+async def test_access_policy_set_rejects_a_malformed_pin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+    value: str,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-pin-bad")
+
+    with pytest.raises(typer.BadParameter):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="discord",
+            external_id="guild-pin-bad",
+            pin_agent=[value],
+        )

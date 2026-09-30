@@ -184,6 +184,7 @@ and skips the policy, as it skips billing. Ids are the platform's own (Discord s
 | `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord and Slack write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
 | `sealed_channel_ids` | nothing is sealed | the channel read tools (`read_channel`, `read_thread`, `get_message`, `list_threads`, `search_messages`) via `ChannelReadPolicy`, which the dispatcher in `tools/channels.py` loads per call; `admit()` also sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
+| `agent_channel_pins` | every agent runs wherever the cascade sends it | `admit()` after the agent is retrieved (every turn path: mention, follow-up, wizard submit, continuation, handoff thread, DM), `hand_off_task` via `decide_handoff`, and routines at save (`_check_agent_pin`) and at every fire (scheduler) |
 
 Protection covers threads under a protected channel and, on Discord, channels
 in a protected category; it applies to admins too, and runs after the caller's
@@ -215,8 +216,22 @@ daimon tenants access-policy get discord GUILD_ID [--json]
 daimon tenants access-policy set discord GUILD_ID --invoker USER_ID --invoker USER_ID \
     --protected-channel CHANNEL_ID --protected-category CATEGORY_ID \
     --sealed-channel CHANNEL_ID [--dm-memory-read-only]
+daimon tenants access-policy set discord GUILD_ID \
+    --pin-agent AGENT=CHANNEL_ID --pin-agent AGENT=CHANNEL_ID
 daimon tenants access-policy set discord GUILD_ID --clear   # back to open
 ```
+
+A pinned agent runs only in its listed channels and the threads under them.
+The pin is keyed by agent name and checked against both the cascade's name and
+the agent's own metadata name, so a thread handed to the agent by id is
+covered. A turn anywhere else is refused with `agent_pinned_elsewhere`, a DM
+included, and admins get no exemption: the pin exists because of what the
+agent's credentials reach, not who is asking. `hand_off_task` refuses to bring
+a pinned agent into another channel before anything is written. A pinned
+agent's routine must post straight into a pinned channel (a channel
+destination, not a thread or none), because the scheduler cannot resolve a
+Discord thread's parent at fire time; it is refused at save and skipped at
+fire otherwise.
 
 Each flag given replaces that whole field (repeat it for several ids);
 fields not given keep their stored value, including concurrent CLI edits.

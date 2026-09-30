@@ -22,8 +22,10 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.testing import ma_agent, ma_model_config
@@ -1229,4 +1231,33 @@ async def test_create_routine_refuses_a_private_slack_channel_the_caller_is_not_
             platform="slack",
             kind="channel",
             destination_id="C0123ABC",
+        )
+
+
+async def test_create_routine_refuses_a_pinned_agent_without_a_pinned_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """A routine would run the pinned agent headless, outside any channel."""
+    tenant = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"daimon": ("111111111111111111",)}),
+    )
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = _auth_identity(platform="discord", external_id="guild_pin", tenant_id=tenant.id)
+
+    with pytest.raises(ToolError, match="pinned to specific channels"):
+        await _create_routine_impl(
+            runtime,
+            auth,
+            agent_name="daimon",
+            cron_expr="* * * * *",
+            timezone="UTC",
+            trigger_message="hi",
         )

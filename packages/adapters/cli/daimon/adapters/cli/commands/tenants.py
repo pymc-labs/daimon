@@ -385,6 +385,11 @@ def _print_policy(
     ):
         console.print(f"  {field}: {', '.join(ids) or '-'}")
     console.print(f"  dm_memory_read_only: {str(policy.dm_memory_read_only).lower()}")
+    pins = policy.agent_channel_pins
+    console.print(
+        "  agent_channel_pins: "
+        + ("; ".join(f"{name} -> {', '.join(ids)}" for name, ids in sorted(pins.items())) or "-")
+    )
 
 
 @access_policy_app.command("get")
@@ -447,6 +452,15 @@ def tenants_access_policy_set_command(
             help="Give turns started from a DM read-only memory.",
         ),
     ] = None,
+    pin_agent: Annotated[
+        list[str] | None,
+        typer.Option(
+            help=(
+                "AGENT=CHANNEL_ID: the named agent runs only in these channels and the "
+                "threads under them (repeatable; repeat an agent for more channels)."
+            )
+        ),
+    ] = None,
     clear: Annotated[
         bool, typer.Option("--clear", help="Remove the policy: back to open.")
     ] = False,
@@ -472,11 +486,32 @@ def tenants_access_policy_set_command(
                 protected_category=protected_category,
                 sealed_channel=sealed_channel,
                 dm_memory_read_only=dm_memory_read_only,
+                pin_agent=pin_agent,
                 clear=clear,
                 as_json=as_json,
             )
 
     run_cli(_with_runtime(), console=console)
+
+
+def _parse_agent_pins(pins: list[str], *, platform: str) -> dict[str, tuple[str, ...]]:
+    """Turn repeated AGENT=CHANNEL_ID flags into the policy's pin mapping."""
+    if not pins:
+        raise typer.BadParameter("agent_channel_pins: pass at least one AGENT=CHANNEL_ID")
+    parsed: dict[str, list[str]] = {}
+    pattern = r"[0-9]{15,21}" if platform == "discord" else r"[CGD][A-Z0-9]+"
+    for value in pins:
+        name, sep, channel = (part.strip() for part in value.partition("="))
+        if not sep or not name or not channel:
+            raise typer.BadParameter(
+                f"agent_channel_pins: expected AGENT=CHANNEL_ID, got {value!r}"
+            )
+        if platform != "cli" and re.fullmatch(pattern, channel) is None:
+            raise typer.BadParameter(f"agent_channel_pins: invalid {platform} id {channel!r}")
+        parsed.setdefault(name, [])
+        if channel not in parsed[name]:
+            parsed[name].append(channel)
+    return {name: tuple(ids) for name, ids in parsed.items()}
 
 
 async def tenants_access_policy_set(
@@ -490,6 +525,7 @@ async def tenants_access_policy_set(
     protected_category: list[str] | None = None,
     sealed_channel: list[str] | None = None,
     dm_memory_read_only: bool | None = None,
+    pin_agent: list[str] | None = None,
     clear: bool = False,
     as_json: bool = False,
 ) -> None:
@@ -523,6 +559,8 @@ async def tenants_access_policy_set(
             changes[field] = tuple(dict.fromkeys(value.strip() for value in ids))
     if dm_memory_read_only is not None:
         changes["dm_memory_read_only"] = dm_memory_read_only
+    if pin_agent is not None:
+        changes["agent_channel_pins"] = _parse_agent_pins(pin_agent, platform=validated_platform)
     if clear and changes:
         raise typer.BadParameter("--clear can't be combined with other policy flags")
     if not clear and not changes:

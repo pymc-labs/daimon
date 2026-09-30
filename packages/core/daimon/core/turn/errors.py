@@ -16,7 +16,11 @@ from daimon.core.errors import DaimonError
 from daimon.core.scope import ConfigTier
 
 AdmissionDenialReason = Literal[
-    "balance_depleted", "cap_exceeded", "invoker_not_allowed", "channel_protected"
+    "balance_depleted",
+    "cap_exceeded",
+    "invoker_not_allowed",
+    "channel_protected",
+    "agent_pinned_elsewhere",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 
