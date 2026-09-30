@@ -44,6 +44,7 @@ from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
 from daimon.core.stores.tenants import set_provision_status
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
@@ -699,8 +700,15 @@ def build_oauth_slack_routes(
             key=f"install:slack:{team_id}",
             message=f"New install: Slack {result.team_name or team_id} ({team_id})",
         )
-        async with sessionmaker() as s:
-            promo_codes = await has_redeemable_promo_code(s, now=datetime.now(UTC))
+        try:
+            async with sessionmaker() as s:
+                promo_codes = await has_redeemable_promo_code(s, now=datetime.now(UTC))
+        except SQLAlchemyError as exc:
+            # The install is done; a failed lookup only drops the promo line.
+            logger.warning(
+                "slack install promo code lookup failed", team_id=team_id, error=str(exc)
+            )
+            promo_codes = False
 
         return _success_html(
             workspace=result.team_name or team_id,

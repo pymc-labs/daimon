@@ -28,6 +28,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.tenants import get_tenant_liveness, set_provision_status
 from daimon.testing import ma_agent
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -251,6 +252,45 @@ async def test_seed_skips_roster_check_when_deployment_default_has_no_agent_name
     assert len(skipped_events) >= 1, (
         "skipping the roster check because no default agent name is configured must be logged"
     )
+
+
+async def test_seed_stays_ready_without_promo_line_when_promo_lookup_fails(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A failed promo code lookup after the ready flip keeps the guild ready and
+    still posts the ready embed, just without the promo line."""
+    tenant_id = await _provision(db_session_factory, workspace_id="seed-promo-lookup-1")
+    runtime = _make_runtime(
+        db_session_factory,
+        anthropic_client=build_fake_anthropic(MARouter().dispatch),
+        agent_name=None,
+    )
+    bot = _make_bot(runtime)
+    guild = _make_guild(guild_id=5)
+
+    with (
+        patch(
+            "daimon.adapters.discord.bot.reconcile_tenant_defaults",
+            new_callable=AsyncMock,
+            return_value=ApplyReport(),
+        ),
+        patch(
+            "daimon.adapters.discord.bot.has_redeemable_promo_code",
+            new_callable=AsyncMock,
+            side_effect=OperationalError("SELECT 1", {}, ConnectionError("connection lost")),
+        ),
+    ):
+        await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
+            tenant_id=tenant_id, guild=guild, was_ready=False
+        )
+
+    tr = await get_tenant_liveness(db_session_factory, tenant_id)
+    assert tr is not None and tr.provision_status == "ready", (
+        "a failed promo lookup must not flip a ready guild to failed"
+    )
+    posted_embed = guild.system_channel.send.await_args.kwargs["embed"]
+    assert posted_embed.title == "✅ Ready", "the ready embed must still be posted"
+    assert "promo" not in (posted_embed.description or ""), "the promo line should be left out"
 
 
 async def test_seed_keeps_ready_tenant_ready_when_reconcile_report_fails(
