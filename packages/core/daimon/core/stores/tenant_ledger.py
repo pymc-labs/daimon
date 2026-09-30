@@ -33,8 +33,14 @@ async def insert_entry(
     idempotency_key: str,
     payment_event_id: str | None = None,
     payment_intent: str | None = None,
+    occurred_at: datetime | None = None,
 ) -> bool:
-    """INSERT ... ON CONFLICT (idempotency_key) DO NOTHING. True iff a row was inserted."""
+    """INSERT ... ON CONFLICT (idempotency_key) DO NOTHING. True iff a row was inserted.
+
+    ``occurred_at`` dates the entry by when it happened (a model call's own
+    time) rather than when it was written; the database clock is the default.
+    """
+    dated = {} if occurred_at is None else {"occurred_at": occurred_at}
     stmt = (
         pg_insert(TenantLedger)
         .values(
@@ -44,6 +50,7 @@ async def insert_entry(
             idempotency_key=idempotency_key,
             payment_event_id=payment_event_id,
             payment_intent=payment_intent,
+            **dated,
         )
         .on_conflict_do_nothing(index_elements=["idempotency_key"])
     )

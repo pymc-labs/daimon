@@ -100,6 +100,9 @@ async def record_turn_usage(
             delta_usd=-debit,
             reason=reason,
             idempotency_key=f"turn:{managed_session_id}:{event.id}",
+            # The model call's own time, so a debit the sweep writes late still
+            # lands inside the timed promo window the call was made in.
+            occurred_at=event.processed_at,
         )
 
 

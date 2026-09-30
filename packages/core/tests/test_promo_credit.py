@@ -16,6 +16,7 @@ from daimon.core.promo_codes import (
     normalize_promo_code,
 )
 from daimon.core.promo_credit import (
+    PROMO_EXPIRY_GRACE,
     REDEEM_FAILURE_LIMIT,
     REDEEM_FAILURE_WINDOW,
     ActiveTimedCredit,
@@ -231,8 +232,10 @@ async def test_overlapping_timed_credit_is_spent_earliest_ending_first(
     active = await get_active_timed_credit(db_session, tenant_id=tenant.id, now=T0 + 4 * H)
     assert [c.remaining_usd for c in active] == [Decimal("0"), Decimal("8")]
 
-    assert await settle_promo_credit(db_session_factory, now=T0 + 6 * H) == _settled(0, 1)
-    assert await settle_promo_credit(db_session_factory, now=T0 + 10 * H) == _settled(0, 1, "8")
+    after_short = T0 + 6 * H + PROMO_EXPIRY_GRACE
+    after_long = T0 + 10 * H + PROMO_EXPIRY_GRACE
+    assert await settle_promo_credit(db_session_factory, now=after_short) == _settled(0, 1)
+    assert await settle_promo_credit(db_session_factory, now=after_long) == _settled(0, 1, "8")
     ledger = await _ledger(db_session, tenant)
     assert f"promo_expiry:{short.id}:{tenant.id}" not in ledger
     assert ledger[f"promo_expiry:{long.id}:{tenant.id}"] == Decimal("-8")
@@ -349,3 +352,24 @@ async def test_settlement_works_through_every_due_row_in_batches(
     assert settled == _settled(3, 0), "all three due grants should settle despite limit=2"
     settled = await settle_promo_credit(db_session_factory, now=T0 + 6 * H, limit=2)
     assert settled == _settled(0, 3, "30"), "all three expiries should settle despite limit=2"
+
+
+async def test_expiry_waits_out_the_grace_period_for_late_recorded_spend(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """Spend dated inside the window but written after it closed still draws on the credit."""
+    tenant = await make_tenant(db_session)
+    await _timed(db_session, "LATESPEND", 1, 5)
+    await _redeem(db_session_factory, tenant, "LATESPEND")
+    await settle_promo_credit(db_session_factory, now=T0 + 2 * H)
+    closed = T0 + 5 * H
+
+    early = await settle_promo_credit(db_session_factory, now=closed + PROMO_EXPIRY_GRACE / 2)
+    await _spend(db_session, tenant, "4", at=T0 + 4 * H)  # recorded late, dated in the window
+    settled = await settle_promo_credit(db_session_factory, now=closed + PROMO_EXPIRY_GRACE)
+
+    assert early == _settled(0, 0), "nothing should expire inside the grace period"
+    assert settled == _settled(0, 1, "6"), "only the unspent $6 should expire"
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == 0, (
+        "the late spend should have been paid from the timed credit"
+    )

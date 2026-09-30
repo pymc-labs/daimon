@@ -46,6 +46,12 @@ log = structlog.get_logger(__name__)
 REDEEM_FAILURE_LIMIT = 5
 REDEEM_FAILURE_WINDOW = timedelta(minutes=15)
 
+# How long after a timed window closes its remainder waits to expire. Turn
+# debits are dated by the model call, and the scheduler's usage sweep can
+# record a call a tick or more after it ran; this covers that lag, so late
+# spend inside the window still draws on the timed credit.
+PROMO_EXPIRY_GRACE = timedelta(minutes=15)
+
 
 @dataclasses.dataclass(frozen=True)
 class PromoRedeemed:
@@ -306,7 +312,7 @@ async def _settle_expiries(
     while True:
         async with session_factory() as session, session.begin():
             rows = await promo_store.lock_due_expiries(
-                session, now=now, limit=limit, exclude=skipped
+                session, closed_by=now - PROMO_EXPIRY_GRACE, limit=limit, exclude=skipped
             )
             for row in rows:
                 try:
@@ -327,7 +333,8 @@ async def settle_promo_credit(
 
     Idempotent: the ledger keys and the ``granted_at``/``expired_at`` guards make
     a re-run, or a second scheduler, a no-op. A window that opened and closed
-    while nothing ran is marked expired without ever granting.
+    while nothing ran is marked expired without ever granting. A remainder
+    expires ``PROMO_EXPIRY_GRACE`` after its window closes.
 
     Each row settles in its own savepoint, so a row the database rejects is
     logged and left due without holding back the rest. The expiry phase runs

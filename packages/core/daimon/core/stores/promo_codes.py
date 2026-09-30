@@ -212,14 +212,18 @@ async def lock_due_grants(
 
 
 async def lock_due_expiries(
-    session: AsyncSession, *, now: datetime, limit: int, exclude: Collection[uuid.UUID] = ()
+    session: AsyncSession,
+    *,
+    closed_by: datetime,
+    limit: int,
+    exclude: Collection[uuid.UUID] = (),
 ) -> list[TimedPromoGrantRow]:
-    """Granted timed redemptions whose credit window has closed and not yet been settled."""
+    """Granted timed redemptions whose window closed by ``closed_by`` and is not yet settled."""
     stmt = (
         _grant_select(
             PromoRedemption.granted_at.is_not(None),
             PromoRedemption.expired_at.is_(None),
-            PromoCode.credit_ends_at <= now,
+            PromoCode.credit_ends_at <= closed_by,
             PromoRedemption.id.not_in(exclude),
         )
         .order_by(PromoCode.credit_ends_at, PromoRedemption.id)

@@ -280,11 +280,17 @@ redeem it. Each tenant redeems a code at most once.
 - **Timed** codes grant their amount only between `--starts` and `--ends`.
   Redemption stays open until `--ends` unless `--redeem-until` is earlier. A
   code redeemed before its start is granted by the scheduler when the window
-  opens (same key). When the window closes, a `promo_expiry` entry, keyed
-  `promo_expiry:{code_id}:{tenant_id}`, removes only what was not spent. Spend
-  inside a window draws on timed credit first, the credit that ends earliest
-  first, then on ordinary credit. A window that opens and closes while the
-  scheduler is down expires without a grant.
+  opens (same key). Fifteen minutes after the window closes, a `promo_expiry`
+  entry, keyed `promo_expiry:{code_id}:{tenant_id}`, removes only what was not
+  spent. Spend inside a window draws on timed credit first, the credit that
+  ends earliest first, then on ordinary credit. A window that opens and closes
+  while the scheduler is down expires without a grant.
+- **Late spend.** Turn debits are dated by the model call, not by when they
+  were written, so a call the [sweep](#the-tables) records after the window
+  closed still draws on the timed credit. The fifteen-minute wait bounds that
+  lag: spend recorded later counts as ordinary spend. Until the expiry runs,
+  the leftover credit still counts toward the balance, so turns in those
+  minutes can leave a tenant with no other credit slightly negative.
 
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
 timed credit only changes what the ledger holds. `/billing` shows live timed

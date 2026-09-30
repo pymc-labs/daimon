@@ -565,3 +565,30 @@ async def test_record_thread_naming_usage_idempotent_under_replay(
         )
     ).scalar_one()
     assert count == 1, "raw row count must agree with the store read"
+
+
+async def test_turn_debit_is_dated_by_the_model_call_not_the_write(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A debit the sweep writes late keeps the call's own time on the ledger."""
+    tenant = await make_tenant(db_session)
+    processed_at = datetime(2026, 5, 1, 12, tzinfo=UTC)
+    event = BetaManagedAgentsSpanModelRequestEndEvent(
+        id="evt_late",
+        is_error=False,
+        model_request_start_id="start_late",
+        model_usage=ma_model_usage(input_tokens=100, output_tokens=50),
+        processed_at=processed_at,
+        type="span.model_request_end",
+    )
+    await usage_recording.record_turn_usage(
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        platform_user_id="u1",
+        managed_session_id="s_late",
+        model_id="claude-opus-4-7",
+        event=event,
+    )
+    [debit] = await tenant_ledger.list_for_tenant(db_session, tenant_id=tenant.id)
+    assert debit.occurred_at == processed_at, "the debit should carry event.processed_at"
