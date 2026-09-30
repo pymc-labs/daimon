@@ -31,6 +31,7 @@ from daimon.core.stores.tenants import (
     get_tenant_dependent_counts,
     list_tenants_by_platform,
     set_funding_mode,
+    set_turn_cap,
 )
 from rich.console import Console
 
@@ -197,6 +198,39 @@ async def tenants_funding_mode(
     async with rt.sessionmaker() as session, session.begin():
         row = await set_funding_mode(session, tenant_id=tenant_id, funding_mode=mode)
     console.print(f"{platform}:{external_id} funding mode: {row.funding_mode}")
+
+
+@tenants_app.command("turn-cap")
+def tenants_turn_cap_command(platform: str, workspace_id: str, value: str) -> None:
+    """Set a tenant's concurrent-turn cap, or restore the deployment default."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _with_runtime() -> None:
+        async with build_runtime(settings) as rt:
+            await tenants_turn_cap(
+                rt=rt, console=console, platform=platform, workspace_id=workspace_id, value=value
+            )
+
+    run_cli(_with_runtime(), console=console)
+
+
+async def tenants_turn_cap(
+    *, rt: CliRuntime, console: Console, platform: str, workspace_id: str, value: str
+) -> None:
+    if value == "default":
+        cap = None
+    else:
+        try:
+            cap = int(value)
+        except ValueError as exc:
+            raise typer.BadParameter("turn cap must be a positive integer or default") from exc
+        if cap < 1 or str(cap) != value:
+            raise typer.BadParameter("turn cap must be a positive integer or default")
+    tenant_id = derive_tenant_uuid(platform=_validate_platform(platform), workspace_id=workspace_id)
+    async with rt.sessionmaker() as session, session.begin():
+        row = await set_turn_cap(session, tenant_id=tenant_id, cap=cap)
+    console.print(f"{platform}:{workspace_id} turn cap: {row.turn_cap or 'default'}")
 
 
 async def _existing_tenant_id(rt: CliRuntime, *, platform: str, external_id: str) -> uuid.UUID:

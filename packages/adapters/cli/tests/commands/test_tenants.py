@@ -20,6 +20,7 @@ from daimon.adapters.cli.commands.tenants import (
     tenants_credit,
     tenants_delete,
     tenants_list,
+    tenants_turn_cap,
 )
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.defaults.provisioning import provision_tenant
@@ -31,7 +32,7 @@ from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     load_access_policy,
 )
-from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.testing.factories import make_tenant
 from rich.console import Console
 from sqlalchemy import text
@@ -390,6 +391,36 @@ async def test_tenants_funding_mode_changes_only_the_selected_tenant(
         await tenants_funding_mode(
             rt=rt, console=_make_console(), platform="discord", external_id="funded", mode="invalid"
         )
+
+
+async def test_tenants_turn_cap_sets_and_clears_one_tenant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="shared-guild")
+    other = await make_tenant(db_session, platform="discord", workspace_id="other-guild")
+    await db_session.commit()
+    rt = build_cli_runtime(db_session_factory)
+    console = _make_console()
+    await tenants_turn_cap(
+        rt=rt, console=console, platform="discord", workspace_id="shared-guild", value="30"
+    )
+    assert await get_turn_cap(db_session_factory, tenant_id=tenant.id, default=3) == 30
+    assert await get_turn_cap(db_session_factory, tenant_id=other.id, default=3) == 3
+    assert "turn cap: 30" in cast(StringIO, console.file).getvalue()
+    await tenants_turn_cap(
+        rt=rt, console=console, platform="discord", workspace_id="shared-guild", value="default"
+    )
+    assert await get_turn_cap(db_session_factory, tenant_id=tenant.id, default=3) == 3
+    for bad in ("0", "-1", "1.5", "nope"):
+        with pytest.raises(typer.BadParameter):
+            await tenants_turn_cap(
+                rt=rt,
+                console=console,
+                platform="discord",
+                workspace_id="shared-guild",
+                value=bad,
+            )
 
 
 # --- access-policy -------------------------------------------------------------

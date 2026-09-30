@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Operators can credit tenants with `daimon tenants credit --note` and set default
   or per-person monthly caps with `daimon tenants cap`. Caps apply without Stripe;
   prepaid Discord and Slack turn footers show the remaining balance.
+- Operators can set a tenant's concurrent chat-turn cap with
+  `daimon tenants turn-cap`, or clear it to use the deployment default.
 - Record content-free turn outcomes across chat, headless, routines and MCP hub/agent-chat, including attributed admission refusals, with bounded best-effort persistence. MCP `ask` records its terminal reason; fire-and-forget `start_turn`/`continue_turn` record dispatch only (`unknown`), without a later terminal update. Pre-attribution and adapter readiness gates are outside coverage.
 - Routines can name an optional destination channel or thread
   (`create_routine`/`update_routine` `destination_kind` + `destination_id`,
