@@ -80,9 +80,10 @@ def _thinking_event() -> Any:
     return types.SimpleNamespace(type="agent.thinking")
 
 
-def _tool_use_event(name: str = "Bash") -> Any:
-    """MA session SSE event: agent.tool_use."""
-    return types.SimpleNamespace(type="agent.tool_use", name=name)
+def _running_tool_turn(name: str = "bash") -> TurnState:
+    """Turn state with one tool call still waiting on its result."""
+    call = ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name=name, input={})
+    return TurnState(content=[call])
 
 
 def _message_event(text: str = "I'll look that up") -> Any:
@@ -129,8 +130,7 @@ class TestFirstEventSendsEmbed:
 
         await lc.on_sse_event(_thinking_event())
         await lc.on_render(TurnState())  # first post
-        await lc.on_sse_event(_tool_use_event("read_file"))
-        await lc.on_render(TurnState())  # same debounce window
+        await lc.on_render(_running_tool_turn("read"))  # same debounce window
 
         assert len(sends) == 1, "only one send — no additional posts"
         assert len(edits) == 0, "no edits within debounce window"
@@ -160,8 +160,7 @@ class TestPostInitial:
         await lc.post_initial()
         # Simulate debounce elapsed by backdating last flush
         lc._last_flush = time.monotonic() - 11.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce is the established idiom in TestDebounce
-        await lc.on_sse_event(_tool_use_event("Bash"))
-        await lc.on_render(TurnState())
+        await lc.on_render(_running_tool_turn())
 
         assert len(sends) == 1, "initial embed should be adopted, not re-posted"
         assert len(edits) == 1, "render tick should edit the initial embed in place"
@@ -183,8 +182,7 @@ class TestDebounce:
         # Simulate debounce elapsed by backdating last flush
         lc._last_flush = time.monotonic() - 11.0
 
-        await lc.on_sse_event(_tool_use_event("Bash"))
-        await lc.on_render(TurnState())
+        await lc.on_render(_running_tool_turn())
 
         assert len(edits) == 1, "edit should fire after debounce elapsed"
         assert edits[0][0] is _SENTINEL_REF, "edit should use stored message ref"
@@ -472,10 +470,9 @@ class TestRenderPropagatesFailures:
         await lc.on_sse_event(_thinking_event())
         await lc.on_render(TurnState())  # first post -- no edit yet, succeeds
         lc._last_flush = time.monotonic() - 11.0
-        await lc.on_sse_event(_tool_use_event("Bash"))
 
         with pytest.raises(RuntimeError, match="rate limited"):
-            await lc.on_render(TurnState())
+            await lc.on_render(_running_tool_turn())
 
     async def test_on_sse_event_never_raises_for_the_same_scenario(self) -> None:
         """The cheap local tap performs no I/O, so a failing edit callable
@@ -499,7 +496,10 @@ class TestRenderPropagatesFailures:
         lc._last_flush = time.monotonic() - 11.0
         # Does not raise even though the next render tick would hit the
         # raising edit -- on_sse_event performs no I/O at all.
-        await lc.on_sse_event(_tool_use_event("Bash"))
+        await lc.on_sse_event(_message_event("Checking the logs"))
+        assert lc._state.text_preview == "Checking the logs", (  # pyright: ignore[reportPrivateUsage]
+            "the tap still folded the event into the card"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -637,8 +637,7 @@ class TestCancelViewWiring:
         await lc.on_sse_event(_thinking_event())
         await lc.on_render(TurnState())
         lc._last_flush = time.monotonic() - 11.0
-        await lc.on_sse_event(_tool_use_event("Bash"))
-        await lc.on_render(TurnState())
+        await lc.on_render(_running_tool_turn())
         assert edits[0][1].get("view") is fake_view, "debounced edit must include cancel_view"
 
     async def test_terminal_success_removes_cancel_view(self) -> None:

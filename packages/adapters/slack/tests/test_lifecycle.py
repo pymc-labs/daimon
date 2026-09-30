@@ -6,7 +6,7 @@ Task 1 (debounce / registry / usage):
   - on_sse_event alone performs zero chat.postMessage and zero chat.update;
     the following on_render posts immediately (flush rides the render
     tick, not the SSE consume path).
-  - Two events plus two on_render ticks within 5s trigger NO chat.update
+  - Two on_render ticks within 5s trigger NO chat.update
     (debounce window).
   - Events plus an on_render tick after 5s trigger exactly one chat.update
     (debounce elapsed).
@@ -140,9 +140,15 @@ def _thinking_event() -> Any:
     return types.SimpleNamespace(type="agent.thinking")
 
 
-def _tool_event(name: str = "Bash") -> Any:
-    """MA session SSE event: agent.tool_use."""
-    return types.SimpleNamespace(type="agent.tool_use", name=name)
+def _message_event(text: str) -> Any:
+    """MA session SSE event: agent.message with one text part."""
+    return types.SimpleNamespace(type="agent.message", content=[types.SimpleNamespace(text=text)])
+
+
+def _running_tool_turn(name: str = "bash") -> TurnState:
+    """Turn state with one tool call still waiting on its result."""
+    call = ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name=name, input={})
+    return TurnState(content=[call])
 
 
 # ---------------------------------------------------------------------------
@@ -231,13 +237,12 @@ async def test_on_sse_event_performs_no_io_then_on_render_posts_immediately(
 
 
 async def test_second_event_within_debounce_no_update(fake_slack_web_client: Any) -> None:
-    """Two events plus two on_render ticks inside the debounce window produce one post, no update."""
+    """Two render ticks inside the debounce window produce one post, no update."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
 
     await lc.on_sse_event(_thinking_event())
     await lc.on_render(TurnState())  # first render tick — immediate post, no debounce
-    await lc.on_sse_event(_tool_event())  # within debounce window (no time elapsed)
-    await lc.on_render(TurnState())  # second render tick — still within debounce
+    await lc.on_render(_running_tool_turn())  # second render tick — still within debounce
 
     assert _post_count(fake_slack_web_client) == 1, (
         "second render tick within debounce must not post a new message"
@@ -246,7 +251,7 @@ async def test_second_event_within_debounce_no_update(fake_slack_web_client: Any
 
 
 async def test_event_after_debounce_triggers_update(fake_slack_web_client: Any) -> None:
-    """SSE events plus an on_render tick past the debounce window trigger one chat.update."""
+    """A render tick with a new tool call past the debounce window triggers one chat.update."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
 
     await lc.on_sse_event(_thinking_event())
@@ -254,8 +259,7 @@ async def test_event_after_debounce_triggers_update(fake_slack_web_client: Any) 
     # Backdate _last_flush to simulate 6s elapsed (established idiom from Discord tests)
     lc._last_flush = time.monotonic() - 6.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce
 
-    await lc.on_sse_event(_tool_event())
-    await lc.on_render(TurnState())
+    await lc.on_render(_running_tool_turn())
 
     assert _post_count(fake_slack_web_client) == 1, "debounced update must NOT post a new message"
     assert _update_count(fake_slack_web_client) == 1, (
@@ -425,7 +429,6 @@ async def test_raising_chat_update_propagates_out_of_on_render(
     await lc.on_sse_event(_thinking_event())
     await lc.on_render(TurnState())  # first post — no update yet, succeeds
     lc._last_flush = time.monotonic() - 6.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce
-    await lc.on_sse_event(_tool_event())
 
     _reset_slack_responses(fake_slack_web_client)
     fake_slack_web_client.mock.post(  # pyright: ignore[reportUnknownMemberType]
@@ -434,7 +437,7 @@ async def test_raising_chat_update_propagates_out_of_on_render(
     )
 
     with pytest.raises(SlackApiError):
-        await lc.on_render(TurnState())
+        await lc.on_render(_running_tool_turn())
 
 
 async def test_on_sse_event_never_raises_for_the_same_scenario(
@@ -456,7 +459,10 @@ async def test_on_sse_event_never_raises_for_the_same_scenario(
 
     # Does not raise even though the next render tick would hit the failing
     # update -- on_sse_event performs no I/O at all.
-    await lc.on_sse_event(_tool_event())
+    await lc.on_sse_event(_message_event("Checking the logs"))
+    assert lc._state.text_preview == "Checking the logs", (  # pyright: ignore[reportPrivateUsage]
+        "the tap still folded the event into the card"
+    )
 
 
 # ---------------------------------------------------------------------------
