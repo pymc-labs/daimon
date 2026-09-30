@@ -14,12 +14,15 @@ Slack ephemeral) differ.
 
 There are three rule families, each a fixed short-circuit order:
 
-- **spec** (`agent_spec_edit`): a spec edit never stamps the defaults
-  reconciler's spec hash, so a defaults-managed agent refuses the edit even
-  for an admin — an admin bypass here would leave permanent, silent drift
-  against the repo defaults that reconcile never notices. Order: managed ->
+- **spec** (`agent_spec_edit`, `skill_add`, `skill_remove`): a spec edit
+  never stamps the defaults reconciler's spec hash, so a defaults-managed
+  agent refuses the edit even for an admin — an admin bypass here would leave
+  permanent, silent drift against the repo defaults that reconcile never
+  notices. Order: managed ->
   `managed_agent` (admin included); admin -> `allow`; reachable ->
-  `needs_admin`; else `allow`.
+  `needs_admin`; else `allow`. Adding or removing one of an agent's skills
+  changes what it does, so it follows the same order: the managed agent is
+  forked first, and anyone may change an agent that answers nowhere.
 
 - **attachment** (`key_replace`, `key_remove`, `mcp_remove`, `repo_bind`):
   attachments never enter the agent spec, so the managed-agent absolutism
@@ -60,11 +63,15 @@ OperationKind = Literal[
     "repo_bind",
     "skill_repo_connect",
     "agent_spec_edit",
+    "skill_add",
+    "skill_remove",
 ]
 
 PolicyOutcome = Literal["allow", "needs_admin", "managed_agent"]
 
-_SPEC_OPERATIONS: frozenset[OperationKind] = frozenset({"agent_spec_edit"})
+_SPEC_OPERATIONS: frozenset[OperationKind] = frozenset(
+    {"agent_spec_edit", "skill_add", "skill_remove"}
+)
 
 _ATTACHMENT_OPERATIONS: frozenset[OperationKind] = frozenset(
     {"key_replace", "key_remove", "mcp_remove", "repo_bind"}

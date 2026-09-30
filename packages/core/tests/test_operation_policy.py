@@ -136,3 +136,27 @@ def test_locality_defaults_off_so_reachable_agent_still_needs_admin() -> None:
         "agent_spec_edit", is_admin=False, target=_facts(managed=False, reachable=True)
     )
     assert outcome == "needs_admin", "no channel admins configured means no change"
+
+
+def test_skill_add_and_remove_follow_the_spec_family() -> None:
+    """Managed refused for all; admin allowed; channel admin on local; anyone on unrouted."""
+    local = TargetFacts(
+        is_daimon_managed=False, is_reachable_in_tenant=True, is_local_to_caller_channels=True
+    )
+    for operation in ("skill_add", "skill_remove"):
+        managed = decide_operation(
+            operation, is_admin=True, target=_facts(managed=True, reachable=False)
+        )
+        assert managed == "managed_agent", f"{operation}: the managed agent is forked, not edited"
+        shared = _facts(managed=False, reachable=True)
+        assert decide_operation(operation, is_admin=True, target=shared) == "allow", operation
+        assert decide_operation(operation, is_admin=False, target=shared) == "needs_admin", (
+            f"{operation}: a member may not change an agent others talk to"
+        )
+        assert decide_operation(operation, is_admin=False, target=local) == "allow", (
+            f"{operation}: a channel admin may change an agent local to their channels"
+        )
+        unrouted = _facts(managed=False, reachable=False)
+        assert decide_operation(operation, is_admin=False, target=unrouted) == "allow", (
+            f"{operation}: anyone may change an agent that answers nowhere"
+        )
