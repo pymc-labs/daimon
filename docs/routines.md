@@ -315,6 +315,13 @@ One asymmetry worth knowing: the MCP `list_routines` and `get_routine` tools
 are tenant-wide and ungated, so any authenticated caller in the tenant can
 read every routine, including other people's last output.
 
+Channel isolation narrows the MCP tools. A routine of an isolated channel's own
+agent, or one whose `channel_id` is that channel, is visible (list, read,
+update, delete) only from inside it, and a routine is created or moved only
+where its agent may answer: an isolated channel's agent posts only into its
+channel, and other agents never post there. The admin panels are unchanged. See
+[architecture.md](architecture.md) (Channel isolation).
+
 ## When a run fails
 
 There is no retry, no backoff, no failure counter and no disable-after-N. A

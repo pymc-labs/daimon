@@ -39,6 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channel's own agent; built-in agents and the server default stay with server
   admins. Slack grants are by member only.
   Nothing changes until a channel admin is named.
+- **Channel isolation.** Server admins can isolate a channel whose default
+  agent answers only there, with `set_channel_isolation`, from Who answers
+  where in the setup panel, or with `--isolated-channel`; `fork_from` or the
+  panel's copy option makes that agent from the one answering now. Its agents
+  then can't be bound or handed tasks elsewhere and are hidden outside it in
+  agent, skill, routine and hub listings and `/memory`; inside it only they
+  show. Its messages are readable only from inside it, and `/dm` there is
+  refused. Nothing changes until a channel is isolated. Clear isolation before
+  rolling back: an older release rejects the new policy field.
 - Optional Discord process-wide turn limit for guild chats and DMs. Excess
   requested turns get a retry notice; surfaced Anthropic 429/529 responses
   emit structured logs.
