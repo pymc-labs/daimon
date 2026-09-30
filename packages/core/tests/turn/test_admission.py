@@ -262,7 +262,7 @@ async def test_admit_refuses_a_turn_in_a_channel_over_its_budget(
     )
 
 
-async def test_admit_attributes_the_channel_and_never_gates_a_dm(
+async def test_admit_attributes_the_channel_and_a_dm_to_its_source(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -279,8 +279,17 @@ async def test_admit_attributes_the_channel_and_never_gates_a_dm(
 
     await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("0"))
     await db_session.commit()
-    dm = await admit(deps, **args, channel_id="chan-1", is_dm=True, now=_NOW)
-    assert dm.channel_id is None, "a DM belongs to no channel"
+    dm = await admit(deps, **args, channel_id="dm-chan", is_dm=True, now=_NOW)
+    assert dm.channel_id is None, "a DM with no source channel is unattributed"
+    moved = await admit(
+        deps, **args, channel_id="dm-chan", is_dm=True, dm_source_channel_id="chan-2", now=_NOW
+    )
+    assert moved.channel_id == "chan-2", "a moved DM counts toward the channel it came from"
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps, **args, channel_id="dm-chan", is_dm=True, dm_source_channel_id="chan-1", now=_NOW
+        )
+    assert exc_info.value.reason == "channel_budget_exceeded", "and is gated by its budget"
 
 
 async def test_admit_gate_order_cap_wins_over_channel_budget(
@@ -1210,3 +1219,83 @@ async def test_admit_with_an_unresolved_category(
         assert exc_info.value.reason == "channel_protected"
     else:
         assert isinstance(await call, Admission), "no category policy: nothing to check"
+
+
+_PIN_DAIMON = TenantAccessPolicy(agent_channel_pins={"daimon": ("rx-chan",)})
+
+
+@pytest.mark.parametrize(
+    ("channel_id", "thread_id", "is_dm", "role"),
+    [
+        ("general", None, False, Role.USER),
+        ("general", "thr-1", False, Role.USER),
+        ("general", None, False, Role.ADMIN),
+        ("rx-chan", "dm-scope", True, Role.USER),
+    ],
+    ids=["other-channel", "thread-under-other", "admin", "dm"],
+)
+async def test_admit_refuses_a_pinned_agent_outside_its_channels(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    channel_id: str,
+    thread_id: str | None,
+    is_dm: bool,
+    role: Role,
+) -> None:
+    """The pin holds however the turn got here, admins and DMs included."""
+    tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="anyone",
+            channel_id=channel_id,
+            thread_id=thread_id,
+            now=_NOW,
+            role=role,
+            is_dm=is_dm,
+        )
+
+    assert exc_info.value.reason == "agent_pinned_elsewhere"
+
+
+@pytest.mark.parametrize(
+    ("policy", "channel_id", "thread_id"),
+    [
+        (_PIN_DAIMON, "rx-chan", None),
+        (_PIN_DAIMON, "rx-chan", "thr-1"),
+        (TenantAccessPolicy(agent_channel_pins={"daimon-rx": ("rx-chan",)}), "general", None),
+    ],
+    ids=["pinned-channel", "thread-under-pinned", "other-agent-pinned"],
+)
+async def test_admit_admits_a_pinned_agent_in_its_channels_and_leaves_others_alone(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    policy: TenantAccessPolicy,
+    channel_id: str,
+    thread_id: str | None,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="anyone",
+        channel_id=channel_id,
+        thread_id=thread_id,
+        now=_NOW,
+        role=Role.USER,
+    )
+
+    assert isinstance(admission, Admission)

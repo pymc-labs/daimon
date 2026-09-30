@@ -38,6 +38,18 @@ def test_load_settings_parses_nested_delimiter_when_env_provided(
     assert settings.log.level == "DEBUG"
 
 
+def test_ops_webhook_is_optional_and_reads_nested_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_OPS__ALERT_WEBHOOK_URL", raising=False)
+    assert load_settings(_env_file=None).ops.alert_webhook_url is None
+
+    monkeypatch.setenv("DAIMON_OPS__ALERT_WEBHOOK_URL", "https://discord.com/api/webhooks/test")
+    webhook = load_settings(_env_file=None).ops.alert_webhook_url
+    assert webhook is not None
+    assert webhook.get_secret_value() == "https://discord.com/api/webhooks/test"
+
+
 def test_load_settings_defaults_cli_local_user_to_env_user_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

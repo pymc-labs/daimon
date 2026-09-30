@@ -108,3 +108,67 @@ async def test_admit_refuses_when_the_policy_is_unreadable(
     await db_session.commit()
     with _BALANCE_OK, pytest.raises(ToolError, match="TERMINAL ERROR: this workspace's access"):
         await _admit(auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask")
+
+
+_PINNED = TenantAccessPolicy(agent_channel_pins={"acme-project": ("c-acme",)})
+
+
+@pytest.mark.parametrize("role", [Role.USER, Role.ADMIN])
+async def test_admit_refuses_a_turn_on_a_pinned_agent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], role: Role
+) -> None:
+    """An MCP turn runs in no channel, so it is outside every pin; admins too."""
+    auth = await _member(db_session, policy=_PINNED, role=role)
+
+    async def names() -> tuple[str | None, ...]:
+        return ("acme-project", None)
+
+    with (
+        patch(
+            "daimon.adapters.mcp.tools._ctx.is_over_balance",
+            new=AsyncMock(side_effect=AssertionError("the pin runs before billing")),
+        ),
+        pytest.raises(ToolError, match="TERMINAL ERROR: An operator pinned this agent"),
+    ):
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            tool_name="start_turn",
+            agent_names=names,
+        )
+
+
+async def test_admit_passes_an_unpinned_agent_on_a_tenant_with_pins(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    auth = await _member(db_session, policy=_PINNED)
+
+    async def names() -> tuple[str | None, ...]:
+        return ("clientb-project", "clientb-project")
+
+    with _BALANCE_OK:
+        result = await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            tool_name="ask",
+            agent_names=names,
+        )
+    assert result is auth
+
+
+async def test_admit_skips_the_agent_lookup_when_nothing_is_pinned(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    auth = await _member(db_session, policy=None)
+    names = AsyncMock(side_effect=AssertionError("no pin, no lookup"))
+    with _BALANCE_OK:
+        result = await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            tool_name="ask",
+            agent_names=names,
+        )
+    assert result is auth

@@ -1692,6 +1692,22 @@ class SlackApp:
                         "A workspace admin can add you."
                     ),
                 )
+            elif err.reason == "agent_pinned_elsewhere":
+                log.info(
+                    "turn.skipped.agent_pinned_elsewhere",
+                    tenant_id=str(tenant_id),
+                    team_id=team_id,
+                    channel_id=channel,
+                    thread_id=thread_id,
+                )
+                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel,
+                    thread_ts=thread_id,
+                    text=(
+                        "This agent only runs in the channels an operator pinned it to, "
+                        "so it can't answer here."
+                    ),
+                )
             elif err.reason == "balance_depleted":
                 log.info(
                     "turn.skipped.over_balance",
@@ -1770,6 +1786,7 @@ class SlackApp:
         cancel_event = asyncio.Event()
         lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             tenant_id=tenant_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
@@ -2194,6 +2211,7 @@ class SlackApp:
             def _recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
                 new_lifecycle = SlackTurnLifecycle(
                     sessionmaker=self.runtime.sessionmaker,
+                    alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                     tenant_id=tenant_id,
                     render_tables=self.runtime.settings.table_rendering.get(tenant_id, False)
                     is True,
@@ -2563,6 +2581,7 @@ class SlackApp:
         follow_cancel = asyncio.Event()
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             tenant_id=tenant_id,
             render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
             client=web_client,
@@ -2657,6 +2676,7 @@ class SlackApp:
         def _follow_up_recovery_lifecycle(cancel: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = SlackTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 client=web_client,

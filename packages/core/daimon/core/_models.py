@@ -2277,9 +2277,10 @@ class DirectMessageConversation(Base):
     )
     workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
     channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The parent channel `/dm` ran in; the DM's spend counts toward its budget.
+    source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     scope_id: Mapped[str] = mapped_column(Text, nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
-    source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     context: Mapped[str] = mapped_column(Text, nullable=False)
     memory_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)

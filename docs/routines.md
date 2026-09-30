@@ -40,7 +40,7 @@ through `packages/core/daimon/core/stores/routines.py`:
 | `next_fire_at` | the claim key — `NULL` means claimed or paused |
 | `last_fired_at`, `last_error`, `last_result_tail` | what the last run did |
 | `destination_kind` / `destination_id` | optional: `channel` or `thread` and its id, set together or not at all. On Slack a thread is `<channel id>:<thread ts>` |
-| `channel_id` | the channel whose budget a run's spend counts against: the destination's parent channel, set when the destination is; without a destination, the channel the routine was made in (MCP `origin_context_id`, or the Slack panel's channel); `NULL` from a DM or with no origin |
+| `channel_id` | the channel whose budget a run's spend counts against: the destination's parent channel, set when the destination is; without a destination, the channel the routine was made in (MCP `origin_context_id`, or the Slack panel's channel); `NULL` from a DM or with no origin. Clearing the destination keeps it |
 | `delivery_status`, `delivery_note`, `delivered_at` | the outbox for the last result: `pending` → `claimed` → `delivered` or `skipped` (with why); `NULL` for a routine without a destination |
 | `delivery_payload` | the text a pending post carries: that fire's result, copied so a writer that only knows `last_result_tail` (an older scheduler) cannot change what gets posted |
 | `delivery_lease_owner` / `delivery_lease_expires_at` | the poster holding a `claimed` row |
@@ -299,8 +299,8 @@ and queued work, recording `scheduler_shutdown` for cancelled tasks.
 
 | Action | MCP | Discord | Slack |
 | --- | --- | --- | --- |
-| create | any caller with a platform user identity | via the agent calling the tool | workspace admin only |
-| list / read last output | any caller in the tenant | `Manage Server`, and only the command's invoker | admin or the routine's creator |
+| create | a caller with a platform user identity, for the agent they are talking to or the one the destination channel answers with; any agent for an admin | via the agent calling the tool | workspace admin only |
+| list / read last output | admin or the routine's creator | `Manage Server`, and only the command's invoker | admin or the routine's creator |
 | pause / resume | `update_routine`: admin or creator | admin or creator, re-checked at click | admin or creator |
 | delete | admin or creator | not offered | admin or creator |
 
@@ -311,9 +311,11 @@ routine is indistinguishable from one that does not exist. The Slack panel
 holds reading `last_result_tail` to the same bar as pausing, on the grounds
 that a scheduled run's output routinely carries business data.
 
-One asymmetry worth knowing: the MCP `list_routines` and `get_routine` tools
-are tenant-wide and ungated, so any authenticated caller in the tenant can
-read every routine, including other people's last output.
+The MCP `list_routines` and `get_routine` tools show a non-admin only the
+routines they created, so another member's trigger and last output (often a
+client's work) stay private. A routine runs with its agent's repo, keys,
+connectors and memory, which is why a member may only schedule the agent they
+are talking to or the one the destination channel answers with.
 
 ## When a run fails
 

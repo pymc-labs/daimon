@@ -32,13 +32,12 @@ class DirectMessageRow(BaseModel):
     channel_id: str
     scope_id: str
     source_url: str
-    # Channel `/dm` ran in (a thread counts as its parent); None before it was recorded.
-    source_channel_id: str | None = None
     context: str
     memory_read_only: bool
     history: list[dict[str, str]]
     recent_message_ids: list[str]
     active_until: datetime | None
+    source_channel_id: str | None = None
 
 
 class DmOrigin(BaseModel):

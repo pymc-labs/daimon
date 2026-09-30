@@ -127,8 +127,8 @@ class PlatformDriver(Protocol):
         new_name: str,
         account_id: uuid.UUID,
     ) -> None:
-        """Fork `source_name` into a new agent `new_name`, copying its
-        credential + repo binding."""
+        """Fork `source_name` into a new agent `new_name` (which starts with no
+        credential or repo binding)."""
         ...
 
     async def purge_account(

@@ -1,13 +1,10 @@
-"""Channel admins, the platform role ids an account held on its last turn, and DM origins.
+"""Channel admins, and the platform role ids an account held on its last turn.
 
 `channel_admins` names, per channel, the roles and users who administer it on
 top of the server or workspace admins. No row means nobody extra, so existing
 tenants behave exactly as before. `accounts.platform_role_ids` is refreshed on
 every chat turn like `accounts.role`, so MCP calls can match a role grant
 without a live platform lookup; it starts empty.
-`direct_message_conversations.source_channel_id` records the channel `/dm`
-ran in, so a private conversation counts as that channel; existing rows keep
-NULL and count as their DM channel until the member runs `/dm` again.
 
 downgrade: destructive
 """
@@ -25,9 +22,6 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "direct_message_conversations", sa.Column("source_channel_id", sa.Text(), nullable=True)
-    )
     op.add_column(
         "accounts",
         sa.Column(
@@ -75,4 +69,3 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table("channel_admins")
     op.drop_column("accounts", "platform_role_ids")
-    op.drop_column("direct_message_conversations", "source_channel_id")

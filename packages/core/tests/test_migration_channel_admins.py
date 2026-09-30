@@ -1,4 +1,4 @@
-"""The channel admins migration adds an empty table and empty role-id and DM-origin columns."""
+"""The channel admins migration adds an empty table and an empty role-id column."""
 
 import importlib.util
 from pathlib import Path
@@ -44,23 +44,10 @@ async def test_channel_admins_migration_round_trips(db_session: AsyncSession) ->
         )
         return found.first() is not None
 
-    async def dm_origin_exists() -> bool:
-        found = await db_session.execute(
-            text(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_schema = current_schema() "
-                "AND table_name = 'direct_message_conversations' "
-                "AND column_name = 'source_channel_id'"
-            )
-        )
-        return found.first() is not None
-
     await conn.run_sync(run("downgrade"))
     assert not await table_exists(), "downgrade drops channel_admins"
-    assert not await dm_origin_exists(), "downgrade drops the DM origin column"
     await conn.run_sync(run("upgrade"))
     assert await table_exists(), "upgrade recreates channel_admins"
-    assert await dm_origin_exists(), "upgrade adds the DM origin column"
 
     role_ids = await db_session.execute(
         text("SELECT platform_role_ids FROM accounts WHERE id = :id"), {"id": account.id}

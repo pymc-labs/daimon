@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.core.access_policy import is_invoker_allowed
+from daimon.core.access_policy import is_invoker_allowed, is_outside_agent_pin
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
@@ -54,6 +55,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     sessionmaker: async_sessionmaker[AsyncSession],
     billing_config: BillingConfig | None,
     tool_name: str,
+    agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None = None,
 ) -> AuthIdentity:
     """Balance and cap gate for an already-resolved identity.
 
@@ -71,6 +73,11 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       account whose stored role is admin (the hub pins ``is_admin=False``, so
       the stored role is the only admin signal every caller has). A refusal,
       or a policy that can't be read, raises a ``TERMINAL ERROR:`` ``ToolError``.
+    - Then, when ``agent_names`` is given and the tenant pins any agent,
+      refuses a turn on a pinned agent. An MCP turn has no channel, so it is
+      outside every pin, exactly as a DM is in ``admit()``; admins get no
+      exemption. ``agent_names`` is called only when a pin exists, so the
+      agent lookup it may need costs nothing on unpinned tenants.
     - Then runs ``is_over_balance`` then ``is_over_cap``; either denial
       raises a ``TERMINAL ERROR:`` ``ToolError`` naming ``/billing`` and logs
       a deny event carrying only ids (tenant/user/tool/gate) — never prompt
@@ -110,6 +117,25 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
         raise ToolError(
             "TERMINAL ERROR: You aren't on this workspace's list of people who can "
             "use daimon. A workspace admin can add you."
+        )
+
+    if (
+        agent_names is not None
+        and policy.agent_channel_pins
+        and is_outside_agent_pin(policy, agent_names=await agent_names(), channel_id=None)
+    ):
+        log.info(
+            "mcp.admission_denied",
+            tenant_id=str(auth.tenant_id),
+            platform_user_id=auth.platform_user_id,
+            tool=tool_name,
+            gate="agent_pin",
+        )
+        refused(TerminationReason.ADMISSION_DENIED)
+        raise ToolError(
+            "TERMINAL ERROR: An operator pinned this agent to specific channels, so it "
+            "only runs in a conversation inside them, not from here. Talk to it in its "
+            "channel."
         )
 
     if await is_over_balance(sessionmaker=sessionmaker, tenant_id=auth.tenant_id):
@@ -155,11 +181,19 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
     sessionmaker: async_sessionmaker[AsyncSession],
     billing_config: BillingConfig | None,
     tool_name: str,
+    agent_names: Callable[[AuthIdentity], Awaitable[tuple[str | None, ...]]] | None = None,
 ) -> AuthIdentity:
     """Shared admission gate for the billed media and agent-chat turn tools. See ``_admit``."""
+    auth = await _auth(ctx)
+
+    async def names() -> tuple[str | None, ...]:
+        assert agent_names is not None
+        return await agent_names(auth)
+
     return await _admit(
-        await _auth(ctx),
+        auth,
         sessionmaker=sessionmaker,
         billing_config=billing_config,
         tool_name=tool_name,
+        agent_names=None if agent_names is None else names,
     )

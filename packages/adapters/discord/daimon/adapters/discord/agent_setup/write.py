@@ -15,7 +15,6 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from cryptography.fernet import Fernet
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core import agent_lifecycle
 from daimon.core.constants import ALLOWED_MODEL_IDS
@@ -245,8 +244,7 @@ async def load_agent_inline_pat(runtime: DiscordRuntime, *, agent_id: uuid.UUID)
     configured crypto (storing one requires crypto too, via
     `store_inline_pat`), and calling `_build_runtime_fernet` unconditionally
     here would raise `ValueError` on such a deployment, breaking a
-    previously-working bind path (same tolerance rationale as
-    `_build_fork_fernet`).
+    previously-working bind path.
 
     Passes `allow_service_default=False` and no `fallback_pat` explicitly:
     the operator's shared service PAT must never be treated as this agent's
@@ -459,19 +457,17 @@ async def fork_agent(
     fork_params["tools"] = merge_default_agent_toolset(
         fork_params.get("tools"),  # type: ignore[arg-type]
     )
-    created = await runtime.anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]
-
-    fork_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(created.id))
-    source_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(source.id))
-    await agent_lifecycle.copy_credential_and_repo_binding(
-        anthropic=runtime.anthropic,
+    # A fork starts with no credentials (see strip_credentialed_mcp_servers).
+    servers, tools = await agent_lifecycle.strip_credentialed_mcp_servers(
         sessionmaker=runtime.sessionmaker,
-        fernet=_build_fork_fernet(runtime),
-        oauth_scopes=tuple(runtime.settings.github.oauth_scopes),
         tenant_id=tenant_id,
-        source_agent_uuid=source_agent_uuid,
-        fork_agent_uuid=fork_agent_uuid,
+        source_agent_uuid=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(source.id)),
+        mcp_servers=fork_params.get("mcp_servers"),  # type: ignore[arg-type]
+        tools=fork_params.get("tools"),  # type: ignore[arg-type]
     )
+    fork_params["mcp_servers"] = servers
+    fork_params["tools"] = tools
+    await runtime.anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]
 
 
 async def delete_agent(runtime: DiscordRuntime, *, tenant_id: uuid.UUID, name: str) -> None:
@@ -513,22 +509,6 @@ def _build_runtime_fernet(runtime: DiscordRuntime) -> MultiFernet:
     """Build a MultiFernet from `runtime.settings.crypto.keys`."""
     keys = tuple(secret.get_secret_value() for secret in runtime.settings.crypto.keys)
     return build_multifernet(keys)
-
-
-def _build_fork_fernet(runtime: DiscordRuntime) -> MultiFernet:
-    """Build the fernet `copy_credential_and_repo_binding` requires, tolerating
-    an unconfigured deployment (`settings.crypto.keys == ()`).
-
-    `copy_credential_and_repo_binding` only reads/writes through `fernet` when
-    the source has an `inline-pat:` binding — which cannot exist in a
-    deployment with no crypto keys configured (storing one requires crypto
-    too, via `store_inline_pat`). The anon:/unbound-source paths never touch
-    the value, so a throwaway single-use key keeps the primitives-only
-    interface satisfied without forcing every fork to require crypto config.
-    """
-    if not runtime.settings.crypto.keys:
-        return build_multifernet((Fernet.generate_key().decode(),))
-    return _build_runtime_fernet(runtime)
 
 
 async def store_inline_pat(

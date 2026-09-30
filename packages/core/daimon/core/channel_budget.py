@@ -124,10 +124,12 @@ def budget_period(budget: ChannelBudgetRow, *, now: datetime) -> BudgetPeriod:
 
 
 def is_budget_active(budget: ChannelBudgetRow, *, now: datetime) -> bool:
-    """A fixed budget gates only inside its range; the other windows always gate."""
-    if budget.window != "fixed" or budget.starts_at is None or budget.ends_at is None:
+    """A budget gates from `starts_at`, if set, and a fixed one until `ends_at`, exclusive."""
+    if budget.window == "monthly":
         return True
-    return budget.starts_at <= now < budget.ends_at
+    if budget.starts_at is not None and now < budget.starts_at:
+        return False
+    return budget.ends_at is None or now < budget.ends_at
 
 
 def _instant_label(value: datetime) -> str:
@@ -137,14 +139,17 @@ def _instant_label(value: datetime) -> str:
 
 
 def window_label(budget: ChannelBudgetRow) -> str:
-    """The window in words, e.g. `monthly`, `since 2026-07-01`, `2026-07-01 to 2026-07-03`."""
+    """The window in words, e.g. `monthly`, `since 2026-07-01`, `2026-07-01 until 2026-07-03`.
+
+    A fixed window's end is exclusive, hence "until".
+    """
     if budget.window == "monthly":
         return "monthly"
     if budget.starts_at is None:
         return "total"
     if budget.window == "total" or budget.ends_at is None:
         return f"since {_instant_label(budget.starts_at)}"
-    return f"{_instant_label(budget.starts_at)} to {_instant_label(budget.ends_at)}"
+    return f"{_instant_label(budget.starts_at)} until {_instant_label(budget.ends_at)}"
 
 
 def describe_budget(status: ChannelBudgetStatus) -> str:

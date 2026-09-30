@@ -13,7 +13,6 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.direct_messages import reply_to_dm, require_dm_enabled, start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
@@ -22,6 +21,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set_dm_enabled
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
+from daimon.core.turn.errors import AdmissionDenied
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -65,6 +65,8 @@ def _error_message(exc: Exception, fallback: str) -> str:
         "account_inactive",
     }:
         return _REAUTHORIZE
+    if isinstance(exc, AdmissionDenied) and exc.reason == "channel_budget_exceeded":
+        return "This channel has used its spending budget. A workspace admin can raise or clear it."
     return str(exc) if isinstance(exc, DaimonError) else fallback
 
 
@@ -130,20 +132,9 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 channel_id=channel_id,
                 role=role,
                 is_dm=True,
+                dm_source_channel_id=channel_id,
                 now=datetime.now(UTC),
             )
-            # A DM's spend is not the channel's, but a used-up channel cannot open one.
-            if await is_over_channel_budget(
-                sessionmaker=runtime.sessionmaker,
-                tenant_id=tenant_id,
-                platform="slack",
-                channel_id=channel_id,
-                now=datetime.now(UTC),
-            ):
-                raise DaimonError(
-                    "This channel has used its spending budget. "
-                    "A workspace admin can raise or clear it."
-                )
             response = await client.conversations_history(channel=channel_id, limit=12)  # pyright: ignore[reportUnknownMemberType]
             messages = cast(list[dict[str, Any]], response.get("messages", []))
             context = [
@@ -164,9 +155,9 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 workspace_id=team_id,
                 route_key=f"{team_id}:{dm_channel}",
                 channel_id=dm_channel,
+                source_channel_id=channel_id,
                 external_user_id=user_id,
                 source_url=source_url,
-                source_channel_id=channel_id,
                 context=context,
             )
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]

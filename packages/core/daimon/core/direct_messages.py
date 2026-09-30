@@ -61,17 +61,18 @@ async def start_dm(
     workspace_id: str,
     route_key: str,
     channel_id: str,
+    source_channel_id: str,
     external_user_id: str,
     source_url: str,
-    source_channel_id: str,
     context: Sequence[TranscriptTurn],
 ) -> DirectMessageRow:
     """Select a workspace explicitly and give the DM a new thread-like scope.
 
-    Caller admits the source with is_dm=True before reading history or opening
-    the DM. Each move resets the private scope; a prior workspace's physical
-    DM history is never replayed into this one. `source_channel_id` is the
-    channel run in (a thread's parent): the DM counts as that channel's.
+    Caller admits the source with is_dm=True and `dm_source_channel_id` before
+    reading history or opening the DM. `source_channel_id` is the parent
+    channel `/dm` ran in; the DM's turns count toward its budget. Each move
+    resets the private scope; a prior workspace's physical DM history is never
+    replayed into this one.
     """
     await require_dm_enabled(deps, tenant_id=tenant_id)
     scope_id = f"{DM_SCOPE_PREFIX}{uuid.uuid4()}"
@@ -83,9 +84,9 @@ async def start_dm(
         account_id=admission.account_id,
         workspace_id=workspace_id,
         channel_id=channel_id,
+        source_channel_id=source_channel_id,
         scope_id=scope_id,
         source_url=source_url,
-        source_channel_id=source_channel_id,
         context=render_previous_session(
             [TranscriptTurn(role="user", text=f"Source: {source_url}"), *bounded_turns(context)],
             from_agent_name="source conversation",
@@ -209,6 +210,7 @@ async def reply_to_dm(
             role=role,
             platform_role_ids=platform_role_ids,
             is_dm=True,
+            dm_source_channel_id=conversation.source_channel_id,
             now=now,
         )
         if admission.account_id != conversation.account_id:
