@@ -445,6 +445,19 @@ file (`packages/core/daimon/core/credential_env.py`) or brokered per call
 back into authenticates a JWT whose `agent_id` claim is the derived agent
 UUID from `packages/core/daimon/core/ma_identity.py`.
 
+Because that env file is `source`d in the sandbox, `credential_env.py`
+serializes every value so bash cannot expand or execute it, and
+`packages/core/daimon/core/env_file.py` decides which key *names* may be
+stored. Names that control an interpreter, archiver, loader, locale, package
+manager, git, an HTTP client or a CA bundle, or that redirect an SDK's own
+endpoint (`TAR_OPTIONS`, `BASH_ENV`, `LD_PRELOAD`, `GIT_SSH_COMMAND`,
+`*_BASE_URL`, …) are hard-denied for everyone and dropped from the mount even
+if stored earlier; a non-admin member may additionally add only a secret
+name (ending in `_KEY`, `_KEY_ID`, `_TOKEN`, `_SECRET`, `_PASSWORD`,
+`_PASSPHRASE` or `_PAT` — never an identity, region or `*_URL`/`*_HOST`
+name, which only an admin may add). This keeps one tenant member from handing another client's
+agent code execution or a redirected connector through a key value or name.
+
 ## Sessions and Managed Agents
 
 A turn does not create a session per message. `thread_sessions` maps

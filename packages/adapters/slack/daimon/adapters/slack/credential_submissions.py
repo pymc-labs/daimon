@@ -54,9 +54,11 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_K
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
+    MEMBER_SECRET_SUFFIX_HINT,
     EnvEntry,
     EnvFileRejected,
     decode_env_bytes,
+    env_name_problem,
     parse_env_file,
 )
 from daimon.core.errors import DaimonError
@@ -340,6 +342,19 @@ async def _validate_submission(
     return row
 
 
+def _env_name_refusal(name: str, problem: str) -> str:
+    """One-line refusal for a key name the submitter may not store."""
+    if problem == "bad_name":
+        return f"{name} is not a valid key name (letters, digits, underscores; not leading digit)."
+    if problem == "reserved_name":
+        return f"{name} is reserved: it changes how the agent's tools run, so it cannot be a key."
+    return (
+        f"{name} is not a secret name a member can add. Use a name ending in "
+        f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, region "
+        "and URL names."
+    )
+
+
 async def run_env_credential_submission(
     runtime: SlackRuntime,
     *,
@@ -388,6 +403,21 @@ async def run_env_credential_submission(
     refuse_replacement = request.replaces_updated_at is not None and (
         await _replacement_refused_at_submit(runtime, client, row=request, user_id=user_id)
     )
+
+    # The name a member may store is re-checked against the submitter's live
+    # role. `key_add` needs no gate, but the NAME does: a tool-control or
+    # redirect name is refused for a member even on a brand-new key.
+    is_admin = await resolve_is_admin(client, user_id=user_id)
+    name_problem = env_name_problem(request.target, is_admin=is_admin)
+    if name_problem is not None:
+        await post_ephemeral(
+            client,
+            thread_ts=request.origin_thread_id,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=_env_name_refusal(request.target, name_problem),
+        )
+        return
 
     now = datetime.now(UTC)
     state: CardState = "applied"
@@ -669,7 +699,8 @@ async def run_env_file_credential_submission(
     try:
         # `decode_env_bytes` re-measures the real bytes against the same cap
         # the submission checked the client's reported size against.
-        entries = parse_env_file(decode_env_bytes(body))
+        is_admin = await resolve_is_admin(client, user_id=user_id)
+        entries = parse_env_file(decode_env_bytes(body), member_writable_only=not is_admin)
     except EnvFileRejected as err:
         log.info(
             "credential_request.env_file_rejected",

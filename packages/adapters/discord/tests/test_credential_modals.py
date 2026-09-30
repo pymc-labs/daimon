@@ -555,7 +555,7 @@ async def test_env_modal_stores_the_value_even_when_the_card_edit_fails(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    row = await _seed_env_request(db_session_factory, target="EDIT_FAILS", with_origin=True)
+    row = await _seed_env_request(db_session_factory, target="EDIT_FAILS_TOKEN", with_origin=True)
     runtime = _runtime(sessionmaker=db_session_factory)
     modal = EnvCredentialModal(runtime=runtime, request_row=row)
     modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
@@ -2037,7 +2037,7 @@ async def test_env_submission_records_none_requested_work_for_a_save_only_reques
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Nothing was waiting on this key, so the card promises no turn."""
-    row = await _seed_env_request(db_session_factory, target="SAVE_ONLY", with_origin=True)
+    row = await _seed_env_request(db_session_factory, target="SAVE_ONLY_TOKEN", with_origin=True)
     modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
     modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
 
@@ -2049,7 +2049,7 @@ async def test_env_submission_records_none_requested_work_for_a_save_only_reques
         "a save-only request is still recorded, carrying no work to resume"
     )
     card = _card_text(_card_edits(interaction)[-1])
-    assert "SAVE_ONLY saved for tester." in card, "the card reports the key that landed"
+    assert "SAVE_ONLY_TOKEN saved for tester." in card, "the card reports the key that landed"
     assert "next message" not in card, (
         "with nothing waiting on it, the card must not promise a turn"
     )
@@ -2223,7 +2223,7 @@ async def test_success_paths_send_no_ephemeral_receipt(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """The card is the receipt; an ephemeral would say the same thing twice."""
-    env_row = await _seed_env_request(db_session_factory, target="NO_TOAST", with_origin=True)
+    env_row = await _seed_env_request(db_session_factory, target="NO_TOAST_TOKEN", with_origin=True)
     env_modal = EnvCredentialModal(
         runtime=_runtime(sessionmaker=db_session_factory), request_row=env_row
     )
@@ -2231,7 +2231,7 @@ async def test_success_paths_send_no_ephemeral_receipt(
     env_interaction = _card_interaction()
     await env_modal.on_submit(env_interaction)
     env_interaction.followup.send.assert_not_awaited()
-    assert "NO_TOAST saved for tester." in _card_text(_card_edits(env_interaction)[-1]), (
+    assert "NO_TOAST_TOKEN saved for tester." in _card_text(_card_edits(env_interaction)[-1]), (
         "sanity: the card this receipt was dropped in favour of actually rendered"
     )
 
@@ -2405,3 +2405,72 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     assert "did not accept" in text and "connect it with your account" in text, (
         "the person learns the token was refused and that OAuth is the way out"
     )
+
+
+# --- key-name policy at submit ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "target", ["R_PROFILE_USER", "TAR_OPTIONS", "SNOWFLAKE_USER", "AWS_REGION"]
+)
+async def test_env_modal_member_cannot_store_a_non_secret_name(
+    db_session_factory: async_sessionmaker[AsyncSession], target: str
+) -> None:
+    """The submitter's live role decides the name: a member may store secrets only."""
+    row = await _seed_env_request(db_session_factory, target=target)
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _member_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert files == [], f"a member must not store {target}"
+    assert persisted is not None and persisted.used_at is None, "a refusal spends nothing"
+    assert target in _sent_message(interaction), "the refusal names the key"
+    _assert_secret_absent_from_every_reply(interaction, _SECRET_VALUE)
+
+
+async def test_env_modal_admin_may_store_an_identity_name_but_not_a_tool_control(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    ok = await _seed_env_request(db_session_factory, target="SNOWFLAKE_USER")
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=ok)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+    await modal.on_submit(_admin_interaction())
+
+    denied = await _seed_env_request(db_session_factory, target="R_LIBS_USER")
+    modal = EnvCredentialModal(
+        runtime=_runtime(sessionmaker=db_session_factory), request_row=denied
+    )
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+    await modal.on_submit(_admin_interaction())
+
+    async with db_session_factory() as session:
+        files = await list_agent_files(session, tenant_id=ok.tenant_id, agent_id=ok.agent_id)
+    assert [f.key for f in files] == ["SNOWFLAKE_USER"], (
+        "an admin may add an identity name; no one may add a code-loading name"
+    )
+
+
+@pytest.mark.parametrize(
+    "content", [b"API_KEY=ok\nSNOWFLAKE_USER=x\n", b"API_KEY=ok\nR_ENVIRON_USER=/tmp/x\n"]
+)
+async def test_env_file_member_upload_with_a_non_secret_name_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession], content: bytes
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory), row=row, attachment=_uploaded(content)
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert files == [], "a member upload with a non-secret name is refused whole"
+    assert persisted is not None and persisted.used_at is None, "the refusal spends nothing"

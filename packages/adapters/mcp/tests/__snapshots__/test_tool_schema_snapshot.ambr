@@ -3697,6 +3697,11 @@
         Write or overwrite a per-agent file under `key`.
         
         Stored in your private agent_files namespace; isolated from other agents.
+        Every entry is exported into your sandbox's `.env`, so `key` must be a
+        credential name: upper-case, ending in `_KEY`, `_TOKEN`, `_SECRET`,
+        `_PASSWORD` or similar (or `GH_TOKEN`/`GITHUB_TOKEN`). Tool-control and
+        endpoint names (`PATH`, `LD_PRELOAD`, `TAR_OPTIONS`, `*_BASE_URL`,
+        `*_URL` …) are refused.
       ''',
       'parameters': dict({
         'additionalProperties': False,

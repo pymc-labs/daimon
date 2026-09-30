@@ -127,9 +127,11 @@ from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
     MAX_ENV_FILE_BYTES,
+    MEMBER_SECRET_SUFFIX_HINT,
     EnvEntry,
     EnvFileRejected,
     decode_env_bytes,
+    env_name_problem,
     parse_env_file,
 )
 from daimon.core.errors import DaimonError
@@ -379,6 +381,19 @@ async def _dispatch_origin_thread(
     )
 
 
+def _env_name_refusal(name: str, problem: str) -> str:
+    """One-line refusal for a key name the submitter may not store."""
+    if problem == "bad_name":
+        return f"{name} is not a valid key name (letters, digits, underscores; not leading digit)."
+    if problem == "reserved_name":
+        return f"{name} is reserved: it changes how the agent's tools run, so it cannot be a key."
+    return (
+        f"{name} is not a secret name a member can add. Use a name ending in "
+        f"{MEMBER_SECRET_SUFFIX_HINT}. An admin can add identity, account, region "
+        "and URL names."
+    )
+
+
 async def _decide_key_replacement(
     interaction: discord.Interaction, *, runtime: DiscordRuntime, row: CredentialRequestRow
 ) -> PolicyOutcome:
@@ -471,6 +486,16 @@ class EnvCredentialModal(discord.ui.Modal):
         if await refuse_if_credential_target_unavailable(
             interaction, runtime=self._runtime, row=self._row
         ):
+            return
+        # The name a member may store is re-checked against the submitter's
+        # live role: a key minted while they were an admin must not land as a
+        # member. `key_add` itself needs no gate, but the NAME does.
+        is_admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+        name_problem = env_name_problem(self._row.target, is_admin=is_admin)
+        if name_problem is not None:
+            await interaction.followup.send(
+                _env_name_refusal(self._row.target, name_problem), ephemeral=True
+            )
             return
         # A replacement's gate is decided BEFORE the transaction opens: the
         # decision costs an MA listing and a config read, and neither may be
@@ -669,7 +694,10 @@ class EnvFileModal(discord.ui.Modal):
             )
             return
         try:
-            entries = parse_env_file(decode_env_bytes(raw))
+            entries = parse_env_file(
+                decode_env_bytes(raw),
+                member_writable_only=not is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+            )
         except EnvFileRejected as rejected:
             # The request is deliberately NOT consumed: a typo in the file
             # must not cost the one click this card is good for.
