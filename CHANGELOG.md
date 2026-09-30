@@ -163,6 +163,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A tidier status card while a turn runs.** Discord shows one embed instead
+  of two and Slack one matching card: a bold Thinking or Working headline with
+  the elapsed time, up to six recent tool calls in a code block, and the latest
+  draft quoted underneath. Built-in tools read as plain verbs ("Reading a
+  file", then "Read a file"), MCP and custom tools get readable names, finished
+  calls are ticked, failed ones marked, and older calls fold into "+N earlier".
+  The list now includes MCP and custom tool calls and still never shows tool
+  arguments. The finished-turn summary and the error card are unchanged.
+
 - A handoff or private-input continuation whose process dies mid-dispatch is
   no longer stuck in `claimed`: it is retried if its turn had not started, and
   settled `skipped/interrupted` if it had. When the session is busy, the same
