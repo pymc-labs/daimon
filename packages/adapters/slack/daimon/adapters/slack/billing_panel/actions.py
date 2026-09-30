@@ -106,7 +106,7 @@ async def handle_billing_command(
 
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id,
-            view=build_billing_view(state, now=now, since=since),
+            view=build_billing_view(state, now=now, since=since, channel_id=channel_id),
         )
 
     except (DaimonError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:

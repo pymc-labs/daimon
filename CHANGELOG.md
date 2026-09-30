@@ -9,13 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- `fork_agent` is admin-only, refuses to copy an agent pinned to channels, and a fork now starts with no credentials: no GitHub access, repo binding or proof of access, and no agent-wide MCP token. MCP servers that only work with a stored token are left off the copy. Previously any member could fork another project's agent and walk off with its repo access and connector tokens.
+- A member can no longer operate another project's agent from outside its channels. MCP and hub turns (`start_turn`, `ask`, `continue_turn`, new or resumed) refuse a pinned agent. `hand_off_task` to an agent other than the channel's own, and `create_routine`/`update_routine` for an agent other than the one you are talking to or the destination channel's, now need an admin. Routines are listed and read only by their creator and admins.
+- Operators can pin an agent to named channels (`daimon tenants access-policy set --add-pin-agent AGENT=CHANNEL_ID`, `--remove-pin-agent AGENT[=CHANNEL_ID]`). Pin edits keep every other agent's pin, and `--pin-agent`, which replaces the whole map, refuses to drop an unnamed agent's pin without `--replace-pins`. A pinned agent refuses turns anywhere else, including DMs and threads handed to it from other channels, and its routines must post into a pinned channel. Agents without a pin are unchanged.
 - Encrypt agent environment values with rotatable deployment keys when configured, including existing rows on upgrade. Store encoding separately from user text so every literal value, including `enc:v1:` prefixes, remains valid. A database trigger keeps writes from older code tagged as plaintext; decryption errors identify the affected row without exposing values.
 
 ### Upgrade notes
 
 - Agent environment encryption is opt-in through `DAIMON_CRYPTO__KEYS`; keyless deployments retain plaintext storage and initialization still succeeds. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
+- The seeded agents move to Sonnet 5.5 on the next defaults reconcile, so each existing `daimon` and `dev_agent` thread replaces its session on its next message, with one checkpoint turn on the old session if it had replied. Reports and spend caps reprice history at read time, so this month's Sonnet 5 and Opus 4.7 spend drops at once; set `DAIMON_BILLING__MARKUP` if the old rates stood in for a margin.
 
 ### Added
+
+- Staging-only load rehearsal script for synthetic installs and metered headless turns, with a dry run, spend guard, and tenant cleanup.
+
+- Optional Discord webhook alerts for new installs, Stripe top-ups, and Anthropic spend or overload events.
 
 - Discord delivers files generated during tool-using turns into the chat thread,
   with upload-limit notices and protected-channel checks.
@@ -24,9 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_channel_budget`, `clear_channel_budget` and `list_channel_budgets`, or
   `daimon channels budget set|clear|list`. Once a channel's debits (markup
   included, threads counting toward their channel) reach its limit, new turns
-  there are refused, as are unprompted replies, wakes, `/dm`, YouTube
-  transcripts asked for there and routine fires that post there or were made
-  there. Members can read a budget with `get_channel_budget`, and
+  there are refused, as are unprompted replies, wakes, `/dm` and DMs moved
+  from there, YouTube transcripts asked for there and routine fires that post
+  there or were made there. Members can read a budget with `get_channel_budget`, and
   `/billing` shows the channel's spend against it. Nothing changes until a
   budget is set, with or without Stripe. Usage and debits now record their
   channel from this release on.
@@ -42,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Channel isolation.** Server admins can isolate a channel whose default
   agent answers only there, with `set_channel_isolation`, from Who answers
   where in the setup panel, or with `--isolated-channel`; `fork_from` or the
-  panel's copy option makes that agent from the one answering now. Its agents
+  panel's copy option makes that agent from the one answering now (with no
+  credentials; a pinned agent isn't copied). Its agents
   then can't be bound or handed tasks elsewhere and are hidden outside it in
   agent, skill, routine and hub listings and `/memory`; inside it only they
   show. Its messages are readable only from inside it, and `/dm` there is
@@ -249,8 +258,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defer the durable queue job using GitHub's retry deadline; permission 403s
   remain permanent. See `docs/github-push-resync.md` for the covered request
   paths and remaining scope.
+- **Sonnet 5.5 is the default model.** It can be selected for an agent and is
+  metered at its published rates, and the seeded `daimon` and `dev_agent`
+  agents and every new agent now start on it instead of Sonnet 5, at the same
+  per-token price. Asking an agent tool for "Sonnet" or "Opus" now means
+  Sonnet 5.5 or Opus 5.5. Opus 5.5 and the older models remain selectable per
+  agent; fork a seeded agent to keep it on another model. Sonnet 5.5 returns longer notes between tool calls as thinking, so the in-progress
+  card can show less draft text than it did on Sonnet 5.
 - Opus 5.5 can be selected for an agent and is metered at its published rates.
-  The seeded and new-agent defaults remain Sonnet 5.
 - The documentation site carries daimon's own look: the readme sticker as
   logo and favicon, and a palette taken from it.
 - Defaults reconciliation serializes writes and sweeps per tenant so concurrent
@@ -258,6 +273,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller has already resolved.
 
 ### Fixed
+
+- **Sonnet 5 and Opus 4.7 are metered at list price.** Sonnet 5 was charged at
+  $3/$15 per million tokens, the rise Anthropic announced and then withdrew;
+  its standard price stayed $2/$10. Opus 4.7 was charged Opus 4.1's $15/$75
+  instead of $5/$25. Every agent-model row in the pricing table is now the
+  provider's list price. Deployments that want a margin set `DAIMON_BILLING__MARKUP`, which
+  applies the same multiplier to every model and leaves the cost reports
+  showing provider cost.
+
+- Stop retrying Anthropic's monthly spend-cap response and show a clear model usage limit notice in Discord and Slack.
+
+- Avoid repeated Managed Agents event reads for unchanged sessions during the usage sweep, with hourly full passes.
 
 - The MCP server's hub login store opens one database connection at startup and
   grows to four, instead of holding ten per instance. During a deploy the old and

@@ -212,6 +212,7 @@ async def _start(
         channel_id="dm-42",
         external_user_id="42",
         source_url="https://example.com/source",
+        source_channel_id="source",
         context=[TranscriptTurn(role="user", text=context)],
     )
 
@@ -892,6 +893,7 @@ async def test_slack_real_turn_registers_destination_for_leak_guard_and_cleans_o
         channel_id="D42",
         external_user_id="42",
         source_url="slack://source",
+        source_channel_id="source",
         context=[],
     )
     if concurrent_channel:
@@ -1215,6 +1217,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         channel_id="D42",
         external_user_id="42",
         source_url="slack://source",
+        source_channel_id="source",
         context=[],
     )
     with aioresponses() as http:

@@ -17,6 +17,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -33,6 +34,9 @@ _NAME_MAX = 60
 _KEPT = "The conversation and its workspace are kept."
 _RETRY = "Send your message again."
 _SHARE_RID = "If it keeps happening, share the request id with an admin."
+_SPEND_LIMIT_MESSAGE = (
+    "Daimon has reached its model usage limit for now. The operators have been notified."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +242,7 @@ def render_termination_notice(
     *,
     state: TurnState | None = None,
     request_id: str | None = None,
+    error: BaseException | None = None,
 ) -> TerminationNotice | None:
     """The notice for `reason`, or None when the turn completed.
 
@@ -248,6 +253,8 @@ def render_termination_notice(
     if reason is TerminationReason.COMPLETED:
         return None
     copy = _COPY.get(reason, _FALLBACK)
+    if spend_limit_error(error or (state.error if state is not None else None)) is not None:
+        copy = _Copy("Model usage limit reached", _SPEND_LIMIT_MESSAGE, _KEPT, "")
     cause = copy.cause
     next_step = copy.next_step
     in_flight: tuple[str, ...] = ()

@@ -10,18 +10,12 @@ from __future__ import annotations
 import uuid
 from typing import Any, Literal, cast
 
-from daimon.adapters.slack.agent_setup.write import (
-    _build_fork_fernet,  # pyright: ignore[reportPrivateUsage]
-)
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_fork import fork_agent
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
-from daimon.core.channel_isolation_setup import (
-    ChannelIsolationRefused,
-    ForkAgent,
-    set_channel_isolation,
-)
+from daimon.core.channel_isolation_setup import ForkAgent, set_channel_isolation
+from daimon.core.errors import DaimonError
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -42,8 +36,6 @@ def _fork(runtime: SlackRuntime, tenant_id: uuid.UUID) -> ForkAgent:
             source_name=source,
             new_name=new_name,
             public_url=str(public_url) if public_url is not None else None,
-            fernet=_build_fork_fernet(runtime),
-            oauth_scopes=tuple(runtime.settings.github.oauth_scopes),
         )
 
     return fork
@@ -92,7 +84,7 @@ async def change_isolation(
             channel_label=await _channel_name(client, channel) if copy else None,
             fork=_fork(runtime, tenant_id) if copy else None,
         )
-    except ChannelIsolationRefused as exc:
+    except DaimonError as exc:  # a refusal, or a copy that can't be made
         return f"{exc} Nothing changed."
     if not change.isolated:
         return f"<#{channel}> is open again."

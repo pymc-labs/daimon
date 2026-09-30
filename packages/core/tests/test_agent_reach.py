@@ -12,15 +12,22 @@ from daimon.core.agent_reach import (
 )
 from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.stores import accounts
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.direct_messages import (
     DirectMessageRow,
     delete_conversations_for_account,
     start_conversation,
 )
+from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
-from daimon.testing.factories import make_account, make_routine, make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_platform_principal,
+    make_routine,
+    make_tenant,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 DEFAULT = DeploymentDefault(agent_name="daimon")
@@ -46,7 +53,7 @@ async def test_reach_and_locality_follow_channels_and_threads(db_session: AsyncS
         kind="handoff",
     )
     reach = await load_agent_reach(
-        db_session, tenant_id=tenant.id, agent_name="helper", default=DEFAULT
+        db_session, tenant_id=tenant.id, platform="discord", agent_name="helper", default=DEFAULT
     )
     assert reach.channel_ids == {"c1", "c2"}
 
@@ -197,18 +204,47 @@ async def _is_local(db_session: AsyncSession, tenant_id, agent_name: str = "help
     )
 
 
-async def test_someone_elses_routine_keeps_an_agent_from_a_channel_admin(
+async def _member(db_session: AsyncSession, tenant, user_id: str, *, admin: bool = False):
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="discord", external_id=user_id, tenant=tenant, account=account
+    )
+    if admin:
+        await accounts.set_role(db_session, account.id, Role.ADMIN)
+
+
+async def test_only_a_stronger_creators_routine_keeps_an_agent_from_a_channel_admin(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
     await _admin_of_c1(db_session, tenant.id)
-    await make_routine(db_session, tenant=tenant, created_by_user_id="u1", agent_name="helper")
-    assert await _is_local(db_session, tenant.id), "the caller's own routine keeps it local"
-    await make_routine(
-        db_session, tenant=tenant, created_by_user_id="u9", agent_name="helper", enabled=False
+    await _member(db_session, tenant, "u5")
+    for creator in ("u1", "u5", "u-unknown"):
+        await make_routine(
+            db_session, tenant=tenant, created_by_user_id=creator, agent_name="helper"
+        )
+    assert await _is_local(db_session, tenant.id), (
+        "the caller's own and plain members' routines keep it local"
     )
-    assert not await _is_local(db_session, tenant.id), "a paused routine by someone else counts"
 
+    await _member(db_session, tenant, "u7")
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="c2",
+        role_ids=[],
+        user_ids=["u7"],
+        actor_account_id=None,
+    )
+    await make_routine(
+        db_session, tenant=tenant, created_by_user_id="u7", agent_name="helper", enabled=False
+    )
+    assert not await _is_local(db_session, tenant.id), (
+        "a paused routine by the admin of another channel counts"
+    )
+
+    await _member(db_session, tenant, "u9", admin=True)
     await make_routine(db_session, tenant=tenant, created_by_user_id="u9", agent_name="scheduled")
     assert not await may_bind_as_channel_default(
         db_session,
@@ -218,7 +254,7 @@ async def test_someone_elses_routine_keeps_an_agent_from_a_channel_admin(
         default=DEFAULT,
         caller=ChannelAdminCaller(platform_user_id="u1"),
         is_daimon_managed=False,
-    ), "an agent answering nowhere but running another member's routine does not bind"
+    ), "an agent answering nowhere but running a server admin's routine does not bind"
 
 
 async def test_a_dm_counts_as_the_channel_it_was_started_from(db_session: AsyncSession) -> None:
@@ -266,7 +302,11 @@ async def test_a_dm_counts_as_the_channel_it_was_started_from(db_session: AsyncS
 
     async def channels() -> frozenset[str]:
         reach = await load_agent_reach(
-            db_session, tenant_id=tenant.id, agent_name="helper", default=DEFAULT
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            agent_name="helper",
+            default=DEFAULT,
         )
         return reach.channel_ids
 

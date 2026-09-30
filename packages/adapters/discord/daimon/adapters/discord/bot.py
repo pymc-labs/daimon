@@ -48,6 +48,7 @@ from daimon.adapters.discord.vision import (
     download_as_image_blocks,
     is_vision_image_attachment,
 )
+from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.config import DirectMessagePolicy, DiscordSettings, Settings
 from daimon.core.continuity.continuation import ContinuationDecision, check_wake_responder
 from daimon.core.continuity.messages import (
@@ -65,6 +66,7 @@ from daimon.core.errors import DaimonError, TurnError
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.ops_alerts import alert_ops
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
@@ -103,6 +105,7 @@ from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
+from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -112,8 +115,12 @@ from discord.ext import commands
 log = structlog.get_logger()
 
 
-def log_anthropic_overload(exc: object, *, tenant_id: uuid.UUID, path: str) -> None:
+def log_anthropic_overload(
+    exc: object, *, tenant_id: uuid.UUID, path: str, alert_webhook_url: SecretStr | None = None
+) -> None:
     """Surface provider throttling that the SDK eventually gives up retrying."""
+    if spend_limit_error(exc) is not None:
+        return
     if isinstance(exc, TurnError):
         exc = exc.cause
     if isinstance(exc, _anthropic.APIStatusError) and exc.status_code in (429, 529):
@@ -122,6 +129,11 @@ def log_anthropic_overload(exc: object, *, tenant_id: uuid.UUID, path: str) -> N
             tenant_id=str(tenant_id),
             path=path,
             status_code=exc.status_code,
+        )
+        alert_ops(
+            alert_webhook_url,
+            key="overloaded",
+            message=f"Anthropic overloaded: HTTP {exc.status_code} (tenant {tenant_id})",
         )
 
 
@@ -225,6 +237,10 @@ INVOKER_NOT_ALLOWED_NOTICE = (
 
 CHANNEL_BUDGET_NOTICE = (
     "this channel has used its spending budget. A server admin can raise or clear it."
+)
+
+AGENT_PINNED_ELSEWHERE_NOTICE = (
+    "this agent only runs in the channels an operator pinned it to, so it can't answer here."
 )
 
 
@@ -1110,6 +1126,11 @@ class DaimonBot(commands.Bot):
             tenant_id = await self._provision_joined_guild(guild)
             if tenant_id is None:
                 return
+            alert_ops(
+                self.runtime.settings.ops.alert_webhook_url,
+                key=f"install:discord:{guild_id}",
+                message=f"New install: Discord {guild.name} ({guild_id})",
+            )
             await self._post_to_guild(
                 guild, _build_welcome_embed(_resolve_bot_display_name(self.runtime.settings))
             )
@@ -1717,7 +1738,12 @@ class DaimonBot(commands.Bot):
                 unprompted=unprompted,
             )
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            log_anthropic_overload(exc, tenant_id=tenant_id, path="mention")
+            log_anthropic_overload(
+                exc,
+                tenant_id=tenant_id,
+                path="mention",
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+            )
             log.warning("turn.failed", error=str(exc), channel_id=str(message.channel.id))
             await self._render_turn_error(message, tenant_id, guild_id, rid, exc)
         except Exception as exc:  # mention-turn adapter boundary
@@ -1907,7 +1933,12 @@ class DaimonBot(commands.Bot):
                     row, decision, thread=thread, tenant_id=tenant_id, guild_id=guild_id
                 )
         except _anthropic.APIError as exc:
-            log_anthropic_overload(exc, tenant_id=tenant_id, path="continuation")
+            log_anthropic_overload(
+                exc,
+                tenant_id=tenant_id,
+                path="continuation",
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
+            )
             raise
 
     async def _run_continuation_turn_observed(
@@ -2009,6 +2040,7 @@ class DaimonBot(commands.Bot):
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
                 requester_id=int(row.requester_external_user_id),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
@@ -2122,6 +2154,7 @@ class DaimonBot(commands.Bot):
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
                 requester_id=int(row.requester_external_user_id),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
@@ -2208,6 +2241,7 @@ class DaimonBot(commands.Bot):
             outcome.state.error.cause if outcome.state.error is not None else None,
             tenant_id=tenant_id,
             path="continuation",
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
         )
         final_lifecycle = lifecycle_holder[0]
         if outcome.state.error is None and prepared.mapping_id is not None:
@@ -2417,6 +2451,14 @@ class DaimonBot(commands.Bot):
                     user_id=str(message.author.id),
                 )
                 await target.send("Sorry, " + INVOKER_NOT_ALLOWED_NOTICE)
+            elif err.reason == "agent_pinned_elsewhere":
+                log.info(
+                    "turn.skipped.agent_pinned_elsewhere",
+                    guild_id=guild_id,
+                    channel_id=parent_channel_id,
+                    user_id=str(message.author.id),
+                )
+                await target.send("Sorry, " + AGENT_PINNED_ELSEWHERE_NOTICE)
             elif err.reason == "balance_depleted":
                 log.info("turn.skipped.over_balance", guild_id=guild_id, tenant_id=str(tenant_id))
                 await target.send(
@@ -2517,6 +2559,7 @@ class DaimonBot(commands.Bot):
         ) -> DiscordTurnLifecycle:
             return DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
                 requester_id=message.author.id,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
@@ -2884,6 +2927,7 @@ class DaimonBot(commands.Bot):
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
             new_lifecycle = DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
+                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
                 requester_id=message.author.id,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
@@ -2994,6 +3038,7 @@ class DaimonBot(commands.Bot):
             outcome.state.error.cause if outcome.state.error is not None else None,
             tenant_id=tenant_id,
             path="mention",
+            alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
         )
         state = outcome.state
         mapping_id = outcome.mapping_id

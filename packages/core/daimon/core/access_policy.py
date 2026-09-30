@@ -11,7 +11,7 @@ for the tenant's own platform. Channels are named by id, never by name.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TenantAccessPolicy(BaseModel):
@@ -32,6 +32,9 @@ class TenantAccessPolicy(BaseModel):
     # Channels whose own agents answer, and are seen, only inside them; see
     # `daimon.core.channel_isolation`. Memory stays writable, unlike sealed.
     isolated_channel_ids: tuple[str, ...] = ()
+    # Agent name -> the only channels (and threads under them) it may run in.
+    # An agent not named here runs wherever the cascade sends it.
+    agent_channel_pins: dict[str, tuple[str, ...]] = Field(default_factory=dict)
 
 
 OPEN_ACCESS_POLICY = TenantAccessPolicy()
@@ -86,3 +89,29 @@ def is_isolated(
     if channel_id in policy.isolated_channel_ids:
         return True
     return parent_channel_id is not None and parent_channel_id in policy.isolated_channel_ids
+
+
+def is_outside_agent_pin(
+    policy: TenantAccessPolicy,
+    *,
+    agent_names: tuple[str | None, ...],
+    channel_id: str | None,
+    parent_channel_id: str | None = None,
+) -> bool:
+    """Whether a pinned agent is being asked to run outside its channels.
+
+    Pass every name the responder answers to (the cascade's name and the
+    agent's own metadata name); a pin on any of them applies. A turn with no
+    channel (a DM, a headless run) is outside every pin. Admins get no
+    exemption: the pin exists because of what the agent's credentials reach.
+    """
+    for name in agent_names:
+        if name is None or name not in policy.agent_channel_pins:
+            continue
+        pinned = policy.agent_channel_pins[name]
+        if channel_id is not None and channel_id in pinned:
+            continue
+        if parent_channel_id is not None and parent_channel_id in pinned:
+            continue
+        return True
+    return False

@@ -232,8 +232,8 @@ Routines tools: create / list / get / update / delete.
 | --- | --- | --- |
 | `create_routine` | all callers | Create a routine in the caller's tenant partition. |
 | `delete_routine` | all callers | Delete a routine (hard delete, tenant-scoped). |
-| `get_routine` | all callers | Get a routine by id (tenant-scoped; raises if not found or cross-tenant). |
-| `list_routines` | all callers | List all routines in the caller's tenant partition. |
+| `get_routine` | all callers | Get a routine by id. |
+| `list_routines` | all callers | List the routines you created (an admin sees every routine in the workspace). |
 | `update_routine` | all callers | PATCH-update a routine. |
 
 ## `self_edit`

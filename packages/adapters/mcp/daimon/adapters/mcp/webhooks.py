@@ -23,6 +23,7 @@ from daimon.core.billing import BillingConfig
 from daimon.core.config import GithubSettings
 from daimon.core.github_app_auth import verify_signature
 from daimon.core.github_repo_auth import normalize_owner_repo
+from daimon.core.ops_alerts import alert_ops
 from daimon.core.stores import (
     github_installation_reconciliation,
     github_push_resync,
@@ -30,6 +31,7 @@ from daimon.core.stores import (
     pending_clawbacks,
     tenant_ledger,
 )
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 from starlette.responses import Response
@@ -317,6 +319,7 @@ def build_stripe_webhook(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
     billing_config: BillingConfig,
+    alert_webhook_url: SecretStr | None = None,
 ) -> Callable[[Request], Awaitable[Response]]:
     """Construct a Stripe webhook handler with sessionmaker + config bound.
 
@@ -358,7 +361,9 @@ def build_stripe_webhook(
         # --- completed checkout: credit the tenant ledger ---
         if event_type == "checkout.session.completed":
             try:
-                return await _handle_completed(sessionmaker, event_id, event)
+                return await _handle_completed(
+                    sessionmaker, event_id, event, alert_webhook_url=alert_webhook_url
+                )
             except _PaymentCreditConflict as err:
                 log.error(
                     "stripe.webhook.payment_credit_conflict",
@@ -392,6 +397,8 @@ async def _handle_completed(
     sessionmaker: async_sessionmaker[AsyncSession],
     event_id: str,
     event: stripe.Event,
+    *,
+    alert_webhook_url: SecretStr | None = None,
 ) -> Response:
     """Credit the tenant balance for a completed Checkout Session.
 
@@ -443,6 +450,7 @@ async def _handle_completed(
     payment_intent = str(payment_intent_raw) if payment_intent_raw is not None else None
     payment_intent = payment_intent or None
 
+    inserted = False
     async with sessionmaker() as s, s.begin():
         if payment_intent:
             await pending_clawbacks.lock_payment_intent(s, payment_intent=payment_intent)
@@ -464,7 +472,6 @@ async def _handle_completed(
                 if payment_intent
                 else None
             )
-            inserted = False
             if existing is None:
                 inserted = await tenant_ledger.insert_entry(
                     s,
@@ -506,6 +513,12 @@ async def _handle_completed(
             if credit is not None:
                 await _drain_pending_clawbacks(s, payment_intent=payment_intent, credit=credit)
 
+    if inserted:
+        alert_ops(
+            alert_webhook_url,
+            key=f"stripe_topup:{payment_intent or event_id}",
+            message=f"Stripe top-up: ${amount_usd:.2f} to tenant {tenant_id}",
+        )
     log.info(
         "stripe.webhook.processed",
         event_id=event_id,

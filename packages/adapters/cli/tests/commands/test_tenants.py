@@ -617,6 +617,7 @@ def test_access_policy_set_is_registered_with_its_flags() -> None:
         "--sealed-channel",
         "--isolated-channel",
         "--dm-memory-read-only",
+        "--pin-agent",
         "--clear",
     ):
         assert flag in flags, f"{flag} missing from registered options"
@@ -911,3 +912,151 @@ async def test_access_policy_isolates_only_a_channel_with_its_own_agent(
     )
     policy = await _policy(db_session_factory, workspace_id="iso")
     assert policy.isolated_channel_ids == (local,), "its own agent answers only there"
+
+
+@pytest.mark.asyncio
+async def test_access_policy_set_pins_an_agent_to_channels(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-pin")
+
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="guild-pin",
+        pin_agent=[
+            "daimon-rx=666666666666666666",
+            "daimon-rx=777777777777777777",
+            "daimon-rx=666666666666666666",
+        ],
+    )
+
+    assert await _policy(db_session_factory, workspace_id="guild-pin") == TenantAccessPolicy(
+        agent_channel_pins={"daimon-rx": ("666666666666666666", "777777777777777777")}
+    ), "repeating an agent adds channels; a repeated channel is kept once"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["daimon-rx", "=666666666666666666", "daimon-rx=general"])
+async def test_access_policy_set_rejects_a_malformed_pin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+    value: str,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-pin-bad")
+
+    with pytest.raises(typer.BadParameter):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="discord",
+            external_id="guild-pin-bad",
+            pin_agent=[value],
+        )
+
+
+_ACME = "111111111111111111"
+_ACME_2 = "222222222222222222"
+_CLIENT_B = "333333333333333333"
+
+
+@pytest.mark.asyncio
+async def test_onboarding_a_second_client_keeps_the_first_clients_pin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+) -> None:
+    """The onboarding step run once per client must never unpin an earlier client."""
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-onboard")
+
+    async def pin(**flags: object) -> str:
+        console = _make_console()
+        await tenants_access_policy_set(
+            rt=rt,
+            console=console,
+            platform="discord",
+            external_id="guild-onboard",
+            **flags,  # type: ignore[arg-type]
+        )
+        return _output(console)
+
+    await pin(add_pin_agent=[f"acme-project={_ACME}"])
+    printed = await pin(add_pin_agent=[f"clientb-project={_CLIENT_B}"])
+
+    assert await _policy(db_session_factory, workspace_id="guild-onboard") == TenantAccessPolicy(
+        agent_channel_pins={"acme-project": (_ACME,), "clientb-project": (_CLIENT_B,)}
+    ), "adding the second client's pin must keep the first client's"
+    assert f"acme-project -> {_ACME}" in printed and f"clientb-project -> {_CLIENT_B}" in printed
+
+    with pytest.raises(typer.BadParameter, match="would unpin acme-project"):
+        await pin(pin_agent=[f"clientb-project={_CLIENT_B}"])
+    assert (await _policy(db_session_factory, workspace_id="guild-onboard")).agent_channel_pins[
+        "acme-project"
+    ] == (_ACME,), "a refused replace changes nothing"
+
+    await pin(add_pin_agent=[f"acme-project={_ACME_2}"])
+    await pin(remove_pin_agent=[f"acme-project={_ACME}"])
+    assert (await _policy(db_session_factory, workspace_id="guild-onboard")).agent_channel_pins == {
+        "acme-project": (_ACME_2,),
+        "clientb-project": (_CLIENT_B,),
+    }
+
+    await pin(remove_pin_agent=["acme-project"])
+    assert (await _policy(db_session_factory, workspace_id="guild-onboard")).agent_channel_pins == {
+        "clientb-project": (_CLIENT_B,)
+    }, "removing one agent's pin keeps the other's"
+
+    await pin(pin_agent=[f"acme-project={_ACME}"], replace_pins=True)
+    assert (await _policy(db_session_factory, workspace_id="guild-onboard")).agent_channel_pins == {
+        "acme-project": (_ACME,)
+    }, "--replace-pins is the explicit way to drop pins"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "flags",
+    [
+        {"remove_pin_agent": ["nobody"]},
+        {"remove_pin_agent": [f"acme-project={_CLIENT_B}"]},
+        {"pin_agent": [f"acme-project={_ACME}"], "add_pin_agent": [f"x={_ACME_2}"]},
+        {"replace_pins": True, "add_pin_agent": [f"x={_ACME_2}"]},
+        {"clear": True, "add_pin_agent": [f"x={_ACME_2}"]},
+    ],
+    ids=[
+        "remove-unknown-agent",
+        "remove-unknown-channel",
+        "replace-and-edit",
+        "stray-replace",
+        "clear-and-edit",
+    ],
+)
+async def test_pin_edits_refuse_ambiguous_or_mistyped_changes(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+    flags: dict[str, object],
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-pin-edit")
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="guild-pin-edit",
+        add_pin_agent=[f"acme-project={_ACME}"],
+    )
+
+    with pytest.raises(typer.BadParameter):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform="discord",
+            external_id="guild-pin-edit",
+            **flags,  # type: ignore[arg-type]
+        )
+    assert (
+        await _policy(db_session_factory, workspace_id="guild-pin-edit")
+    ).agent_channel_pins == {"acme-project": (_ACME,)}

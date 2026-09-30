@@ -390,6 +390,11 @@ def _print_policy(
     ):
         console.print(f"  {field}: {', '.join(ids) or '-'}")
     console.print(f"  dm_memory_read_only: {str(policy.dm_memory_read_only).lower()}")
+    pins = policy.agent_channel_pins
+    console.print(
+        "  agent_channel_pins: "
+        + ("; ".join(f"{name} -> {', '.join(ids)}" for name, ids in sorted(pins.items())) or "-")
+    )
 
 
 async def _require_isolatable(
@@ -485,6 +490,42 @@ def tenants_access_policy_set_command(
             help="Give turns started from a DM read-only memory.",
         ),
     ] = None,
+    pin_agent: Annotated[
+        list[str] | None,
+        typer.Option(
+            help=(
+                "AGENT=CHANNEL_ID: replace every pin with these; the named agent runs only "
+                "in these channels and the threads under them (repeatable; repeat an agent "
+                "for more channels). Refused if it would drop an existing agent's pin "
+                "unless --replace-pins is given."
+            )
+        ),
+    ] = None,
+    add_pin_agent: Annotated[
+        list[str] | None,
+        typer.Option(
+            help=(
+                "AGENT=CHANNEL_ID: add a channel to an agent's pin, keeping every other "
+                "pin (repeatable). Use this to onboard another client."
+            )
+        ),
+    ] = None,
+    remove_pin_agent: Annotated[
+        list[str] | None,
+        typer.Option(
+            help=(
+                "AGENT or AGENT=CHANNEL_ID: drop that agent's whole pin, or one channel "
+                "from it, keeping every other pin (repeatable)."
+            )
+        ),
+    ] = None,
+    replace_pins: Annotated[
+        bool,
+        typer.Option(
+            "--replace-pins",
+            help="Let --pin-agent drop pins of agents it does not name.",
+        ),
+    ] = False,
     clear: Annotated[
         bool, typer.Option("--clear", help="Remove the policy: back to open.")
     ] = False,
@@ -493,7 +534,10 @@ def tenants_access_policy_set_command(
     """Set a tenant's access policy.
 
     Each flag given replaces that whole field; fields not given keep their
-    stored value. To empty one field, --clear and set the rest again.
+    stored value. To empty one field, --clear and set the rest again. Pins
+    are the exception: --add-pin-agent and --remove-pin-agent edit the stored
+    pins in place, and --pin-agent refuses to drop another agent's pin
+    without --replace-pins. The resulting policy is printed.
     """
     settings = load_settings()
     console = Console(highlight=False)
@@ -511,11 +555,77 @@ def tenants_access_policy_set_command(
                 sealed_channel=sealed_channel,
                 isolated_channel=isolated_channel,
                 dm_memory_read_only=dm_memory_read_only,
+                pin_agent=pin_agent,
+                add_pin_agent=add_pin_agent,
+                remove_pin_agent=remove_pin_agent,
+                replace_pins=replace_pins,
                 clear=clear,
                 as_json=as_json,
             )
 
     run_cli(_with_runtime(), console=console)
+
+
+def _parse_agent_pins(
+    pins: list[str], *, platform: str, channel_optional: bool = False
+) -> dict[str, tuple[str, ...]]:
+    """Turn repeated AGENT=CHANNEL_ID flags into the policy's pin mapping.
+
+    With ``channel_optional`` a bare AGENT is accepted and maps to ``()``,
+    meaning the agent's whole pin (``--remove-pin-agent``).
+    """
+    if not pins:
+        raise typer.BadParameter("agent_channel_pins: pass at least one AGENT=CHANNEL_ID")
+    parsed: dict[str, list[str]] = {}
+    pattern = r"[0-9]{15,21}" if platform == "discord" else r"[CGD][A-Z0-9]+"
+    for value in pins:
+        name, sep, channel = (part.strip() for part in value.partition("="))
+        if channel_optional and name and not sep:
+            parsed.setdefault(name, [])
+            continue
+        if not sep or not name or not channel:
+            raise typer.BadParameter(
+                f"agent_channel_pins: expected AGENT=CHANNEL_ID, got {value!r}"
+            )
+        if platform != "cli" and re.fullmatch(pattern, channel) is None:
+            raise typer.BadParameter(f"agent_channel_pins: invalid {platform} id {channel!r}")
+        parsed.setdefault(name, [])
+        if channel not in parsed[name]:
+            parsed[name].append(channel)
+    return {name: tuple(ids) for name, ids in parsed.items()}
+
+
+def _merge_pins(
+    current: dict[str, tuple[str, ...]],
+    *,
+    add: dict[str, tuple[str, ...]],
+    remove: dict[str, tuple[str, ...]],
+) -> dict[str, tuple[str, ...]]:
+    """Apply --add-pin-agent then --remove-pin-agent to the stored pins.
+
+    Pins of agents named by neither are kept exactly. Removing an agent's
+    last channel removes its pin, and removing a pin that isn't there is
+    refused rather than ignored, so a typo can't pass for a change.
+    """
+    merged = {name: list(ids) for name, ids in current.items()}
+    for name, ids in add.items():
+        channels = merged.setdefault(name, [])
+        channels.extend(channel for channel in ids if channel not in channels)
+    for name, ids in remove.items():
+        if name not in merged:
+            raise typer.BadParameter(f"agent_channel_pins: {name!r} is not pinned")
+        if not ids:
+            del merged[name]
+            continue
+        missing = [channel for channel in ids if channel not in merged[name]]
+        if missing:
+            raise typer.BadParameter(
+                f"agent_channel_pins: {name!r} is not pinned to {', '.join(missing)}"
+            )
+        merged[name] = [channel for channel in merged[name] if channel not in ids]
+        if not merged[name]:
+            del merged[name]
+    return {name: tuple(ids) for name, ids in merged.items()}
 
 
 async def tenants_access_policy_set(
@@ -530,6 +640,10 @@ async def tenants_access_policy_set(
     sealed_channel: list[str] | None = None,
     isolated_channel: list[str] | None = None,
     dm_memory_read_only: bool | None = None,
+    pin_agent: list[str] | None = None,
+    add_pin_agent: list[str] | None = None,
+    remove_pin_agent: list[str] | None = None,
+    replace_pins: bool = False,
     clear: bool = False,
     as_json: bool = False,
 ) -> None:
@@ -567,9 +681,29 @@ async def tenants_access_policy_set(
             changes[field] = tuple(dict.fromkeys(value.strip() for value in ids))
     if dm_memory_read_only is not None:
         changes["dm_memory_read_only"] = dm_memory_read_only
-    if clear and changes:
+    if pin_agent is not None:
+        changes["agent_channel_pins"] = _parse_agent_pins(pin_agent, platform=validated_platform)
+    if pin_agent is not None and (add_pin_agent is not None or remove_pin_agent is not None):
+        raise typer.BadParameter(
+            "--pin-agent replaces every pin; use it alone, or edit pins with "
+            "--add-pin-agent / --remove-pin-agent"
+        )
+    if replace_pins and pin_agent is None:
+        raise typer.BadParameter("--replace-pins only applies to --pin-agent")
+    pins_to_add = (
+        _parse_agent_pins(add_pin_agent, platform=validated_platform)
+        if add_pin_agent is not None
+        else {}
+    )
+    pins_to_remove = (
+        _parse_agent_pins(remove_pin_agent, platform=validated_platform, channel_optional=True)
+        if remove_pin_agent is not None
+        else {}
+    )
+    edits_pins = bool(pins_to_add or pins_to_remove)
+    if clear and (changes or edits_pins):
         raise typer.BadParameter("--clear can't be combined with other policy flags")
-    if not clear and not changes:
+    if not clear and not changes and not edits_pins:
         raise typer.BadParameter("nothing to set: pass a policy flag or --clear")
 
     label = f"{platform}:{external_id}"
@@ -586,6 +720,21 @@ async def tenants_access_policy_set(
             # An unreadable stored row raises here rather than being overwritten
             # blind; --clear is the way out of that state.
             current = await load_access_policy(session, tenant_id=tenant_id)
+            if edits_pins:
+                changes["agent_channel_pins"] = _merge_pins(
+                    current.agent_channel_pins, add=pins_to_add, remove=pins_to_remove
+                )
+            elif pin_agent is not None and not replace_pins:
+                # Onboarding a second client with only its own --pin-agent
+                # would silently unpin the first; make that explicit.
+                replacement = cast("dict[str, tuple[str, ...]]", changes["agent_channel_pins"])
+                dropped = sorted(set(current.agent_channel_pins) - set(replacement))
+                if dropped:
+                    raise typer.BadParameter(
+                        "--pin-agent replaces every pin and would unpin "
+                        f"{', '.join(dropped)}. Use --add-pin-agent to keep them, or "
+                        "--replace-pins to drop them. Nothing was changed."
+                    )
             policy = TenantAccessPolicy.model_validate(current.model_dump() | changes)
             await set_access_policy(session, tenant_id=tenant_id, policy=policy)
     _print_policy(console, label=label, policy=policy, as_json=as_json)

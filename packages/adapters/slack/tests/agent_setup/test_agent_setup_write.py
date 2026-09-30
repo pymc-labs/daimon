@@ -4,7 +4,7 @@ Covers:
 - do_propagate persists agent_name at the scope (set_fields); second call returns prior name
 - do_unpropagate clears the agent_name (unset_fields)
 - mask_tail covers the full-length and short-string cases
-- fork_agent copies credential + repo binding via core.agent_lifecycle (mirrors Discord)
+- fork_agent copies no credential or repo binding (mirrors Discord)
 - delete_agent archives the memory store via core.agent_lifecycle (mirrors Discord)
 """
 
@@ -39,7 +39,6 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from daimon.core.stores.agent_repo_binding import get_binding, set_binding
-from daimon.core.stores.github_credentials import delete_credential_for_principal
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import get_tenant
@@ -423,12 +422,11 @@ def _runtime_with_db(
     )
 
 
-async def test_fork_agent_rekeys_source_credential_onto_fork(
+async def test_fork_agent_copies_no_credential_or_repo_binding(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """After fork_agent, get_pat(agent_id=fork) resolves the source's token,
-    re-keyed under the fork's OWN principal."""
+    """A fork starts credential-less: the source's PAT and repo binding stay behind."""
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_FORK_CRED")
     tenant_id = tenant.id
     account_id = await _seed_account(db_session, tenant_id)
@@ -491,136 +489,11 @@ async def test_fork_agent_rekeys_source_credential_onto_fork(
         sessionmaker=db_session_factory,
         fernet=fernet,
     )
-    assert fork_pat == plaintext, "fork's credential must resolve the source's token"
-
-    # Deleting the source credential must not break the fork (no aliasing).
-    await delete_credential_for_principal(db_session, principal_id=source_agent_uuid)
-    await db_session.commit()
-    fork_pat_after_delete = await get_pat(
-        principal_id=fork_agent_uuid,
-        agent_id=fork_agent_uuid,
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-    )
-    assert fork_pat_after_delete == plaintext, (
-        "fork's credential must survive deletion of the source credential (no aliasing)"
-    )
-
-
-async def test_fork_agent_raises_when_source_credential_unresolvable(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """fork_agent fails loud when the source's inline-pat binding has no
-    resolvable credential (binding row exists, credential row does not)."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_FORK_NOCRED")
-    tenant_id = tenant.id
-    account_id = await _seed_account(db_session, tenant_id)
-
-    source_payload = _agent_dict(
-        id_="ag_src_nocred", name="source", tenant_id=tenant_id, account_id=account_id
-    )
-    source_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_src_nocred")
-
-    # Binding exists (inline-pat:) but no github_credentials row backs it —
-    # the undecryptable/missing-credential case.
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=tenant_id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/repo",
-            default_branch="main",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
+    assert fork_pat is None, "the fork must not hold the source's GitHub token"
+    async with db_session_factory() as s:
+        assert await get_binding(s, tenant_id=tenant_id, agent_id=fork_agent_uuid) is None, (
+            "the fork must not inherit the source's repo binding"
         )
-
-    created: list[dict[str, Any]] = []
-    handler = _fork_handler(
-        source_payload=source_payload,
-        fork_id="ag_fork_nocred",
-        fork_name="myfork2",
-        tenant_id=tenant_id,
-        account_id=account_id,
-        created=created,
-    )
-    fernet_key = Fernet.generate_key().decode()
-    runtime = _runtime_with_db(
-        build_stub_anthropic(handler), sessionmaker=db_session_factory, fernet_key=fernet_key
-    )
-
-    with pytest.raises(DaimonError, match="github git-proxy"):
-        await write_mod.fork_agent(
-            runtime,
-            tenant_id=tenant_id,
-            source_name="source",
-            new_name="myfork2",
-            account_id=account_id,
-        )
-
-
-async def test_fork_agent_copies_anon_binding_without_error_or_credential_write(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A public/anon: source binding forks with no error and no credential write;
-    the fork's binding carries the same repo with ma_secret_ref copied verbatim."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_FORK_ANON")
-    tenant_id = tenant.id
-    account_id = await _seed_account(db_session, tenant_id)
-
-    source_payload = _agent_dict(
-        id_="ag_src_anon", name="source", tenant_id=tenant_id, account_id=account_id
-    )
-    source_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_src_anon")
-    fork_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_fork_anon")
-
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=tenant_id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/public-repo",
-            default_branch="main",
-            ma_secret_ref="anon:",
-            proof=None,
-        )
-
-    created: list[dict[str, Any]] = []
-    handler = _fork_handler(
-        source_payload=source_payload,
-        fork_id="ag_fork_anon",
-        fork_name="myfork3",
-        tenant_id=tenant_id,
-        account_id=account_id,
-        created=created,
-    )
-    fernet_key = Fernet.generate_key().decode()
-    runtime = _runtime_with_db(
-        build_stub_anthropic(handler), sessionmaker=db_session_factory, fernet_key=fernet_key
-    )
-
-    await write_mod.fork_agent(
-        runtime,
-        tenant_id=tenant_id,
-        source_name="source",
-        new_name="myfork3",
-        account_id=account_id,
-    )
-
-    fork_binding = await get_binding(db_session, tenant_id=tenant_id, agent_id=fork_agent_uuid)
-    assert fork_binding is not None, "anon: source binding must still be copied to the fork"
-    assert fork_binding.repo_url == "acme/public-repo", "fork points at the same repo"
-    assert fork_binding.ma_secret_ref == "anon:", "anon: ref is copied verbatim, not rewritten"
-
-    fernet = build_multifernet((fernet_key,))
-    fork_pat = await get_pat(
-        principal_id=fork_agent_uuid,
-        agent_id=fork_agent_uuid,
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-    )
-    assert fork_pat is None, "no credential write must happen for an anon: source"
 
 
 async def test_delete_agent_archives_memory_store(db_session, db_session_factory) -> None:

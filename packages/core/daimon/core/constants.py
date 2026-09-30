@@ -23,6 +23,7 @@ MODEL_DISPLAY_NAMES: Final[dict[str, str]] = {
     "claude-opus-5": "Opus 5",
     "claude-opus-4-8": "Opus 4.8",
     "claude-opus-4-7": "Opus 4.7",
+    "claude-sonnet-5-5": "Sonnet 5.5",
     "claude-sonnet-5": "Sonnet 5",
     "claude-sonnet-4-6": "Sonnet 4.6",
     "claude-haiku-4-5": "Haiku 4.5",
@@ -34,7 +35,7 @@ MODEL_DISPLAY_NAMES: Final[dict[str, str]] = {
 # modal and the Slack submit path, which is how three surfaces ended up a
 # generation behind `defaults/agents/daimon.yaml` while each looked correct in
 # isolation. Keep it equal to the model that file pins.
-DEFAULT_AGENT_MODEL: str = "claude-sonnet-5"
+DEFAULT_AGENT_MODEL: str = "claude-sonnet-5-5"
 
 # The per-agent skill and MCP-server limits every surface enforces. The setup
 # panel (disabling its add controls) and the chat update path (refusing a

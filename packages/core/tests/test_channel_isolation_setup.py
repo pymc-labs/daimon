@@ -6,6 +6,7 @@ import uuid
 
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_fork import fork_agent
 from daimon.core.channel_isolation_setup import (
     ChannelIsolationRefused,
@@ -16,10 +17,9 @@ from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from daimon.testing.ma_models import ma_agent
@@ -176,8 +176,6 @@ async def test_fork_agent_copies_the_source_under_a_new_name(
             source_name="shared",
             new_name=new_name,
             public_url=None,
-            fernet=make_fernet(),
-            oauth_scopes=(),
         )
 
     await fork("team-alpha")
@@ -186,3 +184,11 @@ async def test_fork_agent_copies_the_source_under_a_new_name(
     assert names == ["shared", "team-alpha"], "the copy is tagged with its new name"
     with pytest.raises(DaimonError, match="already exists"):
         await fork("team-alpha")
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"shared": ("C_PINNED",)}),
+    )
+    await db_session.commit()
+    with pytest.raises(DaimonError, match="pinned to specific channels"):
+        await fork("team-beta")
