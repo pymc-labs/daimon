@@ -8,6 +8,7 @@ from typing import cast
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -46,6 +47,13 @@ async def send_direct_message_impl(
     policy = runtime.settings.direct_message_policies.get(auth.tenant_id, DirectMessagePolicy())
     if not policy.allows(recipient_id):
         raise ToolError("recipient is denied by this tenant's direct-message policy")
+    # Only an executing agent can be inside an isolated channel; a person's own token never is.
+    executing = auth.agent_id or auth.chat_agent_id
+    if executing and (await load_caller_isolation(runtime, auth)).inside_channel_id is not None:
+        raise ToolError(
+            "an isolated channel's own agent posts only inside that channel, so it can't "
+            "send direct messages. Tell the caller. Do not retry."
+        )
     chunks = [content[i : i + 1900] for i in range(0, len(content), 1900)]
     ids: list[str] = []
     if auth.platform == "discord":

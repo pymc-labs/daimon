@@ -4,7 +4,7 @@ One write guard for Discord and Slack: each platform resolves its target to a
 channel id (plus parent channel and category where it has them) and calls
 `require_channel_writable` after its own caller-permission check, so the
 policy never reveals a channel the caller could not see anyway. Protection
-applies to admins too.
+and isolation apply to admins too.
 
 Reads go through `ChannelReadPolicy`, which the channel dispatcher
 (`tools/channels.py`) loads once per call and hands to the platform impl. A
@@ -38,6 +38,10 @@ _PROTECTED_MSG = (
     "this channel is protected: the workspace does not let daimon post there. "
     "Tell the caller and offer to post somewhere else. Do not retry."
 )
+_ISOLATED_WRITE_MSG = (
+    "this post would cross an isolated channel's line: only its own agents post in it, "
+    "and they post nowhere else. Tell the caller. Do not retry."
+)
 _UNREADABLE_MSG = (
     "this workspace's access policy could not be read, so daimon won't read or post channels"
 )
@@ -65,7 +69,11 @@ async def require_channel_writable(
     parent_channel_id: str | None = None,
     category_id: str | None = None,
 ) -> None:
-    """Raise ToolError when the tenant policy protects the target from agent writes."""
+    """Raise ToolError when the tenant policy protects the target from agent writes.
+
+    An isolated channel takes posts only from its own agents, and they post
+    nowhere else.
+    """
     policy = await load_channel_policy(runtime, auth)
     if is_write_protected(
         policy,
@@ -74,6 +82,12 @@ async def require_channel_writable(
         category_id=category_id,
     ):
         raise ToolError(_PROTECTED_MSG)
+    if policy.isolated_channel_ids:
+        caller = await load_caller_isolation(runtime, auth)
+        if caller.isolation.isolated_channel(channel_id, parent_channel_id) != (
+            caller.inside_channel_id
+        ):
+            raise ToolError(_ISOLATED_WRITE_MSG)
 
 
 _ISOLATED_MSG = (

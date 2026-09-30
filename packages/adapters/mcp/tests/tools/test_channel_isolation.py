@@ -16,6 +16,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
 from daimon.adapters.mcp.tools.agents import (
     _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
@@ -23,8 +24,10 @@ from daimon.adapters.mcp.tools.agents import (
 from daimon.adapters.mcp.tools.channel_isolation import (
     _set_channel_isolation_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
 from daimon.adapters.mcp.tools.propagation import (
     _clear_agent_default_impl,  # pyright: ignore[reportPrivateUsage]
+    _explain_agent_resolution_impl,  # pyright: ignore[reportPrivateUsage]
     _set_agent_default_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.routines import (
@@ -44,10 +47,10 @@ from daimon.core.stores.access_policy import load_access_policy, set_access_poli
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing import ma_agent
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing.ma import (
     FakeMAState,
     NotHandled,
@@ -102,13 +105,13 @@ async def _world(
     local: str = "local",
     uploaded: bool = False,
 ) -> tuple[_World, McpRuntime]:
-    async with sessionmaker.begin() as session:
-        tenant = await make_tenant(session)
-        account = await make_account(session, tenant=tenant)
     """``uploaded`` adds ``upload-notes``: a title naming no agent, owned by ``local`` by its upload."""
     titles = {"skill_local": f"{local}/notes", "skill_shared": "shared/notes"}
     if uploaded:
         titles["skill_upload"] = "upload-notes"
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
         if uploaded:
             principal = await make_platform_principal(
                 session, platform="discord", external_id="555", tenant=tenant, account=account
@@ -194,9 +197,6 @@ async def test_agents_and_skills_split_at_the_isolation_line(
     assert [s.name for s in await _list_impl(runtime, inside)] == ["local/notes"]
 
 
-async def test_routing_writes_keep_local_agents_in_and_shared_ones_out(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
 async def test_skill_owners_come_from_uploads_and_survive_shortened_titles(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -217,6 +217,9 @@ async def test_skill_owners_come_from_uploads_and_survive_shortened_titles(
             await _get_impl(runtime, outside, name)
 
 
+async def test_routing_writes_keep_local_agents_in_and_shared_ones_out(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
     world, runtime = await _world(committing_sessionmaker)
     admin = world.auth()
     with pytest.raises(ToolError, match="isolated"):
@@ -303,3 +306,39 @@ async def test_set_channel_isolation_refuses_or_forks_and_ends(
         runtime, world.auth(), channel_id=ROOM, isolated=False
     )
     assert ended.changed and not ended.isolated, "ending isolation reports the change"
+
+
+async def test_explain_agent_resolution_stays_on_the_callers_side(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    outside, inside = world.auth(), world.auth(executing="agent_local")
+
+    with pytest.raises(ToolError, match="across an isolated channel's line"):
+        await _explain_agent_resolution_impl(runtime, outside, ROOM)
+    with pytest.raises(ToolError, match="across an isolated channel's line"):
+        await _explain_agent_resolution_impl(runtime, inside, OTHER)
+    here = await _explain_agent_resolution_impl(runtime, inside, ROOM)
+    assert (here.effective_agent_name, here.deployment_default) == ("local", None), (
+        "inside, the shared fallback is not named"
+    )
+    there = await _explain_agent_resolution_impl(runtime, outside, OTHER)
+    assert there.effective_agent_name == "shared"
+
+
+async def test_posts_and_direct_messages_stay_on_their_side(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    outside, inside = world.auth(), world.auth(executing="agent_local")
+
+    with pytest.raises(ToolError, match="cross an isolated channel's line"):
+        await require_channel_writable(runtime, outside, channel_id=ROOM)
+    with pytest.raises(ToolError, match="cross an isolated channel's line"):
+        await require_channel_writable(runtime, outside, channel_id="t1", parent_channel_id=ROOM)
+    with pytest.raises(ToolError, match="cross an isolated channel's line"):
+        await require_channel_writable(runtime, inside, channel_id=OTHER)
+    await require_channel_writable(runtime, inside, channel_id="t1", parent_channel_id=ROOM)
+    await require_channel_writable(runtime, outside, channel_id=OTHER)
+    with pytest.raises(ToolError, match="can't send direct messages"):
+        await send_direct_message_impl(runtime, inside, recipient_id="123", content="hi")
