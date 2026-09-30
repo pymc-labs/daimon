@@ -233,10 +233,11 @@ Both the checkout and webhook routes are mounted only when Stripe is
 configured. Operators can credit an existing tenant without Stripe:
 
 ```sh
-daimon tenants credit discord GUILD_ID 25.00 --reason "hackathon grant" --id grant-1
+daimon tenants credit discord GUILD_ID 25.00 --note "hackathon grant" --id grant-1
 ```
 
-The command prints the new balance, credit id and idempotency key. Reusing the same
+The ledger reason is `manual_credit`; the readable note goes in the idempotency
+key. The command prints the new balance, credit id and key. Reusing the same
 arguments and `--id` does not add a second credit. Omit `--id` for a new,
 generated id each time.
 
@@ -262,7 +263,7 @@ all turns; the cap gate applies even without Stripe.
 
 These tables are declared in `packages/core/daimon/core/_models.py` with stores
 beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
-`trial`, `topup`, `turn_debit`, `checkpoint_debit`, `media_debit`,
+`trial`, `topup`, `manual_credit`, `turn_debit`, `checkpoint_debit`, `media_debit`,
 `classifier_debit`, `thread_naming_debit`, and the two clawback reasons named
 after their Stripe events.
 

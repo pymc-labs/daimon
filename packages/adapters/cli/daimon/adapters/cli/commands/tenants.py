@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -228,7 +227,7 @@ def tenants_credit_command(
     platform: str,
     workspace_id: str,
     usd: str,
-    reason: Annotated[str, typer.Option("--reason", help="Why credit was added.")],
+    note: Annotated[str, typer.Option("--note", help="Operator note for this credit.")],
     request_id: Annotated[
         str | None, typer.Option("--id", help="Reuse this id to safely retry the credit.")
     ] = None,
@@ -244,7 +243,7 @@ def tenants_credit_command(
                 platform=platform,
                 workspace_id=workspace_id,
                 usd=usd,
-                reason=reason,
+                note=note,
                 request_id=request_id,
             )
 
@@ -258,26 +257,24 @@ async def tenants_credit(
     platform: str,
     workspace_id: str,
     usd: str,
-    reason: str,
+    note: str,
     request_id: str | None,
 ) -> None:
     amount = _usd(usd, positive=True)
-    if not reason.strip():
-        raise typer.BadParameter("reason must not be empty")
+    if not note.strip():
+        raise typer.BadParameter("note must not be empty")
+    note_slug = re.sub(r"[_\W]+", "-", note.strip().lower()).strip("-")[:64].rstrip("-")
+    if not note_slug:
+        raise typer.BadParameter("note must contain letters or numbers")
     tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=workspace_id)
     request_id = request_id or str(uuid.uuid4())
-    # Argument digest makes the key stable across retries without putting free-form
-    # reasons in the index. The caller id distinguishes intentional repeat credits.
-    digest = hashlib.sha256(
-        f"{platform}\0{workspace_id}\0{amount:.2f}\0{reason}".encode()
-    ).hexdigest()[:16]
-    key = f"manual:topup:{tenant_id}:{digest}:{request_id}"
+    key = f"manual:credit:{tenant_id}:{note_slug}:usd{amount:.2f}:{request_id}"
     async with rt.sessionmaker() as session, session.begin():
         inserted = await tenant_ledger.insert_entry(
             session,
             tenant_id=tenant_id,
             delta_usd=amount,
-            reason=reason,
+            reason="manual_credit",
             idempotency_key=key,
         )
         balance = await tenant_ledger.get_balance(session, tenant_id=tenant_id)

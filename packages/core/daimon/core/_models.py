@@ -860,7 +860,7 @@ class TenantLedger(Base):
     delta_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
     reason: Mapped[str] = mapped_column(
         Text, nullable=False
-    )  # topup|trial|turn_debit|charge.refunded|charge.dispute.created
+    )  # topup|manual_credit|trial|turn_debit|charge.refunded|charge.dispute.created
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
     payment_event_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("payment_events.id", ondelete="SET NULL"), nullable=True

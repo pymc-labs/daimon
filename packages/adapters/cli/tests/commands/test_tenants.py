@@ -37,6 +37,7 @@ from rich.console import Console
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from typer.main import get_command
+from typer.testing import CliRunner
 
 from ..harness import build_cli_runtime
 
@@ -54,6 +55,13 @@ class _FakeSettings:
 def _make_console() -> Console:
     """Console that writes to a StringIO for test output capture."""
     return Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+
+
+def test_credit_uses_note_option() -> None:
+    result = CliRunner().invoke(tenants_mod.tenants_app, ["credit", "--help"])
+    assert result.exit_code == 0
+    assert "--note" in result.output
+    assert "--reason" not in result.output
 
 
 @pytest.mark.asyncio
@@ -74,14 +82,18 @@ async def test_credit_is_positive_and_idempotent(
             platform="discord",
             workspace_id="credit-guild",
             usd="25.00",
-            reason="hackathon grant",
+            note="Hackathon grant: team #3",
             request_id="grant-1",
         )
     async with db_session_factory() as s:
         after = await tenant_ledger.get_balance(s, tenant_id=result.tenant_id)
         rows = await tenant_ledger.list_for_tenant(s, tenant_id=result.tenant_id)
     assert after == before + Decimal("25.00")
-    assert len([row for row in rows if row.reason == "hackathon grant"]) == 1
+    credits = [row for row in rows if row.reason == "manual_credit"]
+    assert len(credits) == 1
+    assert credits[0].idempotency_key == (
+        f"manual:credit:{result.tenant_id}:hackathon-grant-team-3:usd25.00:grant-1"
+    )
     assert "already credited" in cast(StringIO, console.file).getvalue()
     assert "credit id: grant-1" in cast(StringIO, console.file).getvalue()
     with pytest.raises(typer.BadParameter, match="positive"):
@@ -91,7 +103,17 @@ async def test_credit_is_positive_and_idempotent(
             platform="discord",
             workspace_id="credit-guild",
             usd="-1",
-            reason="invalid",
+            note="invalid",
+            request_id=None,
+        )
+    with pytest.raises(typer.BadParameter, match="note"):
+        await tenants_credit(
+            rt=rt,
+            console=console,
+            platform="discord",
+            workspace_id="credit-guild",
+            usd="1",
+            note="!!!",
             request_id=None,
         )
 
