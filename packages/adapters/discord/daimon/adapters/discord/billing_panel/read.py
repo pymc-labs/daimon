@@ -17,6 +17,7 @@ from daimon.adapters.discord.billing_panel.state import (
     MemberRow,
 )
 from daimon.adapters.discord.checks import is_member_guild_admin
+from daimon.core.channel_budget import get_channel_budget_status
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.promo_credit import get_active_timed_credit
 from daimon.core.stores import tenant_user_caps
@@ -54,6 +55,14 @@ def is_guild_admin(interaction: BotInteraction) -> bool:
     return is_member_guild_admin(member, guild_owner_id=owner_id)
 
 
+def invoking_channel_id(interaction: BotInteraction) -> str | None:
+    """The channel a budget applies to: the invoking channel, or a thread's parent."""
+    channel = interaction.channel
+    if isinstance(channel, discord.Thread):
+        return str(channel.parent_id)
+    return str(interaction.channel_id) if interaction.channel_id is not None else None
+
+
 def _resolve_member_name(guild: discord.Guild | None, user_id: str) -> str:
     """Cache-only display-name lookup.
 
@@ -81,6 +90,7 @@ async def load_billing_snapshot(
     is_admin: bool,
     since: datetime,
     now: datetime,
+    channel_id: str | None = None,
 ) -> BillingPanelState:
     """Read everything needed to render /billing for a single invocation.
 
@@ -110,6 +120,17 @@ async def load_billing_snapshot(
     )
     guild_balance = await get_balance(session, tenant_id=tenant_id)
     timed_credit = tuple(await get_active_timed_credit(session, tenant_id=tenant_id, now=now))
+    channel_budget = (
+        None
+        if channel_id is None
+        else await get_channel_budget_status(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            channel_id=channel_id,
+            now=now,
+        )
+    )
 
     if not is_admin:
         return BillingPanelState(
@@ -125,6 +146,7 @@ async def load_billing_snapshot(
             member_rows=(),
             over_cap_count=0,
             timed_credit=timed_credit,
+            channel_budget=channel_budget,
         )
 
     # Admin path
@@ -182,4 +204,5 @@ async def load_billing_snapshot(
         member_rows=capped,
         over_cap_count=over_cap_count,
         timed_credit=timed_credit,
+        channel_budget=channel_budget,
     )

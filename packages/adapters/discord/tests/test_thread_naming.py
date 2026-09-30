@@ -98,10 +98,12 @@ async def test_generate_thread_name_returns_title_and_meters_haiku_call_to_autho
         markup=Decimal("1.0"),
         max_input_chars=2000,
         timeout_seconds=5.0,
+        channel_id="chan-1",
     )
 
     assert name == "PyMC Divergences on M2 Mac", "the model's title is what the thread opens under"
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
+    assert [r.channel_id for r in rows] == ["chan-1"], "the title counts toward the channel"
     assert [(r.model, r.platform_user_id, r.input_tokens, r.managed_session_id) for r in rows] == [
         (THREAD_NAMING_MODEL, "555", 120, "thread-naming:4242")
     ], "the naming call must be metered to the tenant under the author, keyed on the message"

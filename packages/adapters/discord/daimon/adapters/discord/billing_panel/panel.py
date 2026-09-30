@@ -24,6 +24,7 @@ from decimal import Decimal
 import httpx
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.billing_panel.read import (
+    invoking_channel_id,
     is_guild_admin,
     load_billing_snapshot,
 )
@@ -35,6 +36,7 @@ from daimon.adapters.discord.billing_panel.state import (
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.channel_budget import describe_budget
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.mcp_auth import mint_jwt
@@ -93,6 +95,12 @@ def _format_caller_line(spend: float, cap: Decimal | None, turns: int) -> str:
     cap_f = float(cap)
     pct = int(spend / cap_f * 100) if cap_f > 0 else 0
     return f"💸 {_fmt_usd(spend)} / {_fmt_usd(cap_f)} cap ({pct}%) · {turns} turns"
+
+
+def _channel_budget_lines(state: BillingPanelState) -> list[str]:
+    if state.channel_budget is None:
+        return []
+    return [f"-# this channel: {describe_budget(state.channel_budget)}"]
 
 
 def estimate_turns(
@@ -159,6 +167,7 @@ def build_billing_container(
             "🏦 **Server credit**",
             credit_line,
             *_timed_credit_lines(state),
+            *_channel_budget_lines(state),
             "",
             "🏆 **Top spenders**",
         ]
@@ -204,6 +213,7 @@ def build_billing_container(
         "🏦 **Server credit**",
         credit_line,
         *_timed_credit_lines(state),
+        *_channel_budget_lines(state),
     ]
     body_member: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
         "\n".join(body_lines_member)
@@ -512,6 +522,7 @@ async def _rerender(
             caller_user_id=str(interaction.user.id),
             is_admin=is_admin,
             since=since,
+            channel_id=invoking_channel_id(bot_interaction),
             now=now,
         )
     new_view = BillingPanelView(

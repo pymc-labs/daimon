@@ -40,6 +40,7 @@ from daimon.testing import (
     ma_environment,
     ma_session,
 )
+from daimon.testing.factories import make_channel_budget
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -2332,3 +2333,39 @@ class TestUnpromptedAdmission:
         mention.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         sent: str = mention.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "credit" in sent.lower(), "a mention still gets the depleted-credit notice"
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_exhausted_channel_budget_is_silent_when_unprompted_but_not_for_a_mention(
+        self,
+        mock_resolve: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await tenant_ledger.insert_entry(
+            db_session,
+            tenant_id=tenant.id,
+            delta_usd=Decimal("10"),
+            reason="trial",
+            idempotency_key=f"trial:{tenant.id}",
+        )
+        await make_channel_budget(db_session, tenant=tenant, channel_id="789", limit_usd=Decimal(0))
+        await db_session.commit()
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+
+        unprompted = _make_thread_message(content="and the priors?")
+        await bot._orchestrate(unprompted, "123456", tenant.id, unprompted=True)  # pyright: ignore[reportPrivateUsage]
+        unprompted.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+        mention = _make_thread_message()
+        await bot._orchestrate(mention, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
+        mention.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        sent: str = mention.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        assert "spending budget" in sent, "a mention gets the channel budget notice"

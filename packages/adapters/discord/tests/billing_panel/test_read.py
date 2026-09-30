@@ -20,13 +20,19 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 # pyright: reportPrivateUsage=false
 from daimon.adapters.discord.billing_panel.read import (
     _resolve_member_name,
+    invoking_channel_id,
     is_guild_admin,
     load_billing_snapshot,
 )
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.tenants import get_tenant
-from daimon.testing.factories import make_tenant, make_usage_event
+from daimon.testing.factories import (
+    make_channel_budget,
+    make_ledger_entry,
+    make_tenant,
+    make_usage_event,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # ---- _resolve_member_name ----
@@ -487,3 +493,47 @@ async def test_load_billing_snapshot_guild_balance_zero_when_no_ledger_rows(
     assert state.guild_balance_usd == Decimal("0"), (
         "empty ledger should yield guild_balance_usd of Decimal('0')"
     )
+
+
+def test_invoking_channel_id_resolves_a_thread_to_its_parent() -> None:
+    thread = MagicMock(spec=discord.Thread)
+    thread.parent_id = 42
+    in_thread = MagicMock(channel=thread, channel_id=7)
+    in_channel = MagicMock(channel=MagicMock(spec=discord.TextChannel), channel_id=7)
+    assert invoking_channel_id(in_thread) == "42"
+    assert invoking_channel_id(in_channel) == "7"
+
+
+async def test_load_billing_snapshot_reads_the_invoking_channels_budget(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="guild_b")
+    await make_channel_budget(db_session, tenant=tenant, channel_id="c1", limit_usd=Decimal("5"))
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("-2"), channel_id="c1")
+    guild = _make_guild_with_members({})
+    since = datetime.now(UTC) - timedelta(days=1)
+
+    for is_admin in (False, True):
+        state = await load_billing_snapshot(
+            db_session,
+            guild=guild,
+            guild_id="guild_b",
+            caller_user_id="1",
+            is_admin=is_admin,
+            since=since,
+            now=datetime.now(UTC),
+            channel_id="c1",
+        )
+        assert state.channel_budget is not None
+        assert state.channel_budget.spent_usd == Decimal("2")
+    unbudgeted = await load_billing_snapshot(
+        db_session,
+        guild=guild,
+        guild_id="guild_b",
+        caller_user_id="1",
+        is_admin=False,
+        since=since,
+        now=datetime.now(UTC),
+        channel_id="c2",
+    )
+    assert unbudgeted.channel_budget is None

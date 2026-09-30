@@ -10,6 +10,7 @@ import dataclasses
 from decimal import Decimal
 
 from daimon.adapters.discord import theme
+from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.promo_credit import ActiveTimedCredit
 
 COLOR_OVER_CAP = theme.COLOR_RED  # caller is over their effective cap
@@ -45,3 +46,5 @@ class BillingPanelState:
 
     # Live timed promo credit (both views), soonest-ending first; empty without promo codes
     timed_credit: tuple[ActiveTimedCredit, ...] = ()
+    # The invoking channel's budget (both views); None when it has none.
+    channel_budget: ChannelBudgetStatus | None = None
