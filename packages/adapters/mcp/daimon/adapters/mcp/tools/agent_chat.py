@@ -78,7 +78,7 @@ from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
 from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED, MA_METADATA_KEY_NAME
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
@@ -277,6 +277,11 @@ async def _resolve_ma_agent(
         if derived == auth.agent_id:
             return agent
     raise ToolError("agent not found")
+
+
+def agent_pin_names(agent: BetaManagedAgentsAgent) -> tuple[str | None, ...]:
+    """Every name a channel pin on ``agent`` may be keyed by: its MA name and its config name."""
+    return (agent.name, agent.metadata.get(MA_METADATA_KEY_NAME))
 
 
 async def _describe_agent_impl(
@@ -902,11 +907,16 @@ def register_agent_chat_tools(
 
     ``start_turn``, ``continue_turn``, and ``ask`` run the shared
     ``_check_admission`` gate (the same balance/cap checks the media tools run)
-    before creating a session or sending an event. Every other tool —
+    before creating a session or sending an event, including the operator's
+    channel pin: a pinned agent is refused here, since an MCP turn runs in no
+    channel. Every other tool —
     including ``cancel_turn`` and ``get_turn_cost`` — stays on bare ``_auth``;
     ``deliver_turn_charts`` is the one exception that performs a bounded
     artifact-store write when optional link delivery is configured.
     """
+
+    async def pin_names(auth: AuthIdentity) -> tuple[str | None, ...]:
+        return agent_pin_names(await _resolve_ma_agent(runtime, auth))
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def describe_agent(ctx: Context) -> AgentDescription:  # pyright: ignore[reportUnusedFunction]
@@ -960,6 +970,7 @@ def register_agent_chat_tools(
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
             tool_name="start_turn",
+            agent_names=pin_names,
         )
         return await _start_turn_impl(runtime, auth, message, bundle)
 
@@ -979,6 +990,7 @@ def register_agent_chat_tools(
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
             tool_name="ask",
+            agent_names=pin_names,
         )
         return _ask_tool_result(  # type: ignore[return-value]
             await _ask_impl(runtime, auth, message, handle=handle)
@@ -1001,6 +1013,7 @@ def register_agent_chat_tools(
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
             tool_name="continue_turn",
+            agent_names=pin_names,
         )
         return await _continue_turn_impl(runtime, auth, handle, message)
 

@@ -19,6 +19,12 @@ The refusals are ordered, and the order is the point:
    it afterwards.
 4. `same_agent` — the destination already answers here; there is nothing to
    hand over.
+5. `admin_required` — the destination is not the agent this channel answers
+   with, and the caller is not an admin. Every agent reachable anywhere in the
+   workspace is reachable here, and a handed-off thread runs as the
+   destination, with its repo, keys, connectors and memory. Bringing another
+   project's agent into a channel is therefore an admin's call; a member may
+   still hand a thread back to the channel's own agent.
 
 Pure module — no I/O, no clock, no randomness.
 """
@@ -39,7 +45,9 @@ __all__ = [
     "decide_handoff",
 ]
 
-HandoffRefusalReason = Literal["unreachable", "setup_thread", "same_agent", "pinned_elsewhere"]
+HandoffRefusalReason = Literal[
+    "unreachable", "setup_thread", "same_agent", "pinned_elsewhere", "admin_required"
+]
 
 
 class HandoffRefusedInSetupThread(DaimonError):
@@ -80,6 +88,8 @@ def decide_handoff(
     existing_binding_kind: Literal["setup", "handoff"] | None,
     origin_responder_ma_agent_id: str,
     destination_pinned_elsewhere: bool = False,
+    destination_answers_channel: bool = True,
+    caller_is_admin: bool = True,
 ) -> HandoffDecision:
     """Decide whether this task may move to `destination_ma_agent_id`.
 
@@ -89,6 +99,10 @@ def decide_handoff(
 
     `destination_pinned_elsewhere` is True when the tenant's access policy
     pins the destination to channels that don't include this thread's.
+
+    `destination_answers_channel` is True when the channel/workspace cascade
+    already sends this thread's parent channel to the destination; unless it
+    is, only a `caller_is_admin` caller may hand the thread over.
 
     `existing_binding_kind` is the kind of binding the thread already carries
     (None when it carries none). A `handoff` binding is replaceable — a task
@@ -102,6 +116,8 @@ def decide_handoff(
         return HandoffRefused(reason="unreachable", destination_name=destination_name)
     if destination_ma_agent_id == origin_responder_ma_agent_id:
         return HandoffRefused(reason="same_agent", destination_name=destination_name)
+    if not destination_answers_channel and not caller_is_admin:
+        return HandoffRefused(reason="admin_required", destination_name=destination_name)
     return HandoffAllowed(
         destination_ma_agent_id=destination_ma_agent_id, destination_name=destination_name
     )

@@ -7,8 +7,11 @@ caller, tenant and platform, and a concrete MA agent id — a recreated namesake
 has a different id and cannot receive a handoff.
 
 Neither tool writes channel or workspace routing. A handoff binds one thread;
-who answers everywhere else is untouched, which is why any member who can post
-in the thread may do it — the blast radius is the thread they are already in.
+who answers everywhere else is untouched. But the thread then runs as the
+destination, with its repo, keys, connectors and memory, so a member may only
+hand a thread to the agent the channel itself answers with. Bringing in any
+other agent is an admin's call, and an agent an operator pinned to other
+channels can't be brought in at all.
 """
 
 from __future__ import annotations
@@ -41,8 +44,9 @@ from daimon.core.continuity.tool_messages import (
 )
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.scope import ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
 from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.thread_agent_bindings import get_binding, upsert_responder_binding
 from daimon.core.stores.thread_session_lineage import request_fresh_start
@@ -160,6 +164,13 @@ async def _hand_off_task_impl(
             thread_id=origin.thread_id,
         )
         policy = await load_access_policy(session, tenant_id=auth.tenant_id)
+        # Who the channel answers with, ignoring any thread binding: a member
+        # may hand a thread back to that agent, and to no other.
+        channel_config = await resolve(
+            session,
+            context=ScopeContext(tenant_id=auth.tenant_id, channel_id=origin.parent_channel_id),
+            default=runtime.deployment_default,
+        )
         live_session = await get_live_thread_session(
             session,
             tenant_id=auth.tenant_id,
@@ -180,6 +191,8 @@ async def _hand_off_task_impl(
             channel_id=origin.thread_id or origin.parent_channel_id,
             parent_channel_id=origin.parent_channel_id,
         ),
+        destination_answers_channel=channel_config.agent_name == destination_name,
+        caller_is_admin=auth.is_admin,
     )
     if isinstance(decision, HandoffRefused):
         raise ToolError(
@@ -290,6 +303,17 @@ def _refusal_text(refusal: HandoffRefused, *, channel: str) -> str:
                 "Nothing was changed. Do not retry.",
             ]
         )
+    if refusal.reason == "admin_required":
+        return "\n".join(
+            [
+                f"{refusal.destination_name} is not the agent this channel answers with, "
+                "and handing a conversation to another agent brings its repository, keys "
+                "and connectors here, so only a workspace or server admin can do it.",
+                "Tell the caller an admin can make the handoff, or ask in one of that "
+                "agent's own channels.",
+                "Nothing was changed. Do not retry.",
+            ]
+        )
     return "\n".join(
         [
             f"{refusal.destination_name} already answers in this conversation.",
@@ -359,7 +383,8 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         `set_setup_target` changes your configuration target; `set_agent_default`
         changes who answers a channel; neither does this. The destination must
-        already answer in this workspace.
+        already answer in this workspace. Only an admin may hand to an agent other
+        than the one this channel answers with.
 
         From the next message here, that agent answers, with its own keys,
         connections and memory; conversation, decisions and files move with the
