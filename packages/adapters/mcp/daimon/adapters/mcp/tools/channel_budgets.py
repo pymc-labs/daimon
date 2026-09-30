@@ -39,6 +39,7 @@ from daimon.core.channel_budget import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import channel_budgets as store
+from daimon.core.stores.direct_messages import get_source_channel
 from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -66,7 +67,7 @@ class ChannelBudgetResult:
     """Debited spend in the window, markup included."""
     remaining_usd: str
     active: bool
-    """False only for a fixed window that has not started or has ended: it gates nothing."""
+    """False before a total or fixed window's start, or after a fixed one ends: it gates nothing."""
     summary: str
     """The line to read back, e.g. '$1.20 of $5.00 (monthly)'."""
 
@@ -151,9 +152,10 @@ async def origin_budget_channel(
 ) -> str | None:
     """The channel a tool call's spend counts against: its turn's parent channel.
 
-    None without a live origin of this caller and responder, or in a DM, so
-    the call is simply not attributed; tools that need a channel use
-    `require_turn_origin` instead, which explains the refusal.
+    A DM counts toward the channel it was started from. None without a live
+    origin of this caller and responder, or in an older DM, so the call is
+    simply not attributed; tools that need a channel use `require_turn_origin`
+    instead, which explains the refusal.
     """
     if not origin_context_id or auth.platform not in _PLATFORMS:
         return None
@@ -170,25 +172,35 @@ async def origin_budget_channel(
             platform=cast(str, auth.platform),
             now=datetime.now(UTC),
         )
-    if origin is None or _is_dm_scope(origin.thread_id):
-        return None
-    if auth.agent_id is not None and auth.agent_id != derive_agent_uuid(
-        tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
-    ):
-        return None
+        if origin is None or (
+            auth.agent_id is not None
+            and auth.agent_id
+            != derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
+        ):
+            return None
+        if _is_dm_scope(origin.thread_id):
+            return await get_source_channel(
+                session, tenant_id=auth.tenant_id, scope_id=origin.thread_id
+            )
     return origin.parent_channel_id
 
 
 async def _origin_channel(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
 ) -> str:
-    """The calling turn's parent channel; the origin already proves the caller is there."""
+    """The calling turn's parent channel, or its DM's source; the origin proves access."""
     if not origin_context_id:
         raise ToolError(_NEEDS_CHANNEL)
     origin = await require_turn_origin(runtime, auth, origin_context_id)
-    if _is_dm_scope(origin.thread_id):
+    if not _is_dm_scope(origin.thread_id):
+        return origin.parent_channel_id
+    async with runtime.session_factory() as session:
+        source = await get_source_channel(
+            session, tenant_id=auth.tenant_id, scope_id=origin.thread_id
+        )
+    if source is None:
         raise ToolError("a direct message belongs to no channel, so no channel budget applies")
-    return origin.parent_channel_id
+    return source
 
 
 async def _get_channel_budget_impl(
@@ -293,8 +305,9 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> ChannelBudgetLookup:
         """Show a channel's spending budget: its limit, window and what it has spent.
 
-        For the channel this turn is in, omit ``channel_id`` and pass this
-        turn's ``origin_context_id``. For another channel, pass its id; a
+        For the channel this turn is in (in a DM, the channel it was moved
+        from), omit ``channel_id`` and pass this turn's
+        ``origin_context_id``. For another channel, pass its id; a
         thread id resolves to its parent channel. Any member may read the
         budget of a channel they can see. ``budget`` is null when the
         channel has none. Read ``summary`` back to the user.
