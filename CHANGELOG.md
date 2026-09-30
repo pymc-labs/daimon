@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Staging-only load rehearsal script for synthetic installs and metered headless turns, with a dry run, spend guard, and tenant cleanup.
+
 - Optional Discord webhook alerts for new installs, Stripe top-ups, and Anthropic spend or overload events.
 
 - Discord delivers files generated during tool-using turns into the chat thread,
