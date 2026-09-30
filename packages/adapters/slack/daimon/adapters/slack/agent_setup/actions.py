@@ -183,9 +183,14 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
                 channel_id=channel_id or None,
                 thread_id=thread_id,
                 default=runtime.deployment_default,
+                is_admin=is_admin,
             )
             answering_map = await load_panel_answering_map(
-                session, tenant_id=tenant_id, default=runtime.deployment_default
+                session,
+                tenant_id=tenant_id,
+                default=runtime.deployment_default,
+                channel_id=channel_id or None,
+                is_admin=is_admin,
             )
             attributions = await resolve_attributions(
                 session,
@@ -355,9 +360,14 @@ async def load_agents_view(
             channel_id=meta.channel_id or None,
             thread_id=None,
             default=runtime.deployment_default,
+            is_admin=is_admin,
         )
         answering_map = await load_panel_answering_map(
-            session, tenant_id=tenant_id, default=runtime.deployment_default
+            session,
+            tenant_id=tenant_id,
+            default=runtime.deployment_default,
+            channel_id=meta.channel_id or None,
+            is_admin=is_admin,
         )
         attributions = await resolve_attributions(
             session, tenant_id=tenant_id, account_ids=_roster_account_ids(roster)
@@ -385,7 +395,11 @@ async def load_routing_view(
     admins and this channel's isolation."""
     async with runtime.sessionmaker() as session:
         answering_map = await load_panel_answering_map(
-            session, tenant_id=tenant_id, default=runtime.deployment_default
+            session,
+            tenant_id=tenant_id,
+            default=runtime.deployment_default,
+            channel_id=meta.channel_id or None,
+            is_admin=is_admin,
         )
         channel_admins = (
             await list_channel_admins(session, tenant_id=tenant_id, platform="slack")
@@ -409,6 +423,7 @@ async def load_routing_view(
             channel_id=meta.channel_id or None,
             thread_id=None,
             default=runtime.deployment_default,
+            is_admin=is_admin,
         )
     setup_links = [
         f"<{setup_link(meta.team_id, ref.parent_channel_id, ref.thread_id)}|"
@@ -453,6 +468,7 @@ async def _load_details_view(
             channel_id=meta.channel_id or None,
             thread_id=None,
             default=runtime.deployment_default,
+            is_admin=is_admin,
         )
         details = await load_panel_details(
             session,

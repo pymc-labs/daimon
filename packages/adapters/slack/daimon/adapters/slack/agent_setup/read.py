@@ -15,6 +15,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.answering_map import AnsweringMap, load_answering_map
+from daimon.core.channel_isolation import load_isolation_viewer
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.roster import Roster, load_roster
 from daimon.core.scope import (
@@ -74,12 +75,14 @@ async def load_panel_roster(
     channel_id: str | None,
     thread_id: str | None,
     default: DeploymentDefault,
+    is_admin: bool,
 ) -> Roster:
     """The tenant's agents, answering-here first, for the Agents view.
 
     `channel_id` is None only where the caller has no channel — a DM, or a
     payload that carried none. The roster still lists every agent; nothing is
-    marked as answering here, because there is no here.
+    marked as answering here, because there is no here. A non-admin sees only
+    their side of every isolated channel's line.
     """
     return await load_roster(
         session,
@@ -89,6 +92,9 @@ async def load_panel_roster(
         channel_id=channel_id,
         thread_id=thread_id,
         default=default,
+        viewer=await load_isolation_viewer(
+            session, tenant_id=tenant_id, default=default, channel_id=channel_id, is_admin=is_admin
+        ),
     )
 
 
@@ -136,9 +142,22 @@ async def load_panel_answering_map(
     *,
     tenant_id: uuid.UUID,
     default: DeploymentDefault,
+    channel_id: str | None,
+    is_admin: bool,
 ) -> AnsweringMap:
-    """Every tier of this workspace's routing, for the Who-answers-where view."""
-    return await load_answering_map(session, tenant_id=tenant_id, platform="slack", default=default)
+    """Every tier of this workspace's routing, for the Who-answers-where view.
+
+    A non-admin at `channel_id` sees only their side of every isolated channel's line.
+    """
+    return await load_answering_map(
+        session,
+        tenant_id=tenant_id,
+        platform="slack",
+        default=default,
+        viewer=await load_isolation_viewer(
+            session, tenant_id=tenant_id, default=default, channel_id=channel_id, is_admin=is_admin
+        ),
+    )
 
 
 async def resolve_attributions(

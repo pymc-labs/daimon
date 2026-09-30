@@ -304,6 +304,7 @@ async def run_new_agent_submission(
                 channel_id=channel_id or None,
                 thread_id=None,
                 default=runtime.deployment_default,
+                is_admin=is_admin,
             )
             details = await load_panel_details(
                 session,

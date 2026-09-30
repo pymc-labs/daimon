@@ -38,6 +38,7 @@ from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap, ChannelAnswer
 from daimon.core.channel_admins import MAX_CHANNEL_ADMIN_IDS, fit_lines, fold_mentions
+from daimon.core.channel_isolation_setup import END_ISOLATION_WARNING
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.roster import Page, Roster, RosterAgent
@@ -679,7 +680,11 @@ def _isolation_blocks(*, channel_id: str, isolated: bool) -> list[dict[str, Any]
     return [
         _section(f"*Isolation*\n<#{channel_id}> {state}."),
         {"type": "actions", "elements": buttons},
-        _context(ISOLATION_NOTE),
+        _context(
+            f"{ISOLATION_NOTE} Ending isolation: {END_ISOLATION_WARNING}"
+            if isolated
+            else ISOLATION_NOTE
+        ),
         {"type": "divider"},
     ]
 

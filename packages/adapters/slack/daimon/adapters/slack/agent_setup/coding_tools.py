@@ -174,6 +174,7 @@ async def handle_coding_tools_click(
             channel_id=channel_id or None,
             thread_id=None,
             default=runtime.deployment_default,
+            is_admin=True,
         )
     target = next((row for row in roster.rows if row.name == agent_name), None)
     if target is None:

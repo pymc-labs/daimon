@@ -8,13 +8,18 @@ channel name and words the outcome.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import Any, Literal, cast
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_fork import fork_agent
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
-from daimon.core.channel_isolation_setup import ForkAgent, set_channel_isolation
+from daimon.core.channel_isolation_setup import (
+    END_ISOLATION_WARNING,
+    ForkAgent,
+    set_channel_isolation,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
@@ -28,8 +33,8 @@ ISOLATION_NEED_ADMIN_MESSAGE = "Only a workspace admin can isolate a channel. No
 def _fork(runtime: SlackRuntime, tenant_id: uuid.UUID) -> ForkAgent:
     public_url = runtime.settings.mcp.public_url
 
-    async def fork(source: str, new_name: str) -> None:
-        await fork_agent(
+    async def fork(source: str, new_name: str) -> Sequence[str]:
+        copy = await fork_agent(
             runtime.anthropic,
             runtime.sessionmaker,
             tenant_id=tenant_id,
@@ -37,6 +42,7 @@ def _fork(runtime: SlackRuntime, tenant_id: uuid.UUID) -> ForkAgent:
             new_name=new_name,
             public_url=str(public_url) if public_url is not None else None,
         )
+        return copy.dropped_skills
 
     return fork
 
@@ -87,9 +93,11 @@ async def change_isolation(
     except DaimonError as exc:  # a refusal, or a copy that can't be made
         return f"{exc} Nothing changed."
     if not change.isolated:
-        return f"<#{channel}> is open again."
+        return f"<#{channel}> is open again. {END_ISOLATION_WARNING}"
     name = escape_mrkdwn(change.agent_name or "")
     if change.forked_from is not None:
         source = escape_mrkdwn(change.forked_from)
-        return f"<#{channel}> is isolated. *{name}*, a copy of *{source}*, answers only there."
+        copied = f"<#{channel}> is isolated. *{name}*, a copy of *{source}*, answers only there."
+        note = change.dropped_skills_note
+        return f"{copied} {escape_mrkdwn(note)}" if note else copied
     return f"<#{channel}> is isolated. *{name}* answers only there."
