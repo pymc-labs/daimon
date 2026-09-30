@@ -848,7 +848,9 @@ async def test_skill_repo_submission_refuses_a_member_on_a_reachable_unmanaged_a
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("is_admin", [False, True])
 async def test_skill_repo_submission_passes_seeded_names_and_admin_status_to_the_sync(
+    is_admin: bool,
     monkeypatch: pytest.MonkeyPatch,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -860,6 +862,8 @@ async def test_skill_repo_submission_passes_seeded_names_and_admin_status_to_the
     )
     sync = AsyncMock(return_value=[])
     monkeypatch.setattr(credential_submissions_mod, "run_skill_sync", sync)
+    if is_admin:
+        _override_users_info_admin(fake_slack_web_client.mock)
     tenant_id, fernet_key = await _seed_team(db_session)
     await record_seeded_skill(
         db_session, tenant_id=tenant_id, name="eda", content_hash="h", anthropic_id="sk_eda"
@@ -880,7 +884,7 @@ async def test_skill_repo_submission_passes_seeded_names_and_admin_status_to_the
     await _submit_skill_repo(runtime, token)
 
     assert sync.call_args.kwargs["seeded_skill_names"] == frozenset({"eda"})
-    assert sync.call_args.kwargs["is_admin"] is False
+    assert sync.call_args.kwargs["is_admin"] is is_admin
 
 
 @pytest.mark.asyncio
