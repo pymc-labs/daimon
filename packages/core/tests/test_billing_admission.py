@@ -37,7 +37,7 @@ _TEST_BILLING = billing.BillingConfig(
 )
 
 
-async def _record_1m_opus_tokens(
+async def _record_3m_opus_tokens(
     session: AsyncSession,
     *,
     user_id: str,
@@ -83,7 +83,7 @@ async def test_is_over_cap_returns_true_when_sum_meets_threshold(
             tenant_id=tenant.id,
             amount=Decimal("15.00"),
         )
-        await _record_1m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
+        await _record_3m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
     over = await billing.is_over_cap(
         billing_config=_TEST_BILLING,
         sessionmaker=db_session_factory,
@@ -110,7 +110,7 @@ async def test_is_over_cap_window_follows_injected_now(
             amount=Decimal("10.00"),
         )
         # $15 spent, stamped at the current wall-clock month.
-        await _record_1m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
+        await _record_3m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
 
     now = datetime.now(UTC)
     over_this_month = await billing.is_over_cap(
@@ -145,7 +145,7 @@ async def test_is_over_cap_returns_false_when_under_threshold(
             tenant_id=tenant.id,
             amount=Decimal("20.00"),
         )
-        await _record_1m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
+        await _record_3m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
     over = await billing.is_over_cap(
         billing_config=_TEST_BILLING,
         sessionmaker=db_session_factory,
@@ -174,7 +174,7 @@ async def test_is_over_cap_uses_override_when_set(
             user_id="u1",
             amount=Decimal("10.00"),
         )
-        await _record_1m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
+        await _record_3m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="evt_1")
     over = await billing.is_over_cap(
         billing_config=_TEST_BILLING,
         sessionmaker=db_session_factory,
@@ -282,7 +282,7 @@ async def test_is_over_cap_without_stripe_when_cap_is_reached(
     tenant = await make_tenant(db_session)
     async with db_session_factory() as s, s.begin():
         await tenant_user_caps.set_default(s, tenant_id=tenant.id, amount=Decimal("15.00"))
-        await _record_1m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="no-stripe")
+        await _record_3m_opus_tokens(s, user_id="u1", tenant_id=tenant.id, event_id="no-stripe")
     assert await billing.is_over_cap(
         billing_config=None,
         sessionmaker=db_session_factory,
