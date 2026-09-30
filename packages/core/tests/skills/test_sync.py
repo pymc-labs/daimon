@@ -92,7 +92,7 @@ async def test_sync_creates_new_skill(tmp_path: Path) -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sync_skills(
-        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset()
+        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
     )
 
     assert len(outcomes) == 1, "should return one outcome"
@@ -130,13 +130,30 @@ async def test_sync_updates_existing_skill(tmp_path: Path) -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sync_skills(
-        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset()
+        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
     )
 
     assert len(outcomes) == 1, "should return one outcome"
     assert outcomes[0].action is Action.UPDATED, "action should be UPDATED"
     assert outcomes[0].anthropic_id == "sk_1", "should use existing MA skill id"
     assert version_called, "skills.versions.create must have been called"
+
+
+async def test_sync_refuses_a_member_replacing_an_existing_library_skill(tmp_path: Path) -> None:
+    """The library skill may be attached to a shared agent; only an admin may replace it."""
+    skill = _skill(tmp_path)
+    canonical = tenant_scoped_display_title(tenant_id=_TENANT_A, name="brainstorming")
+    router = MARouter()
+    router.add("GET", r"/v1/skills", lambda req, _m: list_response([_skill_row("sk_1", canonical)]))
+    client = build_fake_anthropic_http(router.dispatch)
+
+    outcomes = await sync_skills(
+        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=False
+    )
+
+    assert [o.action for o in outcomes] == [Action.FAILED], "a member may not replace it"
+    # No POST route is registered, so a pushed version would fail differently.
+    assert outcomes[0].error is not None and "only an admin" in outcomes[0].error
 
 
 async def test_sync_records_failed_outcome_on_error(tmp_path: Path) -> None:
@@ -148,7 +165,7 @@ async def test_sync_records_failed_outcome_on_error(tmp_path: Path) -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sync_skills(
-        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset()
+        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
     )
 
     assert len(outcomes) == 1, "should return one outcome"
@@ -201,7 +218,11 @@ async def test_sync_continues_after_failure(tmp_path: Path) -> None:
     client = AsyncAnthropic(api_key="test", http_client=http_client, max_retries=0)
 
     outcomes = await sync_skills(
-        client, [skill_a, skill_b], tenant_id=_TENANT_A, seeded_skill_names=frozenset()
+        client,
+        [skill_a, skill_b],
+        tenant_id=_TENANT_A,
+        seeded_skill_names=frozenset(),
+        is_admin=True,
     )
 
     assert len(outcomes) == 2, "should return two outcomes"
@@ -215,7 +236,9 @@ async def test_sync_empty_list_returns_empty(tmp_path: Path) -> None:
     router = MARouter()
     client = build_fake_anthropic_http(router.dispatch)
 
-    outcomes = await sync_skills(client, [], tenant_id=_TENANT_A, seeded_skill_names=frozenset())
+    outcomes = await sync_skills(
+        client, [], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
+    )
 
     assert outcomes == [], "empty skill list should produce empty outcomes"
 
@@ -267,7 +290,7 @@ async def test_sync_creates_distinct_skills_when_two_tenants_sync_same_named_ski
 
     skill_a = _skill(tmp_path / "a", name="brainstorming")
     outcomes_a = await sync_skills(
-        client_a, [skill_a], tenant_id=_TENANT_A, seeded_skill_names=frozenset()
+        client_a, [skill_a], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
     )
 
     assert len(outcomes_a) == 1, "tenant A sync should produce one outcome"
@@ -284,7 +307,7 @@ async def test_sync_creates_distinct_skills_when_two_tenants_sync_same_named_ski
 
     skill_b = _skill(tmp_path / "b", name="brainstorming")
     outcomes_b = await sync_skills(
-        client_b, [skill_b], tenant_id=_TENANT_B, seeded_skill_names=frozenset()
+        client_b, [skill_b], tenant_id=_TENANT_B, seeded_skill_names=frozenset(), is_admin=True
     )
 
     assert len(outcomes_b) == 1, "tenant B sync should produce one outcome"
@@ -327,7 +350,7 @@ async def test_sync_records_failed_outcome_when_list_is_truncated(tmp_path: Path
     client = AsyncAnthropic(api_key="test", http_client=http_client, max_retries=0)
 
     outcomes = await sync_skills(
-        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset()
+        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
     )
 
     assert len(outcomes) == 1, "should return one outcome"
@@ -363,7 +386,7 @@ async def test_sync_fails_when_agent_scoped_skill_takes_the_mount_name(tmp_path:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sync_skills(
-        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset()
+        client, [skill], tenant_id=_TENANT_A, seeded_skill_names=frozenset(), is_admin=True
     )
 
     assert len(outcomes) == 1, "should return one outcome"
@@ -416,7 +439,11 @@ async def test_sync_refuses_a_seeded_skill_name_without_touching_ma(tmp_path: Pa
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sync_skills(
-        client, [seeded, other], tenant_id=_TENANT_A, seeded_skill_names=frozenset({"eda"})
+        client,
+        [seeded, other],
+        tenant_id=_TENANT_A,
+        seeded_skill_names=frozenset({"eda"}),
+        is_admin=True,
     )
 
     assert version_posts == [], "no version may be pushed onto the seeded skill"

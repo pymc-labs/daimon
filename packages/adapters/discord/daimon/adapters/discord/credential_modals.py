@@ -1164,6 +1164,7 @@ class SkillRepoModal(discord.ui.Modal):
                     path=path,
                     tenant_id=consumed_row.tenant_id,
                     seeded_skill_names=seeded_skill_names,
+                    is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # see refuse_if_shared_and_not_admin_for_request
                     token=pat,
                 )
         except DaimonError as err:

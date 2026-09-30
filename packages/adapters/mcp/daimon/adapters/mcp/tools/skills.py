@@ -346,6 +346,8 @@ async def _sync_impl(
                 path=path,
                 tenant_id=auth.tenant_id,
                 seeded_skill_names=seeded_skill_names,
+                # `_require_admin` above.
+                is_admin=True,
                 token=token,
                 max_tarball_bytes=runtime.settings.github.max_tarball_bytes,
                 max_tarball_decompressed_bytes=(

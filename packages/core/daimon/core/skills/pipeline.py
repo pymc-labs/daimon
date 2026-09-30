@@ -26,6 +26,7 @@ async def run_skill_sync(
     path: str = "",
     tenant_id: uuid.UUID,
     seeded_skill_names: frozenset[str],
+    is_admin: bool,
     token: str | None = None,
     max_tarball_bytes: int = 50 * 1024 * 1024,
     max_tarball_decompressed_bytes: int = 200 * 1024 * 1024,
@@ -50,6 +51,8 @@ async def run_skill_sync(
             tenant_id: Owning tenant — determines the canonical title prefix.
             seeded_skill_names: Names ``sync_skills`` refuses because a
                 default skill already owns them.
+            is_admin: Whether the importer may replace an existing library
+                skill (see ``sync_skills``).
             max_tarball_bytes: Raw tarball size cap passed through to ``fetch_repo``
     . Defaults to the safe 50 MiB constant.
             max_tarball_decompressed_bytes: Decompressed size cap passed through to
@@ -77,7 +80,11 @@ async def run_skill_sync(
                 raise DaimonError(f"path {path!r} not found in fetched repository")
         found = discover_skills(discover_root)
         return await sync_skills(
-            client, found, tenant_id=tenant_id, seeded_skill_names=seeded_skill_names
+            client,
+            found,
+            tenant_id=tenant_id,
+            seeded_skill_names=seeded_skill_names,
+            is_admin=is_admin,
         )
     finally:
         shutil.rmtree(result.cleanup_dir, ignore_errors=True)

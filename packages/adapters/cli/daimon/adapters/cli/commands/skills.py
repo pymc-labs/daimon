@@ -95,6 +95,8 @@ async def sync_skills(
             path=path,
             tenant_id=tenant_id,
             seeded_skill_names=seeded_skill_names,
+            # The operator owns the library.
+            is_admin=True,
         )
 
     if http_client is not None:

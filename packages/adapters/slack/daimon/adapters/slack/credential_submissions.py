@@ -1370,6 +1370,7 @@ async def run_skill_repo_credential_submission(
             path=path,
             tenant_id=consumed.tenant_id,
             seeded_skill_names=seeded_skill_names,
+            is_admin=await resolve_is_admin(client, user_id=user_id),
             token=value,
         )
     except DaimonError as err:

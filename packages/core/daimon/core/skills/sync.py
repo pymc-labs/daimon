@@ -20,6 +20,10 @@ same-named import would push a new version onto the seeded skill. The
 reconciler's fingerprint would still match the defaults tree and skip it on
 every later `defaults apply`, making the overwrite permanent. Those names are
 refused instead.
+
+Any other library skill may already be attached to agents that answer for
+everyone, so only an admin import may push a new version onto it. A member's
+same-named import is refused and must be renamed.
 """
 
 from __future__ import annotations
@@ -44,6 +48,7 @@ async def sync_skills(
     *,
     tenant_id: uuid.UUID,
     seeded_skill_names: frozenset[str],
+    is_admin: bool,
 ) -> list[ResourceOutcome]:
     """Create or update each skill in *skills* on MA.
 
@@ -66,7 +71,8 @@ async def sync_skills(
     Any exception raised while processing a single skill is caught; a
     ``FAILED`` outcome is recorded and the batch continues with the next skill.
     A skill named in ``seeded_skill_names`` is recorded as ``FAILED`` without
-    touching MA (see the module docstring).
+    touching MA, and so is a non-admin import that matches an existing library
+    skill (see the module docstring).
 
     Args:
         client: Anthropic SDK client for MA API calls.
@@ -74,6 +80,8 @@ async def sync_skills(
         tenant_id: Owning tenant — determines the canonical title prefix.
         seeded_skill_names: This tenant's seeded skill names
             (``list_seeded_skill_names``), which an import may not reuse.
+        is_admin: Whether the importer may push a new version onto an existing
+            library skill.
 
     Returns:
         One :class:`~daimon.core.defaults.report.ResourceOutcome` per input
@@ -101,6 +109,12 @@ async def sync_skills(
             ma_match = await find_skill_by_display_title(client, canonical, on_truncation="raise")
             pkg = build_skill_zip(skill.skill_dir, name=skill.spec.name)
             try:
+                if ma_match is not None and not is_admin:
+                    raise DaimonError(
+                        f"skill name {skill.spec.name!r} is already taken in this library, "
+                        f"and only an admin can replace it. Rename the skill (e.g. "
+                        f"{skill.spec.name}-2) and re-sync."
+                    )
                 if ma_match is not None:
                     with pkg.path.open("rb") as fh:
                         await client.beta.skills.versions.create(
