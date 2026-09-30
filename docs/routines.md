@@ -298,7 +298,7 @@ and queued work, recording `scheduler_shutdown` for cancelled tasks.
 | Action | MCP | Discord | Slack |
 | --- | --- | --- | --- |
 | create | a caller with a platform user identity, for the agent they are talking to or the one the destination channel answers with; any agent for an admin | via the agent calling the tool | workspace admin only |
-| list / read last output | admin or the routine's creator | `Manage Server`, and only the command's invoker | admin or the routine's creator |
+| list / read last output | admin or the routine's creator | `Manage Server`, and only the command's invoker | admin or the routine's creator (the panel lists only your own routines unless you are an admin) |
 | pause / resume | `update_routine`: admin or creator | admin or creator, re-checked at click | admin or creator |
 | delete | admin or creator | not offered | admin or creator |
 

@@ -294,12 +294,14 @@ def _system_agent_rejection(agent: BetaManagedAgentsAgent) -> str | None:
     if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
         return (
             f"agent '{agent.name}' is managed by defaults; chat tools cannot modify it. "
-            "Use fork_agent to make an editable copy, then edit the named copy."
+            "An admin can make an editable copy with fork_agent; a member can create_agent "
+            "a new one instead."
         )
     if agent.metadata.get(MA_METADATA_KEY_ACCOUNT) is None:
         return (
             f"agent '{agent.name}' is a system agent; chat tools cannot modify it. "
-            "Use fork_agent to make an editable copy, then edit the named copy."
+            "An admin can make an editable copy with fork_agent; a member can create_agent "
+            "a new one instead."
         )
     return None
 

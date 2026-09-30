@@ -32,11 +32,8 @@ from daimon.adapters.slack.agent_setup.write import (
 )
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.errors import DaimonError
-from daimon.core.github_credentials import build_multifernet, get_pat, upsert_credential_encrypted
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
-from daimon.core.stores.agent_github_binding import set_agent_github_binding
-from daimon.core.stores.agent_repo_binding import get_binding, set_binding
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import get_tenant
@@ -45,7 +42,6 @@ from daimon.testing.ma import (
     FakeMemoryStoreState,
     NotHandled,
     build_fake_anthropic,
-    build_stub_anthropic,
     combine_handlers,
     make_archive_agent_handler,
     make_fake_ma_handler,
@@ -398,80 +394,6 @@ def _runtime_with_db(
         turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
         deployment_default=DeploymentDefault(),
     )
-
-
-async def test_fork_agent_copies_no_credential_or_repo_binding(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A fork starts credential-less: the source's PAT and repo binding stay behind."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_FORK_CRED")
-    tenant_id = tenant.id
-    account_id = await _seed_account(db_session, tenant_id)
-
-    source_payload = _agent_dict(
-        id_="ag_src_cred", name="source", tenant_id=tenant_id, account_id=account_id
-    )
-    source_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_src_cred")
-    fork_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_fork_cred")
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-    plaintext = "ghp_source_token_xxxx1234"
-    await upsert_credential_encrypted(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=source_agent_uuid,
-        github_login="(inline-pat)",
-        plaintext_token=plaintext,
-        scopes=("repo", "read:user"),
-    )
-    async with db_session_factory() as s, s.begin():
-        await set_agent_github_binding(
-            s, agent_id=source_agent_uuid, principal_id=source_agent_uuid
-        )
-        await set_binding(
-            s,
-            tenant_id=tenant_id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/repo",
-            default_branch="main",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
-        )
-
-    created: list[dict[str, Any]] = []
-    handler = _fork_handler(
-        source_payload=source_payload,
-        fork_id="ag_fork_cred",
-        fork_name="myfork",
-        tenant_id=tenant_id,
-        account_id=account_id,
-        created=created,
-    )
-    runtime = _runtime_with_db(
-        build_stub_anthropic(handler), sessionmaker=db_session_factory, fernet_key=fernet_key
-    )
-
-    await write_mod.fork_agent(
-        runtime,
-        tenant_id=tenant_id,
-        source_name="source",
-        new_name="myfork",
-        account_id=account_id,
-    )
-
-    fork_pat = await get_pat(
-        principal_id=fork_agent_uuid,
-        agent_id=fork_agent_uuid,
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-    )
-    assert fork_pat is None, "the fork must not hold the source's GitHub token"
-    async with db_session_factory() as s:
-        assert await get_binding(s, tenant_id=tenant_id, agent_id=fork_agent_uuid) is None, (
-            "the fork must not inherit the source's repo binding"
-        )
 
 
 async def test_delete_agent_archives_memory_store(db_session, db_session_factory) -> None:

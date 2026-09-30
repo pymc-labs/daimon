@@ -88,28 +88,3 @@ async def delete_credential(
     for orm in rows:
         await session.delete(orm)
     return bool(rows)
-
-
-async def copy_credentials(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    source_agent_id: uuid.UUID,
-    target_agent_id: uuid.UUID,
-) -> int:
-    """Give `target_agent_id` every token `source_agent_id` holds; return how many.
-
-    Ciphertext is copied as is — both agents sit under the same key set. An
-    existing target token for the same URL is replaced, as `upsert_credential`
-    does. For why a fork needs this, see `agent_lifecycle`.
-    """
-    rows = await list_credentials(session, tenant_id=tenant_id, agent_id=source_agent_id)
-    for row in rows:
-        await upsert_credential(
-            session,
-            tenant_id=tenant_id,
-            agent_id=target_agent_id,
-            mcp_server_url=row.mcp_server_url,
-            encrypted_token=row.encrypted_token,
-        )
-    return len(rows)

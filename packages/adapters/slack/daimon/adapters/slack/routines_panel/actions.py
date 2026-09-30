@@ -27,7 +27,7 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.routines_panel.read import load_routines
+from daimon.adapters.slack.routines_panel.read import load_routines, routines_viewer
 from daimon.adapters.slack.routines_panel.state import RoutinesPanelState, picker_label
 from daimon.adapters.slack.routines_panel.views import (
     build_content_view,
@@ -83,7 +83,10 @@ async def handle_routines_command(runtime: SlackRuntime, payload: dict[str, Any]
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         async with runtime.sessionmaker() as session:
             entries, over_cap_count, agent_name_map = await load_routines(
-                session, runtime.anthropic, tenant_id=tenant_id
+                session,
+                runtime.anthropic,
+                tenant_id=tenant_id,
+                viewer_user_id=await routines_viewer(client, user_id=user_id),
             )
         state = RoutinesPanelState(
             rows=entries,
@@ -211,7 +214,10 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
             # Re-render after successful write.
             async with runtime.sessionmaker() as session:
                 entries, over_cap_count, agent_name_map = await load_routines(
-                    session, runtime.anthropic, tenant_id=tenant_id
+                    session,
+                    runtime.anthropic,
+                    tenant_id=tenant_id,
+                    viewer_user_id=await routines_viewer(client, user_id=user_id),
                 )
             state = RoutinesPanelState(
                 rows=entries,
@@ -308,7 +314,10 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
         elif action_value == "refresh":
             async with runtime.sessionmaker() as session:
                 entries, over_cap_count, agent_name_map = await load_routines(
-                    session, runtime.anthropic, tenant_id=tenant_id
+                    session,
+                    runtime.anthropic,
+                    tenant_id=tenant_id,
+                    viewer_user_id=await routines_viewer(client, user_id=user_id),
                 )
             state = RoutinesPanelState(
                 rows=entries,
