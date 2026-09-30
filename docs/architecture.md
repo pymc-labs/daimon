@@ -815,11 +815,25 @@ new selection resets the scope, so a physical Discord DM shared across servers
 never contributes the previous server's private history. The live membership check
 is bound to that scope to prevent a concurrent selection from changing its authority.
 The context is escaped with the existing handoff builder and includes a source link.
+`/dm` refuses in a sealed channel or a Discord thread that is sealed or sits
+under a sealed channel, before any history is read: the DM sits outside the seal
+and can reach unsealed channels. Admission reports this as `source_sealed`, and
+`start_dm` refuses it too. Slack's slash command carries no thread, so a Slack
+thread sealed on its own (`channel:thread_ts`) is not refused; instead its root
+and broadcast replies are dropped from the copied channel history, as the read
+tools do. Discord system notices (thread created, pins) are never copied. The DM
+row records its source channel and thread and, on Slack, the `channel:thread_ts`
+of every copied message. Every private turn re-checks them against the current
+seal list. Once any of them is sealed the DM is quarantined: the turn is refused,
+the conversation row (copied context and private history) is deleted, and the
+scope's provider sessions are retired and archived, so a fresh `/dm` is needed.
+Rows from before provenance was recorded cannot prove their source unsealed and
+are quarantined as soon as the tenant seals anything.
 
 Turns use the shared billing/session/recovery pipeline. Row claims prevent overlapping
 or duplicate DM deliveries. The route retains bounded source context and private
-history; privacy preview and deletion include it. Memory restrictions inherited from
-a sealed source remain attached to its DM conversation, and current DM policy is
+history; privacy preview and deletion include it. Memory restrictions inherited
+from the source remain attached to its DM conversation, and current DM policy is
 checked on each admission. Session preparation enforces the selected memory mount access.
 Slack private turns register their physical DM destination under a random execution
 ID carried in a signed JWT in an isolated MA vault. The read guard resolves only
