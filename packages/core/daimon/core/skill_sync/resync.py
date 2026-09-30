@@ -44,6 +44,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.config import GithubSettings
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_app_auth import build_app_jwt, mint_installation_token
 from daimon.core.github_credentials import get_pat
@@ -148,6 +149,13 @@ async def _resolve_agent_name_and_principal(
     for ma_agent in tenant_agents:
         candidate_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(ma_agent.id))
         if candidate_uuid == binding.agent_id:
+            if (ma_agent.metadata or {}).get(MA_METADATA_KEY_MANAGED) == "true":
+                # An attach never stamps the reconciler's spec hash, so the
+                # built-in agent would drift for good.
+                raise DaimonError(
+                    f"{ma_agent.name!r} is a built-in agent managed by defaults; "
+                    "a push does not sync skills onto it"
+                )
             daimon_name = (ma_agent.metadata or {}).get("daimon_name")
             resolved_agent_name = daimon_name or ma_agent.name
             resolved_ma_agent_id = str(ma_agent.id)
