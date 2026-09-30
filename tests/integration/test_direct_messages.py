@@ -8,12 +8,15 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import httpx
 import pytest
+from daimon.adapters.discord.bot import GLOBAL_CAP_NOTICE, DaimonBot
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings
 from daimon.core.direct_messages import reply_to_dm, start_dm
@@ -381,6 +384,78 @@ async def test_discord_refuses_a_departed_member_before_running_a_dm(
     await DirectMessageCog(bot).on_message(message)
     assert not created
     message.channel.send.assert_awaited_once()
+
+
+async def test_discord_dm_counts_global_slot_and_releases_on_success_and_error(
+    db_session, db_session_factory
+):
+    tenant, deps, admission, *_ = await _setup(db_session, db_session_factory)
+    await _start(tenant, deps, admission)
+    runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
+    runtime.turn_deps = deps
+    runtime.settings.discord.max_concurrent_turns = 1
+    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    guild = MagicMock(spec=discord.Guild)
+    member = MagicMock(spec=discord.Member)
+    member.id = 42
+    member.guild_permissions.administrator = False
+    member.guild_permissions.manage_guild = False
+    guild.fetch_member = AsyncMock(return_value=member)
+    channel = MagicMock(spec=discord.DMChannel)
+    channel.id = "dm-42"
+    channel.send = AsyncMock()
+
+    @asynccontextmanager
+    async def typing():
+        yield
+
+    channel.typing = typing
+
+    def message(message_id: int) -> discord.Message:
+        result = MagicMock(spec=discord.Message)
+        result.author.bot = False
+        result.author.id = 42
+        result.channel = channel
+        result.id = message_id
+        result.content = "continue"
+        return result
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_reply(*_args, **_kwargs):
+        assert bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+        entered.set()
+        await release.wait()
+        return "answer"
+
+    with (
+        patch.object(bot, "get_guild", return_value=guild),
+        patch(
+            "daimon.adapters.discord.commands.direct_messages.reply_to_dm", side_effect=slow_reply
+        ),
+    ):
+        first = asyncio.create_task(DirectMessageCog(bot).on_message(message(1)))
+        await entered.wait()
+        try:
+            await DirectMessageCog(bot).on_message(message(2))
+            assert bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+            assert any(call.args[0] == GLOBAL_CAP_NOTICE for call in channel.send.await_args_list)
+        finally:
+            release.set()
+            await first
+    assert bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
+
+    with (
+        patch.object(bot, "get_guild", return_value=guild),
+        patch(
+            "daimon.adapters.discord.commands.direct_messages.reply_to_dm",
+            side_effect=DaimonError("failed"),
+        ),
+    ):
+        await DirectMessageCog(bot).on_message(message(3))
+    assert bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize("denied", [False, True])

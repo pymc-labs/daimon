@@ -269,9 +269,30 @@ async def test_a_burst_is_judged_once_and_the_last_message_is_the_trigger(
     assert THREAD_ID not in bot._processing, (  # pyright: ignore[reportPrivateUsage]
         "the in-flight slot is released when the turn ends"
     )
+    assert bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
     assert bot._participation_pending == {}, (  # pyright: ignore[reportPrivateUsage]
         "a judged batch is gone"
     )
+
+
+async def test_global_cap_sheds_unprompted_turn_after_classifier(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    classifier: _FakeClassifier,
+) -> None:
+    await _follow_thread(db_session_factory, tenant_id)
+    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
+    assert bot.runtime.settings.discord is not None
+    bot.runtime.settings.discord.max_concurrent_turns = 1
+    bot._global_inflight = 1  # pyright: ignore[reportPrivateUsage]
+    turns = _stub_turn(bot)
+
+    await bot.on_message(_thread_message(_make_thread(), content="a question?"))
+    await _drain_timer(bot)
+
+    assert len(classifier.calls) == 1
+    assert turns == []
+    assert bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_classifier_silence_runs_no_turn(

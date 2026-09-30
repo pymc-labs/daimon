@@ -316,6 +316,15 @@ class DiscordSettings(BaseModel):
             "on the shared Anthropic key."
         ),
     )
+    max_concurrent_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Maximum Discord agent turns running across all guilds and DMs in this process. "
+            "Unset leaves deployment-wide admission unlimited. Excess turns are refused "
+            "with a retry notice; continuation wakes keep their existing admission path."
+        ),
+    )
     health_port: int = Field(
         default=8081,
         description=(

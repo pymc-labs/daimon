@@ -1101,6 +1101,43 @@ class TestProtectedChannelSilence:
 
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
 
+    async def test_global_capacity_notice_is_not_posted_into_a_protected_channel(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        bot, _ = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        assert bot.runtime.settings.discord is not None
+        bot.runtime.settings.discord.max_concurrent_turns = 1
+        bot._global_inflight = 1  # pyright: ignore[reportPrivateUsage]
+        message = _make_channel_message(channel_id=789)
+        message.channel.category_id = None  # pyright: ignore[reportAttributeAccessIssue]
+
+        await bot.on_message(message)
+
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        assert bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+
+    async def test_global_capacity_notice_is_not_posted_into_a_protected_thread(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        bot, _ = await self._bot_for(
+            db_session, db_session_factory, TenantAccessPolicy(protected_channel_ids=("789",))
+        )
+        assert bot.runtime.settings.discord is not None
+        bot.runtime.settings.discord.max_concurrent_turns = 1
+        bot._global_inflight = 1  # pyright: ignore[reportPrivateUsage]
+        message = _make_thread_message(parent_id=789)
+
+        await bot.on_message(message)
+
+        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        assert bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+
     @pytest.mark.parametrize("fetch_fails", [False, True], ids=["fetched", "fetch-failed"])
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_an_uncached_thread_parent_is_fetched_before_judging_its_category(

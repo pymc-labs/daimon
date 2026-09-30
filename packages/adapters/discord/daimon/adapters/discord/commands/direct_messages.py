@@ -6,7 +6,7 @@ from typing import Literal
 
 import anthropic
 import structlog
-from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.bot import GLOBAL_CAP_NOTICE, DaimonBot, log_anthropic_overload
 from daimon.adapters.discord.checks import is_member_guild_admin, require_registered_guild
 from daimon.core.direct_messages import reply_to_dm, require_dm_enabled, start_dm
 from daimon.core.errors import DaimonError
@@ -162,17 +162,25 @@ class DirectMessageCog(commands.Cog):
             if not message.content.strip():
                 await message.channel.send("Send a text message to continue this conversation.")
                 return
-            async with message.channel.typing():
-                answer = await reply_to_dm(
-                    runtime.turn_deps,
-                    platform="discord",
-                    route_key=str(message.channel.id),
-                    external_user_id=str(message.author.id),
-                    message_id=str(message.id),
-                    expected_scope_id=conversation.scope_id,
-                    text=message.content,
-                    role=role,
+            if not self.bot.try_claim_global_turn():
+                await message.channel.send(
+                    GLOBAL_CAP_NOTICE, allowed_mentions=discord.AllowedMentions.none()
                 )
+                return
+            try:
+                async with message.channel.typing():
+                    answer = await reply_to_dm(
+                        runtime.turn_deps,
+                        platform="discord",
+                        route_key=str(message.channel.id),
+                        external_user_id=str(message.author.id),
+                        message_id=str(message.id),
+                        expected_scope_id=conversation.scope_id,
+                        text=message.content,
+                        role=role,
+                    )
+            finally:
+                self.bot.release_global_turn()
             if answer is not None:
                 for start in range(0, len(answer), 1900):
                     await message.channel.send(
@@ -186,6 +194,7 @@ class DirectMessageCog(commands.Cog):
             anthropic.APIError,
             SQLAlchemyError,
         ) as exc:
+            log_anthropic_overload(exc, tenant_id=conversation.tenant_id, path="dm")
             log.warning("discord.dm.turn_failed", error_type=type(exc).__name__)
             error = (
                 str(exc)

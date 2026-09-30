@@ -302,6 +302,14 @@ Discord bot token. Required to run the Discord adapter.
 Maximum number of agent turns a single tenant (Discord guild) may have in flight at
 once. Caps one noisy guild from starving others on the shared Anthropic key.
 
+### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS`
+
+`int | None` · optional · default unset
+
+Maximum Discord agent turns running across all guilds and DMs in this process. Unset
+leaves deployment-wide admission unlimited. Excess turns are refused with a retry
+notice; continuation wakes keep their existing admission path.
+
 ### `DAIMON_DISCORD__HEALTH_PORT`
 
 `int` · optional · default `8081`

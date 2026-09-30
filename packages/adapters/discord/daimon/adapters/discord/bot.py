@@ -58,7 +58,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, TurnError
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
@@ -105,7 +105,22 @@ from discord.ext import commands
 
 log = structlog.get_logger()
 
+
+def log_anthropic_overload(exc: object, *, tenant_id: uuid.UUID, path: str) -> None:
+    """Surface provider throttling that the SDK eventually gives up retrying."""
+    if isinstance(exc, TurnError):
+        exc = exc.cause
+    if isinstance(exc, _anthropic.APIStatusError) and exc.status_code in (429, 529):
+        log.warning(
+            "turn.anthropic_overloaded",
+            tenant_id=str(tenant_id),
+            path=path,
+            status_code=exc.status_code,
+        )
+
+
 _EMBED_COLOR = theme.COLOR_BLURPLE  # Blurple — repo standard (help.py D-FORMAT-01).
+GLOBAL_CAP_NOTICE = "Daimon is at capacity right now — try again in a minute."
 
 # Grace window for graceful shutdown drain. Must match the deployment's
 # container kill/stop timeout of 60s. The drain polls _processing up to this
@@ -394,6 +409,7 @@ class DaimonBot(commands.Bot):
         # Incremented before the turn starts; decremented in a finally that brackets
         # the whole drain loop so the slot is always released.
         self._inflight: dict[uuid.UUID, int] = {}
+        self._global_inflight = 0
         # Organic thread participation: per-thread quiet-period batches, keyed
         # by thread id. Populated only for threads that resolved to `on`.
         self._participation_pending: dict[int, _ParticipationBatch] = {}
@@ -453,7 +469,9 @@ class DaimonBot(commands.Bot):
             self._cancel_participation_batch(thread_id)
         log.info("discord.draining", inflight_threads=len(self._processing))
         deadline = asyncio.get_running_loop().time() + _DRAIN_GRACE_S
-        while self._processing and asyncio.get_running_loop().time() < deadline:
+        while (
+            self._processing or self._global_inflight
+        ) and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.5)
         log.info("discord.drain_complete", remaining=len(self._processing))
         await self.close()
@@ -1069,6 +1087,18 @@ class DaimonBot(commands.Bot):
         if self._inflight[tenant_id] <= 0:
             self._inflight.pop(tenant_id, None)
 
+    def try_claim_global_turn(self) -> bool:
+        """Claim a process-wide slot without yielding between check and increment."""
+        settings = self.runtime.settings.discord
+        cap = settings.max_concurrent_turns if settings is not None else None
+        if self.draining or (isinstance(cap, int) and self._global_inflight >= cap):
+            return False
+        self._global_inflight += 1
+        return True
+
+    def release_global_turn(self) -> None:
+        self._global_inflight -= 1
+
     def _cancel_participation_batch(self, thread_id: int) -> None:
         """Drop a thread's pending auto batch and its timer, if any."""
         batch = self._participation_pending.pop(thread_id, None)
@@ -1242,6 +1272,14 @@ class DaimonBot(commands.Bot):
                 cap=cap,
             )
             return
+        if not self.try_claim_global_turn():
+            log.info(
+                "turn.skipped.global_concurrency_shed",
+                tenant_id=str(tenant_id),
+                guild_id=guild_id,
+                channel_id=str(thread_id),
+            )
+            return  # unprompted participation follows the per-tenant silent refusal
         self._inflight[tenant_id] = count + 1
         self._processing.add(thread_id)
         try:
@@ -1262,6 +1300,7 @@ class DaimonBot(commands.Bot):
             self._release_thread(thread_id)
             self._pending.pop(thread_id, None)
             self._release_inflight(tenant_id)
+            self.release_global_turn()
 
     async def on_message(self, message: discord.Message) -> None:
         """Gate on mention, resolve TenantContext once + run the non-ready self-heal gate,
@@ -1404,12 +1443,22 @@ class DaimonBot(commands.Bot):
                     "This server has too many chats in flight right now — try again in a moment."
                 )
                 return
+            if not self.try_claim_global_turn():
+                log.info(
+                    "turn.skipped.global_concurrency_shed",
+                    tenant_id=str(tenant_id),
+                    guild_id=guild_id,
+                    channel_id=str(thread_id),
+                )
+                await message.channel.send(GLOBAL_CAP_NOTICE)
+                return
             self._inflight[tenant_id] = count + 1
 
             # Channel-level mentions each open their own thread + MA session, so
-            # they run in parallel — no serialization (bounded only by the
-            # per-tenant concurrency cap claimed above). Serializing them by channel
-            # id wedged the whole channel whenever a single turn stalled (e.g. an
+            # they run in parallel — no serialization (bounded by the
+            # per-tenant and optional process-wide caps claimed above).
+            # Serializing them by channel id wedged the whole channel whenever
+            # a single turn stalled (e.g. an
             # upstream overload backoff with no SSE events for minutes).
             #
             # Channel mentions still parallelize per-mention (each opens its own
@@ -1450,16 +1499,10 @@ class DaimonBot(commands.Bot):
                         self._release_thread(created_id)
                         self._pending.pop(created_id, None)
                     self._release_inflight(tenant_id)
+                    self.release_global_turn()
                 return
 
             thread_id = message.channel.id
-            if thread_id in self._processing:
-                await self._queue_behind_inflight_turn(thread_id, message)
-                # This coroutine won't run a turn; the slot was claimed for the
-                # already-processing path which will do the work.
-                self._release_inflight(tenant_id)
-                return
-
             self._processing.add(thread_id)
             try:
                 await self._handle_mention(message, guild_id, tenant_id)
@@ -1468,6 +1511,7 @@ class DaimonBot(commands.Bot):
                 self._release_thread(thread_id)
                 self._pending.pop(thread_id, None)
                 self._release_inflight(tenant_id)
+                self.release_global_turn()
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await self._handle_prologue_failure(message, exc, guild_id, post_state=post_state)
         except Exception as exc:  # on_message event-handler boundary
@@ -1605,6 +1649,7 @@ class DaimonBot(commands.Bot):
                 unprompted=unprompted,
             )
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
+            log_anthropic_overload(exc, tenant_id=tenant_id, path="mention")
             log.warning("turn.failed", error=str(exc), channel_id=str(message.channel.id))
             await self._render_turn_error(message, tenant_id, guild_id, rid, exc)
         except Exception as exc:  # mention-turn adapter boundary
@@ -1646,6 +1691,8 @@ class DaimonBot(commands.Bot):
         anything outside a turn goes through
         `dispatch_continuations_in_thread`, which takes the guard first.
         """
+        if self.draining:
+            return
         await dispatch_pending_continuations(
             self.runtime.sessionmaker,
             self.runtime.anthropic,
@@ -1779,17 +1826,21 @@ class DaimonBot(commands.Bot):
         tenant_id: uuid.UUID,
         guild_id: str,
     ) -> None:
-        with observe_turn(
-            self.runtime.sessionmaker,
-            tenant_id=tenant_id,
-            platform="discord",
-            channel_id=str(thread.parent_id),
-            thread_id=str(thread.id),
-            origin="handoff",
-        ):
-            return await self._run_continuation_turn_observed(
-                row, decision, thread=thread, tenant_id=tenant_id, guild_id=guild_id
-            )
+        try:
+            with observe_turn(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="discord",
+                channel_id=str(thread.parent_id),
+                thread_id=str(thread.id),
+                origin="handoff",
+            ):
+                return await self._run_continuation_turn_observed(
+                    row, decision, thread=thread, tenant_id=tenant_id, guild_id=guild_id
+                )
+        except _anthropic.APIError as exc:
+            log_anthropic_overload(exc, tenant_id=tenant_id, path="continuation")
+            raise
 
     async def _run_continuation_turn_observed(
         self,
@@ -2080,6 +2131,11 @@ class DaimonBot(commands.Bot):
                 )
 
         assert outcome is not None
+        log_anthropic_overload(
+            outcome.state.error.cause if outcome.state.error is not None else None,
+            tenant_id=tenant_id,
+            path="continuation",
+        )
         final_lifecycle = lifecycle_holder[0]
         if outcome.state.error is None and prepared.mapping_id is not None:
             if final_lifecycle.final_message_id is not None:
@@ -2845,6 +2901,11 @@ class DaimonBot(commands.Bot):
         # Reached only on the non-exceptional path -- any raise inside the try
         # propagates past this point once the finally block above has run.
         assert outcome is not None
+        log_anthropic_overload(
+            outcome.state.error.cause if outcome.state.error is not None else None,
+            tenant_id=tenant_id,
+            path="mention",
+        )
         state = outcome.state
         mapping_id = outcome.mapping_id
         final_lifecycle = lifecycle_holder[0]

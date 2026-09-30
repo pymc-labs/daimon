@@ -148,7 +148,8 @@ Two boundaries of the design worth stating plainly:
   negative. The ledger allows it. Concurrent turns compound this: every turn
   admitted while the balance was still positive runs to completion, so a chat
   tenant can overdraw by up to `max_concurrent_turns_per_tenant` (default 3)
-  times one turn's cost. An MCP `start_turn` session is worse. Its spend
+  times one turn's cost. Discord's optional process-wide limit refuses excess
+  guild mentions and DMs before `admit()`. An MCP `start_turn` session is worse. Its spend
   reaches the ledger only when the scheduler's usage sweep next runs (after
   the tick's routine fires, which can take up to the 45-minute turn ceiling).
   Until then the gate reads a balance that leaves out earlier headless turns,
