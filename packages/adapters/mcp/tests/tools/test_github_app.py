@@ -323,7 +323,7 @@ async def test_post_app_install_link_rejects_missing_platform_user_id(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_post_app_install_link_rejects_unset_slug(
     monkeypatch: pytest.MonkeyPatch,
     platform: str,

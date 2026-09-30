@@ -5,8 +5,8 @@ turn chokepoint and the MCP channel tools evaluate it with the predicates
 below. Every field defaults to "open", so a tenant without a policy row
 behaves exactly as before the policy existed.
 
-Ids are platform-native strings (Discord snowflakes, Slack channel/user ids)
-for the tenant's own platform. Channels are named by id, never by name.
+Ids are platform-native strings (Discord snowflakes, Slack ids, Teams Entra
+object and conversation ids) for the tenant's own platform. Channels are named by id, never by name.
 """
 
 from __future__ import annotations

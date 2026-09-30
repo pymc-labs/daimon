@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from daimon.core.continuity.messages import FORBIDDEN_TOKENS, ConfigurationChange
-from daimon.core.credential_requests import build_custom_id
+from daimon.core.credential_requests import build_custom_id, build_skill_repo_target
 from daimon.core.posted_controls.cards import (
     ALREADY_USED_MESSAGE,
     EXPIRED_HEADLINE,
@@ -21,10 +22,12 @@ from daimon.core.posted_controls.cards import (
     CardState,
     PostedCard,
     build_posted_card,
+    card_for_request,
     card_text,
     classify_card_state,
     expired_message,
 )
+from daimon.core.stores.domain import CredentialRequestRow
 
 AGENT = "research-bot"
 RESPONDER = "Daimon"
@@ -541,3 +544,45 @@ def test_a_primary_button_without_a_custom_id_is_rejected() -> None:
 def test_a_link_button_without_a_url_is_rejected() -> None:
     with pytest.raises(ValueError, match="url"):
         CardButton(label="Connect GitHub", style="link", custom_id="ztc:abc")
+
+
+def _request_row(kind: str, target: str, mcp_server_url: str | None = None) -> CredentialRequestRow:
+    return CredentialRequestRow(
+        token=TOKEN,
+        kind=kind,
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        target=target,
+        mcp_server_url=mcp_server_url,
+        requester_platform_user_id=REQUESTER,
+        channel_id="C1",
+        idempotency_key=uuid.uuid4(),
+        target_name=AGENT,
+        created_at=EXPIRES,
+        expires_at=EXPIRES,
+        used_at=None,
+    )
+
+
+def test_card_for_request_reads_the_row() -> None:
+    """Every fact the card shows comes off the durable request row."""
+    card = card_for_request(_request_row("mcp", "linear", MCP_URL), state="requested")
+    assert card.headline == f"🔌 Connect {AGENT} to linear", "the row names agent and server"
+    assert card.facts[0] == f"{MCP_URL} needs a token.", "the row carries the server url"
+
+
+def test_card_for_request_unpacks_the_repo_target() -> None:
+    """A repo row packs `url@branch#path` into `target`; the card shows owner/repo."""
+    target = build_skill_repo_target("https://github.com/acme/skills", "dev", "skills")
+    card = card_for_request(_request_row("skill_repo", target), state="requested")
+    expected = build(
+        "skill_repo",
+        "requested",
+        target=target,
+        repo="acme/skills",
+        branch="dev",
+        mcp_server_url=None,
+        skill_repo_isolated=False,
+    )
+    assert card == expected, "the row's packed target yields the same card as explicit facts"

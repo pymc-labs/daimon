@@ -230,7 +230,7 @@ async def _bind_public_repo_impl(
 
 
 def register_repo_binding_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def bind_public_repo(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,

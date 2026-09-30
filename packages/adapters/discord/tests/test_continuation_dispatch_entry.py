@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime, build_turn_deps
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.continuity.continuation import ContinuationDecision, ContinuationRequest
 from daimon.core.continuity.wakes import enqueue_wake, poll_wakes_once
@@ -38,6 +38,7 @@ from daimon.core.stores.task_continuations import (
     list_pending_continuations,
     record_continuation,
 )
+from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TurnState

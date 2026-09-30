@@ -30,6 +30,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Microsoft Teams adapter: answers in 1:1 chats and when @mentioned in
+  channels, with an in-place status card, author-only Cancel, per-thread
+  queueing, feedback buttons and restart recovery. The configured Entra
+  organisation is provisioned at boot. The 1:1 chat offers `help`, `new`,
+  `setup` (with setup conversations), `routines`, `memory`, `privacy` and
+  `billing`; admins are listed in
+  `DAIMON_TEAMS__ADMIN_USER_IDS`. Pasted images and files shared in 1:1 chats
+  reach the agent, output files are delivered with file consent cards, and
+  `send_message`, `create_thread`, task handoffs and timers work from Teams
+  turns; the wake poller runs handoffs and timers across restarts.
+  Agent keys, MCP tokens and MCP sign-ins are collected privately through
+  Teams dialogs, and with tool safety on, attached-tool writes wait on an
+  Approve/Deny card only the requester can answer. A turn that ends early
+  explains why with the termination notice. Protected channels get no
+  replies, notices or tool posts. Tenant turn caps, agent pins, key-name
+  rules, prepaid balance footers and spend-limit alerts match Slack.
+  Builds on #220 by @jchu96. See `docs/teams.md`.
 - Staging-only load rehearsal script for synthetic installs and metered headless turns, with a dry run, spend guard, and tenant cleanup.
 
 - Optional Discord webhook alerts for new installs, Stripe top-ups, and Anthropic spend or overload events.
@@ -236,6 +253,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The checkout landing pages no longer tell every payer to return to Discord.
+- Continuity notices (workspace loss, fresh start, a failed preparation, a new
+  responder, a timer that did not run) say "here" and "ask again" instead of
+  "this thread" and "mention me", so they read right in a chat without threads.
 - **Sonnet 5 and Opus 4.7 are metered at list price.** Sonnet 5 was charged at
   $3/$15 per million tokens, the rise Anthropic announced and then withdrew;
   its standard price stayed $2/$10. Opus 4.7 was charged Opus 4.1's $15/$75
@@ -396,6 +417,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Sentry's event scrubber checks nested values, so a token inside a dict local,
+  such as request headers, no longer ships with an error event.
+- Slack top-ups sent the checkout route an internal admin token for the
+  clicking account. They now send a plain account token, as Discord does;
+  the route only needs the account.
 - Text daimon quotes from outside the request now arrives marked as data:
   replayed thread and channel messages on Discord and Slack sit inside
   `trust="untrusted"` envelopes, YouTube transcripts come back wrapped, and

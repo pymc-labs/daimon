@@ -26,6 +26,7 @@ typo is silent — check the spelling here.
 - [Discord](#discord)
 - [Thread Participation](#thread-participation)
 - [Slack](#slack)
+- [Teams](#teams)
 - [GitHub](#github)
 - [Crypto](#crypto)
 - [Credentials](#credentials)
@@ -88,7 +89,7 @@ Set DAIMON_TABLE_RENDERING to a JSON object.
 
 `HttpUrl` · optional · default `https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md`
 
-URL rendered on the Discord and Slack privacy panels' Policy button. Override via
+URL rendered on the privacy panels' Policy button. Override via
 DAIMON_PRIVACY_POLICY_URL if you host your own policy page.
 
 ### `DAIMON_DEFAULTS_ROOT`
@@ -474,6 +475,75 @@ once. Caps one noisy workspace from starving others on the shared Anthropic key.
 Port for the Slack process's liveness endpoint. Must not collide with the mcp process
 (8080), the discord process (8081), or the scheduler process (8082) — all process groups
 share one host.
+
+## Teams
+
+Read from `daimon.core.config.TeamsSettings`. Prefix `DAIMON_TEAMS__`.
+
+Microsoft Teams adapter config.
+
+Optional so non-Teams deployments boot unchanged — the block is ``None`` when no
+``DAIMON_TEAMS__*`` env vars are present. Mirrors ``SlackSettings``.
+
+``client_id`` / ``client_secret`` / ``tenant_id`` are the Entra app registration the Bot
+Framework posts activities to; ``port`` is the HTTP ingress the SDK's FastAPI adapter
+binds (``/api/messages`` plus the ``/healthz`` / ``/readyz`` endpoints served by the
+same listener); ``enabled`` gates ``/api/messages`` without taking the process down.
+
+This whole block is optional: it stays unset until at least one of its variables is set,
+and the features that read it are inactive while it is.
+
+### `DAIMON_TEAMS__CLIENT_ID`
+
+`str` · **required**
+
+Entra (Azure AD) app registration client ID the Teams bot authenticates as — also the
+audience inbound Bot Framework JWTs are validated against.
+
+### `DAIMON_TEAMS__CLIENT_SECRET`
+
+`SecretStr` · **required** · secret
+
+Entra app registration client secret, used to mint Bot Framework tokens for outbound
+sends.
+
+### `DAIMON_TEAMS__TENANT_ID`
+
+`str` · **required**
+
+Entra tenant ID the app registration lives in. A single-tenant bot only answers
+activities whose conversation and channel-data tenant both equal this value.
+
+### `DAIMON_TEAMS__MAX_CONCURRENT_TURNS_PER_TENANT`
+
+`int` · optional · default `3`
+
+Maximum number of agent turns a single Teams tenant may have in flight at once. Caps one
+noisy tenant from starving others on the shared Anthropic key.
+
+### `DAIMON_TEAMS__PORT`
+
+`int` · optional · default `3978`
+
+Port for the Teams process's HTTP ingress and health endpoints (/api/messages, /healthz,
+/readyz). The Bot Framework messaging endpoint must be configured to reach this
+listener.
+
+### `DAIMON_TEAMS__ENABLED`
+
+`bool` · optional · default `True`
+
+When False, /api/messages answers 503 while the health endpoints stay live — the process
+keeps running so ingress can be re-enabled without a redeploy.
+
+### `DAIMON_TEAMS__ADMIN_USER_IDS`
+
+`tuple[str, ...]` · optional · default unset
+
+Entra object IDs of the people who administer this deployment from Teams. Teams exposes
+no admin role to bots, so this list is the admin check: admins get the admin role in
+turns, create routines, replace shared keys, top up and see everyone's usage. Everyone
+else is a regular user.
 
 ## GitHub
 

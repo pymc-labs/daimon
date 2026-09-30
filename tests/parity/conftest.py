@@ -2,7 +2,7 @@
 
 Re-exports the standard per-worker-schema DB fixtures from `daimon.testing.db`
 (the established pattern — no local Base import) and the shared turn router
-(`daimon.testing.turn_router`) both `DiscordDriver` and `SlackDriver` use to
+(`daimon.testing.turn_router`) every driver uses to
 fake the MA transport for a turn (agent/environment resolution + SSE event
 stream). The platform entry points themselves stay in their own driver
 modules.
@@ -28,13 +28,20 @@ from daimon.testing.turn_router import (
 from .drivers.discord_driver import DiscordDriver
 from .drivers.protocol import PlatformDriver
 from .drivers.slack_driver import SlackDriver
+from .drivers.teams_driver import TeamsDriver
 
 __all__ = ["build_turn_router", "turn_events", "AGENT_TEXT", "AGENT_ID", "ENV_ID", "MODEL_ID"]
 
 
-@pytest.fixture(params=["discord", "slack"], ids=["discord", "slack"])
+@pytest.fixture(params=["discord", "slack", "teams"])
 def driver(request: pytest.FixtureRequest) -> PlatformDriver:
-    """Yield the PlatformDriver under test, parametrized over both platforms."""
+    """Yield the PlatformDriver under test, parametrized over every chat platform.
+
+    A scenario that cannot apply to one platform narrows this with
+    `@pytest.mark.parametrize("driver", [...], indirect=True)`.
+    """
     if request.param == "discord":
         return DiscordDriver()
-    return SlackDriver()
+    if request.param == "slack":
+        return SlackDriver()
+    return TeamsDriver()

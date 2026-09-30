@@ -117,7 +117,7 @@ _CHECK_FAILED = "Something went wrong checking this request — please try again
 _CALLBACK_FAILED = "Something went wrong opening this form — please try again."
 
 #: Fallbacks for the two display names a row may not carry, matching
-#: `posted_controls.edit`: a row minted before its agent was resolved names no
+#: `card_for_request`: a row minted before its agent was resolved names no
 #: target, and one minted outside a turn names no responder.
 _UNNAMED_AGENT: Final[str] = "the agent"
 _UNNAMED_RESPONDER: Final[str] = "Daimon"

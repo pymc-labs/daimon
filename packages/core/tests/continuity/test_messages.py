@@ -307,7 +307,7 @@ def test_render_fresh_start() -> None:
     assert render_fresh_start("Ada") == (
         "Starting fresh from your next message here.\n"
         "Leaves behind: this task's working files and unfinished work.\n"
-        "Keeps: everything already posted in this thread, and Ada's saved memory, "
+        "Keeps: everything already posted here, and Ada's saved memory, "
         "keys and connections.\n"
         "Nothing is removed until the new workspace is ready."
     ), "fresh start copy is fixed four lines naming the target"
@@ -321,7 +321,7 @@ def test_render_preparation_failed() -> None:
         "I could not get Ada ready with the latest setup, so I have not started this message.\n"
         "What was saved is still saved.\n"
         "Your task, decisions and working files are unchanged.\n"
-        "Mention me again to retry."
+        "Ask again to retry."
     ), "preparation failure copy states the turn did not run"
 
 
@@ -331,7 +331,7 @@ def test_render_preparation_failed() -> None:
 def test_render_unexpected_loss_transcript() -> None:
     assert render_unexpected_loss("transcript") == (
         "I lost the workspace this task was running in and started a new one.\n"
-        "I have this thread's conversation and the files that were saved to your task.\n"
+        "I have this conversation and the files that were saved to your task.\n"
         "Anything unsaved in the old workspace is gone, and nothing that was running "
         "came across.\n"
         "Tell me what to re-check and I'll go from there."
@@ -341,7 +341,7 @@ def test_render_unexpected_loss_transcript() -> None:
 def test_render_unexpected_loss_history() -> None:
     assert render_unexpected_loss("history") == (
         "I lost the workspace this task was running in and started a new one.\n"
-        "I have what was posted in this thread, but not the earlier conversation.\n"
+        "I have what was posted here, but not the earlier conversation.\n"
         "Anything unsaved in the old workspace is gone, and nothing that was running "
         "came across.\n"
         "Tell me what to re-check and I'll go from there."
@@ -375,7 +375,7 @@ def test_render_responder_changed_without_handoff() -> None:
         "Nova now answers in #data, but this conversation's work belongs to Ada.\n"
         'Say "have Nova take over this task" and I\'ll move the conversation and '
         "working files across.\n"
-        "Or start a new thread to begin fresh with Nova."
+        "Or start a new conversation to begin fresh with Nova."
     ), "the quoted trigger phrase must name the new responder verbatim"
 
 
@@ -397,7 +397,7 @@ def test_render_replacement_summary_transcript_with_nothing_lost() -> None:
 
 def test_render_replacement_summary_history_with_nothing_lost() -> None:
     assert render_replacement_summary("history", []) == (
-        "Only what was posted in this thread came across."
+        "Only what was posted here came across."
     ), "history transfer is the narrowest summary"
 
 
@@ -409,7 +409,7 @@ def test_render_replacement_summary_appends_not_carried_line_when_lost_is_nonemp
 
 def test_render_replacement_summary_joins_multiple_lost_items_with_commas() -> None:
     assert render_replacement_summary("history", ["memory", "keys"]) == (
-        "Only what was posted in this thread came across.\nNot carried: memory, keys."
+        "Only what was posted here came across.\nNot carried: memory, keys."
     ), "multiple lost items should be comma-joined on the 'Not carried' line"
 
 

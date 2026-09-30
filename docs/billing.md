@@ -207,7 +207,7 @@ then balance-gated on its first message.
 The product flow is Stripe Checkout, one-time payments rather than a
 subscription:
 
-1. `/billing` on Discord or Slack offers fixed amounts, each labelled with an
+1. `/billing` on Discord or Slack (`billing` on Teams) offers fixed amounts, each labelled with an
    estimated number of turns derived from that tenant's own history. Admin
    status is verified at click time, not at render.
 2. The chat adapters never import `stripe`. They mint a token and POST to
@@ -336,13 +336,13 @@ Self-service top-ups additionally need `DAIMON_MCP__PUBLIC_URL` and
 `DAIMON_MCP__JWT_SECRET` for the adapter-to-MCP hop, and the image must carry
 the optional `billing` extra, which is what pulls in `stripe`.
 
-The Discord and Slack terminal reply footers show the remaining ledger balance
+The Discord, Slack and Teams terminal reply footers show the remaining ledger balance
 for prepaid tenants after the turn's debit. Operator-funded tenants and turns
 without a tenant omit it.
 
 ## What you can see
 
-`/billing` on Discord and Slack is the reporting surface, always over the
+`/billing` on Discord and Slack, and `billing` on Teams, is the reporting surface, always over the
 current calendar month, built from
 `packages/core/daimon/core/stores/usage_events.py`. A member sees their own
 spend, turn count and cap plus the tenant balance; an admin additionally sees

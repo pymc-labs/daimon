@@ -157,7 +157,7 @@ def _recovery_lifecycle(_cancel: asyncio.Event) -> RecordingLifecycle:
 
 
 @pytest.mark.parametrize("funding_mode", ["prepaid", "operator_funded"])
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("failure", [False, True])
 async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
     db_session: AsyncSession,
