@@ -178,7 +178,9 @@ async def test_modal_saves_then_clears_this_channels_admins(
     cleared.users._values = []  # pyright: ignore[reportPrivateUsage]
     await cleared.on_submit(_interaction(admin=True))
     async with db_session_factory() as session:
-        assert await list_channel_admins(session, tenant_id=tenant.id, platform="discord") == []
+        assert await list_channel_admins(session, tenant_id=tenant.id, platform="discord") == [], (
+            "an empty submit clears the grant"
+        )
 
 
 async def test_modal_refuses_a_member_and_stores_nothing(account_id: uuid.UUID) -> None:

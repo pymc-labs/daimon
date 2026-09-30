@@ -131,14 +131,16 @@ async def test_set_get_clear_round_trip(
     listed = _console()
     await channels_admins_get(**where, console=listed, channel_id=None, as_json=True)
     (row,) = json.loads(_out(listed))
-    assert (row["channel_id"], row["role_ids"], row["user_ids"]) == (CHANNEL, [ROLE], [USER])
+    assert (row["channel_id"], row["role_ids"], row["user_ids"]) == (CHANNEL, [ROLE], [USER]), (
+        "json lists the saved grant"
+    )
 
     cleared = _console()
     await channels_admins_clear(**where, console=cleared, channel_id=CHANNEL)
-    assert "cleared" in _out(cleared)
+    assert "cleared" in _out(cleared), "clear reports it"
     after = _console()
     await channels_admins_get(**where, console=after, channel_id=CHANNEL, as_json=True)
-    assert json.loads(_out(after)) == []
+    assert json.loads(_out(after)) == [], "nothing is left after clear"
 
 
 async def test_set_refuses_bad_ids_empty_lists_and_unknown_tenants(

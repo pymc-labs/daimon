@@ -1583,10 +1583,10 @@ async def test_purge_account_removes_the_person_from_channel_admins(
     await db_session.commit()
 
     preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
-    assert preview.channel_admins.count == 2
+    assert preview.channel_admins.count == 2, "the preview counts both grants"
     report = await purge_account(sm=db_session_factory, account_id=account.id)
 
-    assert report.db.channel_admins == 2
+    assert report.db.channel_admins == 2, "purge removes both"
     async with db_session_factory() as session:
         rows = await channel_admins_store.list_channel_admins(
             session, tenant_id=tenant.id, platform="discord"

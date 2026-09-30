@@ -269,13 +269,13 @@ def test_channel_admin_caller_reads_live_roles_without_everyone() -> None:
     member.id, member.guild.owner_id = 7, 1
     member.roles = [_role(1, default=True), _role(55)]
     member.guild_permissions.administrator = member.guild_permissions.manage_guild = False
-    assert member_role_ids(member) == ["55"]
+    assert member_role_ids(member) == ["55"], "the default role is dropped"
     caller = channel_admin_caller(member)
     assert (caller.platform_user_id, caller.role_ids, caller.is_server_admin) == (
         "7",
         frozenset({"55"}),
         False,
-    )
+    ), "the caller carries its id and roles, not server admin"
     user = MagicMock(spec=discord.User)
     user.id = 8
     assert channel_admin_caller(user).role_ids == frozenset(), "a non-member holds no roles"

@@ -131,7 +131,9 @@ def test_channel_admin_locality_allows_reachable_agent_but_not_managed_one() -> 
 
 
 def test_locality_defaults_off_so_reachable_agent_still_needs_admin() -> None:
-    assert _facts(managed=False, reachable=True).is_local_to_caller_channels is False
+    assert _facts(managed=False, reachable=True).is_local_to_caller_channels is False, (
+        "locality is off by default"
+    )
     outcome = decide_operation(
         "agent_spec_edit", is_admin=False, target=_facts(managed=False, reachable=True)
     )

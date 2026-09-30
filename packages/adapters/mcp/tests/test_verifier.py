@@ -242,7 +242,7 @@ async def test_verifier_computes_the_channel_admin_claim_from_stored_roles(
     )
 
     before = await verifier.verify_token(token)
-    assert before is not None and before.claims["channel_admin"] is False
+    assert before is not None and before.claims["channel_admin"] is False, "no grant yet"
     async with sessionmaker() as s, s.begin():
         await set_platform_role_ids(s, account.id, ["r1"])
         await set_channel_admins(
@@ -255,5 +255,7 @@ async def test_verifier_computes_the_channel_admin_claim_from_stored_roles(
             actor_account_id=None,
         )
     after = await verifier.verify_token(token)
-    assert after is not None and after.claims["channel_admin"] is True
-    assert after.claims["platform_role_ids"] == ["r1"]
+    assert after is not None and after.claims["channel_admin"] is True, (
+        "a new grant shows on the next verify"
+    )
+    assert after.claims["platform_role_ids"] == ["r1"], "the stored role ids ride along"

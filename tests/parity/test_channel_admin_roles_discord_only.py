@@ -41,9 +41,11 @@ def test_slack_channel_admins_form_offers_members_only() -> None:
         user_ids=[],
     )
     selects = [block["element"]["type"] for block in form["blocks"] if block["type"] == "input"]
-    assert selects == ["multi_users_select"]
+    assert selects == ["multi_users_select"], "Slack picks users only"
 
 
 def test_core_documents_the_discord_only_roles() -> None:
     doc = daimon.core.channel_admins.__doc__
-    assert doc is not None and "test_channel_admin_roles_discord_only" in doc
+    assert doc is not None and "test_channel_admin_roles_discord_only" in doc, (
+        "core names the parity record"
+    )
