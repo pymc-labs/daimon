@@ -15,9 +15,10 @@ from anthropic.types.beta.skills import VersionCreateResponse
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.skills.add import add_agent_skill
+from daimon.core.skills.add import add_agent_skill, fetch_attachment, fetch_repo_skill
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_markdown
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
+from daimon.testing.archives import make_tarball
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.ma_models import ma_agent
@@ -223,3 +224,49 @@ async def test_an_agent_at_the_skill_cap_is_refused_before_uploading(
     with pytest.raises(SkillIngestError, match="Remove one first"):
         await _add(fake, db_session_factory, tenant.id)
     assert fake.created_titles == []
+
+
+async def _repo_skill(files: dict[str, bytes], path: str):
+    tarball = make_tarball(files)
+    transport = httpx.MockTransport(lambda _r: httpx.Response(200, content=tarball))
+    async with httpx.AsyncClient(transport=transport) as http:
+        return await fetch_repo_skill(
+            http,
+            url="https://github.com/o/r",
+            branch="main",
+            path=path,
+            token=None,
+            max_tarball_bytes=10_000_000,
+            max_tarball_decompressed_bytes=10_000_000,
+        )
+
+
+async def test_a_repo_folder_or_the_repos_only_skill_is_read() -> None:
+    files = {
+        "r-main/README.md": b"repo",
+        "r-main/skills/notes/SKILL.md": _md().encode(),
+        "r-main/skills/notes/tool.py": b"print(1)\n",
+    }
+    for path in ("skills/notes", ""):
+        preview = (await _repo_skill(files, path)).preview
+        assert (preview.files, preview.scripts) == (["SKILL.md", "tool.py"], ["tool.py"])
+
+
+async def test_a_repo_path_that_escapes_or_holds_two_skills_is_refused() -> None:
+    files = {
+        "r-main/a/SKILL.md": _md().encode(),
+        "r-main/b/SKILL.md": _md().encode(),
+    }
+    with pytest.raises(SkillIngestError, match="holds 2 skills"):
+        await _repo_skill(files, "")
+    with pytest.raises(SkillIngestError, match="not a folder"):
+        await _repo_skill(files, "../..")
+
+
+async def test_an_attachment_is_fetched_without_following_redirects() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "http://169.254.169.254/"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(httpx.HTTPStatusError):
+            await fetch_attachment(http, "https://cdn.discordapp.com/a/b/s.zip")
