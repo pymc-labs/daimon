@@ -113,6 +113,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Drop the promo tables; ledger entries they wrote stay.
+
+    Live timed credit becomes permanent: its grant stays on the ledger and
+    nothing is left to expire it.
+    """
     op.drop_table("promo_redeem_failures")
     op.drop_table("promo_redemptions")
     op.drop_table("promo_codes")
