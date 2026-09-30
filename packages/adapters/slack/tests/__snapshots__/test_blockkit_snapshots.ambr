@@ -22,7 +22,7 @@
   list([
     dict({
       'text': dict({
-        'text': '*🧠 thinking*',
+        'text': '*Thinking*',
         'type': 'mrkdwn',
       }),
       'type': 'section',
@@ -47,31 +47,32 @@
   list([
     dict({
       'text': dict({
-        'text': '*⚙️ running tool*',
+        'text': '*Working* · 20s',
         'type': 'mrkdwn',
       }),
       'type': 'section',
     }),
     dict({
-      'elements': list([
-        dict({
-          'text': '''
-            ⏱️ 20s
-            ⚙️ Read
-            ⚙️ Write
-            ⚙️ Bash
-            ⚙️ Grep
-            ⚙️ Glob
-          ''',
-          'type': 'mrkdwn',
-        }),
-      ]),
-      'type': 'context',
+      'text': dict({
+        'text': '''
+          ```
+          +3 earlier
+          ✔️ Read a file
+          🚫 Wrote a file
+          ✔️ Search issues (tracker)
+          ✔️ Listed files
+          🔍 Searching files
+          🖋️ Running a command
+          ```
+        ''',
+        'type': 'mrkdwn',
+      }),
+      'type': 'section',
     }),
     dict({
       'expand': True,
       'text': dict({
-        'text': '💬 Preview text describing the ongoing work.',
+        'text': '> Preview text describing the ongoing work.',
         'type': 'mrkdwn',
       }),
       'type': 'section',
@@ -96,22 +97,21 @@
   list([
     dict({
       'text': dict({
-        'text': '*⚙️ running tool*',
+        'text': '*Working* · 10s',
         'type': 'mrkdwn',
       }),
       'type': 'section',
     }),
     dict({
-      'elements': list([
-        dict({
-          'text': '''
-            ⏱️ 10s
-            ⚙️ Bash
-          ''',
-          'type': 'mrkdwn',
-        }),
-      ]),
-      'type': 'context',
+      'text': dict({
+        'text': '''
+          ```
+          🖋️ Running a command
+          ```
+        ''',
+        'type': 'mrkdwn',
+      }),
+      'type': 'section',
     }),
     dict({
       'elements': list([
@@ -172,19 +172,10 @@
   list([
     dict({
       'text': dict({
-        'text': '*🧠 thinking*',
+        'text': '*Thinking* · 10s',
         'type': 'mrkdwn',
       }),
       'type': 'section',
-    }),
-    dict({
-      'elements': list([
-        dict({
-          'text': '⏱️ 10s',
-          'type': 'mrkdwn',
-        }),
-      ]),
-      'type': 'context',
     }),
     dict({
       'elements': list([
@@ -206,24 +197,15 @@
   list([
     dict({
       'text': dict({
-        'text': '*🧠 thinking*',
+        'text': '*Thinking* · 10s',
         'type': 'mrkdwn',
       }),
       'type': 'section',
     }),
     dict({
-      'elements': list([
-        dict({
-          'text': '⏱️ 10s',
-          'type': 'mrkdwn',
-        }),
-      ]),
-      'type': 'context',
-    }),
-    dict({
       'expand': True,
       'text': dict({
-        'text': '💬 Let me check that for you.',
+        'text': '> Let me check that for you.',
         'type': 'mrkdwn',
       }),
       'type': 'section',
