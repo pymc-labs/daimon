@@ -369,15 +369,17 @@ async def test_a_row_the_ledger_rejects_does_not_hold_back_settlement(
     )
 
 
-class _FirstSessionFails(async_sessionmaker[AsyncSession]):
-    """Fails the first session it opens, as a dropped connection would."""
+class _SessionFails(async_sessionmaker[AsyncSession]):
+    """Fails the ``fail_on``-th session it opens; the default is a dropped connection."""
 
     opened = 0
+    fail_on = 1
+    error: Exception = OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
 
     def __call__(self, **local_kw: Any) -> AsyncSession:
         self.opened += 1
-        if self.opened == 1:
-            raise OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
+        if self.opened == self.fail_on:
+            raise self.error
         return super().__call__(**local_kw)
 
 
@@ -388,7 +390,7 @@ async def test_expiries_settle_even_when_the_grant_phase_fails(
     tenant = await make_tenant(db_session)
     await _timed(db_session, "EARLYWINDOW", -3, -2)
     await _redeem(db_session_factory, tenant, "EARLYWINDOW", now=T0 - 3 * H)
-    factory = _FirstSessionFails(bind=db_session.bind, expire_on_commit=False)
+    factory = _SessionFails(bind=db_session.bind, expire_on_commit=False)
 
     with pytest.raises(OperationalError):
         await settle_promo_credit(factory, now=T0 + H)
@@ -397,6 +399,30 @@ async def test_expiries_settle_even_when_the_grant_phase_fails(
     assert grant.expired_at is not None, "the closed window should still expire"
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == 0, (
         "the unspent timed credit should be gone"
+    )
+
+
+async def test_reconcile_runs_even_when_the_expiry_phase_fails(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """Any error in the expiry phase is raised only after the reconcile has run."""
+    tenant = await _grant_late_spend_code(db_session, db_session_factory)
+    await settle_promo_credit(db_session_factory, now=T0 + 5 * H)  # expires the $10
+    await _spend(db_session, tenant, "4", at=T0 + 4 * H)
+    await _timed(db_session, "EARLYWINDOW", -3, -2)  # clear of the late spend at 4h
+    await _redeem(db_session_factory, tenant, "EARLYWINDOW", now=T0 - 3 * H)
+    factory = _SessionFails(bind=db_session.bind, expire_on_commit=False)
+    factory.fail_on, factory.error = 2, RuntimeError("expiry phase broke")  # grant, expiry, ...
+
+    with pytest.raises(RuntimeError, match="expiry phase broke"):
+        await settle_promo_credit(factory, now=T0 + 5 * H + LATE_SPEND_GRACE)
+
+    grants = await promo_store.list_timed_grants(db_session, tenant_id=tenant.id)
+    assert sorted(g.expired_at is None for g in grants) == [False, True], (
+        "the early code's expiry should still be due after the failed phase"
+    )
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("10"), (
+        "the $4 refund should land while the early code's unexpired $10 stays"
     )
 
 
