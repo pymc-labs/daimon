@@ -18,6 +18,7 @@ from daimon.adapters.discord.billing_panel.state import (
 )
 from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.promo_credit import get_active_timed_credit
 from daimon.core.stores import tenant_user_caps
 from daimon.core.stores.tenant_ledger import get_balance
 from daimon.core.stores.usage_events import (
@@ -79,6 +80,7 @@ async def load_billing_snapshot(
     caller_user_id: str,
     is_admin: bool,
     since: datetime,
+    now: datetime,
 ) -> BillingPanelState:
     """Read everything needed to render /billing for a single invocation.
 
@@ -107,6 +109,7 @@ async def load_billing_snapshot(
         user_id=caller_user_id,
     )
     guild_balance = await get_balance(session, tenant_id=tenant_id)
+    timed_credit = tuple(await get_active_timed_credit(session, tenant_id=tenant_id, now=now))
 
     if not is_admin:
         return BillingPanelState(
@@ -121,6 +124,7 @@ async def load_billing_snapshot(
             guild_distinct_members=0,
             member_rows=(),
             over_cap_count=0,
+            timed_credit=timed_credit,
         )
 
     # Admin path
@@ -177,4 +181,5 @@ async def load_billing_snapshot(
         guild_distinct_members=len(all_user_ids),
         member_rows=capped,
         over_cap_count=over_cap_count,
+        timed_credit=timed_credit,
     )

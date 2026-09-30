@@ -64,6 +64,7 @@ class BillingCog(commands.Cog):
                     caller_user_id=str(interaction.user.id),
                     is_admin=is_admin,
                     since=since,
+                    now=now,
                 )
                 # Tenant ids are derived deterministically from (platform, guild) —
                 # the same uuid the turn pipeline bills against.

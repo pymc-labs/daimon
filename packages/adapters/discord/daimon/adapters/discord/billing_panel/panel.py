@@ -27,6 +27,7 @@ from daimon.adapters.discord.billing_panel.read import (
     is_guild_admin,
     load_billing_snapshot,
 )
+from daimon.adapters.discord.billing_panel.redeem import RedeemCodeModal
 from daimon.adapters.discord.billing_panel.state import (
     COLOR_OVER_CAP,
     BillingPanelState,
@@ -67,6 +68,22 @@ def _period_label(since: datetime) -> str:
 
 def _is_over_cap(spend: float, cap: Decimal | None) -> bool:
     return cap is not None and spend > float(cap)
+
+
+_TIMED_CREDIT_LINES = 3
+
+
+def _timed_credit_lines(state: BillingPanelState) -> list[str]:
+    """One dim line per live timed promo credit; nothing when there is none."""
+    lines = [
+        f"-# ⏳ {_fmt_usd(c.remaining_usd)} timed credit left · "
+        f"ends <t:{int(c.ends_at.timestamp())}:f>"
+        for c in state.timed_credit[:_TIMED_CREDIT_LINES]
+    ]
+    extra = len(state.timed_credit) - _TIMED_CREDIT_LINES
+    if extra > 0:
+        lines.append(f"-# ⏳ {extra} more timed credits")
+    return lines
 
 
 def _format_caller_line(spend: float, cap: Decimal | None, turns: int) -> str:
@@ -141,6 +158,7 @@ def build_billing_container(
         body_lines: list[str] = [
             "🏦 **Server credit**",
             credit_line,
+            *_timed_credit_lines(state),
             "",
             "🏆 **Top spenders**",
         ]
@@ -185,6 +203,7 @@ def build_billing_container(
         "",
         "🏦 **Server credit**",
         credit_line,
+        *_timed_credit_lines(state),
     ]
     body_member: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
         "\n".join(body_lines_member)
@@ -358,8 +377,10 @@ class BillingPanelView(discord.ui.LayoutView):
             lookup_row = discord.ui.ActionRow(_MemberLookupSelect())
             self.add_item(lookup_row)
 
-        btn_row = discord.ui.ActionRow(_RefreshButton(), _DoneButton())
-        self.add_item(btn_row)
+        buttons: list[discord.ui.Button[BillingPanelView]] = [_RefreshButton(), _DoneButton()]
+        if is_admin:
+            buttons.insert(0, _RedeemButton())
+        self.add_item(discord.ui.ActionRow(*buttons))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if interaction.user.id != self.allowed_user_id:
@@ -382,6 +403,27 @@ class _RefreshButton(discord.ui.Button["BillingPanelView"]):
         if self.view is None:
             return
         await _rerender(interaction, self.view)
+
+
+class _RedeemButton(discord.ui.Button["BillingPanelView"]):
+    """Opens the redeem-code modal. Admin card only; re-gated on click and on submit."""
+
+    def __init__(self) -> None:
+        super().__init__(label="🎟️ Redeem code", style=discord.ButtonStyle.secondary)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if view is None:
+            return
+        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # narrowing to the Bot-bound interaction inside our adapter
+            return
+
+        async def rerender(submitted: discord.Interaction) -> None:
+            await _rerender(submitted, view)
+
+        await interaction.response.send_modal(
+            RedeemCodeModal(runtime=view.runtime, account_id=view.account_id, rerender=rerender)
+        )
 
 
 class _DoneButton(discord.ui.Button["BillingPanelView"]):
@@ -470,6 +512,7 @@ async def _rerender(
             caller_user_id=str(interaction.user.id),
             is_admin=is_admin,
             since=since,
+            now=now,
         )
     new_view = BillingPanelView(
         new_state,

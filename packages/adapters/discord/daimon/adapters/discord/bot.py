@@ -317,7 +317,10 @@ def _build_ready_embed() -> discord.Embed:
     """Terminal success follow-up. Pure — no I/O."""
     return discord.Embed(
         title="✅ Ready",
-        description="Mention me anywhere, or run `/agent-setup`.",
+        description=(
+            "Mention me anywhere, or run `/agent-setup`.\n"
+            "Have a promo code? Redeem it in `/billing`."
+        ),
         color=theme.COLOR_GREEN,
     )
 
