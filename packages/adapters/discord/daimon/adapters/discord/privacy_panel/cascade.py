@@ -71,6 +71,10 @@ def build_cascade_preview_container(
         will_happen_rows.append(
             f"-# Remove **{preview.direct_message_conversations.count}** private conversation(s)"
         )
+    if preview.channel_admins.count > 0:
+        will_happen_rows.append(
+            f"-# Remove you from the admins of **{preview.channel_admins.count}** channel(s)"
+        )
     if preview.account.count > 0:
         will_happen_rows.append("-# 🪪 Remove the account row itself")
 

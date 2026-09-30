@@ -17,7 +17,7 @@ import structlog
 import structlog.contextvars
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
-from daimon.adapters.discord.checks import is_member_guild_admin
+from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.context import (
     build_channel_context_xml,
     build_context_xml,
@@ -382,22 +382,23 @@ _PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = 10
 _PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = 6
 
 
-async def _requester_role(guild: discord.Guild, external_user_id: str) -> Role:
-    """The requester's live guild role, for a turn that has no message to read it from.
+async def _requester_role(guild: discord.Guild, external_user_id: str) -> tuple[Role, list[str]]:
+    """The requester's live guild role and role ids, for a turn with no message to read.
 
     Same test a mention applies (`is_member_guild_admin`), against the member
     fetched from Discord now. Never the member cache: a cached member can
     still carry a role the requester has since lost, and a continuation can
     run long after the form was submitted. Anything short of a fetched member
-    -- left the guild, a Discord error, a malformed id -- is USER: a
-    continuation never runs with more than its requester provably holds.
+    -- left the guild, a Discord error, a malformed id -- is USER with no
+    roles: a continuation never runs with more than its requester provably holds.
     """
     try:
         member = await guild.fetch_member(int(external_user_id))
     except (discord.HTTPException, ValueError) as exc:
         log.warning("continuation.requester_role_lookup_failed", exc_info=exc)
-        return Role.USER
-    return Role.ADMIN if is_member_guild_admin(member, guild_owner_id=guild.owner_id) else Role.USER
+        return Role.USER, []
+    is_admin = is_member_guild_admin(member, guild_owner_id=guild.owner_id)
+    return (Role.ADMIN if is_admin else Role.USER), member_role_ids(member)
 
 
 class DaimonBot(commands.Bot):
@@ -1952,7 +1953,7 @@ class DaimonBot(commands.Bot):
         # The follow-up runs as the requester, so it carries their role as it
         # stands NOW -- re-read from the guild, never from anything the form
         # or the row recorded. A lookup that fails runs the turn as USER.
-        role = await _requester_role(thread.guild, row.requester_external_user_id)
+        role, role_ids = await _requester_role(thread.guild, row.requester_external_user_id)
         # A continuation posts into the thread too: a protected one is skipped
         # (the dispatcher logs it) before admission, which then reads the
         # parent the check cached.
@@ -1970,6 +1971,7 @@ class DaimonBot(commands.Bot):
             channel_id=row.parent_channel_id,
             thread_id=row.thread_id,
             role=role,
+            platform_role_ids=role_ids,
             now=datetime.now(UTC),
             category_id=category_id,
             category_unresolved=category_unresolved,
@@ -2334,6 +2336,9 @@ class DaimonBot(commands.Bot):
                 channel_id=parent_channel_id,
                 thread_id=str(thread.id) if thread else None,
                 role=role,
+                platform_role_ids=member_role_ids(author)
+                if isinstance(author, discord.Member)
+                else None,
                 now=datetime.now(UTC),
                 category_id=category_id,
                 category_unresolved=category_unresolved,

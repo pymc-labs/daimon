@@ -363,13 +363,22 @@ async def test_routing_paginates_beyond_the_page_size(account_id: uuid.UUID) -> 
 
 
 def test_routing_carries_no_pager_when_everything_fits(account_id: uuid.UUID) -> None:
-    state = _state(_map(), account_id=account_id)
+    state = _state(_map(), account_id=account_id, is_admin=False)
     view = RoutingView(
         state, runtime=_make_runtime(), allowed_user_id=42, lines=_lines(3), server_default=None
     )
     labels = {node.label for node in _walk(view) if isinstance(node, discord.ui.Button)}
     assert "Next ▶" not in labels, "a single page needs no pager"
-    assert labels == {"◀ Back", "Done"}, "the screen offers only Back and Done"
+    assert labels == {"◀ Back", "Done"}, "a member is offered only Back and Done"
+
+
+def test_routing_offers_channel_admins_to_server_admins(account_id: uuid.UUID) -> None:
+    state = _state(_map(), account_id=account_id, is_admin=True)
+    view = RoutingView(
+        state, runtime=_make_runtime(), allowed_user_id=42, lines=_lines(3), server_default=None
+    )
+    labels = {node.label for node in _walk(view) if isinstance(node, discord.ui.Button)}
+    assert labels == {"◀ Back", "Channel admins", "Done"}
 
 
 async def test_back_returns_to_the_roster_page_the_reader_left(account_id: uuid.UUID) -> None:

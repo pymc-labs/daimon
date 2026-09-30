@@ -98,7 +98,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAgentsSkillParams
 from daimon.adapters.discord.agent_setup.write import mask_tail
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
 from daimon.adapters.discord.credential_origin import (
     is_credential_interaction_valid,
     refuse_if_credential_target_unavailable,
@@ -111,6 +111,7 @@ from daimon.adapters.discord.credential_repo_bind import (
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+from daimon.core.agent_reach import load_target_facts
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import build_input_continuation
 from daimon.core.continuity.messages import (
@@ -140,12 +141,7 @@ from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mcp_attach import attach_mcp_server_to_agent
 from daimon.core.mcp_token_check import is_token_rejected, rejected_token_message
 from daimon.core.mcp_vault import add_external_mcp_credential
-from daimon.core.operation_policy import (
-    PolicyOutcome,
-    TargetFacts,
-    decide_operation,
-    needs_reachability_read,
-)
+from daimon.core.operation_policy import PolicyOutcome, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
     CardState,
@@ -159,7 +155,6 @@ from daimon.core.stores.agent_files import list_agent_files, put_agent_file_if_u
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.task_continuations import record_continuation
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -405,19 +400,21 @@ async def _decide_key_replacement(
         # gone, so nothing can establish that it is not shared.
         return "needs_admin"
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    reachable = False
-    if needs_reachability_read("key_replace", is_admin=False, is_daimon_managed=is_daimon_managed):
-        async with runtime.sessionmaker() as session:
-            reachable = await is_agent_reachable_in_tenant(
-                session,
-                tenant_id=row.tenant_id,
-                agent_name=agent.name,
-                default=runtime.deployment_default,
-            )
+    async with runtime.sessionmaker() as session:
+        facts = await load_target_facts(
+            session,
+            "key_replace",
+            tenant_id=row.tenant_id,
+            platform="discord",
+            agent_name=agent.name,
+            default=runtime.deployment_default,
+            caller=channel_admin_caller(interaction.user),
+            is_daimon_managed=is_daimon_managed,
+        )
     return decide_operation(
         "key_replace",
         is_admin=False,
-        target=TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=reachable),
+        target=facts,
     )
 
 
