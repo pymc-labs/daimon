@@ -1018,8 +1018,10 @@ class SkillRepoModal(discord.ui.Modal):
     (`set_skill_repo_credential`), which is the row later skill syncs resolve
     the token from. It deliberately writes no `agent_repo_binding`: the
     working repo is what the agent clones and runs, a separate decision with
-    its own admin gate, and a skill import must never move it. It does not
-    inherit the admin gate of direct skill imports either.
+    its own admin gate, and a skill import must never move it. The attach is
+    gated like the repo bind (`skill_repo_connect`): a member is refused on a
+    shared agent before the consume, and nobody attaches to a defaults-managed
+    agent.
     """
 
     def __init__(self, *, runtime: DiscordRuntime, request_row: CredentialRequestRow) -> None:
@@ -1056,6 +1058,21 @@ class SkillRepoModal(discord.ui.Modal):
         await interaction.response.defer()
         if not is_credential_interaction_valid(interaction, self._row):
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            return
+
+        if await refuse_if_shared_and_not_admin_for_request(
+            interaction,
+            runtime=self._runtime,
+            tenant_id=self._row.tenant_id,
+            agent_id=self._row.agent_id,
+            operation="skill_repo_connect",
+        ):
+            # Same shape as the repo bind: nothing is spent, and the card
+            # stops offering a form this submitter could never finish.
+            await _record_refused_outcome(self._runtime, self._row)
+            await edit_posted_card(
+                interaction.client, row=self._row, state="refused", refusal="admin_required"
+            )
             return
 
         pat = str(self.pat_in.value or "").strip()
@@ -1279,6 +1296,13 @@ class SkillRepoModal(discord.ui.Modal):
         )
         if agent is None:
             return "Could not attach: that agent no longer exists. The skills are in the library."
+        if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+            # Admins included: an attach never stamps the reconciler's spec
+            # hash, so the seeded agent would drift for good.
+            return (
+                f"Skills imported, but `{agent.name}` is a built-in agent, so they were not "
+                "attached. Fork it and add them to the fork. The skills are in the library."
+            )
         new_skills: list[BetaManagedAgentsSkillParams] = [
             {"type": "custom", "skill_id": skill_id} for skill_id in skill_ids
         ]
