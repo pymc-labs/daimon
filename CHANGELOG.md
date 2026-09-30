@@ -213,6 +213,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stop retrying Anthropic's monthly spend-cap response and show a clear model usage limit notice in Discord and Slack.
+
 - The MCP server's hub login store opens one database connection at startup and
   grows to four, instead of holding ten per instance. During a deploy the old and
   new revisions no longer exhaust a small Cloud SQL tier's connection slots.

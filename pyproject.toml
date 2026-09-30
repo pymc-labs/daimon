@@ -95,6 +95,7 @@ source_modules = [
     "daimon.core.agent_guidance",
     "daimon.core.agent_lifecycle",
     "daimon.core.agent_mcp_credentials",
+    "daimon.core.anthropic_spend",
     "daimon.core.answering_map",
     "daimon.core.artifacts",
     "daimon.core.billing",
