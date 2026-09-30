@@ -136,6 +136,8 @@ async def _resolve_agent_name_and_principal(
     webhook system account).
 
     Returns None when the MA agent is not found (logs a warning and skips).
+    Raises DaimonError when the agent is defaults-managed (a push must not
+    attach skills to it) or when several agents share its name.
     """
     tenant_id = binding.tenant_id
 
