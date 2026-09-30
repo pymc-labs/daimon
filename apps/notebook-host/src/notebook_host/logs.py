@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import re
 
+from uvicorn.logging import AccessFormatter, DefaultFormatter
+
 # Plain, and url-encoded once or twice (marimo's login redirect puts the
 # original path, query included, into ``next=``). Tokens are url-safe
 # base64, so a value ends at the first ``&``, ``%``, quote or space.
@@ -13,6 +15,20 @@ _ACCESS_TOKEN = re.compile(r"(access_token(?:=|%3D|%253D))[^&%\s\"']*", re.IGNOR
 
 def redact_access_token(text: str) -> str:
     return _ACCESS_TOKEN.sub(r"\1[redacted]", text)
+
+
+class RedactingDefaultFormatter(DefaultFormatter):
+    """uvicorn's formatter, redacting the final text, tracebacks included."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_access_token(super().format(record))
+
+
+class RedactingAccessFormatter(AccessFormatter):
+    """uvicorn's access formatter, redacting the final text."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_access_token(super().format(record))
 
 
 class RedactAccessToken(logging.Filter):

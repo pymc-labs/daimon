@@ -181,9 +181,11 @@ def ensure_slug_jail(data_dir: Path, slug: str, *, uid: int | None = None) -> Sl
     paths = get_slug_paths(data_dir, slug)
     data_dir.mkdir(parents=True, exist_ok=True)
     _secure_dir(paths.root, SLUG_ROOT_MODE, owner=(os.geteuid(), os.getegid()))
-    for f in (paths.notebook, paths.log):
-        if f.is_symlink():
-            f.unlink()
+    # Older releases created these 0644 under a 0700 uid-owned root, where the
+    # uid could also have hard-linked the log to a host registry. The root is
+    # traversable now, so each must be a single-link regular file at 0600.
+    _secure_file(paths.notebook, owner=(uid, uid) if uid is not None else None)
+    _secure_file(paths.log, owner=(os.geteuid(), os.getegid()))
     for d in (paths.data, paths.workspace, paths.home, paths.tmp):
         _secure_dir(d, SLUG_TREE_MODE, owner=(uid, uid) if uid is not None else None)
     return paths
@@ -199,6 +201,32 @@ def _secure_dir(path: Path, mode: int, *, owner: tuple[int, int] | None) -> None
         if owner is not None:
             os.fchown(fd, *owner)
         os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
+def _secure_file(path: Path, *, owner: tuple[int, int] | None) -> None:
+    """Leave ``path`` absent or a single-link regular file at 0600 with ``owner``.
+
+    Anything else (a symlink, a hard link, a fifo or device) is unlinked, which
+    removes only this name and never touches what it points at.
+    """
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        path.unlink()
+        return
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        after = os.fstat(fd)
+        if (after.st_dev, after.st_ino) != (st.st_dev, st.st_ino) or after.st_nlink != 1:
+            path.unlink()
+            return
+        if owner is not None:
+            os.fchown(fd, *owner)
+        os.fchmod(fd, 0o600)
     finally:
         os.close(fd)
 
@@ -253,9 +281,16 @@ def write_file_nofollow(
 
 def open_log_nofollow(path: Path) -> int:
     """Open the slug's host-owned log for append, refusing a symlink. Returns an fd."""
-    return os.open(
-        path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
-    )
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise OSError(f"refusing {path}: not a single-link regular file")
+        os.fchmod(fd, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def remove_slug_tree(data_dir: Path, slug: str, *, uids_file: Path | None = None) -> None:
@@ -401,24 +436,26 @@ def remove_uid_files(uid: int, *, roots: tuple[Path, ...] = SHARED_TEMP_DIRS) ->
     if os.geteuid() not in (0, uid):
         return
     for root in roots:
-        if not root.is_dir():
+        if not root.is_dir() or root.is_symlink():
             continue
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        # fwalk descends through directory fds, and every stat, unlink and
+        # rmtree below is relative to one, so another uid swapping a
+        # directory for a symlink mid-walk can't steer it elsewhere.
+        for _dirpath, dirnames, filenames, dirfd in os.fwalk(root, follow_symlinks=False):
             for name in [*dirnames, *filenames]:
-                path = Path(dirpath) / name
                 try:
-                    st = path.lstat()
+                    st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
                 except OSError:
                     continue
                 if st.st_uid != uid:
                     continue
                 if stat.S_ISDIR(st.st_mode):
-                    shutil.rmtree(path, ignore_errors=True)
+                    shutil.rmtree(name, dir_fd=dirfd, ignore_errors=True)
                     if name in dirnames:
                         dirnames.remove(name)
                 else:
                     with contextlib.suppress(OSError):
-                        path.unlink()
+                        os.unlink(name, dir_fd=dirfd)
 
 
 # ─── uid pool ────────────────────────────────────────────────────────────────

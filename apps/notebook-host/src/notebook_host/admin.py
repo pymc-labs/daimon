@@ -464,7 +464,7 @@ def create_admin_router(state: AdminState) -> APIRouter:
             return {
                 "slug": slug,
                 "name": name,
-                "size_bytes": final_path.stat().st_size,
+                "size_bytes": len(body),
                 "path": f"data/{name}",
             }
 
@@ -668,7 +668,7 @@ def create_admin_router(state: AdminState) -> APIRouter:
                 return {
                     "slug": slug,
                     "name": name,
-                    "size_bytes": final_path.stat().st_size,
+                    "size_bytes": len(body),
                     "path": f"data/{name}",
                 }
 

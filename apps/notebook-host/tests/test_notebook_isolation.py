@@ -42,6 +42,20 @@ def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
+def _mint_data(slug: str, name: str) -> str:
+    payload: dict[str, object] = {
+        "slug": slug,
+        "op": "data",
+        "name": name,
+        "max_bytes": 1_000_000,
+        "exp": int(datetime.now(UTC).timestamp()) + 300,
+        "jti": f"data-{name}",
+    }
+    payload_b64 = _b64(json.dumps(payload, separators=(",", ":")).encode())
+    sig = hmac.new(_SECRET.encode(), payload_b64.encode(), hashlib.sha256).digest()
+    return f"{payload_b64}.{_b64(sig)}"
+
+
 def _mint(op: str, slug: str, *, jti: str = "j1", tenant: str | None = None) -> str:
     payload: dict[str, object] = {
         "slug": slug,
@@ -1036,6 +1050,109 @@ def test_mode_wipe_removes_a_symlinked_home_instead_of_leaving_it(
     assert r.status_code == 200, r.text
     assert (victim / "keep").exists(), "the wipe never recursed through the link"
     assert paths.home.is_dir() and not paths.home.is_symlink()
+
+
+def test_legacy_world_readable_files_are_locked_down_and_hard_links_dropped(
+    tmp_path: Path,
+) -> None:
+    """Older releases left 0644 files under a 0700 root; the root is 0711 now."""
+    from notebook_host.jail import ensure_slug_jail
+
+    data_dir = tmp_path / "nbs"
+    paths = ensure_slug_jail(data_dir, "s")
+    paths.root.chmod(0o700)
+    paths.notebook.write_text("# blog source")
+    paths.notebook.chmod(0o644)
+    registry = data_dir / "uids.json"
+    registry.write_text('{"s": 100000}')
+    registry.chmod(0o600)
+    os.link(registry, paths.log)  # a legacy hard link from the log to a registry
+
+    ensure_slug_jail(data_dir, "s")
+
+    assert paths.notebook.stat().st_mode & 0o777 == 0o600, "no other uid reads the source"
+    assert paths.notebook.read_text() == "# blog source"
+    assert not paths.log.exists() or not os.path.samefile(paths.log, registry), (
+        "the hard link is gone, not chmodded or appended to"
+    )
+    assert registry.stat().st_nlink == 1 and registry.read_text() == '{"s": 100000}'
+
+
+def test_legacy_world_readable_log_is_made_host_only(tmp_path: Path) -> None:
+    from notebook_host.jail import ensure_slug_jail, open_log_nofollow
+
+    paths = ensure_slug_jail(tmp_path / "nbs", "s")
+    paths.log.write_text("old log")
+    paths.log.chmod(0o644)
+    ensure_slug_jail(tmp_path / "nbs", "s")
+    assert paths.log.stat().st_mode & 0o777 == 0o600
+    paths.log.chmod(0o644)
+    os.close(open_log_nofollow(paths.log))
+    assert paths.log.stat().st_mode & 0o777 == 0o600, "the fd is fchmodded, not only on create"
+    other = tmp_path / "other"
+    other.write_text("x")
+    paths.log.unlink()
+    os.link(other, paths.log)
+    with pytest.raises(OSError):
+        open_log_nofollow(paths.log)
+
+
+def test_remove_uid_files_walks_by_fd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """os.walk checks a path and then descends it by name: another uid can swap it."""
+    from notebook_host import jail
+
+    def _no_walk(*_a: object, **_k: object) -> object:
+        raise AssertionError("os.walk is steerable; walk by fd")
+
+    monkeypatch.setattr(jail.os, "walk", _no_walk)
+    shm = tmp_path / "shm"
+    (shm / "d").mkdir(parents=True)
+    (shm / "d" / "f").write_text("y")
+    (shm / "g").write_text("z")
+    jail.remove_uid_files(os.getuid(), roots=(shm,))
+    assert list(shm.iterdir()) == []
+
+
+def test_attachment_size_is_the_uploaded_length_not_a_stat_through_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import notebook_host.admin as admin_mod
+
+    client, _, _ = _make_app(tmp_path, monkeypatch)
+    big = tmp_path / "big"
+    big.write_bytes(b"x" * 12345)
+    real = admin_mod.write_file_nofollow
+
+    def write_then_swap(path: Path, content: bytes, **kw: Any) -> None:
+        real(path, content, **kw)
+        path.unlink()
+        path.symlink_to(big)  # the jail uid swaps the name right after the rename
+
+    monkeypatch.setattr(admin_mod, "write_file_nofollow", write_then_swap)
+    r = client.put(f"/upload/{_mint_data('s', 'd.csv')}", content=b"abc")
+    assert r.status_code == 200, r.text
+    assert r.json()["size_bytes"] == 3, "no stat of whatever the name points at now"
+
+
+def test_log_formatter_redacts_tracebacks_too() -> None:
+    import io
+    import logging
+    import logging.config
+
+    from notebook_host.__main__ import uvicorn_log_config
+
+    logging.config.dictConfig(uvicorn_log_config())
+    buf = io.StringIO()
+    for handler in logging.getLogger().handlers:
+        assert isinstance(handler, logging.StreamHandler)
+        handler.setStream(buf)  # pyright: ignore[reportUnknownMemberType]
+    try:
+        raise ValueError("bad url /n/nb/?access_token=EXC-tok")
+    except ValueError:
+        logging.getLogger("notebook_host").exception("request failed")
+    out = buf.getvalue()
+    assert "request failed" in out and "ValueError" in out
+    assert "EXC-tok" not in out, "exception text is redacted as well"
 
 
 # --- origin-mode cookie hardening and tenant fail-closed ---------------------------

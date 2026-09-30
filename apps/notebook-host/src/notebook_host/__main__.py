@@ -18,6 +18,8 @@ def uvicorn_log_config() -> dict[str, Any]:
     config.setdefault("filters", {})["redact_access_token"] = {
         "()": "notebook_host.logs.RedactAccessToken"
     }
+    config["formatters"]["default"]["()"] = "notebook_host.logs.RedactingDefaultFormatter"
+    config["formatters"]["access"]["()"] = "notebook_host.logs.RedactingAccessFormatter"
     for handler in config["handlers"].values():
         handler.setdefault("filters", []).append("redact_access_token")
     # The host's own loggers (and marimo's, if it logs in-process) propagate
