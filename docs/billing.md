@@ -217,9 +217,17 @@ Members can read a channel's budget with `get_channel_budget`; listing,
 setting and clearing are admin-only. `/billing` in a channel with a budget
 shows `this channel: $spent of $limit (window)`.
 
-Attribution starts with this release: debits recorded earlier have no
-channel and count toward no budget. DMs, MCP turns and routines without a
-destination carry no channel either, so no budget applies to them.
+What a budget does not cover:
+
+- **Earlier spend.** Attribution starts with this release; debits recorded
+  before it have no channel and count toward no budget.
+- **DMs.** A DM carries no channel. That includes a conversation moved to DMs
+  with `/dm`: it keeps only the DM channel, not the channel it started from,
+  so its turns are neither attributed nor gated.
+- **MCP turns.** The MCP tools that start a turn (`start_turn`, `ask` and the
+  like) record no channel and do not check budgets yet.
+- **Routines without a destination**, and Discord thread destinations saved
+  before this release (see [routines.md](routines.md#turning-routines-on)).
 
 ## The signup credit
 
