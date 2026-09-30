@@ -270,7 +270,7 @@ daimon promo revoke CODE_ID
 
 Codes are deployment-wide and stored only as a SHA-256 hash, so a lost code
 cannot be shown again. Generated codes are 20 Crockford base32 characters in
-dash-separated groups of five; matching ignores case, spaces and dashes.
+dash-separated groups of five; matching ignores case, spaces and dashes, and reads O as 0 and I or L as 1.
 `--code` sets a chosen code instead. `--amount` is at most $999,999.99. `--redeem-from` and `--redeem-until`
 bound when it can be redeemed, and `--max-redemptions` how many tenants may
 redeem it. Each tenant redeems a code at most once.

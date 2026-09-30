@@ -48,8 +48,19 @@ def _code(**overrides: Any) -> PromoCodeRow:
 
 
 def test_normalize_ignores_case_whitespace_and_dashes() -> None:
-    assert normalize_promo_code("  ab3de-fg h7k\n") == "AB3DEFGH7K"
-    assert hash_promo_code(normalize_promo_code("abc-def")) == hash_promo_code("ABCDEF")
+    assert normalize_promo_code("  ab3de-fg h7k\n") == "AB3DEFGH7K", "case and separators drop"
+    assert hash_promo_code(normalize_promo_code("abc-def")) == hash_promo_code("ABCDEF"), (
+        "the hash should match however the code is typed"
+    )
+
+
+def test_normalize_folds_crockford_look_alikes() -> None:
+    assert normalize_promo_code("o1l-iO0") == "011100", "O reads as 0, I and L as 1"
+    generated = generate_promo_code()
+    misread = generated.replace("0", "O").replace("1", "l")
+    assert normalize_promo_code(misread) == normalize_promo_code(generated), (
+        "a generated code misread with look-alikes should still match"
+    )
 
 
 @pytest.mark.parametrize("raw", ["", "ABC", "AB$DEF", "ÄBCDEF", "A" * 65])

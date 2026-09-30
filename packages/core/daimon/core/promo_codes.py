@@ -24,6 +24,7 @@ _GROUP_COUNT = 4
 _GROUP_LENGTH = 5  # 20 characters = 100 bits of entropy
 _CODE_PATTERN = re.compile(r"^[A-Z0-9]{6,64}$")
 _SEPARATORS = re.compile(r"[\s-]+")
+_LOOK_ALIKES = str.maketrans({"O": "0", "I": "1", "L": "1"})
 # Largest amount per redemption. The ledger holds Numeric(12, 6), so a grant
 # above this would overflow at write time instead of at creation.
 MAX_PROMO_AMOUNT_USD = Decimal("999999.99")
@@ -54,8 +55,11 @@ class PromoCodeError(ValueError):
 
 
 def normalize_promo_code(raw: str) -> str:
-    """Case-insensitive, separator-insensitive form a code is hashed in."""
-    return _SEPARATORS.sub("", raw).upper()
+    """The form a code is hashed in: no case, no separators, Crockford look-alikes folded.
+
+    O reads as 0 and I or L as 1, so a code misread from print still matches.
+    """
+    return _SEPARATORS.sub("", raw).upper().translate(_LOOK_ALIKES)
 
 
 def is_well_formed_promo_code(normalized: str) -> bool:
