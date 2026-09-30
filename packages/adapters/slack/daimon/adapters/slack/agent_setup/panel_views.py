@@ -181,6 +181,8 @@ CODING_TOOLS_LABEL: Final = "🧰 Use from your coding tools"
 CHANNEL_ADMINS_LABEL: Final = "Channel admins"
 MAX_CHANNEL_ADMIN_LINES: Final = 15
 MAX_ENVIRONMENT_LINES: Final = 10
+ENVIRONMENT_LISTING_MAX_CHARS: Final = 2_000
+"""Room for the channel lines, leaving the defaults theirs in one section's 3000 characters."""
 _MAX_OPTION_TEXT: Final = 75
 CHANNEL_ADMINS_LISTING_MAX_CHARS: Final = 2_800
 """Room for the listing, its heading and "and N more" in one section's 3000 characters."""
@@ -662,12 +664,15 @@ def _environment_blocks(
     answering_map: AnsweringMap, *, picker: EnvironmentPicker | None
 ) -> list[dict[str, Any]]:
     rows = answering_map.channel_environments
-    lines = [
-        f"<#{row.channel_id}> → *{escape_mrkdwn(row.environment_name)}*"
-        for row in rows[:MAX_ENVIRONMENT_LINES]
-    ]
-    if len(rows) > MAX_ENVIRONMENT_LINES:
-        lines.append(f"_and {len(rows) - MAX_ENVIRONMENT_LINES} more_")
+    lines = fit_lines(
+        (
+            f"<#{row.channel_id}> → *{escape_mrkdwn(row.environment_name)}*"
+            for row in rows[:MAX_ENVIRONMENT_LINES]
+        ),
+        max_chars=ENVIRONMENT_LISTING_MAX_CHARS,
+    )
+    if len(lines) < len(rows):
+        lines.append(f"_and {len(rows) - len(lines)} more_")
     if not rows:
         lines.append("_no channel picks its own environment yet_")
     tenant, deployment = answering_map.tenant_environment, answering_map.deployment_environment

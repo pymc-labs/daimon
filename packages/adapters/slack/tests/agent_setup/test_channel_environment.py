@@ -15,7 +15,11 @@ from daimon.adapters.slack.agent_setup.actions import (
     load_routing_view,
 )
 from daimon.adapters.slack.agent_setup.channel_environment import ENVIRONMENT_NEED_ADMIN_MESSAGE
-from daimon.adapters.slack.agent_setup.panel_views import ACTION_ENVIRONMENT, build_routing_view
+from daimon.adapters.slack.agent_setup.panel_views import (
+    ACTION_ENVIRONMENT,
+    MAX_ENVIRONMENT_LINES,
+    build_routing_view,
+)
 from daimon.adapters.slack.agent_setup.state import PANEL_PAGE_SIZE, PanelMetadata
 from daimon.core.answering_map import AnsweringMap, ChannelEnvironment
 from daimon.core.channel_environments import (
@@ -83,15 +87,21 @@ def test_the_block_lists_channels_then_the_defaults_and_the_select_marks_the_pic
     text = _text(view)
     select = _select(view)
 
-    assert f"<#{CHANNEL}> → *gpu*" in text
-    assert text.index("*Workspace default:* shared") < text.index("Deployment default: *default*")
-    assert "_not in effect while a workspace default is set_" in text
-    assert select is not None
+    assert f"<#{CHANNEL}> → *gpu*" in text, "a channel line reads channel → environment"
+    assert text.index("*Workspace default:* shared") < text.index(
+        "Deployment default: *default*"
+    ), "the workspace default comes before the deployment fall-through"
+    assert "_not in effect while a workspace default is set_" in text, (
+        "a workspace default takes the deployment default out of the cascade"
+    )
+    assert select is not None, "an admin gets the select"
     assert [o["value"] for o in select["options"]] == [
         ENVIRONMENT_OPTION_INHERIT,
         environment_option_value("gpu"),
-    ]
-    assert select["options"][0]["text"]["text"] == "Use the default (shared)"
+    ], "the default leads, then each environment"
+    assert select["options"][0]["text"]["text"] == "Use the default (shared)", (
+        "the first option names what the channel falls to"
+    )
     assert select["initial_option"]["value"] == environment_option_value("gpu"), (
         "the channel's own pick is pre-selected"
     )
@@ -100,9 +110,32 @@ def test_the_block_lists_channels_then_the_defaults_and_the_select_marks_the_pic
 def test_with_nothing_set_the_block_names_only_the_deployment_default() -> None:
     text = _text(_routing(AnsweringMap(deployment_environment="default"), None))
 
-    assert "_no channel picks its own environment yet_" in text
-    assert "*Workspace default:* Not assigned" in text
-    assert "Deployment default: *default*" in text and "not in effect" not in text
+    assert "_no channel picks its own environment yet_" in text, "no channel rows"
+    assert "*Workspace default:* Not assigned" in text, "no tenant row"
+    assert "Deployment default: *default*" in text and "not in effect" not in text, (
+        "with no rows at all, every channel runs where it did before"
+    )
+
+
+def test_the_listing_fits_one_section_with_long_names() -> None:
+    rows = tuple(
+        ChannelEnvironment(channel_id=f"C{index:09}", environment_name="e" * 250)
+        for index in range(MAX_ENVIRONMENT_LINES)
+    )
+    view = _routing(
+        AnsweringMap(
+            channel_environments=rows, tenant_environment="e" * 250, deployment_environment="d"
+        ),
+        None,
+    )
+    sections = [
+        block["text"]["text"]
+        for block in view["blocks"]
+        if block["type"] == "section" and block["text"]["text"].startswith("*Environments*")
+    ]
+
+    assert len(sections) == 1 and len(sections[0]) <= 3000, "within Slack's section cap"
+    assert "more_" in sections[0], "the lines cut are counted"
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +237,7 @@ async def test_a_channel_admin_picks_this_channels_environment_and_hands_it_back
     assert f"<#{CHANNEL}> → *science*" in _text(refreshed), "the view shows the pick"
     assert _select(refreshed) is not None, "the channel admin keeps the select"
     note = client.chat_postEphemeral.call_args.kwargs["text"]
-    assert "now runs in the science environment" in note
+    assert "now runs in the science environment" in note, "the reader is told what changed"
 
     await _pick(runtime, client, tenant_id, ENVIRONMENT_OPTION_INHERIT)
 
@@ -236,8 +269,10 @@ async def test_a_refused_or_stale_pick_writes_nothing(
 
     await _pick(_runtime(db_session_factory, tenant_id, []), client, tenant_id, value)
 
-    assert expected in client.chat_postEphemeral.call_args.kwargs["text"]
+    assert expected in client.chat_postEphemeral.call_args.kwargs["text"], (
+        "the reader is told why nothing changed"
+    )
     assert (
         await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
         is None
-    )
+    ), "nothing is written"

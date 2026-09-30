@@ -1641,7 +1641,7 @@ class SlackApp:
             if "environment" in err.missing:
                 hints.append(
                     "A workspace admin, or an admin of this channel, can pick an environment "
-                    "in /agent-setup → Who answers where, or tell Daimon which one to run here."
+                    "in /agent-setup → Who answers where."
                 )
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,

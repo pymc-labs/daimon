@@ -17,8 +17,10 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
 from daimon.core.channel_environments import (
+    NOT_OFFERED_NOTE,
     EnvironmentPicker,
     build_clear_environment_note,
+    build_missing_environment_note,
     build_set_environment_note,
     list_environment_names,
     parse_environment_option,
@@ -100,12 +102,12 @@ async def save_environment_choice(
     try:
         name = parse_environment_option(value)
     except ValueError:
-        return "That is not an environment this panel offers. Nothing changed."
+        return NOT_OFFERED_NOTE
     if name is not None and (
         await find_environment_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
         is None
     ):
-        return f"The {name} environment no longer exists. Nothing changed."
+        return build_missing_environment_note(name)
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
             session, platform="slack", external_id=user_id, tenant_id=tenant_id
@@ -117,7 +119,14 @@ async def save_environment_choice(
             environment_name=name,
             actor_account_id=actor.account_id,
         )
-    log.info("slack.agent_setup.channel_environment.saved", cleared=name is None)
+    log.info(
+        "slack.agent_setup.channel_environment.saved",
+        tenant_id=str(tenant_id),
+        channel_id=channel_id,
+        actor_account_id=str(actor.account_id),
+        environment_name=name,
+        previous_environment_name=previous,
+    )
     if name is None:
         return build_clear_environment_note(
             channel=f"<#{channel_id}>", cleared=previous is not None
