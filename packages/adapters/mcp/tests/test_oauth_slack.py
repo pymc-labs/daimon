@@ -220,7 +220,7 @@ def test_success_html_close_tab_copy() -> None:
 
 
 def test_success_html_mentions_promo_codes() -> None:
-    body = _success_html(workspace="Acme Corp", signup_credit=Decimal("5.00")).body.decode()
+    body = bytes(_success_html(workspace="Acme Corp", signup_credit=Decimal("5.00")).body).decode()
     assert "redeem it in <code>/billing</code>" in body
 
 

@@ -20,6 +20,7 @@ from daimon.adapters.discord.billing_panel.panel import (
 from daimon.adapters.discord.billing_panel.read import load_billing_snapshot
 from daimon.adapters.discord.billing_panel.redeem import RedeemCodeModal, redeem_result_text
 from daimon.adapters.discord.billing_panel.state import BillingPanelState
+from daimon.adapters.discord.bot import _build_ready_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
@@ -108,6 +109,10 @@ def test_timed_credit_shows_under_server_credit_in_both_views() -> None:
         assert f"$7.50 timed credit left · ends <t:{int(END.timestamp())}:f>" in text
     plain = build_billing_container(_state(), now=NOW, since=SINCE)
     assert "timed credit" not in _text(plain)
+
+
+def test_ready_embed_mentions_redemption() -> None:
+    assert "Redeem it in `/billing`" in (_build_ready_embed().description or "")
 
 
 def test_redeem_result_text() -> None:
