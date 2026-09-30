@@ -52,6 +52,8 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, get_pat
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.posted_controls import RECEIVED_FOOTER
+from daimon.core.scope import TenantScopeRef
+from daimon.core.stores import scoped_config_write
 from daimon.core.stores.agent_files import get_agent_file, put_agent_file
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.agent_skill_repo_credentials import get_skill_repo_credential
@@ -59,6 +61,7 @@ from daimon.core.stores.credential_requests import (
     create_credential_request,
     peek_credential_request,
 )
+from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.core.stores.task_continuations import list_pending_continuations
 from daimon.testing import list_response, ma_agent
 from daimon.testing.factories import make_account, make_tenant
@@ -785,7 +788,145 @@ async def test_skill_repo_submission_never_attaches_to_a_managed_agent_even_for_
     assert row is not None and row.used_at is not None, "an admin's import goes ahead"
     # `_agents_handler` fails the test on any agent update, so reaching here
     # means the managed agent was left untouched.
-    assert "added to" not in _chat_updates(fake_slack_web_client)[-1]["text"]
+    card = json.dumps(_chat_updates(fake_slack_web_client)[-1])
+    assert "but not added to tester" in card, "the card must not claim the agent has them"
+    assert "is a built-in agent" in card, "the card says why"
+
+
+async def _submit_skill_repo(
+    runtime: SlackRuntime, token: str, value: str = "ghp_skill_token"
+) -> None:
+    await run_skill_repo_credential_submission(
+        runtime,
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        message_ts=_MESSAGE_TS,
+        token=token,
+        value=value,
+        dispatch_continuations=_noop_dispatch,
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_repo_submission_refuses_a_member_on_a_reachable_unmanaged_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Not built-in, but it answers for the workspace, so a member still needs an admin."""
+    sync = _imported_skill_sync()
+    monkeypatch.setattr(credential_submissions_mod, "run_skill_sync", sync)
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_shared", name="shared", tenant_id=tenant_id)
+    await scoped_config_write.set_fields(
+        db_session,
+        scope=TenantScopeRef(tenant_id=tenant_id),
+        tenant_id=tenant_id,
+        agent_name="shared",
+    )
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="skill_repo",
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
+        target=build_skill_repo_target("https://github.com/o/skills", "main", ""),
+    )
+    await db_session.commit()
+    runtime = _build_runtime(
+        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+    )
+
+    await _submit_skill_repo(runtime, token)
+
+    async with db_session_factory() as s:
+        row = await peek_credential_request(s, token=token)
+    assert row is not None and row.used_at is None, "the gate must precede the consume"
+    sync.assert_not_called()
+    assert _ephemeral_texts(fake_slack_web_client) == [SHARED_AGENT_SKILLS_MESSAGE]
+
+
+@pytest.mark.asyncio
+async def test_skill_repo_submission_passes_seeded_names_and_admin_status_to_the_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The sync can only refuse seeded names and member replacements it is told about."""
+    monkeypatch.setattr(
+        credential_submissions_mod, "pat_can_access_repo", AsyncMock(return_value=True)
+    )
+    sync = AsyncMock(return_value=[])
+    monkeypatch.setattr(credential_submissions_mod, "run_skill_sync", sync)
+    tenant_id, fernet_key = await _seed_team(db_session)
+    await record_seeded_skill(
+        db_session, tenant_id=tenant_id, name="eda", content_hash="h", anthropic_id="sk_eda"
+    )
+    live_agent = ma_agent(id="agent_private", name="private", tenant_id=tenant_id)
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="skill_repo",
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
+        target=build_skill_repo_target("https://github.com/o/skills", "main", ""),
+    )
+    await db_session.commit()
+    runtime = _build_runtime(
+        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+    )
+
+    await _submit_skill_repo(runtime, token)
+
+    assert sync.call_args.kwargs["seeded_skill_names"] == frozenset({"eda"})
+    assert sync.call_args.kwargs["is_admin"] is False
+
+
+@pytest.mark.asyncio
+async def test_skill_repo_submission_puts_a_refused_import_on_the_card(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A refusal is not a success: nothing attaches, and the card says why."""
+    monkeypatch.setattr(
+        credential_submissions_mod, "pat_can_access_repo", AsyncMock(return_value=True)
+    )
+    reason = "skill name 'eda' belongs to a default skill. Rename the skill and re-sync."
+    monkeypatch.setattr(
+        credential_submissions_mod,
+        "run_skill_sync",
+        AsyncMock(
+            return_value=[
+                ResourceOutcome(kind="skill", name="eda", action=Action.FAILED, error=reason)
+            ]
+        ),
+    )
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_private", name="private", tenant_id=tenant_id)
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="skill_repo",
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
+        target=build_skill_repo_target("https://github.com/o/skills", "main", ""),
+    )
+    await db_session.commit()
+    # `_agents_handler` fails the test on any agent update.
+    runtime = _build_runtime(
+        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+    )
+
+    await _submit_skill_repo(runtime, token)
+
+    card = json.dumps(_chat_updates(fake_slack_web_client)[-1])
+    assert "The skills did not import." in card and reason in card
+    assert "added to" not in card and "again to retry" not in card
+    assert ("POST", _EPHEMERAL_URL) not in fake_slack_web_client.mock.requests, (
+        "the card is the receipt"
+    )
 
 
 @pytest.mark.parametrize("fails_after_storage", [False, True])

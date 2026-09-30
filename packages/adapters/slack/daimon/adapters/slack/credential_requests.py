@@ -14,11 +14,12 @@ the tests and the parity drivers keep importing every public name from here.
 Authorization mirrors the Discord `CredentialRequestButton` exactly:
 requester-only for every kind (the click's user must match the row's
 `requester_platform_user_id`), expiry and single-use checked at click time,
-and — for the `repo` kind only — a shared-agent admin gate, run once as a
+and — for the `repo` kind — a shared-agent admin gate, run once as a
 pre-filter before the modal opens and once more at submission before the
-consume. There is deliberately NO admin gate for the env/mcp/skill_repo
-kinds; see `tools/credential_requests.py` in the MCP adapter for the
-documented trade.
+consume. The `skill_repo` kind is gated at submission only; the MCP mint
+already refused it for a member on a shared agent. There is deliberately NO
+admin gate for the env/mcp kinds; see `tools/credential_requests.py` in the
+MCP adapter for the documented trade.
 """
 
 from __future__ import annotations

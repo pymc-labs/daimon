@@ -74,6 +74,7 @@ from daimon.core.posted_controls import (
     CardState,
 )
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores.agent_files import list_agent_files, put_agent_file_if_unchanged
@@ -1082,8 +1083,8 @@ class SkillAttachOutcome:
 
     `attached` is the one bit `run_skill_repo_credential_submission` needs to
     pick the confirmation copy's availability: `next_message` when the attach
-    actually landed, `preparation_failed` when the import succeeded but the
-    attach did not (or found nothing new to attach).
+    actually landed, `saved` when the skills reached the library but not the
+    agent. `note` then closes the card with the reason.
     """
 
     note: str
@@ -1124,7 +1125,7 @@ async def _attach_skills_to_requested_agent(
     )
     if agent is None:
         return SkillAttachOutcome(
-            note="Could not attach: that agent no longer exists. The skills are in the library.",
+            note="That agent no longer exists.",
             attached=False,
             agent_name=None,
             skill_count=len(skill_ids),
@@ -1133,9 +1134,7 @@ async def _attach_skills_to_requested_agent(
         # Admins included: an attach never stamps the reconciler's spec hash,
         # so the seeded agent would drift for good.
         return SkillAttachOutcome(
-            note=(
-                f"Not attached: `{agent.name}` is a built-in agent. The skills are in the library."
-            ),
+            note=f"`{agent.name}` is a built-in agent. Fork it and add them to the fork.",
             attached=False,
             agent_name=agent.name,
             skill_count=len(skill_ids),
@@ -1164,10 +1163,7 @@ async def _attach_skills_to_requested_agent(
             err_type=type(err).__name__,
         )
         return SkillAttachOutcome(
-            note=(
-                f"Imported, but attaching to `{agent.name}` failed. "
-                "Ask again to retry attaching it."
-            ),
+            note="Attaching them did not finish. Ask again to retry.",
             attached=False,
             agent_name=agent.name,
             skill_count=len(skill_ids),
@@ -1405,12 +1401,38 @@ async def run_skill_repo_credential_submission(
         )
         return
 
+    imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
+    failure_detail = summarize_failed_imports(outcomes)
+    if not imported:
+        # Nothing reached the library (an empty repo, or every skill refused
+        # or failed), which an applied card must not claim.
+        async with runtime.sessionmaker() as session, session.begin():
+            await credential_requests_store.set_credential_request_outcome(
+                session, token=token, outcome="write_failed"
+            )
+            await _record_input_continuation(session, row=consumed, audit_only=True)
+        await edit_posted_card(
+            client,
+            row=consumed,
+            state="partial",
+            outcome=ConfigurationChange(
+                target_name=consumed.target_name or "the agent",
+                kind="skills_bulk",
+                availability="preparation_failed",
+                repo=owner_repo,
+                # `preparation_failed` names no count but the model requires one.
+                count=1,
+                detail=failure_detail,
+            ),
+        )
+        return
+
     attach = await _attach_skills_to_requested_agent(
-        runtime, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id, outcomes=outcomes
+        runtime, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id, outcomes=imported
     )
     log.info(
         "credential_request.skill_repo.attach",
-        imported=len(outcomes),
+        imported=len(imported),
         attached=attach.attached,
         note=attach.note,
     )
@@ -1423,6 +1445,7 @@ async def run_skill_repo_credential_submission(
         )
     # The card is the receipt; the import and the attach are one outcome to
     # the person who pasted the token, so they read as one line of copy.
+    detail_lines = [failure_detail] if attach.attached else [attach.note, failure_detail]
     await edit_posted_card(
         client,
         row=consumed,
@@ -1430,11 +1453,10 @@ async def run_skill_repo_credential_submission(
         outcome=ConfigurationChange(
             target_name=consumed.target_name or attach.agent_name or "the agent",
             kind="skills_bulk",
-            availability="next_message" if attach.attached else "preparation_failed",
+            availability="next_message" if attach.attached else "saved",
             repo=owner_repo,
-            # `preparation_failed` names no count but the model requires one;
-            # see `_report_skill_repo_failure`.
-            count=max(attach.skill_count, 1),
+            count=len(imported),
+            detail="\n".join(line for line in detail_lines if line) or None,
         ),
     )
     if attach.attached and queued:
