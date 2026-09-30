@@ -396,6 +396,44 @@ async def test_sync_impl_returns_outcomes(
     assert not cleanup_dir.exists(), "should clean up the temp directory"
 
 
+async def test_sync_impl_passes_the_tenant_seeded_names_to_the_sync(
+    tmp_path: Path, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The sync can only refuse a seeded name it is told about."""
+    async with sessionmaker() as session:
+        tenant = await make_tenant(session)
+        await record_seeded_skill(
+            session, tenant_id=tenant.id, name="eda", content_hash="h", anthropic_id="sk_eda"
+        )
+        await session.commit()
+    cleanup_dir = tmp_path / "cleanup"
+    cleanup_dir.mkdir()
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
+    )
+
+    with (
+        patch("daimon.core.skills.pipeline.fetch_repo") as mock_fetch,
+        patch("daimon.core.skills.pipeline.discover_skills"),
+        patch("daimon.core.skills.pipeline.sync_skills", return_value=[]) as mock_sync,
+    ):
+        from daimon.core.skills.fetch import FetchResult
+
+        mock_fetch.return_value = FetchResult(path=tmp_path, cleanup_dir=cleanup_dir)
+        await _sync_impl(
+            _runtime(build_fake_anthropic(router.dispatch), sessionmaker),
+            auth,
+            url="https://github.com/org/repo",
+            branch="main",
+            path="",
+        )
+
+    assert mock_sync.call_args.kwargs["seeded_skill_names"] == frozenset({"eda"})
+    assert mock_sync.call_args.kwargs["is_admin"] is True, "the tool is admin-only"
+
+
 async def test_sync_impl_raises_tool_error_for_invalid_path(
     tmp_path: Path, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
