@@ -29,6 +29,12 @@ from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
     handle_agent_setup_command,
 )
+from daimon.adapters.slack.agent_setup.channel_admins import (
+    ChannelAdminsSubmission,
+    evaluate_channel_admins_submission,
+    run_channel_admins_submission,
+)
+from daimon.adapters.slack.agent_setup.panel_views import CALLBACK_CHANNEL_ADMINS
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_private_metadata
 from daimon.adapters.slack.agent_setup.submit import (
     evaluate_new_agent_submission,
@@ -768,6 +774,30 @@ class SlackApp:
                             )
 
                     self._spawn(_run_redeem())
+            elif cb_id == CALLBACK_CHANNEL_ADMINS:
+                # Pure evaluate, then an empty ack closes the form over the
+                # routing view the background run refreshes.
+                _ca = evaluate_channel_admins_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id)
+                )
+                if _ca is not None:
+                    _ca_team: dict[str, Any] = payload.get("team") or {}
+                    _ca_user: dict[str, Any] = payload.get("user") or {}
+
+                    async def _run_channel_admins(
+                        *,
+                        _t: str = str(_ca_team.get("id") or ""),
+                        _u: str = str(_ca_user.get("id") or ""),
+                        _s: ChannelAdminsSubmission = _ca,
+                    ) -> None:
+                        wc = await resolve_web_client(self.runtime, team_id=_t)
+                        if wc is not None:
+                            await run_channel_admins_submission(
+                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
+                            )
+
+                    self._spawn(_run_channel_admins())
             elif cb_id == "feedback_text":
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _fb_decision = evaluate_feedback_text_submission(payload)

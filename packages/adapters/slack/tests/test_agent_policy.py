@@ -34,6 +34,9 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.operation_policy import TargetFacts, decide_operation
+from daimon.core.scope import ChannelScopeRef
+from daimon.core.stores.channel_admins import set_channel_admins
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant, make_tenant_config
 from daimon.testing.ma import MARouter, build_fake_anthropic, make_fake_ma_handler
 from daimon.testing.ma_models import ma_agent
@@ -385,3 +388,47 @@ def test_refusal_copy_differs_by_operation_family() -> None:
     assert refusal_message("key_remove", "needs_admin") == SHARED_AGENT_MESSAGE, (
         "attachment writes carry one string for both refused outcomes"
     )
+
+
+async def test_repo_bind_allows_a_channel_admin_for_an_agent_local_to_their_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A listed channel admin may attach to an agent that answers only there."""
+    async with db_session_factory() as session:
+        tenant = await make_tenant(session, platform="slack", workspace_id=_TEAM_ID)
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=_CHANNEL_ID),
+            tenant_id=tenant.id,
+            agent_name=_AGENT_NAME,
+            mode="agent",
+        )
+        await session.commit()
+
+    async def refused() -> bool:
+        return await refuse_unless_allowed(
+            _build_runtime(db_session_factory, handler=_agent_list_handler(tenant_id=tenant.id)),
+            AsyncWebClient(token="xoxb-test"),
+            operation="repo_bind",
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
+            channel_id=_CHANNEL_ID,
+            user_id=_USER_ID,
+        )
+
+    with AioResponsesMock() as mock:
+        mock.get(_USERS_INFO_PATTERN, payload=_users_info_payload(is_admin=False), repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        mock.post(f"{_SLACK_API_BASE}/chat.postEphemeral", payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        assert await refused(), "no grant: the shared agent needs a workspace admin"
+        async with db_session_factory() as session:
+            await set_channel_admins(
+                session,
+                tenant_id=tenant.id,
+                platform="slack",
+                channel_id=_CHANNEL_ID,
+                role_ids=[],
+                user_ids=[_USER_ID],
+                actor_account_id=None,
+            )
+            await session.commit()
+        assert not await refused(), "the channel admin runs the only channel it answers in"

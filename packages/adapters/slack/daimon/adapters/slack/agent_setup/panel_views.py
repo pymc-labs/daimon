@@ -10,7 +10,8 @@ how a Slack modal says them. It reads no settings, resolves no credential and
 re-derives no precedence: an unrouted agent is unrouted because
 `AgentDetails.answers_in` is empty, and the sentence about it is the one
 `daimon.core.routing_facts` wrote. Admin and member see identical blocks; the
-role changes only whose voice the routing request is in.
+role changes only whose voice the routing request is in, and whether Who
+answers where lists the channel admins with a form to edit them.
 
 Pure — no I/O, no clock, no slack_sdk.
 """
@@ -36,6 +37,7 @@ from daimon.adapters.slack.setup_conversations import setup_button
 from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap, ChannelAnswer
+from daimon.core.channel_admins import MAX_CHANNEL_ADMIN_IDS
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.roster import Page, Roster, RosterAgent
@@ -49,8 +51,10 @@ from daimon.core.setup_conversations import (
     setup_target_label,
     shared_keys_sentence,
 )
+from daimon.core.stores.domain import ChannelAdminsRow
 
 __all__ = [
+    "ACTION_CHANNEL_ADMINS",
     "ACTION_CODING_TOOLS",
     "ACTION_DETAILS",
     "ACTION_EXPAND_KEYS",
@@ -62,12 +66,15 @@ __all__ = [
     "ACTION_REVOKE_TOKEN",
     "ACTION_ROUTING",
     "CALLBACK_AGENTS",
+    "CALLBACK_CHANNEL_ADMINS",
     "CALLBACK_CREATING",
     "CALLBACK_DETAILS",
     "CALLBACK_NEW_AGENT",
     "CALLBACK_ROUTING",
     "LEGACY_ACTION_IDS",
+    "CHANNEL_ADMINS_INPUT_ID",
     "build_agents_view",
+    "build_channel_admins_form",
     "build_creating_view",
     "build_details_view",
     "build_error_view",
@@ -89,6 +96,9 @@ ACTION_EXPAND_KEYS: Final = "agent_setup__expand:keys"
 ACTION_EXPAND_SKILLS: Final = "agent_setup__expand:skills"
 ACTION_EXPAND_CONNECTIONS: Final = "agent_setup__expand:connections"
 ACTION_NEW: Final = "agent_setup__new"
+ACTION_CHANNEL_ADMINS: Final = "agent_setup__channel_admins"
+"""Open the form naming this channel's admins. Workspace admins only."""
+
 ACTION_CODING_TOOLS: Final = "agent_setup__coding_tools"
 """Mint a coding-tool token for the agent named in the button's `value`."""
 
@@ -105,6 +115,9 @@ CALLBACK_DETAILS: Final = "agent_setup__details_view"
 CALLBACK_ROUTING: Final = "agent_setup__routing_view"
 CALLBACK_NEW_AGENT: Final = "agent_setup__new_agent"
 CALLBACK_CREATING: Final = "agent_setup__creating"
+CALLBACK_CHANNEL_ADMINS: Final = "agent_setup__channel_admins_form"
+CHANNEL_ADMINS_INPUT_ID: Final = "channel_admins__users"
+"""Block and action id of the form's member select; the submission reads it."""
 
 LEGACY_ACTION_IDS: Final[frozenset[str]] = frozenset(
     {
@@ -149,6 +162,13 @@ DETAILS_BUTTON_LABEL: Final = "🔍 Details"
 NEW_AGENT_LABEL: Final = "➕ New agent"
 ROUTING_LABEL: Final = "📍 Who answers where"
 CODING_TOOLS_LABEL: Final = "🧰 Use from your coding tools"
+CHANNEL_ADMINS_LABEL: Final = "Channel admins"
+MAX_CHANNEL_ADMIN_LINES: Final = 15
+CHANNEL_ADMINS_NOTE: Final = (
+    "Workspace admins run every channel. A channel's admins may change agents that answer "
+    "only in channels they run, and pick those channels' default agent. Built-in agents and "
+    "the workspace default stay with workspace admins."
+)
 
 CODING_TOOLS_UNAVAILABLE_NOTE: Final = "Coding-tool access is not configured for this deployment."
 
@@ -522,11 +542,14 @@ def build_routing_view(
     setup_links: Sequence[str],
     channel_id: str,
     unrouted_agent_name: str | None,
+    channel_admins: Sequence[ChannelAdminsRow] | None = None,
 ) -> dict[str, Any]:
     """The whole cascade, laid out so the precedence is visible, not inferred.
 
     No setup button: this view answers where mentions go, and the change it
     describes is a sentence to say to Daimon rather than a control here.
+    `channel_admins` is passed for workspace admins only, who also see every
+    channel's admins and a button to edit this channel's.
     """
     blocks: list[dict[str, Any]] = []
     if page.items:
@@ -570,6 +593,8 @@ def build_routing_view(
     listing = "\n".join(links) if links else "_none open_"
     blocks.append(_section(f"*Setup conversations*\n{listing}"))
     blocks.append({"type": "divider"})
+    if channel_admins is not None:
+        blocks.extend(_channel_admins_blocks(channel_admins, channel_id=channel_id))
     blocks.append(
         _context(
             _routing_request_line(
@@ -595,6 +620,59 @@ def build_routing_view(
             )
         ),
         callback_id=CALLBACK_ROUTING,
+    )
+
+
+def _channel_admins_blocks(
+    grants: Sequence[ChannelAdminsRow], *, channel_id: str
+) -> list[dict[str, Any]]:
+    lines = [
+        f"<#{row.channel_id}> → {', '.join(f'<@{uid}>' for uid in row.user_ids)}"
+        for row in grants[:MAX_CHANNEL_ADMIN_LINES]
+    ]
+    if len(grants) > MAX_CHANNEL_ADMIN_LINES:
+        lines.append(f"_and {len(grants) - MAX_CHANNEL_ADMIN_LINES} more_")
+    listing = "\n".join(lines) or "_no channel has its own admins yet_"
+    edit = (
+        _button(action_id=ACTION_CHANNEL_ADMINS, label="Edit this channel") if channel_id else None
+    )
+    return [
+        _section(f"*{CHANNEL_ADMINS_LABEL}*\n{listing}", accessory=edit),
+        _context(CHANNEL_ADMINS_NOTE),
+        {"type": "divider"},
+    ]
+
+
+def build_channel_admins_form(*, meta: PanelMetadata, user_ids: Sequence[str]) -> dict[str, Any]:
+    """Name who runs `meta.channel_id` besides the workspace admins; empty clears it.
+
+    Slack has no roles, so members are the only grant here.
+    """
+    element: dict[str, Any] = {
+        "type": "multi_users_select",
+        "action_id": CHANNEL_ADMINS_INPUT_ID,
+        "max_selected_items": MAX_CHANNEL_ADMIN_IDS,
+        "placeholder": {"type": "plain_text", "text": "Pick members"},
+    }
+    if user_ids:
+        element["initial_users"] = list(user_ids)
+    return finish_modal(
+        title=CHANNEL_ADMINS_LABEL,
+        blocks=[
+            _section(f"Who runs <#{meta.channel_id}> besides the workspace admins."),
+            {
+                "type": "input",
+                "block_id": CHANNEL_ADMINS_INPUT_ID,
+                "label": {"type": "plain_text", "text": "Members"},
+                "optional": True,
+                "element": element,
+            },
+            _context(f"Empty the list to clear it. {CHANNEL_ADMINS_NOTE}"),
+        ],
+        private_metadata=encode_panel_metadata(meta),
+        callback_id=CALLBACK_CHANNEL_ADMINS,
+        close="Cancel",
+        submit="Save",
     )
 
 
