@@ -1149,6 +1149,7 @@ async def test_start_dm_refuses_to_move_an_isolated_conversation(
             channel_id="dm-1",
             external_user_id="anyone",
             source_url="https://example.invalid/chan-1",
+            source_channel_id="chan-1",
             context=[],
         )
 

@@ -25,6 +25,11 @@ from daimon.adapters.discord.agent_setup.channel_admins_view import (
     ChannelAdminsView,
     load_grants,
 )
+from daimon.adapters.discord.agent_setup.isolation_view import (
+    ISOLATION_LABEL,
+    IsolationView,
+    load_is_isolated,
+)
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.scope_default import resolve_account_display
 from daimon.adapters.discord.agent_setup.state import PanelState
@@ -277,7 +282,8 @@ class RoutingView(PanelViewBase):
     Setup belongs to the roster and to Details, where a target is selected;
     offering it here would suggest this screen is the place a routing change
     gets made, and it is not. Server admins also get Channel admins, which
-    edits who runs a channel rather than who answers in it.
+    edits who runs a channel rather than who answers in it, and Isolation,
+    which keeps this channel's own agents inside it.
     """
 
     def __init__(
@@ -320,6 +326,12 @@ class RoutingView(PanelViewBase):
             )
             admins_button.callback = self._on_channel_admins  # type: ignore[method-assign]  # per-instance callback
             nav_row.add_item(admins_button)
+            if state.channel_id:
+                isolation_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                    label=ISOLATION_LABEL, style=discord.ButtonStyle.secondary
+                )
+                isolation_button.callback = self._on_isolation  # type: ignore[method-assign]  # per-instance callback
+                nav_row.add_item(isolation_button)
         nav_row.add_item(self.done_button())  # pyright: ignore[reportArgumentType]  # Button[Self] is the same runtime item
         container.add_item(nav_row)
 
@@ -359,6 +371,22 @@ class RoutingView(PanelViewBase):
                 runtime=self.runtime,
                 allowed_user_id=self.allowed_user_id,
                 grants=grants,
+            ),
+        )
+
+    async def _on_isolation(self, interaction: discord.Interaction) -> None:
+        """Open this channel's isolation screen; Manage Server is re-checked live."""
+        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+            return
+        await interaction.response.defer()
+        isolated = await load_is_isolated(self.runtime, state=self.state)
+        await self.swap_to(
+            interaction,
+            IsolationView(
+                self.state,
+                runtime=self.runtime,
+                allowed_user_id=self.allowed_user_id,
+                isolated=isolated,
             ),
         )
 
