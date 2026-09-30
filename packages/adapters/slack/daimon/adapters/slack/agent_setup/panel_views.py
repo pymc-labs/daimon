@@ -56,6 +56,7 @@ from daimon.core.setup_conversations import (
     setup_target_label,
     shared_keys_sentence,
 )
+from daimon.core.skills.ingest import SkillPreview
 from daimon.core.stores.domain import ChannelAdminsRow
 
 __all__ = [
@@ -118,6 +119,9 @@ ACTION_END_ISOLATION: Final = "agent_setup__isolation:end"
 ACTION_CODING_TOOLS: Final = "agent_setup__coding_tools"
 """Mint a coding-tool token for the agent named in the button's `value`."""
 
+ACTION_ADD_SKILL: Final = "agent_setup__skill_add"
+"""Open the Add skill form for the agent on Details."""
+
 ACTION_REVOKE_TOKEN: Final = "agent_setup__revoke_token"
 """Revoke one minted token; the button's `value` is its jti.
 
@@ -134,6 +138,11 @@ CALLBACK_CREATING: Final = "agent_setup__creating"
 CALLBACK_CHANNEL_ADMINS: Final = "agent_setup__channel_admins_form"
 CHANNEL_ADMINS_INPUT_ID: Final = "channel_admins__users"
 """Block and action id of the form's member select; the submission reads it."""
+CALLBACK_ADD_SKILL: Final = "agent_setup__add_skill_form"
+ADD_SKILL_INPUT_ID: Final = "add_skill__text"
+"""Block and action id of the Add skill form's SKILL.md input."""
+MAX_SKILL_PASTE_CHARS: Final = 3000
+"""Slack's cap on a plain-text input."""
 
 LEGACY_ACTION_IDS: Final[frozenset[str]] = frozenset(
     {
@@ -178,6 +187,7 @@ DETAILS_BUTTON_LABEL: Final = "🔍 Details"
 NEW_AGENT_LABEL: Final = "➕ New agent"
 ROUTING_LABEL: Final = "📍 Who answers where"
 CODING_TOOLS_LABEL: Final = "🧰 Use from your coding tools"
+ADD_SKILL_LABEL: Final = "➕ Add skill"
 CHANNEL_ADMINS_LABEL: Final = "Channel admins"
 MAX_CHANNEL_ADMIN_LINES: Final = 15
 MAX_ENVIRONMENT_LINES: Final = 10
@@ -428,20 +438,14 @@ def build_details_view(
     blocks.append(_section(f"*Model:* {escape_mrkdwn(details.model_display_name)}"))
     blocks.extend(_repo_blocks(details))
     blocks.extend(_detail_list_blocks(details, meta=meta))
+    actions = [_button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name)]
     if coding_tools_available:
-        blocks.append(
-            {
-                "type": "actions",
-                "elements": [
-                    _button(
-                        action_id=ACTION_CODING_TOOLS,
-                        label=CODING_TOOLS_LABEL,
-                        value=details.name,
-                    )
-                ],
-            }
+        actions.insert(
+            0,
+            _button(action_id=ACTION_CODING_TOOLS, label=CODING_TOOLS_LABEL, value=details.name),
         )
-    else:
+    blocks.append({"type": "actions", "elements": actions})
+    if not coding_tools_available:
         blocks.append(_context(CODING_TOOLS_UNAVAILABLE_NOTE))
     return finish_modal(
         title=title,
@@ -792,6 +796,68 @@ def build_channel_admins_form(*, meta: PanelMetadata, user_ids: Sequence[str]) -
         callback_id=CALLBACK_CHANNEL_ADMINS,
         close="Cancel",
         submit="Save",
+    )
+
+
+def _file_list(paths: Sequence[str], *, shown: int = 15) -> str:
+    listed = [f"`{escape_mrkdwn(path[:80])}`" for path in paths[:shown]]
+    if len(paths) > shown:
+        listed.append(f"+{len(paths) - shown} more")
+    return ", ".join(listed)
+
+
+def build_add_skill_form(
+    *, meta: PanelMetadata, text: str = "", preview: SkillPreview | None = None
+) -> dict[str, Any]:
+    """Paste a SKILL.md; with `preview`, show what it holds and submit to add it.
+
+    Slack modals take no files, so a .zip goes through chat instead. The
+    previewed hash travels in `meta.skill_hash`; submitting changed text
+    previews again rather than adding.
+    """
+    agent = escape_mrkdwn(meta.agent_name or "this agent")
+    blocks: list[dict[str, Any]] = []
+    if preview is None:
+        blocks.append(_section("Paste a SKILL.md. You see what it holds before anything is added."))
+    else:
+        blocks.append(
+            _section(
+                f"*Add {escape_mrkdwn(preview.name)} to {agent}?*\n"
+                f"{escape_mrkdwn(preview.description)}\n*Files:* {_file_list(preview.files)}"
+            )
+        )
+        if preview.scripts:
+            blocks.append(_section(f"⚠️ *{agent} could run:* {_file_list(preview.scripts)}"))
+    element: dict[str, Any] = {
+        "type": "plain_text_input",
+        "action_id": ADD_SKILL_INPUT_ID,
+        "multiline": True,
+        "max_length": MAX_SKILL_PASTE_CHARS,
+    }
+    if text:
+        element["initial_value"] = text
+    blocks.append(
+        {
+            "type": "input",
+            "block_id": ADD_SKILL_INPUT_ID,
+            "label": {"type": "plain_text", "text": "SKILL.md"},
+            "element": element,
+        }
+    )
+    note = (
+        f"Submit to add it as {agent}'s own skill; shared skills are not changed. "
+        "Changed text is previewed again."
+        if preview is not None
+        else f"For a .zip or a file, attach it in a message and ask me to add it to {agent}."
+    )
+    blocks.append(_context(note))
+    return finish_modal(
+        title="Add skill",
+        blocks=blocks,
+        private_metadata=encode_panel_metadata(meta),
+        callback_id=CALLBACK_ADD_SKILL,
+        close="Cancel",
+        submit="Add" if preview is not None else "Preview",
     )
 
 

@@ -58,6 +58,7 @@ import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.agent_policy import refuse_unless_allowed_for_agent_name
 from daimon.adapters.slack.agent_setup import panel_views
 from daimon.adapters.slack.agent_setup.channel_environment import (
     ENVIRONMENT_NEED_ADMIN_MESSAGE,
@@ -262,6 +263,7 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_EXPAND_CONNECTIONS,
         panel_views.ACTION_NEW,
         panel_views.ACTION_CODING_TOOLS,
+        panel_views.ACTION_ADD_SKILL,
         panel_views.ACTION_REVOKE_TOKEN,
         panel_views.ACTION_CHANNEL_ADMINS,
         panel_views.ACTION_ENVIRONMENT,
@@ -460,7 +462,7 @@ async def load_routing_view(
     )
 
 
-async def _load_details_view(
+async def load_details_view(
     runtime: SlackRuntime,
     *,
     tenant_id: uuid.UUID,
@@ -595,7 +597,7 @@ async def _dispatch_panel_action(
         agent_name = str(action.get("value") or "")
         if not agent_name:
             return
-        details_view = await _load_details_view(
+        details_view = await load_details_view(
             runtime, tenant_id=tenant_id, meta=meta, agent_name=agent_name, is_admin=is_admin
         )
         if details_view is None:
@@ -650,7 +652,7 @@ async def _dispatch_panel_action(
         if not agent_name:
             return
         expansion = expansion_actions[action_id]
-        details_view = await _load_details_view(
+        details_view = await load_details_view(
             runtime,
             tenant_id=tenant_id,
             meta=meta.toggled(expansion),
@@ -767,6 +769,26 @@ async def _dispatch_panel_action(
                     runtime, tenant_id=tenant_id, meta=meta, is_admin=True
                 ),
             )
+        return
+
+    if action_id == panel_views.ACTION_ADD_SKILL:
+        agent_name = str(action.get("value") or meta.agent_name or "")
+        if not agent_name or await refuse_unless_allowed_for_agent_name(
+            runtime,
+            client,
+            operation="skill_add",
+            tenant_id=tenant_id,
+            agent_name=agent_name,
+            channel_id=meta.channel_id,
+            user_id=user_id,
+        ):
+            return
+        await client.views_push(  # pyright: ignore[reportUnknownMemberType]
+            trigger_id=trigger_id,
+            view=panel_views.build_add_skill_form(
+                meta=meta.with_view("add_skill", agent_name=agent_name, root_view_id=view_id)
+            ),
+        )
         return
 
     if action_id == panel_views.ACTION_CODING_TOOLS:

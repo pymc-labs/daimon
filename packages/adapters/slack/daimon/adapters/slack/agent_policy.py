@@ -52,6 +52,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 __all__ = [
     "AGENT_GONE_MESSAGE",
     "MANAGED_AGENT_MESSAGE",
+    "NEEDS_ADMIN_SKILL_MESSAGE",
     "NEEDS_ADMIN_SPEC_MESSAGE",
     "SHARED_AGENT_MESSAGE",
     "gather_target_facts",
@@ -73,6 +74,12 @@ MANAGED_AGENT_MESSAGE: Final[str] = (
 NEEDS_ADMIN_SPEC_MESSAGE: Final[str] = (
     f"This agent answers for other people here, so this change needs {ADMIN_NOUN}. "
     "Ask me and I'll write the request for them. Making your own agent is not restricted."
+)
+
+#: A skill added or removed by a member on an agent that answers beyond their channels.
+NEEDS_ADMIN_SKILL_MESSAGE: Final[str] = (
+    "This agent answers in a channel or the whole workspace, so changing its skills "
+    f"needs {ADMIN_NOUN} or an admin of every channel it answers in."
 )
 
 #: An attachment write (repo binding, keys, MCP server) by a member against a
@@ -258,6 +265,8 @@ def refusal_message(operation: OperationKind, outcome: PolicyOutcome) -> str:
     """
     if operation == "agent_spec_edit":
         return MANAGED_AGENT_MESSAGE if outcome == "managed_agent" else NEEDS_ADMIN_SPEC_MESSAGE
+    if operation in ("skill_add", "skill_remove"):
+        return MANAGED_AGENT_MESSAGE if outcome == "managed_agent" else NEEDS_ADMIN_SKILL_MESSAGE
     return SHARED_AGENT_MESSAGE
 
 

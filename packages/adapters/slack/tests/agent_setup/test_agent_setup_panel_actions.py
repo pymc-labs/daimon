@@ -32,6 +32,7 @@ from daimon.adapters.slack.agent_setup.actions import (
 )
 from daimon.adapters.slack.agent_setup.isolation import ISOLATION_NEED_ADMIN_MESSAGE
 from daimon.adapters.slack.agent_setup.panel_views import (
+    ACTION_ADD_SKILL,
     ACTION_CHANNEL_ADMINS,
     ACTION_CODING_TOOLS,
     ACTION_DETAILS,
@@ -43,6 +44,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_PAGE_NEXT,
     ACTION_REVOKE_TOKEN,
     ACTION_ROUTING,
+    CALLBACK_ADD_SKILL,
 )
 from daimon.adapters.slack.agent_setup.state import (
     PanelMetadata,
@@ -934,3 +936,35 @@ async def test_isolation_click_refuses_a_shared_agent_then_isolates_with_a_copy(
         policy = await load_access_policy(session, tenant_id=tenant_id)
     assert policy.isolated_channel_ids == (room,)
     assert len(_sent(mock, _VIEWS_UPDATE_KEY)) == 2, "each click refreshes Who answers where"
+
+
+async def test_add_skill_opens_the_form_or_refuses_by_where_the_agent_answers(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A member may add to an agent that answers nowhere, not to the workspace default."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    agent = _agent_payload(tenant_id=tenant_id, name=_OTHER_AGENT, agent_id="agent_other")
+    agent["metadata"]["daimon_account"] = str(uuid.uuid4())
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([agent]))
+    click = _action_payload(
+        ACTION_ADD_SKILL,
+        meta=_meta(view="details", agent_name=_OTHER_AGENT),
+        value=_OTHER_AGENT,
+        view_id="V_DETAILS",
+    )
+    mock = fake_slack_web_client.mock
+
+    await handle_agent_setup_action(runtime, click)
+    (pushed,) = _sent(mock, _VIEWS_PUSH_KEY)
+    assert pushed["view"]["callback_id"] == CALLBACK_ADD_SKILL
+    meta = decode_panel_metadata(pushed["view"]["private_metadata"])
+    assert meta is not None and (meta.agent_name, meta.root_view_id) == (_OTHER_AGENT, "V_DETAILS")
+
+    await _mark_tenant_default(db_session_factory, tenant_id=tenant_id, agent_name=_OTHER_AGENT)
+    await handle_agent_setup_action(runtime, click)
+    assert len(_sent(mock, _VIEWS_PUSH_KEY)) == 1, "the refused click pushes nothing"
+    (refusal,) = _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
+    assert "changing its skills needs a workspace admin" in refusal["text"]
