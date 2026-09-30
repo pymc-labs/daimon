@@ -1221,7 +1221,11 @@ class SkillRepoModal(discord.ui.Modal):
         if attach_failure is not None:
             # The skills are in the library but not on the agent: the waiting
             # task gets nothing to resume with, and the card says so.
-            await interaction.followup.send(attach_failure, ephemeral=True)
+            await interaction.followup.send(
+                f"Skills imported to the library, but not added to {_agent_name(consumed_row)}. "
+                f"{attach_failure}",
+                ephemeral=True,
+            )
             is_queued = await _settle_spent_request(
                 self._runtime, row=consumed_row, outcome="write_failed", carries_work=False
             )
@@ -1235,7 +1239,7 @@ class SkillRepoModal(discord.ui.Modal):
                     availability="saved",
                     count=len(imported),
                     repo=owner_repo,
-                    detail=failure_detail,
+                    detail="\n".join(line for line in (attach_failure, failure_detail) if line),
                 ),
             )
             if is_queued:
@@ -1309,7 +1313,7 @@ class SkillRepoModal(discord.ui.Modal):
         no way to tell that anything worked.
 
         Returns None when there was nothing to attach or the attach landed,
-        and the person-facing prose for the failure otherwise — raising is
+        and a one-line reason for the failure otherwise — raising is
         not an option, because the import has already succeeded by the time
         this runs and both halves must be reported truthfully.
         """
@@ -1325,14 +1329,11 @@ class SkillRepoModal(discord.ui.Modal):
             self._runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
         )
         if agent is None:
-            return "Could not attach: that agent no longer exists. The skills are in the library."
+            return "That agent no longer exists."
         if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
             # Admins included: an attach never stamps the reconciler's spec
             # hash, so the seeded agent would drift for good.
-            return (
-                f"Skills imported, but `{agent.name}` is a built-in agent, so they were not "
-                "attached. Fork it and add them to the fork. The skills are in the library."
-            )
+            return f"`{agent.name}` is a built-in agent. Fork it and add them to the fork."
         new_skills: list[BetaManagedAgentsSkillParams] = [
             {"type": "custom", "skill_id": skill_id} for skill_id in skill_ids
         ]
@@ -1356,10 +1357,7 @@ class SkillRepoModal(discord.ui.Modal):
                 agent_id=str(agent_id),
                 err_type=type(err).__name__,
             )
-            return (
-                f"Skills imported, but attaching them to `{agent.name}` did not finish. "
-                "Ask again to retry."
-            )
+            return "Attaching them did not finish. Ask again to retry."
         return None
 
 

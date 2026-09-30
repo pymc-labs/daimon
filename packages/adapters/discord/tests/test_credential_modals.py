@@ -1595,6 +1595,7 @@ async def test_skill_repo_modal_never_attaches_to_a_managed_agent_even_for_admin
     )
     card = _card_text(_card_edits(interaction)[-1])
     assert "but not added to tester" in card, "the card must not claim the agent has them"
+    assert "is a built-in agent" in card, "the card says why, as on Slack"
 
 
 async def test_skill_repo_modal_refuses_a_member_on_a_shared_agent_before_consuming(
