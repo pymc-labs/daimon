@@ -1662,9 +1662,8 @@ class SlackApp:
                 channel=channel,
                 thread_ts=thread_id,
                 text=(
-                    "The configured agent or environment no longer exists. "
-                    "Ask a workspace admin to ask Daimon for an existing agent or "
-                    "environment, or pick an environment in /agent-setup → Who answers where."
+                    "The configured agent or environment no longer exists. A workspace "
+                    "admin, or an admin of this channel, can pick another in /agent-setup."
                 ),
             )
             return

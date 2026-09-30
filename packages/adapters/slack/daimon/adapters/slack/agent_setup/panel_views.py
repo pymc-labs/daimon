@@ -181,8 +181,9 @@ CODING_TOOLS_LABEL: Final = "🧰 Use from your coding tools"
 CHANNEL_ADMINS_LABEL: Final = "Channel admins"
 MAX_CHANNEL_ADMIN_LINES: Final = 15
 MAX_ENVIRONMENT_LINES: Final = 10
-ENVIRONMENT_LISTING_MAX_CHARS: Final = 2_000
-"""Room for the channel lines, leaving the defaults theirs in one section's 3000 characters."""
+MAX_SHOWN_ENVIRONMENT_NAME: Final = 200
+"""Characters of an environment name shown before escaping, so the defaults stay bounded."""
+_MORE_LINE_RESERVE: Final = len("\n_and 9999 more_")
 _MAX_OPTION_TEXT: Final = 75
 CHANNEL_ADMINS_LISTING_MAX_CHARS: Final = 2_800
 """Room for the listing, its heading and "and N more" in one section's 3000 characters."""
@@ -663,29 +664,37 @@ def build_routing_view(
 def _environment_blocks(
     answering_map: AnsweringMap, *, picker: EnvironmentPicker | None
 ) -> list[dict[str, Any]]:
+    heading = "*Environments*"
+    tenant, deployment = answering_map.tenant_environment, answering_map.deployment_environment
+    defaults = [f"*Workspace default:* {_shown_name(tenant) if tenant else 'Not assigned'}"]
+    if deployment is not None:
+        defaults.append(f"Deployment default: *{_shown_name(deployment)}*")
+        if tenant is not None:
+            defaults.append("_not in effect while a workspace default is set_")
     rows = answering_map.channel_environments
     lines = fit_lines(
         (
-            f"<#{row.channel_id}> → *{escape_mrkdwn(row.environment_name)}*"
+            f"<#{row.channel_id}> → *{_shown_name(row.environment_name)}*"
             for row in rows[:MAX_ENVIRONMENT_LINES]
         ),
-        max_chars=ENVIRONMENT_LISTING_MAX_CHARS,
+        max_chars=MAX_SECTION_TEXT_CHARS
+        - len("\n".join([heading, *defaults]))
+        - 1
+        - _MORE_LINE_RESERVE,
     )
     if len(lines) < len(rows):
         lines.append(f"_and {len(rows) - len(lines)} more_")
     if not rows:
         lines.append("_no channel picks its own environment yet_")
-    tenant, deployment = answering_map.tenant_environment, answering_map.deployment_environment
-    lines.append(f"*Workspace default:* {escape_mrkdwn(tenant) if tenant else 'Not assigned'}")
-    if deployment is not None:
-        lines.append(f"Deployment default: *{escape_mrkdwn(deployment)}*")
-        if tenant is not None:
-            lines.append("_not in effect while a workspace default is set_")
-    blocks = [_section("*Environments*\n" + "\n".join(lines))]
+    blocks = [_section("\n".join([heading, *lines, *defaults]))]
     if picker is not None:
         blocks.append({"type": "actions", "elements": [_environment_select(picker)]})
     blocks.append({"type": "divider"})
     return blocks
+
+
+def _shown_name(name: str) -> str:
+    return escape_mrkdwn(name[:MAX_SHOWN_ENVIRONMENT_NAME])
 
 
 def _environment_select(picker: EnvironmentPicker) -> dict[str, Any]:

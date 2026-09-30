@@ -117,14 +117,17 @@ def test_with_nothing_set_the_block_names_only_the_deployment_default() -> None:
     )
 
 
-def test_the_listing_fits_one_section_with_long_names() -> None:
+def test_the_listing_fits_one_section_with_long_names_full_of_markup() -> None:
+    long_name = "&<" * 300
     rows = tuple(
-        ChannelEnvironment(channel_id=f"C{index:09}", environment_name="e" * 250)
+        ChannelEnvironment(channel_id=f"C{index:09}", environment_name=long_name)
         for index in range(MAX_ENVIRONMENT_LINES)
     )
     view = _routing(
         AnsweringMap(
-            channel_environments=rows, tenant_environment="e" * 250, deployment_environment="d"
+            channel_environments=rows,
+            tenant_environment=long_name,
+            deployment_environment=long_name,
         ),
         None,
     )
@@ -135,7 +138,12 @@ def test_the_listing_fits_one_section_with_long_names() -> None:
     ]
 
     assert len(sections) == 1 and len(sections[0]) <= 3000, "within Slack's section cap"
-    assert "more_" in sections[0], "the lines cut are counted"
+    text = sections[0]
+    assert "more_" in text, "the channel lines cut are counted"
+    assert "*Workspace default:* &amp;&lt;" in text and "Deployment default:" in text, (
+        "both defaults show, escaped"
+    )
+    assert not text.endswith("…"), "the section is budgeted, not truncated mid-entity"
 
 
 # ---------------------------------------------------------------------------
