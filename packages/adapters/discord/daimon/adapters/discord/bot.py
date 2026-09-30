@@ -2361,8 +2361,8 @@ class DaimonBot(commands.Bot):
                 )
             if "environment" in err.missing:
                 hints.append(
-                    "Environment is operator-only -- an operator can set it via the CLI "
-                    "(`daimon config set environment_name=...`)."
+                    "An admin of this server or channel can pick an environment in "
+                    "`/agent-setup` → Who answers where, or tell Daimon which one to run here."
                 )
             await target.send(
                 f"No {' or '.join(err.missing)} configured for this channel. " + " ".join(hints)
@@ -2380,8 +2380,8 @@ class DaimonBot(commands.Bot):
             target = thread or message.channel
             await target.send(
                 "The configured agent or environment no longer exists. "
-                "An admin can ask Daimon to pick an existing agent; the environment is "
-                "operator-only via the CLI (`daimon config set environment_name=...`)."
+                "An admin can ask Daimon to pick an existing agent or environment, or "
+                "pick an environment in `/agent-setup` → Who answers where."
             )
             return
         except AdmissionDenied as err:

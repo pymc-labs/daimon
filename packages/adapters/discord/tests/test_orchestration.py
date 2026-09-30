@@ -491,6 +491,9 @@ class TestNewThreadCreation:
         # CR-01: recovery hint points at the /agent-setup panel, not the deleted /propagate.
         assert "/agent-setup" in sent_text, "recovery hint should point at /agent-setup"
         assert "/propagate" not in sent_text, "the deleted /propagate command must not be suggested"
+        assert "operator" not in sent_text and "admin of this server or channel" in sent_text, (
+            "a server or channel admin picks the environment, not the operator"
+        )
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)

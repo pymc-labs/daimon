@@ -3,9 +3,10 @@
 The panel's other two screens answer "who answers *here*". This one shows every
 tier at once: each channel that names its own agent, the server default, and the
 deployment fall-through that a server default removes from the cascade entirely.
-Setup conversations sit in their own bounded list, because a live setup thread
-is not a routing rule and reading it as one is exactly the mistake this screen
-exists to prevent.
+The environment each channel runs in resolves over the same tiers on its own,
+so it gets its own block. Setup conversations sit in their own bounded list,
+because a live setup thread is not a routing rule and reading it as one is
+exactly the mistake this screen exists to prevent.
 
 The precedence itself is `daimon.core.routing_facts`' to state, not this
 module's; adapters render the cascade, they never re-derive it.
@@ -18,6 +19,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
+import anthropic
 import structlog
 from daimon.adapters.discord.agent_setup.budget import ROUTING_PAGE_SIZE
 from daimon.adapters.discord.agent_setup.channel_admins_view import (
@@ -25,13 +27,23 @@ from daimon.adapters.discord.agent_setup.channel_admins_view import (
     ChannelAdminsView,
     load_grants,
 )
+from daimon.adapters.discord.agent_setup.channel_environment import (
+    REFUSED_MESSAGE,
+    build_environment_select,
+    load_environment_picker,
+    may_pick_environment,
+    save_environment_choice,
+)
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.scope_default import resolve_account_display
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import refuse_if_not_admin
+from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.answering_map import AnsweringMap
+from daimon.core.channel_environments import EnvironmentPicker
+from daimon.core.errors import DaimonError
 from daimon.core.roster import Page, paginate
 from daimon.core.routing_facts import PRECEDENCE_LINE, build_routing_request
 from daimon.core.setup_conversations import setup_thread_name
@@ -45,6 +57,7 @@ BACK_LABEL = "◀ Back"
 SERVER_DEFAULT_LABEL = "Server default"
 DEPLOYMENT_NOT_IN_EFFECT = "not in effect while a server default is set"
 MAX_SETUP_CONVERSATION_LINKS = 5
+MAX_ENVIRONMENT_LINES = 10
 
 
 @dataclasses.dataclass(frozen=True)
@@ -231,6 +244,26 @@ def _defaults_block(
     return "\n".join(lines)
 
 
+def build_environments_block(answering_map: AnsweringMap) -> str:
+    """Each channel's own environment, then the server and deployment defaults. Pure."""
+    rows = answering_map.channel_environments
+    lines = ["**Environments**"]
+    lines += [
+        f"<#{row.channel_id}> → **{row.environment_name}**" for row in rows[:MAX_ENVIRONMENT_LINES]
+    ]
+    if len(rows) > MAX_ENVIRONMENT_LINES:
+        lines.append(f"-# and {len(rows) - MAX_ENVIRONMENT_LINES} more")
+    if not rows:
+        lines.append("-# no channel picks its own environment yet")
+    tenant, deployment = answering_map.tenant_environment, answering_map.deployment_environment
+    lines.append(f"{SERVER_DEFAULT_LABEL} → **{tenant}**" if tenant else "-# no server default")
+    if deployment is not None:
+        lines.append(f"Deployment default → **{deployment}**")
+        if tenant is not None:
+            lines.append(f"-# {DEPLOYMENT_NOT_IN_EFFECT}")
+    return "\n".join(lines)
+
+
 def _conversations_block(conversations: Sequence[str]) -> str:
     if not conversations:
         return "**Setup conversations**\n-# none open"
@@ -250,8 +283,13 @@ def build_routing_container(
     deployment_in_effect: bool,
     conversations: Sequence[str],
     sentence: str,
+    environments: str | None = None,
+    environment_select: discord.ui.Select[discord.ui.LayoutView] | None = None,
 ) -> discord.ui.Container[discord.ui.LayoutView]:
-    """Fold one page of the cascade into the panel card. Pure — no I/O, no clock."""
+    """Fold one page of the cascade into the panel card. Pure — no I/O, no clock.
+
+    ``environment_select`` sits right under ``environments``, the block it edits.
+    """
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
     container.add_item(header("Who answers where"))
     container.add_item(discord.ui.TextDisplay(_channel_block(page)))
@@ -264,6 +302,13 @@ def build_routing_container(
             )
         )
     )
+    if environments is not None:
+        container.add_item(hairline())
+        container.add_item(discord.ui.TextDisplay(environments))
+        if environment_select is not None:
+            select_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+            select_row.add_item(environment_select)
+            container.add_item(select_row)
     container.add_item(hairline())
     container.add_item(discord.ui.TextDisplay(_conversations_block(conversations)))
     container.add_item(hairline())
@@ -272,12 +317,14 @@ def build_routing_container(
 
 
 class RoutingView(PanelViewBase):
-    """The Who answers where screen: read-only, paged, no setup button.
+    """The Who answers where screen: paged, no setup button.
 
     Setup belongs to the roster and to Details, where a target is selected;
     offering it here would suggest this screen is the place a routing change
     gets made, and it is not. Server admins also get Channel admins, which
-    edits who runs a channel rather than who answers in it.
+    edits who runs a channel rather than who answers in it. They and this
+    channel's admins get an environment select for this channel, which changes
+    where its turns run rather than who answers.
     """
 
     def __init__(
@@ -288,6 +335,7 @@ class RoutingView(PanelViewBase):
         allowed_user_id: int,
         lines: Sequence[RoutingLine] | None = None,
         server_default: RoutingLine | None = None,
+        environment_picker: EnvironmentPicker | None = None,
     ) -> None:
         super().__init__(state, runtime=runtime, allowed_user_id=allowed_user_id)
         answering_map = state.answering_map
@@ -296,6 +344,14 @@ class RoutingView(PanelViewBase):
             lines, server_default = routing_lines_from_map(answering_map)
         self.lines = list(lines)
         self.server_default = server_default
+        self.environment_picker = environment_picker
+        self.environment_select = (
+            build_environment_select(environment_picker, channel_name=state.channel_name)
+            if environment_picker is not None
+            else None
+        )
+        if self.environment_select is not None:
+            self.environment_select.callback = self._on_environment  # type: ignore[method-assign]  # per-instance callback
 
         page = paginate(self.lines, page=state.routing_page, page_size=ROUTING_PAGE_SIZE)
         state.routing_page = page.page
@@ -306,6 +362,8 @@ class RoutingView(PanelViewBase):
             deployment_in_effect=not answering_map.tenant_consumes_fallthrough,
             conversations=setup_conversation_links(answering_map, guild_id=state.guild_id),
             sentence=build_routing_sentence(state, answering_map),
+            environments=build_environments_block(answering_map),
+            environment_select=self.environment_select,
         )
 
         nav_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
@@ -336,6 +394,7 @@ class RoutingView(PanelViewBase):
             allowed_user_id=self.allowed_user_id,
             lines=self.lines,
             server_default=self.server_default,
+            environment_picker=self.environment_picker,
         )
 
     async def _on_previous(self, interaction: discord.Interaction) -> None:
@@ -360,6 +419,42 @@ class RoutingView(PanelViewBase):
                 allowed_user_id=self.allowed_user_id,
                 grants=grants,
             ),
+        )
+
+    async def _on_environment(self, interaction: discord.Interaction) -> None:
+        """Save this channel's environment; who may is re-checked live first."""
+        select = self.environment_select
+        assert select is not None, "only the environment select has this callback"
+        if not await may_pick_environment(
+            interaction, runtime=self.runtime, state=self.state, live=True
+        ):
+            await interaction.response.send_message(REFUSED_MESSAGE, ephemeral=True)
+            return
+        await interaction.response.defer()
+        # Lazy import: hydrate imports the view modules to type its own returns.
+        from daimon.adapters.discord.agent_setup.hydrate import load_answering_map_for
+
+        try:
+            note = await save_environment_choice(
+                runtime=self.runtime, state=self.state, value=select.values[0]
+            )
+            self.state.answering_map = await load_answering_map_for(self.runtime, state=self.state)
+            routing = await build_routing_view(
+                interaction,
+                runtime=self.runtime,
+                state=self.state,
+                allowed_user_id=self.allowed_user_id,
+            )
+        except (DaimonError, anthropic.APIError, discord.HTTPException) as error:
+            request_id = generate_request_id()
+            log.exception("agent_setup.channel_environment.failed", request_id=request_id)
+            await interaction.followup.send(
+                render_error(error, request_id=request_id), ephemeral=True
+            )
+            return
+        await self.swap_to(interaction, routing)
+        await interaction.followup.send(
+            note, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
         )
 
     async def _on_back(self, interaction: discord.Interaction) -> None:
@@ -402,4 +497,5 @@ async def build_routing_view(
         allowed_user_id=allowed_user_id,
         lines=lines,
         server_default=server_default,
+        environment_picker=await load_environment_picker(interaction, runtime=runtime, state=state),
     )
