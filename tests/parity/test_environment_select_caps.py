@@ -26,7 +26,7 @@ def _picker(limit: int) -> EnvironmentPicker:
     picker = plan_environment_picker(
         AnsweringMap(), channel_id="c1", names=_NAMES, limit=limit, max_value_length=100
     )
-    assert picker is not None
+    assert picker is not None, "a tenant with environments gets a picker"
     return picker
 
 
