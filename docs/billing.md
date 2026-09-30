@@ -143,7 +143,9 @@ A denial raises `AdmissionDenied` carrying only the reason literal
 belongs to each adapter. The turn aborts — it never silently degrades to a
 cheaper model. The balance and cap checks are re-run, with the same order, by
 the MCP tools that start a turn (`_admit` in
-`packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py`). Each scheduled
+`packages/adapters/mcp/daimon/adapters/mcp/tools/_ctx.py`); the billed media
+tool (`fetch_youtube_transcript`) adds the budget of the calling turn's
+channel, found from its `origin_context_id`. Each scheduled
 routine fire runs all three, the budget against the routine's channel, and
 records the reason as that run's error instead of raising. Wakes pass through
 chat admission, so all three apply. Discord's unprompted thread participation
@@ -223,11 +225,15 @@ What a budget does not cover:
   before it have no channel and count toward no budget.
 - **DMs.** A DM carries no channel. That includes a conversation moved to DMs
   with `/dm`: it keeps only the DM channel, not the channel it started from,
-  so its turns are neither attributed nor gated.
+  so its turns are neither attributed nor gated. `/dm` itself is refused in
+  a channel whose budget is used up.
 - **MCP turns.** The MCP tools that start a turn (`start_turn`, `ask` and the
-  like) record no channel and do not check budgets yet.
-- **Routines without a destination**, and Discord thread destinations saved
-  before this release (see [routines.md](routines.md#turning-routines-on)).
+  like) record no channel and do not check budgets yet. A media tool call
+  without a live `origin_context_id` is not attributed either.
+- **Routines with no channel**: made without a destination outside a
+  channel (no `origin_context_id`, or from a DM), and Discord thread
+  destinations saved before this release (see
+  [routines.md](routines.md#turning-routines-on)).
 
 ## The signup credit
 
