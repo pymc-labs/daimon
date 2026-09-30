@@ -31,6 +31,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 ENVIRONMENT_OPTION_INHERIT: Final = "inherit"
 """The picker option that hands a channel back to the default."""
 _ENVIRONMENT_OPTION_PREFIX: Final = "env:"
+NOT_OFFERED_NOTE: Final = "That is not an environment this panel offers. Nothing changed."
+"""A pick whose value no picker offered: forged or stale."""
 
 
 def _scope_phrase(channel: str | None) -> str:
@@ -48,6 +50,11 @@ def build_set_environment_note(*, environment_name: str, channel: str | None) ->
         "the next message in each conversation. The conversation and its saved files carry "
         "over; a running process does not."
     )
+
+
+def build_missing_environment_note(environment_name: str) -> str:
+    """A pick of an environment deleted since the picker was drawn."""
+    return f"The {environment_name} environment no longer exists. Nothing changed."
 
 
 def build_clear_environment_note(*, channel: str | None, cleared: bool) -> str:
@@ -149,10 +156,11 @@ def plan_environment_picker(
 async def list_environment_names(client: AsyncAnthropic, *, tenant_id: uuid.UUID) -> list[str]:
     """The names a scope may pick in this tenant, de-duplicated and sorted case-insensitively.
 
-    The name is the resolver's key (`daimon_name`), the same one a turn looks up.
+    The name is the resolver's key (`daimon_name`), the same one a turn and a
+    save look up; an environment without one cannot be picked, so is left out.
     """
     environments = await list_environments_by_tenant(client, tenant_id=tenant_id)
-    names = {env.metadata.get(MA_METADATA_KEY_NAME) or env.name for env in environments}
+    names = {name for env in environments if (name := env.metadata.get(MA_METADATA_KEY_NAME))}
     return sorted(names, key=str.casefold)
 
 
@@ -193,9 +201,11 @@ async def save_scope_environment(
 
 __all__ = [
     "ENVIRONMENT_OPTION_INHERIT",
+    "NOT_OFFERED_NOTE",
     "EnvironmentPicker",
     "build_clear_environment_note",
     "build_environment_resolution_note",
+    "build_missing_environment_note",
     "build_set_environment_note",
     "environment_choices",
     "environment_option_value",

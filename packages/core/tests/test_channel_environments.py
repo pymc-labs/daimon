@@ -18,6 +18,7 @@ from daimon.core.channel_environments import (
     plan_environment_picker,
     save_scope_environment,
 )
+from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext, TenantScopeRef
 from daimon.core.stores.scoped_config_read import get_scope, resolve
 from daimon.core.stores.scoped_config_write import set_fields
@@ -123,10 +124,16 @@ async def test_save_scope_environment_without_a_channel_writes_the_tenant_defaul
 def test_environment_notes_name_the_scope_and_the_tier() -> None:
     assert "Channel c1 now runs in the gpu environment" in build_set_environment_note(
         environment_name="gpu", channel="c1"
+    ), "a set names the channel and the environment"
+    assert "workspace default" in build_set_environment_note(
+        environment_name="gpu", channel=None
+    ), "no channel is the workspace default"
+    assert "nothing changed" in build_clear_environment_note(channel="c1", cleared=False), (
+        "a clear with nothing set says so"
     )
-    assert "workspace default" in build_set_environment_note(environment_name="gpu", channel=None)
-    assert "nothing changed" in build_clear_environment_note(channel="c1", cleared=False)
-    assert "falls through" in build_clear_environment_note(channel="c1", cleared=True)
+    assert "falls through" in build_clear_environment_note(channel="c1", cleared=True), (
+        "a clear says where the channel goes"
+    )
     assert "workspace default" in build_environment_resolution_note(
         environment_name="shared", tier="tenant", channel_id="c1"
     ), "the note must say which tier chose the environment"
@@ -141,14 +148,16 @@ def test_environment_choices_keeps_the_current_pick_when_the_list_is_cut() -> No
     assert environment_choices(names, current="d", limit=3) == ("a", "b", "d"), (
         "the channel's own environment must stay selectable"
     )
-    assert environment_choices(names, current="b", limit=3) == ("a", "b", "c")
+    assert environment_choices(names, current="b", limit=3) == ("a", "b", "c"), (
+        "a current pick already listed changes nothing"
+    )
     assert environment_choices(names, current="gone", limit=3) == ("a", "b", "c"), (
         "a name no longer in the tenant is not invented"
     )
 
 
 def test_environment_options_round_trip_and_refuse_anything_else() -> None:
-    assert parse_environment_option(environment_option_value("gpu")) == "gpu"
+    assert parse_environment_option(environment_option_value("gpu")) == "gpu", "round trip"
     assert parse_environment_option(ENVIRONMENT_OPTION_INHERIT) is None, "inherit clears"
     for forged in ("gpu", "env:", ""):
         with pytest.raises(ValueError, match="not an environment option"):
@@ -169,7 +178,9 @@ def test_the_picker_names_the_channels_own_pick_and_what_it_inherits() -> None:
         answering_map, channel_id="c2", names=["a", "x" * 97], limit=5, max_value_length=100
     )
 
-    assert own is not None and (own.own, own.inherited, own.names) == ("gpu", "shared", ("gpu",))
+    assert own is not None and (own.own, own.inherited, own.names) == ("gpu", "shared", ("gpu",)), (
+        "the channel's own pick survives a cut list"
+    )
     assert other is not None and (other.own, other.names) == (None, ("a",)), (
         "a channel on the default has no pick of its own; a name too long to fit is left out"
     )
@@ -189,8 +200,14 @@ async def test_list_environment_names_reads_only_this_tenants_resolver_names() -
         ma_environment(id="env_2", name="default", tenant_id=tenant_id),
         ma_environment(id="env_3", name="default", tenant_id=tenant_id),
         ma_environment(id="env_4", name="other", tenant_id=uuid.uuid4()),
+        ma_environment(
+            id="env_5", name="untagged", metadata={MA_METADATA_KEY_TENANT: str(tenant_id)}
+        ),
     )
 
     names = await list_environment_names(build_fake_anthropic(router.dispatch), tenant_id=tenant_id)
 
-    assert names == ["default", "Science"], "deduplicated, case-insensitive order, tenant only"
+    assert names == ["default", "Science"], (
+        "deduplicated, case-insensitive order, this tenant only, and never a name a save "
+        "could not find"
+    )
