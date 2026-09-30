@@ -1708,6 +1708,22 @@ class SlackApp:
                         "so it can't answer here."
                     ),
                 )
+            elif err.reason == "channel_isolated":
+                log.info(
+                    "turn.skipped.channel_isolated",
+                    tenant_id=str(tenant_id),
+                    team_id=team_id,
+                    channel_id=channel,
+                    thread_id=thread_id,
+                )
+                await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel,
+                    thread_ts=thread_id,
+                    text=(
+                        "This channel is isolated and the agent that would answer isn't one of "
+                        "its own. A workspace admin must set the channel's agent."
+                    ),
+                )
             elif err.reason == "balance_depleted":
                 log.info(
                     "turn.skipped.over_balance",
