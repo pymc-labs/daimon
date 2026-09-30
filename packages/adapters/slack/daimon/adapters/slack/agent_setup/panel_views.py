@@ -38,6 +38,11 @@ from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap, ChannelAnswer
 from daimon.core.channel_admins import MAX_CHANNEL_ADMIN_IDS
+from daimon.core.channel_environments import (
+    ENVIRONMENT_OPTION_INHERIT,
+    EnvironmentPicker,
+    environment_option_value,
+)
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.roster import Page, Roster, RosterAgent
@@ -57,6 +62,7 @@ __all__ = [
     "ACTION_CHANNEL_ADMINS",
     "ACTION_CODING_TOOLS",
     "ACTION_DETAILS",
+    "ACTION_ENVIRONMENT",
     "ACTION_EXPAND_KEYS",
     "ACTION_EXPAND_SKILLS",
     "ACTION_EXPAND_CONNECTIONS",
@@ -97,6 +103,8 @@ ACTION_EXPAND_SKILLS: Final = "agent_setup__expand:skills"
 ACTION_EXPAND_CONNECTIONS: Final = "agent_setup__expand:connections"
 ACTION_NEW: Final = "agent_setup__new"
 ACTION_CHANNEL_ADMINS: Final = "agent_setup__channel_admins"
+ACTION_ENVIRONMENT: Final = "agent_setup__environment"
+"""This channel's environment select on Who answers where."""
 """Open the form naming this channel's admins. Workspace admins only."""
 
 ACTION_CODING_TOOLS: Final = "agent_setup__coding_tools"
@@ -164,6 +172,8 @@ ROUTING_LABEL: Final = "📍 Who answers where"
 CODING_TOOLS_LABEL: Final = "🧰 Use from your coding tools"
 CHANNEL_ADMINS_LABEL: Final = "Channel admins"
 MAX_CHANNEL_ADMIN_LINES: Final = 15
+MAX_ENVIRONMENT_LINES: Final = 10
+_MAX_OPTION_TEXT: Final = 75
 CHANNEL_ADMINS_NOTE: Final = (
     "Workspace admins run every channel. A channel's admins may change agents that answer "
     "only in channels they run, and pick those channels' default agent. Built-in agents and "
@@ -543,13 +553,17 @@ def build_routing_view(
     channel_id: str,
     unrouted_agent_name: str | None,
     channel_admins: Sequence[ChannelAdminsRow] | None = None,
+    environment_picker: EnvironmentPicker | None = None,
 ) -> dict[str, Any]:
     """The whole cascade, laid out so the precedence is visible, not inferred.
 
     No setup button: this view answers where mentions go, and the change it
     describes is a sentence to say to Daimon rather than a control here.
     `channel_admins` is passed for workspace admins only, who also see every
-    channel's admins and a button to edit this channel's.
+    channel's admins and a button to edit this channel's. The environment each
+    channel runs in resolves on its own and gets its own block;
+    `environment_picker` is passed for workspace admins and this channel's
+    admins, who get a select for this channel's environment.
     """
     blocks: list[dict[str, Any]] = []
     if page.items:
@@ -589,6 +603,7 @@ def build_routing_view(
     else:
         blocks.append(_section("_no deployment default_"))
     blocks.append({"type": "divider"})
+    blocks.extend(_environment_blocks(answering_map, picker=environment_picker))
     links = list(setup_links[:MAX_SETUP_LINKS])
     listing = "\n".join(links) if links else "_none open_"
     blocks.append(_section(f"*Setup conversations*\n{listing}"))
@@ -621,6 +636,55 @@ def build_routing_view(
         ),
         callback_id=CALLBACK_ROUTING,
     )
+
+
+def _environment_blocks(
+    answering_map: AnsweringMap, *, picker: EnvironmentPicker | None
+) -> list[dict[str, Any]]:
+    rows = answering_map.channel_environments
+    lines = [
+        f"<#{row.channel_id}> → *{escape_mrkdwn(row.environment_name)}*"
+        for row in rows[:MAX_ENVIRONMENT_LINES]
+    ]
+    if len(rows) > MAX_ENVIRONMENT_LINES:
+        lines.append(f"_and {len(rows) - MAX_ENVIRONMENT_LINES} more_")
+    if not rows:
+        lines.append("_no channel picks its own environment yet_")
+    tenant, deployment = answering_map.tenant_environment, answering_map.deployment_environment
+    lines.append(f"*Workspace default:* {escape_mrkdwn(tenant) if tenant else 'Not assigned'}")
+    if deployment is not None:
+        lines.append(f"Deployment default: *{escape_mrkdwn(deployment)}*")
+        if tenant is not None:
+            lines.append("_not in effect while a workspace default is set_")
+    blocks = [_section("*Environments*\n" + "\n".join(lines))]
+    if picker is not None:
+        blocks.append({"type": "actions", "elements": [_environment_select(picker)]})
+    blocks.append({"type": "divider"})
+    return blocks
+
+
+def _environment_select(picker: EnvironmentPicker) -> dict[str, Any]:
+    """This channel's environment select, its current choice pre-selected."""
+
+    def option(label: str, value: str) -> dict[str, Any]:
+        return {"text": {"type": "plain_text", "text": label[:_MAX_OPTION_TEXT]}, "value": value}
+
+    inherited = f" ({picker.inherited})" if picker.inherited else ""
+    options = [option(f"Use the default{inherited}", ENVIRONMENT_OPTION_INHERIT)]
+    options += [option(name, environment_option_value(name)) for name in picker.names]
+    current = (
+        ENVIRONMENT_OPTION_INHERIT if picker.own is None else environment_option_value(picker.own)
+    )
+    element: dict[str, Any] = {
+        "type": "static_select",
+        "action_id": ACTION_ENVIRONMENT,
+        "placeholder": {"type": "plain_text", "text": "Environment for this channel"},
+        "options": options,
+    }
+    initial = next((opt for opt in options if opt["value"] == current), None)
+    if initial is not None:
+        element["initial_option"] = initial
+    return element
 
 
 def _channel_admins_blocks(

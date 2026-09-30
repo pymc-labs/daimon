@@ -1639,7 +1639,10 @@ class SlackApp:
                     "(/agent-setup shows who answers where)."
                 )
             if "environment" in err.missing:
-                hints.append("Ask the operator to configure an environment for this channel.")
+                hints.append(
+                    "A workspace admin, or an admin of this channel, can pick an environment "
+                    "in /agent-setup → Who answers where, or tell Daimon which one to run here."
+                )
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
@@ -1660,8 +1663,8 @@ class SlackApp:
                 thread_ts=thread_id,
                 text=(
                     "The configured agent or environment no longer exists. "
-                    "Ask a workspace admin to ask Daimon for an existing agent, "
-                    "or ask the operator to restore the environment."
+                    "Ask a workspace admin to ask Daimon for an existing agent or "
+                    "environment, or pick an environment in /agent-setup → Who answers where."
                 ),
             )
             return
