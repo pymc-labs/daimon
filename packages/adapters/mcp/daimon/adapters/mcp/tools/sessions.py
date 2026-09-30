@@ -7,7 +7,8 @@ that can be unit-tested without a FastMCP Context.
 Tenant scope: a session belongs to the caller's tenant iff its ``agent.id`` is
 in ``{a.id for a in list_agents_by_tenant(...)}``. Cross-tenant ``get`` /
 ``events`` raise ``ToolError("session not found")`` — terse and identical for
-unknown vs. forbidden so existence isn't leaked.
+unknown vs. forbidden so existence isn't leaked. A session of an agent across an
+isolated channel's line from the caller is treated the same way.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._isolation import load_caller_isolation
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import session_belongs_to_caller
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
@@ -112,12 +114,12 @@ async def _verify_caller_owns_session(
     ownership is leaked.
     """
     s = await runtime.client.beta.sessions.retrieve(session_id)
-    tenant_agent_ids = {
-        a.id for a in await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
-    }
-    if s.agent.id not in tenant_agent_ids:
+    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    agent = next((a for a in agents if a.id == s.agent.id), None)
+    if agent is None or not _session_belongs_to_caller(s, auth):
         raise ToolError("session not found")
-    if not _session_belongs_to_caller(s, auth):
+    caller = await load_caller_isolation(runtime, auth, agents=agents)
+    if not caller.sees_agent(agent):
         raise ToolError("session not found")
     return s
 
@@ -132,7 +134,7 @@ async def _list_sessions_impl(
         agent = await find_agent_by_daimon_tag(
             runtime.client, tenant_id=auth.tenant_id, name=agent_name
         )
-        if agent is None:
+        if agent is None or not (await load_caller_isolation(runtime, auth)).sees_agent(agent):
             raise ToolError(f"agent {agent_name!r} not found")
         list_kwargs: dict[str, Any] = {"agent_id": agent.id}
         if page is not None:
@@ -147,8 +149,9 @@ async def _list_sessions_impl(
     # not coherent, so we ignore the caller's `page` arg in this branch.
     del page
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    caller = await load_caller_isolation(runtime, auth, agents=agents)
     drained: list[SessionInfo] = []
-    for agent in agents:
+    for agent in filter(caller.sees_agent, agents):
         async for s in runtime.client.beta.sessions.list(agent_id=agent.id):
             if _session_belongs_to_caller(s, auth):
                 drained.append(SessionInfo.from_ma(s))
