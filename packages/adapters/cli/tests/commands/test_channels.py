@@ -64,7 +64,7 @@ async def test_set_list_and_clear_a_budget(
     assert budget is not None, "a thread id budgets against its channel"
     assert (budget.limit_usd, budget.set_by_account_id) == (Decimal("20"), None)
     assert budget.ends_at == datetime(2026, 7, 3, tzinfo=UTC)
-    assert "channel C1: $0.00 of $20.00 (2026-07-01 to 2026-07-03)" in _out(console)
+    assert "channel C1: $0.00 of $20.00 (2026-07-01 until 2026-07-03)" in _out(console)
 
     json_console = _console()
     await budget_list(**{**args, "console": json_console}, as_json=True)
@@ -225,3 +225,26 @@ async def test_a_discord_thread_budgets_its_parent_and_a_foreign_channel_is_refu
     async with db_session_factory() as s:
         budgets = await channel_budgets.list_channel_budgets(s, tenant_id=tenant.tenant_id)
     assert [b.channel_id for b in budgets] == ["100"], "only the thread's parent was saved"
+
+    clear = {"rt": rt, "console": args["console"], "platform": "discord", "workspace_id": "g1"}
+    await budget_clear(**clear, channel_id="900", discord_transport=transport)
+    async with db_session_factory() as s:
+        assert await channel_budgets.list_channel_budgets(s, tenant_id=tenant.tenant_id) == [], (
+            "clearing a thread clears its parent's budget"
+        )
+    async with db_session_factory.begin() as s:
+        await channel_budgets.set_channel_budget(
+            s,
+            tenant_id=tenant.tenant_id,
+            platform="discord",
+            channel_id="404",
+            limit_usd=Decimal("5"),
+            window="monthly",
+            starts_at=None,
+            ends_at=None,
+            set_by_account_id=None,
+        )
+    await budget_clear(**clear, channel_id="404", discord_transport=transport)
+    assert "channel 404: budget cleared" in _out(args["console"]), (
+        "a channel the bot cannot see is cleared as given"
+    )

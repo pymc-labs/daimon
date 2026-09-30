@@ -88,11 +88,14 @@ four token counts by those rates and returns USD. The table is split in two:
 configured with (`ALLOWED_MODEL_IDS` in
 `packages/core/daimon/core/constants.py` is literally its keys), while
 `TOOL_MODEL_PRICING` covers models pinned by individual MCP tools and never
-selectable by an agent.
+selectable by an agent. Every agent-model row is the provider's list price.
+Put any margin in `DAIMON_BILLING__MARKUP` (below), not in the table, because
+reports read the table as provider cost.
 
 Opus 5.5 is priced at $4 input, $20 output, $5 five-minute cache write, and
-$0.20 cache read per million tokens. The four-field ledger cannot distinguish
-one-hour cache writes, which Anthropic prices at $8 per million tokens; it
+$0.20 cache read per million tokens; Sonnet 5.5 at $2, $10, $2.50 and $0.20.
+The four-field ledger cannot distinguish one-hour cache writes, which
+Anthropic prices at $8 (Opus 5.5) and $4 (Sonnet 5.5) per million tokens; it
 currently treats all cache writes as five-minute writes.
 
 Two consequences worth knowing before you add a model:
@@ -135,8 +138,9 @@ per-session cap and no window other than the calendar month.
 **Channel budget** — `is_over_channel_budget` in
 `packages/core/daimon/core/channel_budget.py` compares a channel's spend in
 its budget window against the budget's limit; see
-[channel budgets](#channel-budgets). A turn with no channel (a DM, an MCP
-turn) and a channel with no budget are never gated.
+[channel budgets](#channel-budgets). A DM moved with `/dm` counts toward the
+channel it came from. A turn with no channel (an older DM, an MCP turn) and a
+channel with no budget are never gated.
 
 A denial raises `AdmissionDenied` carrying only the reason literal
 (`balance_depleted`, `cap_exceeded` or `channel_budget_exceeded`); the wording
@@ -209,8 +213,9 @@ the same with or without Stripe and for either funding mode.
   pre-markup usage `/billing` totals. Debits carry the parent channel, so a
   thread counts toward its channel.
 - **Window**: `monthly` (the UTC calendar month), `total` (since `starts_at`,
-  or ever) or `fixed` (from `starts_at` to `ends_at`, and gating nothing
-  outside that range).
+  or ever) or `fixed` (from `starts_at` until `ends_at`, exclusive). A
+  budget with a `starts_at` gates nothing before it, and a fixed one nothing
+  after its end. Panels show a fixed window as `START until END`.
 - **The gate** trips once spend reaches the limit, so a limit of 0 stops the
   channel. Like the other gates it runs once before a turn, so a turn in
   progress finishes past the limit.
@@ -223,10 +228,12 @@ What a budget does not cover:
 
 - **Earlier spend.** Attribution starts with this release; debits recorded
   before it have no channel and count toward no budget.
-- **DMs.** A DM carries no channel. That includes a conversation moved to DMs
-  with `/dm`: it keeps only the DM channel, not the channel it started from,
-  so its turns are neither attributed nor gated. `/dm` itself is refused in
-  a channel whose budget is used up.
+- **DMs started before this release** have no source channel, so their
+  turns are neither attributed nor gated. A DM moved with `/dm` since then
+  records the parent channel it came from
+  (`direct_message_conversations.source_channel_id`): `/dm` is refused while
+  that channel's budget is used up, and the DM's turns count toward it and
+  are gated by it.
 - **MCP turns.** The MCP tools that start a turn (`start_turn`, `ask` and the
   like) record no channel and do not check budgets yet. A media tool call
   without a live `origin_context_id` is not attributed either.
@@ -377,10 +384,13 @@ after their Stripe events.
 **The sweep.** An MCP `start_turn` creates a session and sends a message but
 never drives the stream, so the inline hook never fires for it.
 `packages/core/daimon/core/usage_sweep.py` closes that hole: each scheduler
-tick it walks Managed Agents sessions, skips any without a `daimon_tenant`
+tick it lists Managed Agents sessions, skips any without a `daimon_tenant`
 stamp, belonging to a tenant this deployment does not own, or stamped
 `daimon_billing_exempt`, and replays the rest's `span.model_request_end`
-events through the same recorder. It is safe to run
+events through the same recorder. After a successful pass, it skips event
+reads for sessions last updated before that pass started minus 15 minutes.
+The watermark stays in scheduler memory; startup and hourly passes read all
+stamped sessions, and a failed pass leaves the watermark in place. It is safe to run
 against already-metered sessions precisely because the idempotency grain is
 the same.
 
@@ -410,9 +420,9 @@ counts, `cost_usd` (the raw price) and `would_be_debit_usd` (with
 `usage_sweep.completed` line carrying `recorded`, `exempt_sessions`,
 `exempt_model_calls`, `exempt_cost_usd` and `exempt_would_be_debit_usd`.
 
-Nothing is written to the database for these sessions, and the sweep has no
-watermark, so an exempt session is logged again on every tick for as long as
-Managed Agents lists it. Total the absorbed spend by distinct
+Nothing is written to the database for these sessions. An exempt session is
+logged again when its events are read, including the hourly full pass. Total
+the absorbed spend by distinct
 `managed_session_id` (taking its latest line), not by summing every line or
 the per-pass totals.
 

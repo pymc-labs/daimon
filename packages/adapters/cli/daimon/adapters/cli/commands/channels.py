@@ -83,11 +83,14 @@ async def _discord_budget_channel(
     guild_id: str,
     channel_id: str,
     transport: httpx.AsyncBaseTransport | None,
+    missing_ok: bool = False,
 ) -> str:
     """The server channel a Discord id budgets against: a thread's parent.
 
     Spend is attributed to parent channels, so a budget saved on a thread id
-    would never gate anything; the id is looked up with the bot token.
+    would never gate anything; the id is looked up with the bot token. With
+    `missing_ok`, an id the bot cannot see is returned as given, so the budget
+    of a deleted channel can still be cleared.
     """
     if not channel_id.isdigit():
         raise typer.BadParameter(f"{channel_id!r} is not a Discord channel id")
@@ -107,6 +110,8 @@ async def _discord_budget_channel(
     except httpx.HTTPError as exc:
         raise DaimonError(f"could not reach Discord to look up channel {channel_id}") from exc
     if not response.is_success:
+        if missing_ok:
+            return channel_id
         raise DaimonError(f"Discord channel {channel_id} is not visible to daimon")
     channel = cast("dict[str, Any]", response.json())
     if str(channel.get("guild_id")) != guild_id:
@@ -204,7 +209,7 @@ async def budget_set(
 def budget_clear_command(
     platform: str,
     workspace_id: str,
-    channel_id: Annotated[str, typer.Argument(help="Channel id the budget is set on.")],
+    channel_id: Annotated[str, typer.Argument(help=_CHANNEL_HELP)],
 ) -> None:
     """Remove a channel's budget."""
     settings = load_settings()
@@ -224,10 +229,24 @@ def budget_clear_command(
 
 
 async def budget_clear(
-    *, rt: CliRuntime, console: Console, platform: str, workspace_id: str, channel_id: str
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    workspace_id: str,
+    channel_id: str,
+    discord_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
     target = _channel(channel_id)
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+    if platform == "discord":
+        target = await _discord_budget_channel(
+            rt,
+            guild_id=workspace_id,
+            channel_id=target,
+            transport=discord_transport,
+            missing_ok=True,
+        )
     async with rt.sessionmaker() as session, session.begin():
         cleared = await channel_budgets.delete_channel_budget(
             session, tenant_id=tenant_id, platform=platform, channel_id=target

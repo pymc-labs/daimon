@@ -88,16 +88,20 @@ async def test_budget_period_and_activity_follow_the_window(db_session: AsyncSes
     assert (fixed_period.since, fixed_period.until) == (start, end), "a fixed window is its bounds"
     assert is_budget_active(fixed, now=_NOW), "inside a fixed window"
     assert not is_budget_active(fixed, now=end), "a fixed window is half-open"
-    assert is_budget_active(total, now=start - timedelta(days=30)), (
-        "a total window is active before its start; it just counts nothing yet"
+    assert not is_budget_active(total, now=start - timedelta(seconds=1)), (
+        "a total window gates nothing before its start"
     )
+    assert is_budget_active(total, now=start), "a total window gates from its start"
+    open_ended = await make_channel_budget(db_session, channel_id="chan-2", window="total")
+    assert is_budget_active(open_ended, now=_NOW), "a total window with no start always gates"
+    assert is_budget_active(monthly, now=_NOW), "a monthly window always gates"
     spent = Decimal("1234.5")
     assert describe_budget(ChannelBudgetStatus(monthly, spent, True)) == (
         "$1,234.50 of $5.00 (monthly)"
     ), "money shows in cents with separators"
     assert describe_budget(ChannelBudgetStatus(fixed, spent, True)).endswith(
-        "(2026-07-14 12:00 UTC to 2026-07-16 12:00 UTC)"
-    ), "a fixed window shows its bounds"
+        "(2026-07-14 12:00 UTC until 2026-07-16 12:00 UTC)"
+    ), "a fixed window's end reads as exclusive"
 
 
 async def test_set_replaces_the_budget_and_clear_removes_it(db_session: AsyncSession) -> None:

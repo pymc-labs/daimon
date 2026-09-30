@@ -157,7 +157,7 @@ async def test_record_turn_usage_debit_writes_ledger_row_for_guild_turn(
         id="evt_debit_1",
         is_error=False,
         model_request_start_id="start_1",
-        model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
+        model_usage=ma_model_usage(input_tokens=3_000_000, output_tokens=0),
         processed_at=datetime.now(UTC),
         type="span.model_request_end",
     )
@@ -171,7 +171,7 @@ async def test_record_turn_usage_debit_writes_ledger_row_for_guild_turn(
         markup=Decimal("1.0"),
         pricing=MODEL_PRICING.get("claude-opus-4-7"),
     )
-    # Balance should have decreased (input_tokens=1M at $15/M = $15.00 debit)
+    # Balance should have decreased (input_tokens=3M at $5/M = $15.00 debit)
     balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant.id)
     assert balance < Decimal("10.00"), "balance must decrease after a guild turn debit"
     # $15.00 debit from $10.00 trial credit = -$5.00
@@ -269,7 +269,7 @@ async def test_record_turn_usage_ledger_failure_rolls_back_pair_and_allows_retry
         id="evt_rollback_pair",
         is_error=False,
         model_request_start_id="start_rollback_pair",
-        model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
+        model_usage=ma_model_usage(input_tokens=3_000_000, output_tokens=0),
         processed_at=datetime.now(UTC),
         type="span.model_request_end",
     )

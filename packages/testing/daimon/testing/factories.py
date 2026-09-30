@@ -310,15 +310,13 @@ async def make_ledger_entry(
         payment_event_id=payment_event_id,
         payment_intent=payment_intent,
         channel_id=channel_id,
+        occurred_at=occurred_at,
     )
     orm = (
         await session.execute(
             select(TenantLedger).where(TenantLedger.idempotency_key == idempotency_key)
         )
     ).scalar_one()
-    if occurred_at is not None:
-        orm.occurred_at = occurred_at
-        await session.flush()
     return TenantLedgerRow.model_validate(orm, from_attributes=True)
 
 
