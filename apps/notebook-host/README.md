@@ -55,28 +55,32 @@ editor mints a new one, and the editor is refused (409) on a published blog.
 A blog's token is persisted in `blogs.json` (0600, host-only) so its link
 survives restarts. Deleting or reaping a slug invalidates its link. marimo runs
 with `-q`, so its startup banner (which prints the tokenized URL) never reaches
-the slug's log, and the host's access log redacts `access_token=`. marimo is
-pinned to the version locked into the host's venv.
+the slug's log, and the host's logs redact `access_token=` (plain or
+url-encoded). marimo is pinned exactly in `pyproject.toml`, which the Docker
+image installs from without `uv.lock`. The host refuses to boot if links would
+go out over plain http to anything but localhost: set `public_url_base` to the
+`https://` origin, or `allow_http_links` on a trusted private network.
 
-**Leftover processes and uids.** Before a slug's uid is released, the host
-SIGKILLs every process running as that uid, not just marimo's process group,
-so a detached child a cell started can't outlive its notebook. The same
-happens before a slug is respawned. Uids are handed out round-robin, so a
-just-released uid is the last one reused.
-
-**Cross-notebook requests from the browser.** Every notebook is served from
-the same origin, so one notebook's JavaScript (an anywidget runs even in a
-read-only app) could send requests to another notebook with that notebook's
-cookie, if the viewer has opened both links. The proxy refuses HTTP requests
-whose `Sec-Fetch-Site` is `same-origin` unless the `Referer` is inside the
-same `/n/<slug>`, and WebSocket upgrades whose `Referer` names another slug.
-A WebSocket opened with no Referer can't be told apart and is let through.
+**Leftover processes and uids.** Before a slug's uid is released, and before a
+slug or a blog is respawned, the host kills every process running as that uid,
+not just marimo's process group: it becomes the uid and calls `kill(-1,
+SIGKILL)`, then rescans `/proc` until none are left. If one survives the
+deadline, the uid is quarantined (never handed out again) rather than
+released. Files the uid owns in `/tmp` and `/dev/shm` are deleted too. Jailed
+processes run with `PR_SET_NO_NEW_PRIVS`, a per-uid process cap
+(`RLIMIT_NPROC`) and a private `TMPDIR` inside the slug's tree. Uids are
+handed out round-robin, so a just-released uid is the last one reused.
+Switching a slug between the editor and the read-only app wipes its `home`
+(including the uv cache), `workspace` and `tmp`, so nothing the editor
+planted runs under the new mode.
 
 **Read-only by default.** A scratch notebook is served as a `marimo run` app
 (code hidden, widgets live) unless its upload token asked for the editor
 (`notebook_edit`, minted only for `create_notebook_upload_url(editable=True)`,
 which the bot refuses unless the operator set `DAIMON_NOTEBOOK__ALLOW_EDITABLE`
-on the bot, not this host).
+on the bot). The host enforces its own `allow_editable` (same variable name,
+off by default) on `notebook_edit` tokens and on `PUT /admin/notebooks/{slug}`
+with `"editable": true`; without it every notebook is read-only.
 An editor link runs arbitrary code as that notebook's jail uid, so treat it
 as a shell on this host. Blogs are always read-only.
 
@@ -84,15 +88,21 @@ as a shell on this host. Blogs are always read-only.
 scrubbed from every subprocess's environment.
 
 **Known limits: one notebook host serves one client.** This is a hard
-requirement for client work, not a recommendation. Notebooks share one host
-and one browser origin. Subprocesses run as separate uids, but there is no
-per-notebook pid or network namespace, so an editor notebook can see other
-notebooks' process list and reach the host's network. In the browser, the
-same-origin checks above rely on fetch metadata that old browsers don't send,
-and a WebSocket opened without a Referer gets through them. Per-slug origins
-(a subdomain per notebook) would close that; they are not built. Put the host
-behind TLS, set `public_url_base` to its `https://` origin and set
-`allowed_origins` when it is publicly reachable.
+requirement for client work, not a recommendation.
+
+- **No browser isolation between notebooks.** Every notebook is served from
+  the same origin. A notebook's JavaScript (an anywidget runs even in a
+  read-only app) can fetch, frame or open the kernel socket of any other
+  notebook on the host whose link the same viewer has opened, because the
+  browser attaches that notebook's cookie. No header check can stop it, since
+  page JavaScript controls `Referer`. The real fix is a separate origin per
+  notebook (a subdomain per slug with host-only cookies); it isn't built.
+- **No per-notebook pid or network namespace.** Subprocesses run as separate
+  uids, but an editor notebook can see other notebooks' process list and
+  reach the host's network.
+
+Put the host behind TLS with `public_url_base` set to its `https://` origin,
+and set `allowed_origins` when it is publicly reachable.
 
 ## Configuration
 
@@ -114,6 +124,8 @@ delimiter.
 | `validation_timeout_seconds` | `DAIMON_NOTEBOOK__VALIDATION_TIMEOUT_SECONDS` | `60` (wall-clock budget for that validation export; a slow-but-valid notebook is published anyway) |
 | `public_host` | `DAIMON_NOTEBOOK__PUBLIC_HOST` | `localhost` |
 | `public_url_base` | `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` | *(unset — set when behind a TLS terminator that strips the internal port, e.g. Fly's https edge)* |
+| `allow_editable` | `DAIMON_NOTEBOOK__ALLOW_EDITABLE` | `false` *(every notebook read-only)* |
+| `allow_http_links` | `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS` | `false` *(refuse to boot with plain-http links off localhost)* |
 | `max_source_bytes` | `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` | `1048576` (1 MiB) |
 | `max_attachment_bytes_ceiling` | `DAIMON_NOTEBOOK__MAX_ATTACHMENT_BYTES_CEILING` | `104857600` (100 MiB; host-side hard ceiling, defense-in-depth above the daimon-side cap) |
 | `allowed_origins` | `DAIMON_NOTEBOOK__ALLOWED_ORIGINS` | *(empty — check disabled)* |

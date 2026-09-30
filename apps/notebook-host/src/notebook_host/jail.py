@@ -40,13 +40,22 @@ Two documented limitations of the uid split, deliberately not worked around:
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
 import json
+import logging
 import os
 import shutil
 import signal
+import stat
+import subprocess
+import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 SLUG_TREE_MODE = 0o700
 """Mode for each slug's four owned directories (root, data, workspace, home).
@@ -117,6 +126,9 @@ class SlugPaths:
     workspace: Path
     home: Path
     log: Path
+    # TMPDIR for the slug's processes, so nothing it writes lands in the
+    # host-wide /tmp another notebook's uid can list.
+    tmp: Path
 
 
 def get_slug_paths(data_dir: Path, slug: str) -> SlugPaths:
@@ -134,13 +146,14 @@ def get_slug_paths(data_dir: Path, slug: str) -> SlugPaths:
         workspace=root / "workspace",
         home=root / "home",
         log=root / "marimo.log",
+        tmp=root / "tmp",
     )
 
 
 def ensure_slug_jail(data_dir: Path, slug: str, *, uid: int | None = None) -> SlugPaths:
     """Create (or repair) a slug's whole directory tree at mode 0700.
 
-    Creates ``root``, ``data``, ``workspace``, ``home`` and chmods each to
+    Creates ``root``, ``data``, ``workspace``, ``home``, ``tmp`` and chmods each to
     0700 unconditionally — ``mkdir``'s ``mode`` argument is masked by umask,
     so an explicit ``chmod`` is required. When ``uid`` is given, each of those
     four directories is also chowned to ``(uid, uid)``.
@@ -153,7 +166,7 @@ def ensure_slug_jail(data_dir: Path, slug: str, *, uid: int | None = None) -> Sl
     ``slug`` must already have passed ``lifecycle.safe_slug``.
     """
     paths = get_slug_paths(data_dir, slug)
-    dirs = (paths.root, paths.data, paths.workspace, paths.home)
+    dirs = (paths.root, paths.data, paths.workspace, paths.home, paths.tmp)
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
         os.chmod(d, SLUG_TREE_MODE)
@@ -173,22 +186,34 @@ def remove_slug_tree(data_dir: Path, slug: str, *, uids_file: Path | None = None
     When ``uids_file`` is given, the slug's uid is also released from the
     registry (via ``release_slug_uid``) after the tree is gone — keeping uid
     release on the same single code path every delete site already calls,
-    rather than adding a fourth thing each caller must remember. Omitted by
-    default so this plan changes no caller's behaviour.
+    rather than adding a fourth thing each caller must remember.
 
     Before the uid is released, every process still running as it is killed
-    (``kill_uid_processes``). ``lifecycle.kill`` only signals marimo's process
-    group, and a cell can start a detached child that outlives it; that child
-    would otherwise sit under whichever slug is handed the uid next.
+    (``kill_uid_processes``) and every file it owns in the shared temp dirs is
+    deleted (``remove_uid_files``). ``lifecycle.kill`` only signals marimo's
+    process group, and a cell can start a detached child that outlives it; that
+    child would otherwise sit under whichever slug is handed the uid next. If
+    anything survives the kill, the uid is quarantined instead of released.
 
     ``slug`` must already have passed ``lifecycle.safe_slug``.
     """
     uid = load_uid_registry(uids_file).get(slug) if uids_file is not None else None
-    if uid is not None:
-        kill_uid_processes(uid)
+    if uids_file is not None and uid is not None:
+        try:
+            kill_uid_processes(uid)
+        except UidStillInUseError:
+            _log.error("uid %d of slug %r still has processes; quarantining it", uid, slug)
+            quarantine_slug_uid(uids_file, slug)
+            shutil.rmtree(get_slug_paths(data_dir, slug).root, ignore_errors=True)
+            return
+        remove_uid_files(uid)
     shutil.rmtree(get_slug_paths(data_dir, slug).root, ignore_errors=True)
     if uids_file is not None:
         release_slug_uid(uids_file, slug)
+
+
+class UidStillInUseError(RuntimeError):
+    """Raised when a jail uid still has processes after ``kill_uid_processes``."""
 
 
 def _process_uids(status_file: Path) -> tuple[int, ...]:
@@ -203,34 +228,114 @@ def _process_uids(status_file: Path) -> tuple[int, ...]:
     return ()
 
 
+# Run as the jail uid: kill(-1) then reaches every process of that uid, and
+# only those, in one kernel walk (Linux never signals the caller itself).
+_KILL_ALL_AS_UID = """
+import os, signal
+try:
+    os.kill(-1, signal.SIGKILL)
+except ProcessLookupError:
+    pass
+"""
+
+
+def _signal_all_as(uid: int) -> None:
+    """SIGKILL every process of ``uid`` by becoming it and calling ``kill(-1)``.
+
+    Unlike signalling pids from a ``/proc`` scan, a process can't fork its way
+    out of the walk. Needs root; elsewhere (and if the interpreter can't be
+    exec'd as ``uid``) it does nothing and the caller's scan falls back to
+    per-pid kills.
+    """
+    if os.geteuid() != 0:
+        return
+
+    def _drop() -> None:
+        os.setgroups([])
+        os.setgid(uid)
+        os.setuid(uid)
+
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            [sys.executable, "-I", "-S", "-c", _KILL_ALL_AS_UID],
+            preexec_fn=_drop,
+            env={},
+            cwd="/",
+            timeout=5,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
 def kill_uid_processes(
     uid: int,
     *,
     proc_root: Path = Path("/proc"),
-    kill: Callable[[int, int], None] = os.kill,
-    max_passes: int = 10,
+    signal_all_as: Callable[[int], None] = _signal_all_as,
+    deadline_s: float = 5.0,
 ) -> None:
-    """SIGKILL every process any of whose uids is ``uid``; rescan until none remain.
+    """Kill every process any of whose uids is ``uid``; raise if one survives.
 
-    Rescanning catches a process that forked while the previous pass ran.
-    ``uid`` is always a jail uid, never the host's own, so the host can't kill
-    itself. Needs root to signal another uid; an unjailed dev host (where it
-    can't) just gets nothing to do, since no jail uid is running there.
+    Each pass kills the whole uid from the kernel's side (``signal_all_as``),
+    then scans ``proc_root`` and SIGKILLs any pid still showing the uid. It
+    loops until a scan finds none, and raises ``UidStillInUseError`` if
+    ``deadline_s`` passes first, so callers fail closed rather than hand the
+    uid to another slug. ``uid`` is always a jail uid, never the host's own.
+    ``RLIMIT_NPROC`` (``build_jailed_preexec``) bounds how fast a fork loop can
+    refill the uid.
     """
-    for _ in range(max_passes):
-        found = False
-        for entry in proc_root.iterdir():
-            if not entry.name.isdigit():
-                continue
-            if uid not in _process_uids(entry / "status"):
-                continue
-            found = True
-            try:
-                kill(int(entry.name), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                continue
-        if not found:
+    deadline = time.monotonic() + deadline_s
+    while True:
+        signal_all_as(uid)
+        survivors = [
+            int(entry.name)
+            for entry in proc_root.iterdir()
+            if entry.name.isdigit() and uid in _process_uids(entry / "status")
+        ]
+        if not survivors:
             return
+        for pid in survivors:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        if time.monotonic() >= deadline:
+            raise UidStillInUseError(f"uid {uid} still has {len(survivors)} process(es)")
+        time.sleep(0.05)
+
+
+SHARED_TEMP_DIRS: tuple[Path, ...] = (Path("/tmp"), Path("/dev/shm"))
+
+
+def remove_uid_files(uid: int, *, roots: tuple[Path, ...] = SHARED_TEMP_DIRS) -> None:
+    """Delete everything ``uid`` owns under the host-wide temp dirs.
+
+    A notebook's TMPDIR is inside its own slug tree, but code can still write
+    to ``/tmp`` or ``/dev/shm`` directly, and those files would be readable by
+    whichever slug gets the uid next. Symlinks are unlinked, never followed.
+    Only root can delete another uid's files, so elsewhere this does nothing.
+    """
+    if os.geteuid() not in (0, uid):
+        return
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            for name in [*dirnames, *filenames]:
+                path = Path(dirpath) / name
+                try:
+                    st = path.lstat()
+                except OSError:
+                    continue
+                if st.st_uid != uid:
+                    continue
+                if stat.S_ISDIR(st.st_mode):
+                    shutil.rmtree(path, ignore_errors=True)
+                    if name in dirnames:
+                        dirnames.remove(name)
+                else:
+                    with contextlib.suppress(OSError):
+                        path.unlink()
 
 
 # ─── uid pool ────────────────────────────────────────────────────────────────
@@ -341,6 +446,21 @@ def get_or_create_slug_uid(path: Path, slug: str, *, start: int, end: int) -> in
     return uid
 
 
+def quarantine_slug_uid(path: Path, slug: str) -> None:
+    """Drop ``slug`` but keep its uid reserved forever, under a non-slug key.
+
+    For a uid that still had processes when its slug was deleted. ``#`` can't
+    appear in a slug (``lifecycle.safe_slug``), so the key never collides, and
+    ``allocate_uid`` treats every registry value as taken.
+    """
+    registry = load_uid_registry(path)
+    uid = registry.pop(slug, None)
+    if uid is None:
+        return
+    registry[f"#quarantine-{uid}"] = uid
+    save_uid_registry(path, registry)
+
+
 def _uid_cursor_path(registry_path: Path) -> Path:
     return registry_path.with_name(registry_path.name + ".cursor")
 
@@ -422,8 +542,34 @@ def resolve_jail_uid(
     )
 
 
+JAIL_RLIMIT_NPROC = 512
+"""Processes (threads count) one jail uid may hold. Caps a fork loop, so
+``kill_uid_processes`` can always drain the uid, while leaving room for marimo,
+its kernel, uv and a threaded numeric stack."""
+
+_PR_SET_NO_NEW_PRIVS = 38
+_prctl: Callable[..., int] | None = None
+
+
+def _load_prctl() -> None:
+    """Resolve libc's ``prctl`` in the parent: dlopen after fork can deadlock."""
+    global _prctl
+    if _prctl is None:
+        _prctl = ctypes.CDLL(None, use_errno=True).prctl
+
+
+def _set_no_new_privs() -> None:
+    """``PR_SET_NO_NEW_PRIVS``: no setuid/file-capability binary can raise privilege."""
+    if _prctl is None or _prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_NO_NEW_PRIVS) failed")
+
+
 def build_jailed_preexec(
-    uid: int, *, rlimit_as_bytes: int | None, rlimit_cpu_seconds: int | None
+    uid: int,
+    *,
+    rlimit_as_bytes: int | None,
+    rlimit_cpu_seconds: int | None,
+    rlimit_nproc: int = JAIL_RLIMIT_NPROC,
 ) -> Callable[[], None]:
     """Build the preexec_fn that drops the forked child into ``uid``.
 
@@ -441,12 +587,16 @@ def build_jailed_preexec(
     """
     import resource  # POSIX-only stdlib; this whole mechanism requires POSIX.
 
+    _load_prctl()
+
     def _apply() -> None:  # runs in the forked child, before launching marimo
         os.setgroups([])  # MUST precede setgid/setuid — omitting this leaves
         # the child in every supplementary group the host process (root)
         # belongs to, even after setuid/setgid drop the primary identity.
         os.setgid(uid)  # MUST precede setuid — a process cannot change gid
         # once its uid is no longer 0.
+        resource.setrlimit(resource.RLIMIT_NPROC, (rlimit_nproc, rlimit_nproc))
+        _set_no_new_privs()
         os.setuid(uid)
         if rlimit_as_bytes:
             resource.setrlimit(resource.RLIMIT_AS, (rlimit_as_bytes, rlimit_as_bytes))

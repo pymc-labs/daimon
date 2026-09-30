@@ -57,7 +57,7 @@ def _mint(op: str, slug: str, *, jti: str = "j1") -> str:
 
 
 def _make_app(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, allow_editable: bool = False
 ) -> tuple[TestClient, Any, list[dict[str, Any]]]:
     import notebook_host.admin as admin_mod
     from notebook_host.admin import AdminState, create_admin_router
@@ -68,6 +68,8 @@ def _make_app(
     monkeypatch.setenv("DAIMON_NOTEBOOK__MARIMO_PORT_START", "8700")
     monkeypatch.setenv("DAIMON_NOTEBOOK__MARIMO_PORT_END", "8703")
     set_unjailed_test_env(monkeypatch)
+    if allow_editable:
+        monkeypatch.setenv("DAIMON_NOTEBOOK__ALLOW_EDITABLE", "true")
     settings = load_settings(_env_file=None)
     calls: list[dict[str, Any]] = []
 
@@ -162,7 +164,7 @@ def test_scratch_upload_defaults_to_a_read_only_app(
 def test_notebook_edit_op_is_the_only_way_to_get_the_editor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, state, calls = _make_app(tmp_path, monkeypatch)
+    client, state, calls = _make_app(tmp_path, monkeypatch, allow_editable=True)
     r = client.put(f"/upload/{_mint('notebook_edit', 'ed')}", content=b"# nb\n")
     assert r.status_code == 200, r.text
     assert calls[-1]["mode"] == "edit", "an explicit notebook_edit token spawns the editor"
@@ -255,7 +257,7 @@ def test_legacy_blog_without_token_gets_one_on_respawn(
 def test_switching_a_read_only_slug_to_the_editor_rotates_its_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, state, _ = _make_app(tmp_path, monkeypatch)
+    client, state, _ = _make_app(tmp_path, monkeypatch, allow_editable=True)
     client.put(f"/upload/{_mint('notebook', 'a', jti='1')}", content=b"# a\n")
     read_only = state.processes["a"].access_token
     r = client.put(f"/upload/{_mint('notebook_edit', 'a', jti='2')}", content=b"# a\n")
@@ -273,7 +275,7 @@ def test_switching_a_read_only_slug_to_the_editor_rotates_its_token(
 def test_editor_upload_over_a_blog_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, state, calls = _make_app(tmp_path, monkeypatch)
+    client, state, calls = _make_app(tmp_path, monkeypatch, allow_editable=True)
     client.put(f"/upload/{_mint('blog', 'post', jti='1')}", content=b"# blog\n")
     blog_token = state.processes["post"].access_token
     spawned = len(calls)
@@ -370,25 +372,39 @@ def _fake_proc(root: Path, pid: int, uids: tuple[int, int, int, int]) -> None:
     )
 
 
-def test_kill_uid_processes_kills_every_process_owned_by_the_uid(tmp_path: Path) -> None:
+def test_kill_uid_processes_signals_the_whole_uid_and_verifies_none_are_left(
+    tmp_path: Path,
+) -> None:
     """A cell's own `Popen(..., start_new_session=True)` escapes the pgroup kill."""
     from notebook_host.jail import kill_uid_processes
 
     _fake_proc(tmp_path, 10, (100000, 100000, 100000, 100000))  # marimo
     _fake_proc(tmp_path, 11, (100000, 100000, 100000, 100000))  # detached survivor
     _fake_proc(tmp_path, 12, (100001, 100001, 100001, 100001))  # another notebook
-    _fake_proc(tmp_path, 13, (0, 100000, 0, 0))  # setuid-ish: any id matching counts
     (tmp_path / "self").mkdir()
-    killed: list[int] = []
+    signalled: list[int] = []
 
-    def fake_kill(pid: int, _sig: int) -> None:
-        killed.append(pid)
+    def fake_signal_all_as(uid: int) -> None:
+        # setuid(uid) + kill(-1, SIGKILL): the kernel kills every process of the uid.
+        signalled.append(uid)
         import shutil
 
-        shutil.rmtree(tmp_path / str(pid))
+        for pid in (10, 11):
+            shutil.rmtree(tmp_path / str(pid), ignore_errors=True)
 
-    kill_uid_processes(100000, proc_root=tmp_path, kill=fake_kill)
-    assert sorted(killed) == [10, 11, 13], "every process of the uid, and nothing else"
+    kill_uid_processes(100000, proc_root=tmp_path, signal_all_as=fake_signal_all_as)
+    assert signalled == [100000], "one kernel-side kill of the whole uid"
+    assert (tmp_path / "12").exists(), "another notebook's process is untouched"
+
+
+def test_kill_uid_processes_fails_closed_when_something_survives(tmp_path: Path) -> None:
+    from notebook_host.jail import UidStillInUseError, kill_uid_processes
+
+    _fake_proc(tmp_path, 10, (100000, 100000, 100000, 100000))
+    with pytest.raises(UidStillInUseError):
+        kill_uid_processes(
+            100000, proc_root=tmp_path, signal_all_as=lambda _uid: None, deadline_s=0.2
+        )
 
 
 def test_releasing_a_slug_kills_its_uid_before_the_uid_is_freed(
@@ -406,28 +422,230 @@ def test_releasing_a_slug_kills_its_uid_before_the_uid_is_freed(
         order.append("killed")
 
     monkeypatch.setattr(jail, "kill_uid_processes", fake_kill_uid)
+    monkeypatch.setattr(jail, "remove_uid_files", lambda _u, **_kw: None)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
     jail.remove_slug_tree(tmp_path, "a", uids_file=reg)
     assert order == ["killed"], "a survivor must die before its uid can be handed out"
     assert "a" not in jail.load_uid_registry(reg)
 
 
+def test_a_uid_with_a_survivor_is_quarantined_not_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_host import jail
+
+    reg = tmp_path / "uids.json"
+    uid = jail.get_or_create_slug_uid(reg, "a", start=100000, end=100001)
+
+    def stuck(_u: int, **_kw: object) -> None:
+        raise jail.UidStillInUseError("survivor")
+
+    monkeypatch.setattr(jail, "kill_uid_processes", stuck)
+    jail.remove_slug_tree(tmp_path, "a", uids_file=reg)
+    registry = jail.load_uid_registry(reg)
+    assert "a" not in registry, "the slug is gone"
+    assert uid in registry.values(), "but its uid stays reserved"
+    for slug in ("b",):
+        assert jail.get_or_create_slug_uid(reg, slug, start=100000, end=100001) != uid
+    with pytest.raises(jail.UidPoolExhaustedError):
+        jail.get_or_create_slug_uid(reg, "c", start=100000, end=100001)
+
+
+def test_releasing_a_uid_deletes_its_files_in_shared_temp_dirs(tmp_path: Path) -> None:
+    from notebook_host.jail import remove_uid_files
+
+    me = os.getuid()
+    shm = tmp_path / "shm"
+    shm.mkdir()
+    (shm / "planted").write_text("x")
+    nested = shm / "dir"
+    nested.mkdir()
+    (nested / "f").write_text("y")
+    (shm / "link").symlink_to("/etc/passwd")
+    remove_uid_files(me, roots=(shm,))
+    assert list(shm.iterdir()) == [], "everything the uid owned in /tmp and /dev/shm is gone"
+    assert Path("/etc/passwd").exists(), "symlinks are unlinked, never followed"
+    other = shm / "other"
+    other.write_text("z")
+    remove_uid_files(me + 1, roots=(shm,))
+    assert other.exists(), "another uid's files are left alone"
+
+
+def test_jailed_preexec_sets_no_new_privs_and_a_process_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import resource
+
+    from notebook_host import jail
+
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(jail.os, "setgroups", lambda g: calls.append(("setgroups", g)))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(jail.os, "setgid", lambda g: calls.append(("setgid", g)))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(jail.os, "setuid", lambda u: calls.append(("setuid", u)))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(jail, "_set_no_new_privs", lambda: calls.append(("no_new_privs", None)))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(
+        resource,
+        "setrlimit",
+        lambda which, lim: calls.append(("rlimit", (which, lim))),  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    jail.build_jailed_preexec(100000, rlimit_as_bytes=None, rlimit_cpu_seconds=None)()
+    names = [c[0] for c in calls]
+    assert "no_new_privs" in names, "setuid binaries can't hand the notebook root back"
+    assert names.index("no_new_privs") < names.index("setuid")
+    nproc = [c[1] for c in calls if c[0] == "rlimit" and c[1][0] == resource.RLIMIT_NPROC]  # type: ignore[index]
+    assert nproc, "the uid's process count is capped so a fork bomb can't outrun the kill"
+
+
+def test_jailed_marimo_gets_a_private_tmpdir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from notebook_host import lifecycle
+
+    monkeypatch.setattr(lifecycle.shutil, "which", lambda _x: "/usr/bin/uv")  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    captured: dict[str, Any] = {}
+    fake = unittest.mock.MagicMock(spec=subprocess.Popen)
+    fake.stdin = unittest.mock.MagicMock()
+
+    def fake_popen(_cmd: list[str], **kwargs: Any) -> object:
+        captured.update(kwargs)
+        return fake
+
+    monkeypatch.setattr(lifecycle.subprocess, "Popen", fake_popen)
+    paths = get_slug_paths(tmp_path, "nb")
+    paths.notebook.parent.mkdir(parents=True, exist_ok=True)
+    paths.notebook.write_text("# stub", encoding="utf-8")
+    lifecycle.spawn_marimo("nb", paths, 8100, access_token="t")
+    assert captured["env"]["TMPDIR"] == str(paths.tmp), "temp files stay in the slug's tree"
+    assert paths.tmp.is_dir()
+
+
+def test_switching_editor_to_read_only_wipes_what_the_editor_could_plant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _, _ = _make_app(tmp_path, monkeypatch, allow_editable=True)
+    client.put(f"/upload/{_mint('notebook_edit', 'a', jti='1')}", content=b"# a\n")
+    paths = get_slug_paths(tmp_path, "a")
+    for d in (paths.home, paths.workspace, paths.tmp):
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "planted.py").write_text("evil")
+    (paths.data / "keep.csv").write_text("1")
+    r = client.put(f"/upload/{_mint('notebook', 'a', jti='2')}", content=b"# a\n")
+    assert r.status_code == 200, r.text
+    for d in (paths.home, paths.workspace, paths.tmp):
+        assert not (d / "planted.py").exists(), f"{d.name} is reset when the editor goes away"
+    assert (paths.data / "keep.csv").exists(), "attachments are content, and are kept"
+
+
+def test_editor_uploads_need_the_host_switch_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _, calls = _make_app(tmp_path, monkeypatch)
+    r = client.put(f"/upload/{_mint('notebook_edit', 'a')}", content=b"# a\n")
+    assert r.status_code == 403, "a leaked or forged editor capability is refused by default"
+    assert calls == []
+
+
+def test_admin_put_notebook_is_read_only_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _, calls = _make_app(tmp_path, monkeypatch)
+    auth = {"Authorization": f"Bearer {_SECRET}"}
+    r = client.put("/admin/notebooks/a", json={"source": "# a\n"}, headers=auth)
+    assert r.status_code == 200, r.text
+    assert calls[-1]["mode"] == "run"
+    r = client.put("/admin/notebooks/b", json={"source": "# b\n", "editable": True}, headers=auth)
+    assert r.status_code == 403, "the editor needs allow_editable on the host"
+
+
+def test_respawning_a_blog_kills_leftovers_of_its_uid_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import notebook_host.main as main_mod
+    from notebook_host.blogs_store import BlogRecord, register_blog
+
+    _, state, calls = _make_app(tmp_path, monkeypatch)
+    paths = get_slug_paths(tmp_path, "post")
+    paths.notebook.parent.mkdir(parents=True, exist_ok=True)
+    paths.notebook.write_text("# post\n", encoding="utf-8")
+    register_blog(state.settings.resolved_blogs_file, BlogRecord(slug="post", created_at=1.0))
+    monkeypatch.setattr(main_mod, "resolve_jail_uid", lambda *_a, **_k: 100007)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(main_mod, "ensure_slug_jail", lambda d, s, uid=None: get_slug_paths(d, s))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    killed: list[int] = []
+    monkeypatch.setattr(main_mod, "kill_uid_processes", lambda uid, **_k: killed.append(uid))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+
+    async def _fake_wait(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(main_mod, "wait_for_port", _fake_wait)
+    assert asyncio.run(main_mod._spawn_blog_process(state, "post")) is True  # pyright: ignore[reportPrivateUsage]
+    assert killed == [100007], "a dead blog's detached children don't share the new process"
+    assert calls
+
+
+def test_host_refuses_to_boot_serving_tokenized_links_over_plain_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from notebook_host.config import load_settings
+    from notebook_host.main import check_link_security
+
+    monkeypatch.setenv("DAIMON_NOTEBOOK__PUBLIC_HOST", "nbs.example.com")
+    with pytest.raises(RuntimeError, match="PUBLIC_URL_BASE"):
+        check_link_security(load_settings(_env_file=None))
+    monkeypatch.setenv("DAIMON_NOTEBOOK__PUBLIC_URL_BASE", "http://nbs.example.com")
+    with pytest.raises(RuntimeError, match="https"):
+        check_link_security(load_settings(_env_file=None))
+    monkeypatch.setenv("DAIMON_NOTEBOOK__PUBLIC_URL_BASE", "https://nbs.example.com")
+    check_link_security(load_settings(_env_file=None))
+    monkeypatch.delenv("DAIMON_NOTEBOOK__PUBLIC_URL_BASE")
+    monkeypatch.setenv("DAIMON_NOTEBOOK__PUBLIC_HOST", "localhost")
+    check_link_security(load_settings(_env_file=None))
+    monkeypatch.setenv("DAIMON_NOTEBOOK__PUBLIC_HOST", "nbs.internal")
+    monkeypatch.setenv("DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS", "true")
+    check_link_security(load_settings(_env_file=None))
+
+
+def test_notebook_host_pins_marimo_to_the_locked_version() -> None:
+    """The Docker image installs from pyproject.toml alone, without uv.lock."""
+    import importlib.metadata
+    import tomllib
+
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    deps: list[str] = pyproject["project"]["dependencies"]
+    marimo = [d for d in deps if d.replace(" ", "").startswith("marimo")]
+    assert marimo == [f"marimo=={importlib.metadata.version('marimo')}"], (
+        "an unpinned range lets the image resolve a marimo nobody tested"
+    )
+
+
 # --- access log ----------------------------------------------------------------
 
 
-def test_uvicorn_access_log_redacts_the_access_token() -> None:
+def _root_output(config: dict[str, Any]) -> str:
+    import logging
+
+    stream = logging.getLogger().handlers[0]
+    assert isinstance(stream, logging.StreamHandler)
+    value = getattr(stream.stream, "getvalue", None)
+    return value() if callable(value) else ""  # pyright: ignore[reportUnknownVariableType]
+
+
+def test_host_logs_redact_the_access_token_in_every_form() -> None:
     import io
     import logging
     import logging.config
 
     from notebook_host.__main__ import uvicorn_log_config
 
-    config = uvicorn_log_config()
-    logging.config.dictConfig(config)
+    logging.config.dictConfig(uvicorn_log_config())
     buf = io.StringIO()
-    handler = logging.getLogger("uvicorn.access").handlers[0]
-    assert isinstance(handler, logging.StreamHandler)
-    handler.setStream(buf)  # pyright: ignore[reportUnknownMemberType]
-    logging.getLogger("uvicorn.access").info(
+    handlers = [*logging.getLogger("uvicorn.access").handlers, *logging.getLogger().handlers]
+    assert handlers, "uvicorn's handlers are configured, the root logger's too"
+    for handler in handlers:
+        assert isinstance(handler, logging.StreamHandler)
+        handler.setStream(buf)  # pyright: ignore[reportUnknownMemberType]
+    access = logging.getLogger("uvicorn.access")
+    access.info(
         '%s - "%s %s HTTP/%s" %d',
         "10.0.0.1:1",
         "GET",
@@ -435,9 +653,20 @@ def test_uvicorn_access_log_redacts_the_access_token() -> None:
         "1.1",
         303,
     )
+    access.info(
+        '%s - "%s %s HTTP/%s" %d',
+        "10.0.0.1:1",
+        "GET",
+        "/n/nb/auth/login?next=%2Fn%2Fnb%2F%3Faccess_token%3DENC-tok%26x%3D1",
+        "1.1",
+        303,
+    )
+    logging.getLogger("notebook_host.proxy").warning("saw /n/nb/?ACCESS_TOKEN=APP-tok")
     out = buf.getvalue()
     assert "SEKRET-tok" not in out, "the link's token must not land in the host log"
     assert "access_token=[redacted]&x=1" in out
+    assert "ENC-tok" not in out, "nor its url-encoded form in marimo's next="
+    assert "APP-tok" not in out, "nor anything the app's own loggers print"
 
 
 # --- cross-notebook requests from the same origin ---------------------------------
@@ -478,57 +707,25 @@ def _proxy_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Test
 @pytest.mark.parametrize(
     "headers",
     [
-        {"sec-fetch-site": "same-origin", "referer": "https://nbs.example.com/n/a/"},
-        {"sec-fetch-site": "same-origin"},  # referrerPolicy: 'no-referrer'
-        {
-            "sec-fetch-site": "same-origin",
-            "sec-fetch-dest": "iframe",
-            "referer": "https://nbs.example.com/n/a/x",
-        },
-        {"sec-fetch-site": "same-origin", "referer": "https://nbs.example.com/n/b-evil/"},
-    ],
-)
-def test_proxy_refuses_one_notebook_page_reaching_into_another(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, headers: dict[str, str]
-) -> None:
-    client, seen = _proxy_client(tmp_path, monkeypatch)
-    r = client.get("/n/b/api/status", headers=headers)
-    assert r.status_code == 403, "notebook a's JS must not ride b's cookie"
-    assert seen == [], "nothing reaches b's marimo"
-
-
-@pytest.mark.parametrize(
-    "headers",
-    [
-        {"sec-fetch-site": "same-origin", "referer": "https://nbs.example.com/n/b/"},
-        {"sec-fetch-site": "same-origin", "referer": "https://nbs.example.com/n/b"},
+        {"sec-fetch-site": "same-origin"},  # browser reload: no Referer
+        {"sec-fetch-site": "same-origin", "referer": "https://nbs.example.com/n/a/"},  # a link
         {"sec-fetch-site": "cross-site", "referer": "https://discord.com/"},
         {"sec-fetch-site": "none"},
         {},
     ],
 )
-def test_proxy_allows_a_notebooks_own_page_and_opening_its_link(
+def test_proxy_does_not_pretend_to_isolate_notebooks_in_the_browser(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, headers: dict[str, str]
 ) -> None:
+    """All notebooks share one origin; header checks there are bypassable theatre.
+
+    Page JS can set any same-origin ``referrer``, so a Referer gate stops no
+    attacker and only breaks reloads and links. One host = one client instead.
+    """
     client, seen = _proxy_client(tmp_path, monkeypatch)
     r = client.get("/n/b/api/status", headers=headers)
     assert r.status_code == 200, r.text
     assert len(seen) == 1
-
-
-def test_proxy_refuses_a_socket_opened_from_another_notebooks_page(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from starlette.websockets import WebSocketDisconnect
-
-    client, _ = _proxy_client(tmp_path, monkeypatch)
-    headers = {"sec-fetch-site": "same-origin", "referer": "https://nbs.example.com/n/a/"}
-    with (
-        pytest.raises(WebSocketDisconnect) as exc,
-        client.websocket_connect("/n/b/ws?session_id=x", headers=headers) as ws,
-    ):
-        ws.receive_text()
-    assert exc.value.code == 1008
 
 
 # --- real marimo: a neighbour on localhost is refused -------------------------

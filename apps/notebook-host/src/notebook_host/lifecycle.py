@@ -203,6 +203,7 @@ def _prepare_workspace(paths: SlugPaths) -> Path:
     """
     paths.data.mkdir(parents=True, exist_ok=True)
     paths.workspace.mkdir(parents=True, exist_ok=True)
+    paths.tmp.mkdir(parents=True, exist_ok=True)
 
     # Relative symlinks so the workspace dir is location-independent.
     data_link = paths.workspace / "data"
@@ -294,6 +295,7 @@ def spawn_marimo(
     log_fh = open(log_path, "ab")  # noqa: SIM115 — owned by subprocess
     env = scrub_env(dict(os.environ))
     env["HOME"] = str(paths.home)
+    env["TMPDIR"] = str(paths.tmp)
     if jail_uid is not None:
         preexec = build_jailed_preexec(
             jail_uid, rlimit_as_bytes=rlimit_as_bytes, rlimit_cpu_seconds=rlimit_cpu_seconds
@@ -426,6 +428,7 @@ def validate_notebook(
         preexec = _make_preexec(rlimit_as_bytes, rlimit_cpu_seconds)
     env = scrub_env(dict(os.environ))
     env["HOME"] = str(paths.home)
+    env["TMPDIR"] = str(paths.tmp)
     with tempfile.TemporaryDirectory() as tmp:
         if jail_uid is not None:
             # Unlike the log file above, this directory is opened *by the

@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 import re
 
-_ACCESS_TOKEN = re.compile(r"(access_token=)[^&\s\"]*")
+# Plain, and url-encoded once or twice (marimo's login redirect puts the
+# original path, query included, into ``next=``). Tokens are url-safe
+# base64, so a value ends at the first ``&``, ``%``, quote or space.
+_ACCESS_TOKEN = re.compile(r"(access_token(?:=|%3D|%253D))[^&%\s\"']*", re.IGNORECASE)
 
 
 def redact_access_token(text: str) -> str:

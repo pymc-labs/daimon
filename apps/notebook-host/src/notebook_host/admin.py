@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import os
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -28,10 +29,12 @@ from notebook_host.jail import (
     JailUnavailableError,
     SlugPaths,
     UidPoolExhaustedError,
+    UidStillInUseError,
     ensure_slug_jail,
     get_slug_paths,
     kill_uid_processes,
     remove_slug_tree,
+    remove_uid_files,
     resolve_jail_uid,
 )
 from notebook_host.lifecycle import (
@@ -140,6 +143,26 @@ class AdminState:
 
 class WriteRequest(BaseModel):
     source: str
+    # The marimo code editor instead of the read-only app. Refused unless the
+    # host's ``allow_editable`` is on.
+    editable: bool = False
+
+
+def _require_editor_allowed(settings: Settings) -> None:
+    if not settings.allow_editable:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "the notebook editor is off on this host (DAIMON_NOTEBOOK__ALLOW_EDITABLE)",
+        )
+
+
+def _kill_uid_or_503(uid: int) -> None:
+    try:
+        kill_uid_processes(uid)
+    except UidStillInUseError as err:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, f"notebook isolation unavailable: {err}"
+        ) from err
 
 
 def _bearer_dep(settings: Settings) -> Callable[[str | None], None]:
@@ -222,6 +245,23 @@ async def _spawn_tracked(
             status.HTTP_503_SERVICE_UNAVAILABLE, f"uid pool exhausted: {err}"
         ) from err
     paths = ensure_slug_jail(state.settings.data_dir, slug, uid=uid)
+    access_token = state.access_token_for(slug, mode)
+    previous = state.processes.get(slug)
+    if previous is not None and previous.mode != mode:
+        # Switching between the editor and the read-only app: whatever the
+        # editor's holder planted as this uid (site-packages in HOME, a
+        # poisoned uv cache, files in the workspace or temp dirs) must not run
+        # under the new mode, including in the validator below. So the old
+        # process goes first, even though a failed validation then leaves
+        # nothing serving. Attachments in data/ are content and are kept.
+        state.processes.pop(slug, None)
+        kill(previous)
+        if uid is not None:
+            _kill_uid_or_503(uid)
+            remove_uid_files(uid)
+        for d in (paths.home, paths.workspace, paths.tmp):
+            shutil.rmtree(d, ignore_errors=True)
+        paths = ensure_slug_jail(state.settings.data_dir, slug, uid=uid)
     _atomic_write_bytes(paths.notebook, source_bytes, owner_uid=uid)
 
     # Confirm the cells actually execute before we tear down any
@@ -239,7 +279,6 @@ async def _spawn_tracked(
                 },
             )
 
-    access_token = state.access_token_for(slug, mode)
     existing = state.processes.pop(slug, None)
     if existing is not None:
         kill(existing)
@@ -247,7 +286,7 @@ async def _spawn_tracked(
         # Anything the previous run or the validator left behind as this
         # uid (a cell's detached child escapes kill's process group) must not
         # live alongside the new process and its token.
-        kill_uid_processes(uid)
+        _kill_uid_or_503(uid)
 
     port = allocate_port(
         state.processes, state.settings.marimo_port_start, state.settings.marimo_port_end
@@ -306,7 +345,10 @@ def create_admin_router(state: AdminState) -> APIRouter:
                 f"{state.settings.max_source_bytes})",
             )
         async with state.lock_for(slug):
-            np = await _spawn_tracked(state, slug, source_bytes, mode="edit")
+            if body.editable:
+                _require_editor_allowed(state.settings)
+            mode: Literal["edit", "run"] = "edit" if body.editable else "run"
+            np = await _spawn_tracked(state, slug, source_bytes, mode=mode)
             ttl = state.settings.subprocess_ttl_seconds
             # ttl <= 0 disables age-based reaping — the notebook never expires,
             # so there is no expiry timestamp to report.
@@ -505,6 +547,10 @@ def create_admin_router(state: AdminState) -> APIRouter:
         # Public route — authed by the capability token, NOT the admin bearer.
         secrets_list = [s.get_secret_value() for s in state.settings.admin_secrets]
         claims: CapabilityClaims = verify_token(secrets_list, token, now=datetime.now(UTC))
+        if claims.op == "notebook_edit":
+            # The bot gates this too; the host refuses on its own so a
+            # capability minted elsewhere can't turn the editor on.
+            _require_editor_allowed(state.settings)
         # Burn before reading the body: burn_jti's check-and-write is one call
         # with no await in between, so two concurrent replays of one token
         # cannot both observe it as unused. Burning here (rather than after a

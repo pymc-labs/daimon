@@ -123,6 +123,17 @@ class Settings(BaseSettings):
     # degrades: that's acceptable for a resource cap and is not acceptable
     # for an isolation boundary.
     allow_unjailed_spawn: bool = False
+    # Serve the marimo code editor for `notebook_edit` upload tokens and
+    # `PUT /admin/notebooks/{slug}` with `editable: true`. Off: every notebook
+    # is a read-only app, whatever the bot asks for. An editor link runs
+    # arbitrary code on this host, so only turn it on for a host that serves
+    # one client. Same variable name as the bot's `notebook.allow_editable`.
+    allow_editable: bool = False
+    # Boot even though links would go out over plain http to a non-localhost
+    # host. Links carry each notebook's access token, so by default the host
+    # refuses to start without an `https://` `public_url_base`. Only for a
+    # trusted private network.
+    allow_http_links: bool = False
     # Path to the persisted uid registry. Host writes {slug: uid} whenever a
     # new slug is jailed; ``None`` (default) means "use
     # ``data_dir / 'uids.json'``" — keeps it on the same persistent volume

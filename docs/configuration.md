@@ -1030,9 +1030,10 @@ A standalone service in `apps/notebook-host`, deployed and configured separately
 the daimon processes. It is not part of `docker-compose.yml`.
 
 This service shares the `DAIMON_NOTEBOOK__` prefix with a block on daimon's own
-Settings, so `DAIMON_NOTEBOOK__ADMIN_SECRET`, `DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` appear
-twice on this page — once for the service and once for the daimon side that calls it.
-They are read by different processes; a single shared env file would set both.
+Settings, so `DAIMON_NOTEBOOK__ADMIN_SECRET`, `DAIMON_NOTEBOOK__ALLOW_EDITABLE`,
+`DAIMON_NOTEBOOK__MAX_SOURCE_BYTES` appear twice on this page — once for the service and
+once for the daimon side that calls it. They are read by different processes; a single
+shared env file would set both.
 
 No field in this model carries a `Field(description=...)`, so this section lists types
 and defaults only. `apps/notebook-host/src/notebook_host/config.py` documents them in
@@ -1115,6 +1116,14 @@ inline comments.
 `int` · optional · default `100999`
 
 ### `DAIMON_NOTEBOOK__ALLOW_UNJAILED_SPAWN`
+
+`bool` · optional · default `False`
+
+### `DAIMON_NOTEBOOK__ALLOW_EDITABLE`
+
+`bool` · optional · default `False`
+
+### `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS`
 
 `bool` · optional · default `False`
 

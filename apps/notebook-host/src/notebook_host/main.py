@@ -26,8 +26,10 @@ from notebook_host.jail import (
     JailUnavailableError,
     SlugPaths,
     UidPoolExhaustedError,
+    UidStillInUseError,
     can_apply_jail,
     ensure_slug_jail,
+    kill_uid_processes,
     remove_slug_tree,
     resolve_jail_uid,
 )
@@ -47,6 +49,35 @@ from notebook_host.pids_store import reap_orphans
 from notebook_host.proxy import create_proxy_router
 
 _log = logging.getLogger(__name__)
+
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def check_link_security(settings: Settings) -> None:
+    """Refuse to serve tokenized links over plain http off localhost.
+
+    Every link carries its notebook's access token, and marimo's session cookie
+    is only as private as the transport. ``allow_http_links`` is the explicit
+    opt-out for a trusted private network.
+    """
+    if settings.allow_http_links:
+        return
+    base = settings.public_url_base
+    if base is not None:
+        if not base.startswith("https://"):
+            raise RuntimeError(
+                f"DAIMON_NOTEBOOK__PUBLIC_URL_BASE must be https:// (got {base!r}); links "
+                "carry each notebook's access token. Set DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS=true "
+                "only on a trusted private network."
+            )
+        return
+    if settings.public_host not in _LOCAL_HOSTS:
+        raise RuntimeError(
+            f"public_host {settings.public_host!r} would get plain-http links; set "
+            "DAIMON_NOTEBOOK__PUBLIC_URL_BASE to its https:// origin, or "
+            "DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS=true on a trusted private network."
+        )
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -97,6 +128,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:  # pyright: ignore[reportUnusedFunction]
+        check_link_security(settings)
         # Fail-closed boot gate (D-05): a host that cannot apply the jail must
         # not come up at all. Refusing per-request instead would leave an
         # apparently healthy host answering nothing but 503s — a configuration
@@ -189,6 +221,14 @@ async def _spawn_blog_process(state: AdminState, slug: str) -> bool:
     if not paths.notebook.exists():
         _log.warning("blog %r has no source at %s; skipping respawn", slug, paths.notebook)
         return False
+    if uid is not None:
+        # A dead blog's detached children would otherwise live alongside the
+        # new process and its token.
+        try:
+            kill_uid_processes(uid)
+        except UidStillInUseError as err:
+            _log.error("blog %r uid still in use, not respawning: %s", slug, err)
+            return False
     access_token = state.access_token_for(slug, "run")
     record = load_blogs(state.settings.resolved_blogs_file).get(slug)
     if record is not None and record.access_token != access_token:

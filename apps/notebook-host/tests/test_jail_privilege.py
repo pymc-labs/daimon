@@ -348,3 +348,26 @@ def test_releasing_a_slug_kills_a_detached_survivor_before_its_uid_is_reused(
     finally:
         if survivor.poll() is None:
             survivor.kill()
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(os.geteuid() != 0, reason="uid drop requires root")
+def test_jailed_child_has_no_new_privs_and_a_process_cap() -> None:
+    import subprocess
+
+    from notebook_host.jail import JAIL_RLIMIT_NPROC, build_jailed_preexec
+
+    out = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            "grep NoNewPrivs /proc/self/status; grep 'Max processes' /proc/self/limits",
+        ],
+        preexec_fn=build_jailed_preexec(_UID_A, rlimit_as_bytes=None, rlimit_cpu_seconds=None),
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd="/",
+    ).stdout
+    assert "NoNewPrivs:\t1" in out, "setuid binaries can't hand the notebook privilege back"
+    assert out.strip().splitlines()[-1].split()[2] == str(JAIL_RLIMIT_NPROC)

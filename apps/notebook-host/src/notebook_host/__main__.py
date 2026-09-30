@@ -13,13 +13,16 @@ from notebook_host.main import create_app
 
 
 def uvicorn_log_config() -> dict[str, Any]:
-    """uvicorn's default logging, with notebook tokens redacted from every handler."""
+    """uvicorn's default logging, with notebook tokens redacted from every record."""
     config: dict[str, Any] = copy.deepcopy(LOGGING_CONFIG)
     config.setdefault("filters", {})["redact_access_token"] = {
         "()": "notebook_host.logs.RedactAccessToken"
     }
     for handler in config["handlers"].values():
         handler.setdefault("filters", []).append("redact_access_token")
+    # The host's own loggers (and marimo's, if it logs in-process) propagate
+    # to root; route root through the same redacting handler.
+    config["root"] = {"handlers": ["default"], "level": "INFO"}
     return config
 
 
