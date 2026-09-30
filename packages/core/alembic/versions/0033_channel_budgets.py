@@ -9,6 +9,7 @@ backfilled from destinations whose channel is known without a platform call
 
 `channel_budgets` holds at most one budget per (tenant, platform, channel).
 No row means no budget, so nothing is gated until an admin sets one.
+A refusal by a budget is recorded as its own `turn_outcomes` reason.
 
 downgrade: destructive
 """
@@ -22,8 +23,43 @@ down_revision = "0032_promo_codes"
 branch_labels = None
 depends_on = None
 
+_OUTCOME_REASONS_BEFORE = (
+    "completed",
+    "interrupted",
+    "interrupt_timeout",
+    "connection_lost",
+    "upstream",
+    "rate_limited",
+    "session_terminated",
+    "mcp_degraded_empty",
+    "retrying_unsettled",
+    "requires_action",
+    "ceiling",
+    "recovery_cancelled",
+    "recovery_failed",
+    "reducer_bug",
+    "admission_balance_depleted",
+    "admission_cap_exceeded",
+    "admission_denied",
+    "admission_concurrency_shed",
+    "missing_config",
+    "resolver_miss",
+    "session_preparation_failed",
+    "session_busy",
+    "session_agent_mismatch",
+    "unknown",
+)
+OUTCOME_REASONS = (*_OUTCOME_REASONS_BEFORE, "admission_channel_budget_exceeded")
+
+
+def _replace_outcome_reasons(reasons: tuple[str, ...]) -> None:
+    op.drop_constraint("ck_turn_outcomes_reason", "turn_outcomes", type_="check")
+    values = ", ".join(f"'{reason}'" for reason in reasons)
+    op.create_check_constraint("ck_turn_outcomes_reason", "turn_outcomes", f"reason IN ({values})")
+
 
 def upgrade() -> None:
+    _replace_outcome_reasons(OUTCOME_REASONS)
     op.add_column("usage_events", sa.Column("channel_id", sa.Text(), nullable=True))
     op.add_column("tenant_ledger", sa.Column("channel_id", sa.Text(), nullable=True))
     op.create_index(
@@ -89,6 +125,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute(
+        "UPDATE turn_outcomes SET reason = 'admission_denied' "
+        "WHERE reason = 'admission_channel_budget_exceeded'"
+    )
+    _replace_outcome_reasons(_OUTCOME_REASONS_BEFORE)
     op.drop_table("channel_budgets")
     op.drop_column("routines", "channel_id")
     op.drop_index("tenant_ledger_tenant_channel_idx", table_name="tenant_ledger")

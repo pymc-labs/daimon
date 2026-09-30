@@ -421,3 +421,55 @@ def test_config_get_with_guild_override_resolves_that_guilds_config(
     assert "guild-only-agent" in with_override.stdout, (
         "--guild must resolve to that guild's tenant and read its tenant-tier config"
     )
+
+
+@pytest.mark.asyncio
+async def test_config_keeps_an_isolated_channels_agent_inside_it(db_session: AsyncSession) -> None:
+    """Routing that would break channel isolation exits and writes nothing."""
+    from daimon.adapters.cli.commands.config import _config_set_entry, _config_unset_entry
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.scoped_config_read import get_scope
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    room = ChannelScopeRef(tenant_id=tenant.id, channel_id="room")
+    await set_fields(db_session, scope=room, tenant_id=tenant.id, agent_name="local", mode="agent")
+    other = ChannelScopeRef(tenant_id=tenant.id, channel_id="other")
+    await set_fields(
+        db_session, scope=other, tenant_id=tenant.id, agent_name="shared", mode="agent"
+    )
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(isolated_channel_ids=("room",))
+    )
+
+    async def run(action: str, scope_str: str, value: str = "") -> str:
+        console = Console(file=StringIO(), force_terminal=False, highlight=False, width=200)
+        common = {"tenant_id": tenant.id, "account_id": account.id, "console": console}
+        with pytest.raises(typer.Exit):
+            if action == "set":
+                await _config_set_entry(
+                    db_session, key="agent_name", value=value, scope_str=scope_str, **common
+                )
+            elif action == "propagate":
+                await _config_propagate_entry(
+                    db_session,
+                    to_strs=[scope_str],
+                    from_str=value,
+                    fields_str="agent_name",
+                    reset=False,
+                    **common,
+                )
+            else:
+                await _config_unset_entry(
+                    db_session, key="agent_name", scope_str=scope_str, **common
+                )
+        return cast(StringIO, console.file).getvalue()
+
+    assert "belongs to another isolated channel" in await run("set", "channel:elsewhere", "local")
+    assert "belongs to another isolated channel" in await run("set", "tenant", "local")
+    assert "only its own agents answer here" in await run("set", "channel:room", "shared")
+    assert "keeps an agent of its own" in await run("unset", "channel:room")
+    assert "belongs to another" in await run("propagate", "channel:elsewhere", "channel:room")
+    row = await get_scope(db_session, scope=room)
+    assert row is not None and row.agent_name == "local", "every refusal writes nothing"

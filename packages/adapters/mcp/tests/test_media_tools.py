@@ -13,6 +13,7 @@ from __future__ import annotations
 import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -32,7 +33,15 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import Role
+from daimon.core.stores.turn_origins import create_origin
+from daimon.testing.factories import (
+    make_account,
+    make_channel_budget,
+    make_ledger_entry,
+    make_tenant,
+)
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -321,3 +330,62 @@ async def test_fetch_youtube_transcript_returns_the_transcript_in_the_untrusted_
     }
     assert list(envelope) == [], "nothing the speakers say parses as an element"
     assert spoken in (envelope.text or "")
+
+
+@pytest.mark.parametrize(("limit_usd", "refused"), [(Decimal("5"), False), (Decimal("0"), True)])
+async def test_a_billed_transcript_counts_toward_the_turns_channel_budget(
+    tmp_path: Path,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    limit_usd: Decimal,
+    refused: bool,
+) -> None:
+    now = datetime.now(UTC)
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        account = await make_account(session, tenant=tenant)
+        await make_ledger_entry(session, tenant=tenant)
+        await make_channel_budget(session, tenant=tenant, channel_id="222", limit_usd=limit_usd)
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="discord",
+            parent_channel_id="222",
+            thread_id="999",
+            responder_ma_agent_id="agent_x",
+            responder_name="daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.USER,
+            expires_at=now + timedelta(minutes=10),
+            now=now,
+        )
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="u1",
+    )
+    gemini_calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        gemini_calls.append(request)
+        return _transcript_response("[00:00:01] hello")
+
+    mcp = await _registered_billing_mcp(
+        tmp_path, auth=auth, sessionmaker=committing_sessionmaker, handler=handler
+    )
+    call = {"url": "https://youtu.be/dQw4w9WgXcQ", "origin_context_id": str(origin.id)}
+    async with Client(mcp) as client:
+        if refused:
+            with pytest.raises(ToolError, match="TERMINAL ERROR: This channel has used its"):
+                await client.call_tool("fetch_youtube_transcript", call)
+        else:
+            await client.call_tool("fetch_youtube_transcript", call)
+
+    async with committing_sessionmaker() as session:
+        rows = await tenant_ledger.list_for_tenant(session, tenant_id=tenant.id)
+    debits = [row.channel_id for row in rows if row.delta_usd < 0]
+    assert debits == ([] if refused else ["222"]), "the debit carries the turn's channel"
+    assert len(gemini_calls) == (0 if refused else 1), "a refused call never reaches Gemini"

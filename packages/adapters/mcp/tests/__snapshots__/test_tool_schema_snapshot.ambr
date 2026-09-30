@@ -503,7 +503,7 @@
     'clear_channel_admins': dict({
       'description': '''
         Remove every channel admin from one channel, leaving it to the server admins.
-        For example, stop the @growth-leads role running #growth. A no-op when the
+        For example, stop the @support-leads role running #support. A no-op when the
         channel has none. Requires Manage Server (admin).
       ''',
       'parameters': dict({
@@ -520,7 +520,11 @@
       }),
     }),
     'clear_channel_budget': dict({
-      'description': "Remove a channel's spending budget, so only the balance and caps apply. Admin-only.",
+      'description': '''
+        Remove a channel's spending budget, so only the balance and caps apply. Admin-only.
+        
+        A thread id clears its parent channel's budget.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -1542,8 +1546,9 @@
         its final reply there. On Slack a thread is ``<channel id>:<thread
         ts>``. A protected channel is refused. Without a destination the
         result is only recorded (``last_result_tail``), as before. A run's
-        spend counts toward the destination channel's budget, and a run is
-        skipped while that budget is used up.
+        spend counts toward the destination channel's budget, or without a
+        destination the budget of the channel named by ``origin_context_id``
+        (this turn's), and a run is skipped while that budget is used up.
         
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
@@ -1614,6 +1619,17 @@
           'enabled': dict({
             'default': True,
             'type': 'boolean',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'timezone': dict({
             'type': 'string',
@@ -1948,6 +1964,21 @@
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+            'description': '''
+              This turn's origin_context_id, so the cost counts
+              toward the channel it was asked in.
+            ''',
+          }),
           'url': dict({
             'description': '''
               A public YouTube video URL. Accepts youtube.com/watch?v=,
@@ -2427,8 +2458,9 @@
     }),
     'list_channel_admins': dict({
       'description': '''
-        Which channels have their own admins, and who they are. For example, who
-        administers #growth besides the server admins. Requires Manage Server (admin).
+        List the channels that have their own admins, with the roles and members
+        named for each. For example, list the admins of #support. Requires Manage
+        Server (admin).
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4032,7 +4064,7 @@
     'set_channel_admins': dict({
       'description': '''
         Name who administers one channel, on top of the server admins. For example,
-        let the @growth-leads role run #growth. Replaces that channel's whole list;
+        let the @support-leads role run #support. Replaces that channel's whole list;
         pass both lists empty to clear it. Requires Manage Server (admin).
         
         A channel admin may change agents that answer only in the channels they

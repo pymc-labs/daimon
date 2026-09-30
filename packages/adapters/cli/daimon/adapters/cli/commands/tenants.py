@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from decimal import Decimal, InvalidOperation
-from typing import Annotated
+from typing import Annotated, cast
 
 import typer
 from daimon.adapters.cli.errors import run_cli
@@ -14,6 +14,7 @@ from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.channel_isolation_setup import isolation_refusal, render_isolation_refusal
 from daimon.core.config import load_settings
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -37,7 +38,10 @@ from rich.console import Console
 
 tenants_app = typer.Typer(help="Tenants: list, credit, caps, funding and access policy, delete.")
 access_policy_app = typer.Typer(
-    help="A tenant's access policy: who may invoke the agent, protected and sealed channels."
+    help=(
+        "A tenant's access policy: who may invoke the agent, protected, sealed and "
+        "isolated channels."
+    )
 )
 tenants_app.add_typer(access_policy_app, name="access-policy")
 
@@ -382,9 +386,34 @@ def _print_policy(
         ("protected_channel_ids", policy.protected_channel_ids),
         ("protected_category_ids", policy.protected_category_ids),
         ("sealed_channel_ids", policy.sealed_channel_ids),
+        ("isolated_channel_ids", policy.isolated_channel_ids),
     ):
         console.print(f"  {field}: {', '.join(ids) or '-'}")
     console.print(f"  dm_memory_read_only: {str(policy.dm_memory_read_only).lower()}")
+
+
+async def _require_isolatable(
+    rt: CliRuntime, console: Console, *, tenant_id: uuid.UUID, isolated: tuple[str, ...]
+) -> None:
+    """Exit unless every newly isolated channel already has an agent of its own."""
+    async with rt.sessionmaker() as session:
+        current = await load_access_policy(session, tenant_id=tenant_id)
+        for channel_id in (c for c in isolated if c not in current.isolated_channel_ids):
+            refusal, agent_name = await isolation_refusal(
+                rt.anthropic,
+                session,
+                tenant_id=tenant_id,
+                channel_id=channel_id,
+                isolated_ids=isolated,
+                default=rt.deployment_default,
+            )
+            if refusal is not None:
+                message = render_isolation_refusal(refusal, agent_name=agent_name)
+                console.print(
+                    f"[red]{channel_id}: {message} The setup panel's Isolate with a copy, or "
+                    "set_channel_isolation with fork_from, makes one. Nothing was changed.[/red]"
+                )
+                raise typer.Exit(1)
 
 
 @access_policy_app.command("get")
@@ -440,6 +469,15 @@ def tenants_access_policy_set_command(
             )
         ),
     ] = None,
+    isolated_channel: Annotated[
+        list[str] | None,
+        typer.Option(
+            help=(
+                "Channel id whose own agents stay inside it (repeatable). Each needs an agent "
+                "set as its default that answers nowhere else and is not built in."
+            )
+        ),
+    ] = None,
     dm_memory_read_only: Annotated[
         bool | None,
         typer.Option(
@@ -471,6 +509,7 @@ def tenants_access_policy_set_command(
                 protected_channel=protected_channel,
                 protected_category=protected_category,
                 sealed_channel=sealed_channel,
+                isolated_channel=isolated_channel,
                 dm_memory_read_only=dm_memory_read_only,
                 clear=clear,
                 as_json=as_json,
@@ -489,6 +528,7 @@ async def tenants_access_policy_set(
     protected_channel: list[str] | None = None,
     protected_category: list[str] | None = None,
     sealed_channel: list[str] | None = None,
+    isolated_channel: list[str] | None = None,
     dm_memory_read_only: bool | None = None,
     clear: bool = False,
     as_json: bool = False,
@@ -500,6 +540,7 @@ async def tenants_access_policy_set(
         ("protected_channel_ids", protected_channel),
         ("protected_category_ids", protected_category),
         ("sealed_channel_ids", sealed_channel),
+        ("isolated_channel_ids", isolated_channel),
     ):
         if ids is not None:
             if not ids:
@@ -514,6 +555,9 @@ async def tenants_access_policy_set(
                     # A Slack thread is sealed on its own as channel_id:thread_ts.
                     else r"[CGD][A-Z0-9]+(?::[0-9]+\.[0-9]+)?"
                     if field == "sealed_channel_ids"
+                    # An isolated channel is a whole channel, never a DM.
+                    else r"[CG][A-Z0-9]+"
+                    if field == "isolated_channel_ids"
                     else r"[CGD][A-Z0-9]+"
                 )
                 if not cleaned or (
@@ -530,6 +574,9 @@ async def tenants_access_policy_set(
 
     label = f"{platform}:{external_id}"
     tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=external_id)
+    isolated = cast("tuple[str, ...] | None", changes.get("isolated_channel_ids"))
+    if isolated:
+        await _require_isolatable(rt, console, tenant_id=tenant_id, isolated=isolated)
     async with rt.sessionmaker() as session, session.begin():
         await lock_access_policy(session, tenant_id=tenant_id)
         if clear:

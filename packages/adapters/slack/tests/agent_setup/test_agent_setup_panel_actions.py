@@ -18,7 +18,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -26,14 +26,19 @@ import yarl
 from aioresponses import aioresponses as AioResponsesMock
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.agent_setup.actions import (
+    CHANNEL_ADMINS_NEED_ADMIN_MESSAGE,
     handle_agent_setup_action,
     handle_agent_setup_command,
 )
+from daimon.adapters.slack.agent_setup.isolation import ISOLATION_NEED_ADMIN_MESSAGE
 from daimon.adapters.slack.agent_setup.panel_views import (
+    ACTION_CHANNEL_ADMINS,
     ACTION_CODING_TOOLS,
     ACTION_DETAILS,
     ACTION_EXPAND_CONNECTIONS,
     ACTION_EXPAND_KEYS,
+    ACTION_ISOLATE,
+    ACTION_ISOLATE_COPY,
     ACTION_NEW,
     ACTION_PAGE_NEXT,
     ACTION_REVOKE_TOKEN,
@@ -47,11 +52,19 @@ from daimon.adapters.slack.agent_setup.state import (
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic
+from daimon.testing.ma import (
+    FakeMAState,
+    NotHandled,
+    build_fake_anthropic,
+    combine_handlers,
+    make_fake_ma_handler,
+)
+from daimon.testing.ma_models import ma_agent
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -811,3 +824,113 @@ async def test_conversation_action_from_details_targets_that_agent(
     assert binding.configuration_target_name == _OTHER_AGENT, (
         "the conversation configures the agent Details was showing"
     )
+
+
+async def test_channel_admins_click_refuses_a_member(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The rendered button is a hint: a member's click is refused and no form opens."""
+    _, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
+
+    await handle_agent_setup_action(
+        runtime,
+        _action_payload(ACTION_CHANNEL_ADMINS, meta=_meta(view="routing"), view_id="V_ROUTING"),
+    )
+
+    ephemerals = _sent(
+        fake_slack_web_client.mock,
+        ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")),
+    )
+    assert [e["text"] for e in ephemerals] == [CHANNEL_ADMINS_NEED_ADMIN_MESSAGE], (
+        "the member is told only a workspace admin may do this"
+    )
+    assert _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY) == [], "no form is pushed"
+
+
+async def test_isolation_click_refuses_a_member(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A member's click on a rendered isolation button is refused and changes nothing."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
+
+    await handle_agent_setup_action(
+        runtime,
+        _action_payload(ACTION_ISOLATE, meta=_meta(view="routing"), view_id="V_ROUTING"),
+    )
+
+    ephemerals = _sent(
+        fake_slack_web_client.mock,
+        ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")),
+    )
+    assert [e["text"] for e in ephemerals] == [ISOLATION_NEED_ADMIN_MESSAGE]
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    assert policy.isolated_channel_ids == (), "nothing was isolated"
+
+
+async def test_isolation_click_refuses_a_shared_agent_then_isolates_with_a_copy(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.slack.agent_setup import actions
+
+    tenant_id, fernet_key = await _seed_team(db_session)
+    room = "C0TEAMALPHA"
+    for channel in (room, "C0ELSEWHERE"):
+        await set_fields(
+            db_session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel),
+            tenant_id=tenant_id,
+            agent_name="shared",
+            mode="agent",
+        )
+    await db_session.commit()
+    state = FakeMAState()
+    agent = ma_agent(id="agent_shared", name="shared", tenant_id=tenant_id)
+    state.agents[agent.id] = agent.model_dump(mode="json")
+
+    def environments(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/environments":
+            return httpx.Response(200, json={"data": [], "has_more": False})
+        raise NotHandled
+
+    runtime = _build_runtime(
+        fernet_key,
+        db_session_factory,
+        handler=combine_handlers(environments, make_fake_ma_handler(state)),
+    )
+    monkeypatch.setattr(actions, "resolve_is_admin", AsyncMock(return_value=True))
+    mock = fake_slack_web_client.mock
+    mock.get(  # pyright: ignore[reportUnknownMemberType]
+        re.compile(r"https://slack\.com/api/conversations\.info.*"),
+        payload={"ok": True, "channel": {"id": room, "name": "Team Alpha"}},
+        repeat=True,
+    )
+
+    for action_id in (ACTION_ISOLATE, ACTION_ISOLATE_COPY):
+        await handle_agent_setup_action(
+            runtime,
+            _action_payload(
+                action_id, meta=_meta(view="routing", channel_id=room), view_id="V_ROUTING"
+            ),
+        )
+
+    texts = [
+        e["text"] for e in _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
+    ]
+    assert "also answers outside this channel" in texts[0], "the plain click says why not"
+    assert "*team-alpha*, a copy of *shared*" in texts[1], "the copy click makes one"
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    assert policy.isolated_channel_ids == (room,)
+    assert len(_sent(mock, _VIEWS_UPDATE_KEY)) == 2, "each click refreshes Who answers where"

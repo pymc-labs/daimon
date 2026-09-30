@@ -22,7 +22,8 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing.factories import make_account, make_tenant
+from daimon.core.stores.tenants import get_tenant
+from daimon.testing.factories import make_account, make_routine, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -206,3 +207,32 @@ async def test_channel_admin_cannot_bind_another_channels_own_agent(
     await propagation._set_agent_default_impl(  # pyright: ignore[reportPrivateUsage]
         runtime, _auth(tenant_id, admin=True), "other-own", CHANNEL
     )
+
+
+async def test_channel_admin_loses_an_agent_that_runs_someone_elses_routine(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _tenant(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL),
+            tenant_id=tenant_id,
+            agent_name="helper",
+            mode="agent",
+        )
+    await _set_channel_admins_impl(
+        runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
+    )
+    member = _auth(tenant_id)
+    await require_admin_for_reachable_agent(runtime, member, agent_name="helper")
+
+    async with committing_sessionmaker.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None, "the tenant exists"
+        await make_routine(
+            session, tenant=tenant, created_by_user_id="666666666666666666", agent_name="helper"
+        )
+    with pytest.raises(ToolError, match="an admin must change its setup"):
+        await require_admin_for_reachable_agent(runtime, member, agent_name="helper")

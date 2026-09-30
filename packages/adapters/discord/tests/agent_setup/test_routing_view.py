@@ -378,7 +378,7 @@ def test_routing_offers_channel_admins_to_server_admins(account_id: uuid.UUID) -
         state, runtime=_make_runtime(), allowed_user_id=42, lines=_lines(3), server_default=None
     )
     labels = {node.label for node in _walk(view) if isinstance(node, discord.ui.Button)}
-    assert labels == {"◀ Back", "Channel admins", "Done"}
+    assert labels == {"◀ Back", "Channel admins", "Isolation", "Done"}
 
 
 async def test_back_returns_to_the_roster_page_the_reader_left(account_id: uuid.UUID) -> None:
@@ -460,3 +460,38 @@ async def test_load_routing_lines_names_channels_and_resolves_who_set_them(
     assert server_default.audit_line == f"set on <t:{int(_SET_AT.timestamp())}:d>", (
         "a timestamp with no recorded actor still says when"
     )
+
+
+async def test_channel_admins_click_rechecks_manage_server(
+    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.adapters.discord.agent_setup import routing_view
+    from daimon.adapters.discord.agent_setup.channel_admins_view import ChannelAdminsView
+
+    load = AsyncMock(return_value=[])
+    monkeypatch.setattr(routing_view, "load_grants", load)
+    view = RoutingView(
+        _state(_map(), account_id=account_id, is_admin=True),
+        runtime=_make_runtime(),
+        allowed_user_id=42,
+        lines=[],
+        server_default=None,
+    )
+
+    def clicker(*, admin: bool) -> MagicMock:
+        interaction = _interaction()
+        interaction.user.guild_permissions.administrator = admin
+        interaction.user.guild_permissions.manage_guild = False
+        interaction.guild.owner_id = 999
+        return interaction
+
+    demoted = clicker(admin=False)
+    await _find_button(view, "Channel admins").callback(demoted)
+    demoted.response.send_message.assert_awaited_once()
+    assert not load.await_count, "a member who lost Manage Server reads no grants"
+    demoted.response.edit_message.assert_not_called()
+
+    admin = clicker(admin=True)
+    await _find_button(view, "Channel admins").callback(admin)
+    swapped = admin.response.edit_message.call_args.kwargs["view"]
+    assert isinstance(swapped, ChannelAdminsView), "an admin opens the channel admins screen"

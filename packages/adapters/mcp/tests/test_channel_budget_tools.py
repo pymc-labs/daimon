@@ -6,10 +6,11 @@ resolver itself is covered in `tools/test_thread_participation_verify.py`.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from anthropic import AsyncAnthropic
@@ -20,9 +21,12 @@ from daimon.adapters.mcp.tools.channel_budgets import (
     _clear_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
     _get_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
     _list_channel_budgets_impl,  # pyright: ignore[reportPrivateUsage]
+    _resolve_slack_channel,  # pyright: ignore[reportPrivateUsage]
     _set_channel_budget_impl,  # pyright: ignore[reportPrivateUsage]
+    origin_budget_channel,
 )
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.domain import Role, TenantRow
@@ -268,3 +272,100 @@ async def test_callers_without_a_chat_platform_are_refused(
             _runtime(committing_sessionmaker),
             _auth(tenant, account_id, admin=True, platform="cli"),
         )
+
+
+async def test_clear_resolves_a_visible_thread_and_takes_any_other_id_as_given(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
+        if channel_id == _THREAD:
+            return _PARENT
+        raise ToolError("cannot see that channel")
+
+    monkeypatch.setattr(tool_module, "_budget_channel", fake)
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    admin = _auth(tenant, account_id, admin=True)
+    async with committing_sessionmaker.begin() as session:
+        await make_channel_budget(session, tenant=tenant, channel_id=_PARENT)
+        await make_channel_budget(session, tenant=tenant, channel_id="404")
+
+    thread = await _clear_channel_budget_impl(runtime, admin, _THREAD)
+    assert (thread.channel_id, thread.cleared) == (_PARENT, True), "a thread clears its parent"
+    gone = await _clear_channel_budget_impl(runtime, admin, "404")
+    assert (gone.channel_id, gone.cleared) == ("404", True), "a hidden channel is cleared as given"
+
+
+async def test_origin_budget_channel_is_the_turns_channel_or_none(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    member = _auth(tenant, account_id, admin=False)
+    here = await _origin(
+        committing_sessionmaker, tenant, account_id, parent_channel_id=_PARENT, thread_id=_THREAD
+    )
+    dm = await _origin(
+        committing_sessionmaker, tenant, account_id, parent_channel_id="dm-chan", thread_id="dm:x"
+    )
+    responder = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_x")
+
+    async def channel(auth: AuthIdentity, origin_context_id: str | None) -> str | None:
+        return await origin_budget_channel(committing_sessionmaker, auth, origin_context_id)
+
+    assert await channel(member, here) == _PARENT
+    assert await channel(dataclasses.replace(member, agent_id=responder), here) == _PARENT
+    other_agent = dataclasses.replace(member, agent_id=uuid.uuid4())
+    assert await channel(other_agent, here) is None, "another agent's origin is not attributed"
+    assert await channel(member, dm) is None, "a direct message belongs to no channel"
+    assert await channel(member, str(uuid.uuid4())) is None, "an unknown origin"
+    assert await channel(member, "not-a-uuid") is None, "a malformed origin"
+    assert await channel(member, None) is None
+
+
+@pytest.mark.parametrize(("is_private", "caller_in_channel"), [(False, False), (True, True)])
+async def test_slack_channel_resolves_when_the_caller_can_see_it(
+    monkeypatch: pytest.MonkeyPatch, is_private: bool, caller_in_channel: bool
+) -> None:
+    client = _slack_client(monkeypatch, is_private=is_private, caller_in_channel=caller_in_channel)
+    resolved = await _resolve_slack_channel(MagicMock(), _slack_auth(), "C1:1717.5")
+    assert resolved == "C1", "a thread resolves to its channel"
+    client.conversations_info.assert_awaited_once_with(channel="C1")
+
+
+async def test_slack_channel_hidden_from_the_caller_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _slack_client(monkeypatch, is_private=True, caller_in_channel=False)
+    with pytest.raises(ToolError, match="missing channel access"):
+        await _resolve_slack_channel(MagicMock(), _slack_auth(), "C1")
+
+
+def _slack_auth() -> AuthIdentity:
+    return AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.USER,
+        platform="slack",
+        external_id="T1",
+        platform_user_id="U1",
+    )
+
+
+def _slack_client(
+    monkeypatch: pytest.MonkeyPatch, *, is_private: bool, caller_in_channel: bool
+) -> MagicMock:
+    client = MagicMock()
+    client.conversations_info = AsyncMock(
+        return_value={"channel": {"id": "C1", "is_member": True, "is_private": is_private}}
+    )
+    client.users_info = AsyncMock(return_value={"user": {"id": "U1"}})
+    client.conversations_members = AsyncMock(
+        return_value={"members": ["U1"] if caller_in_channel else ["U2"]}
+    )
+
+    async def fake_client(runtime: object, *, team_id: str) -> MagicMock:
+        assert team_id == "T1", "resolved in the caller's own workspace"
+        return client
+
+    monkeypatch.setattr(tool_module, "slack_web_client", fake_client)
+    return client

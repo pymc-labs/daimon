@@ -17,6 +17,7 @@ import anthropic
 import structlog
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.channel_isolation import load_channel_isolation
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
@@ -61,9 +62,10 @@ async def _resolve_store(
 ) -> tuple[str, str] | None:
     """Resolve (agent_name, memory_store_id) for the invoking channel.
 
-    Returns None when the channel has no configured agent or the agent has no
-    memory store yet. Raises DaimonError when the configured agent doesn't
-    exist on the MA side. Same resolution chain as the Discord /memory command.
+    Returns None when the channel has no configured agent, the agent has no
+    memory store yet, or channel isolation hides the agent from this channel.
+    Raises DaimonError when the configured agent doesn't exist on the MA side.
+    Same resolution chain as the Discord /memory command.
     """
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
     async with runtime.sessionmaker() as session:
@@ -76,7 +78,13 @@ async def _resolve_store(
             channel_id=channel_id,
         )
         config = await resolve_config(session, context=scope, default=runtime.deployment_default)
+        isolation = await load_channel_isolation(
+            session, tenant_id=tenant_id, default=runtime.deployment_default
+        )
     if config.agent_name is None:
+        return None
+    inside = isolation.isolated_channel(channel_id)
+    if not isolation.is_visible(config.agent_name, inside_channel_id=inside):
         return None
     agent = await find_agent_by_daimon_tag(
         runtime.anthropic, tenant_id=tenant_id, name=config.agent_name

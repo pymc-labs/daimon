@@ -24,8 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_channel_budget`, `clear_channel_budget` and `list_channel_budgets`, or
   `daimon channels budget set|clear|list`. Once a channel's debits (markup
   included, threads counting toward their channel) reach its limit, new turns
-  there are refused, as are unprompted replies, wakes and routine fires that
-  post there. Members can read a budget with `get_channel_budget`, and
+  there are refused, as are unprompted replies, wakes, `/dm`, YouTube
+  transcripts asked for there and routine fires that post there or were made
+  there. Members can read a budget with `get_channel_budget`, and
   `/billing` shows the channel's spend against it. Nothing changes until a
   budget is set, with or without Stripe. Usage and debits now record their
   channel from this release on.
@@ -38,6 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channel's own agent; built-in agents and the server default stay with server
   admins. Slack grants are by member only.
   Nothing changes until a channel admin is named.
+- **Channel isolation.** Server admins can isolate a channel whose default
+  agent answers only there, with `set_channel_isolation`, from Who answers
+  where in the setup panel, or with `--isolated-channel`; `fork_from` or the
+  panel's copy option makes that agent from the one answering now. Its agents
+  then can't be bound or handed tasks elsewhere and are hidden outside it in
+  agent, skill, routine and hub listings and `/memory`; inside it only they
+  show. Its messages are readable only from inside it, and `/dm` there is
+  refused. Nothing changes until a channel is isolated. Clear isolation before
+  rolling back: an older release rejects the new policy field.
 - **Channel environments.** Admins can pick the environment a Discord or
   Slack channel's turns run in, or the workspace default, with
   `set_channel_environment` and `clear_channel_environment`; an admin of a
@@ -58,7 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Promo codes: operators create credit or timed codes with `daimon promo`, and
   admins redeem them from `/billing` on Discord and Slack or with the MCP tool
   `redeem_promo_code`. Timed credit is spent first inside its window and the
-  unspent rest expires. Nothing changes until an operator creates a code.
+  unspent rest expires. Nothing changes until an operator creates a code, apart
+  from the admin-only Redeem code button; join messages mention redemption only
+  while a code is redeemable.
 - Record content-free turn outcomes across chat, headless, routines and MCP hub/agent-chat, including attributed admission refusals, with bounded best-effort persistence. MCP `ask` records its terminal reason; fire-and-forget `start_turn`/`continue_turn` record dispatch only (`unknown`), without a later terminal update. Pre-attribution and adapter readiness gates are outside coverage.
 - Routines can name an optional destination channel or thread
   (`create_routine`/`update_routine` `destination_kind` + `destination_id`,

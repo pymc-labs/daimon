@@ -9,6 +9,8 @@ Money crosses this boundary as decimal strings, both ways.
 
 from __future__ import annotations
 
+import contextlib
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -35,10 +37,13 @@ from daimon.core.channel_budget import (
     load_budget_status,
     parse_budget_spec,
 )
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import channel_budgets as store
+from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PLATFORMS = ("discord", "slack")
 _NEEDS_CHANNEL = (
@@ -135,6 +140,45 @@ async def _budget_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: s
     return await _resolve_slack_channel(runtime, auth, channel_id)
 
 
+def _is_dm_scope(thread_id: str) -> bool:
+    return thread_id.startswith("dm:")
+
+
+async def origin_budget_channel(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    auth: AuthIdentity,
+    origin_context_id: str | None,
+) -> str | None:
+    """The channel a tool call's spend counts against: its turn's parent channel.
+
+    None without a live origin of this caller and responder, or in a DM, so
+    the call is simply not attributed; tools that need a channel use
+    `require_turn_origin` instead, which explains the refusal.
+    """
+    if not origin_context_id or auth.platform not in _PLATFORMS:
+        return None
+    try:
+        origin_id = uuid.UUID(origin_context_id)
+    except ValueError:
+        return None
+    async with sessionmaker() as session:
+        origin = await get_active_origin(
+            session,
+            origin_id=origin_id,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=cast(str, auth.platform),
+            now=datetime.now(UTC),
+        )
+    if origin is None or _is_dm_scope(origin.thread_id):
+        return None
+    if auth.agent_id is not None and auth.agent_id != derive_agent_uuid(
+        tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
+    ):
+        return None
+    return origin.parent_channel_id
+
+
 async def _origin_channel(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
 ) -> str:
@@ -142,7 +186,7 @@ async def _origin_channel(
     if not origin_context_id:
         raise ToolError(_NEEDS_CHANNEL)
     origin = await require_turn_origin(runtime, auth, origin_context_id)
-    if origin.thread_id.startswith("dm:"):
+    if _is_dm_scope(origin.thread_id):
         raise ToolError("a direct message belongs to no channel, so no channel budget applies")
     return origin.parent_channel_id
 
@@ -224,10 +268,17 @@ async def _set_channel_budget_impl(
 async def _clear_channel_budget_impl(
     runtime: McpRuntime, auth: AuthIdentity, channel_id: str
 ) -> ClearChannelBudgetResult:
-    """No visibility check: a budget on a channel since deleted must still be clearable."""
+    """Clear a channel's budget; a visible Discord thread clears its parent's.
+
+    Any other id is used as given, so a budget on a channel since deleted or
+    hidden can still be cleared.
+    """
     _require_admin(auth)
     platform = _require_platform(auth)
     target = _require_channel_id(channel_id).partition(":")[0]
+    if platform == "discord" and target.isdigit():
+        with contextlib.suppress(ToolError):
+            target = await _budget_channel(runtime, auth, target)
     async with runtime.session_factory.begin() as session:
         cleared = await store.delete_channel_budget(
             session, tenant_id=auth.tenant_id, platform=platform, channel_id=target
@@ -293,5 +344,8 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def clear_channel_budget(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str
     ) -> ClearChannelBudgetResult:
-        """Remove a channel's spending budget, so only the balance and caps apply. Admin-only."""
+        """Remove a channel's spending budget, so only the balance and caps apply. Admin-only.
+
+        A thread id clears its parent channel's budget.
+        """
         return await _clear_channel_budget_impl(runtime, await _auth(ctx), channel_id)

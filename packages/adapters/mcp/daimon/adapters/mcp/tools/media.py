@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.services._usage import MediaUsage
@@ -26,7 +27,9 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _check_admission,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
 from daimon.core.billing import BillingConfig
+from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.media.filenames import display_filename_for
 from daimon.core.media.youtube_url import extract_video_id
 from daimon.core.pricing import MODEL_PRICING
@@ -38,6 +41,8 @@ from fastmcp.exceptions import ToolError
 from google import genai
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+log = structlog.get_logger()
+
 
 async def _meter_billed_call(
     auth: AuthIdentity,
@@ -46,6 +51,7 @@ async def _meter_billed_call(
     markup: Decimal,
     model_id: str,
     usage: MediaUsage,
+    channel_id: str | None,
 ) -> None:
     """Record spend for a successful Gemini call on the billed path only.
 
@@ -65,7 +71,44 @@ async def _meter_billed_call(
         cache_read_input_tokens=usage.cache_read_input_tokens,
         markup=markup,
         pricing=MODEL_PRICING.get(model_id),
+        channel_id=channel_id,
     )
+
+
+async def _media_budget_channel(
+    auth: AuthIdentity,
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    origin_context_id: str | None,
+    tool_name: str,
+) -> str | None:
+    """The channel a billed media call counts against, refused once its budget is used up.
+
+    Runs after the balance and cap gates. Without an origin the call is
+    recorded with no channel, and no budget applies.
+    """
+    if auth.platform_user_id is None:
+        return None
+    channel_id = await origin_budget_channel(sessionmaker, auth, origin_context_id)
+    if await is_over_channel_budget(
+        sessionmaker=sessionmaker,
+        tenant_id=auth.tenant_id,
+        platform=auth.platform or "",
+        channel_id=channel_id,
+        now=datetime.now(UTC),
+    ):
+        log.info(
+            "mcp.admission_denied",
+            tenant_id=str(auth.tenant_id),
+            platform_user_id=auth.platform_user_id,
+            tool=tool_name,
+            gate="channel_budget",
+        )
+        raise ToolError(
+            "TERMINAL ERROR: This channel has used its spending budget. "
+            "An admin can raise or clear it."
+        )
+    return channel_id
 
 
 def register_media_tools(
@@ -96,7 +139,7 @@ def _register_youtube(
 ) -> None:
     @mcp.tool
     async def fetch_youtube_transcript(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, url: str
+        ctx: Context, url: str, origin_context_id: str | None = None
     ) -> str:
         """Fetch the transcript of a public YouTube video for summarization or Q&A.
 
@@ -121,6 +164,8 @@ def _register_youtube(
         Args:
             url: A public YouTube video URL. Accepts youtube.com/watch?v=,
                 youtu.be/, /embed/, /shorts/, /live/ shapes.
+            origin_context_id: This turn's origin_context_id, so the cost counts
+                toward the channel it was asked in.
 
         Returns:
             The full transcript text with timestamps, inside an
@@ -131,6 +176,12 @@ def _register_youtube(
             ctx,
             sessionmaker=sessionmaker,
             billing_config=billing_config,
+            tool_name="fetch_youtube_transcript",
+        )
+        channel_id = await _media_budget_channel(
+            auth,
+            sessionmaker=sessionmaker,
+            origin_context_id=origin_context_id,
             tool_name="fetch_youtube_transcript",
         )
 
@@ -152,6 +203,7 @@ def _register_youtube(
             markup=markup,
             model_id=YOUTUBE_MODEL,
             usage=result.usage,
+            channel_id=channel_id,
         )
         return render_untrusted(result.text, source="youtube_transcript", attrs={"url": url})
 
