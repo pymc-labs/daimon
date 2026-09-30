@@ -16,6 +16,7 @@ import discord
 import pytest
 import pytest_asyncio
 from daimon.adapters.discord.bot import (  # pyright: ignore[reportPrivateUsage]
+    GLOBAL_CAP_NOTICE,
     DaimonBot,
     _compose_queued_content,  # pyright: ignore[reportPrivateUsage]
 )
@@ -183,6 +184,69 @@ async def test_no_queueing_when_serial_mentions(queued_bot: DaimonBot) -> None:
     assert calls[1][1] is None
     m1.add_reaction.assert_not_called()  # type: ignore[attr-defined]
     m2.add_reaction.assert_not_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_per_tenant_cap_refuses_before_global_cap(queued_bot: DaimonBot) -> None:
+    queued_bot.runtime.settings.discord.max_concurrent_turns = 1
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id="123456")
+    queued_bot._inflight[tenant_id] = 100  # pyright: ignore[reportPrivateUsage]
+    queued_bot._global_inflight = 1  # pyright: ignore[reportPrivateUsage]
+    message = _make_channel_message()
+
+    await queued_bot.on_message(message)
+
+    assert queued_bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+    message.channel.send.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        "This server has too many chats in flight right now — try again in a moment."
+    )
+
+
+@pytest.mark.asyncio
+async def test_global_cap_refuses_second_turn_and_releases_first(queued_bot: DaimonBot) -> None:
+    queued_bot.runtime.settings.discord.max_concurrent_turns = 1
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    started: list[int] = []
+
+    async def stub(message: discord.Message, *_args: object, **_kwargs: object) -> None:
+        started.append(message.id)
+        entered.set()
+        if len(started) == 1:
+            await release.wait()
+
+    queued_bot._orchestrate = stub  # type: ignore[method-assign]
+    first_message = _make_channel_message(channel_id=789)
+    first_message.id = 1
+    second_message = _make_channel_message(channel_id=790)
+    second_message.id = 2
+    first = asyncio.create_task(queued_bot.on_message(first_message))
+    await entered.wait()
+    try:
+        await queued_bot.on_message(second_message)
+        assert started == [1]
+        assert queued_bot._global_inflight == 1  # pyright: ignore[reportPrivateUsage]
+        second_message.channel.send.assert_awaited_once_with(GLOBAL_CAP_NOTICE)
+    finally:
+        release.set()
+        await first
+    assert queued_bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_global_slot_released_when_turn_fails(queued_bot: DaimonBot) -> None:
+    queued_bot.runtime.settings.discord.max_concurrent_turns = 1
+
+    async def fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("turn failed")
+
+    queued_bot._orchestrate = fail  # type: ignore[method-assign]
+    message = _make_channel_message()
+
+    await queued_bot.on_message(message)
+
+    assert queued_bot._global_inflight == 0  # pyright: ignore[reportPrivateUsage]
+    assert queued_bot._inflight == {}  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio

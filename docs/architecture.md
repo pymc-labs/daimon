@@ -128,6 +128,13 @@ config). The order is load-bearing and documented as such in the module:
 The policy, protection, balance and cap gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
 
+Discord checks its per-guild in-flight limit before the optional process-wide
+turn limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`). Guild mentions, unprompted
+replies and DMs count against it; an excess requested turn gets a retry notice.
+Unprompted replies follow their existing silent-refusal policy. Continuation
+wakes retain their existing admission path. The limit is unset by default and
+applies only to this Discord process.
+
 A protected channel hears nothing from the agent, not even a refusal or an
 error. Each turn entry decides FIRST, before tenant liveness, provisioning or
 any other read that can fail, whether the agent may post there:
