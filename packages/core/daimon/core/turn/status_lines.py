@@ -48,7 +48,6 @@ _VERB_ICONS: Mapping[str, str] = {
     "discover": _LIST_ICON,
     "list": _LIST_ICON,
     "search": _LOOKUP_ICON,
-    "find": _LOOKUP_ICON,
     "get": _LOOKUP_ICON,
     "query": _LOOKUP_ICON,
     "read": _LOOKUP_ICON,
