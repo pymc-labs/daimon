@@ -243,6 +243,11 @@ AGENT_PINNED_ELSEWHERE_NOTICE = (
     "this agent only runs in the channels an operator pinned it to, so it can't answer here."
 )
 
+CHANNEL_ISOLATED_NOTICE = (
+    "this channel is isolated and the agent that would answer isn't one of its own. "
+    "A server admin must set the channel's agent."
+)
+
 
 def _credit_depleted_message(bot_display_name: str) -> str:
     return (
@@ -2468,6 +2473,14 @@ class DaimonBot(commands.Bot):
                     user_id=str(message.author.id),
                 )
                 await target.send("Sorry, " + AGENT_PINNED_ELSEWHERE_NOTICE)
+            elif err.reason == "channel_isolated":
+                log.info(
+                    "turn.skipped.channel_isolated",
+                    guild_id=guild_id,
+                    channel_id=parent_channel_id,
+                    user_id=str(message.author.id),
+                )
+                await target.send("Sorry, " + CHANNEL_ISOLATED_NOTICE)
             elif err.reason == "balance_depleted":
                 log.info("turn.skipped.over_balance", guild_id=guild_id, tenant_id=str(tenant_id))
                 await target.send(
