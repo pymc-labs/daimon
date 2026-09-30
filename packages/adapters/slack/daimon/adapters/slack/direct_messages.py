@@ -13,6 +13,7 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.direct_messages import reply_to_dm, require_dm_enabled, start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
@@ -131,6 +132,18 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 is_dm=True,
                 now=datetime.now(UTC),
             )
+            # A DM's spend is not the channel's, but a used-up channel cannot open one.
+            if await is_over_channel_budget(
+                sessionmaker=runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                channel_id=channel_id,
+                now=datetime.now(UTC),
+            ):
+                raise DaimonError(
+                    "This channel has used its spending budget. "
+                    "A workspace admin can raise or clear it."
+                )
             response = await client.conversations_history(channel=channel_id, limit=12)  # pyright: ignore[reportUnknownMemberType]
             messages = cast(list[dict[str, Any]], response.get("messages", []))
             context = [
