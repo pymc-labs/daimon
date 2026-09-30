@@ -32,7 +32,7 @@ from decimal import Decimal
 import anthropic
 import httpx
 import structlog
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core.access_policy import is_invoker_allowed, is_write_protected
@@ -518,7 +518,7 @@ async def run(
             api_key=settings.anthropic.api_key.get_secret_value(),
             base_url=str(settings.anthropic.base_url),
             max_retries=MA_MAX_RETRIES,
-            http_client=httpx.AsyncClient(
+            http_client=DefaultAsyncHttpxClient(
                 transport=SkillsRateLimitedTransport(settings.anthropic.skills_requests_per_minute)
             ),
         )

@@ -12,6 +12,7 @@ from functools import lru_cache
 from time import monotonic
 
 import httpx
+from anthropic import DEFAULT_CONNECTION_LIMITS
 
 
 class _Pacer:
@@ -41,7 +42,11 @@ class SkillsRateLimitedTransport(httpx.AsyncBaseTransport):
         self, requests_per_minute: int, *, inner: httpx.AsyncBaseTransport | None = None
     ) -> None:
         self._pacer = _process_pacer(requests_per_minute)
-        self._inner = inner if inner is not None else httpx.AsyncHTTPTransport()
+        self._inner = (
+            inner
+            if inner is not None
+            else httpx.AsyncHTTPTransport(limits=DEFAULT_CONNECTION_LIMITS)
+        )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.startswith("/v1/skills"):

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import structlog
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.adapters.mcp.artifacts import build_artifact_store
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.bundles import build_bundles_route
@@ -209,7 +209,7 @@ def create_mcp_app(
         effective_anthropic = AsyncAnthropic(
             api_key=effective_settings.anthropic.api_key.get_secret_value(),
             max_retries=MA_MAX_RETRIES,
-            http_client=httpx.AsyncClient(
+            http_client=DefaultAsyncHttpxClient(
                 transport=SkillsRateLimitedTransport(
                     effective_settings.anthropic.skills_requests_per_minute
                 )

@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import httpx
 import typer
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.core.config import load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.defaults.platform_export import export_platform
@@ -26,7 +25,7 @@ def platform_export_command(destination: Path) -> None:
             api_key=settings.anthropic.api_key.get_secret_value(),
             base_url=str(settings.anthropic.base_url),
             max_retries=MA_MAX_RETRIES,
-            http_client=httpx.AsyncClient(
+            http_client=DefaultAsyncHttpxClient(
                 transport=SkillsRateLimitedTransport(settings.anthropic.skills_requests_per_minute)
             ),
         ) as client:

@@ -6,8 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-import httpx
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -98,7 +97,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[DiscordRuntime]:
         api_key=settings.anthropic.api_key.get_secret_value(),
         base_url=str(settings.anthropic.base_url),
         max_retries=MA_MAX_RETRIES,
-        http_client=httpx.AsyncClient(
+        http_client=DefaultAsyncHttpxClient(
             transport=SkillsRateLimitedTransport(settings.anthropic.skills_requests_per_minute)
         ),
     ) as anthropic:
