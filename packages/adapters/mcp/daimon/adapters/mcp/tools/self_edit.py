@@ -566,8 +566,10 @@ def register_self_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Stored in your private agent_files namespace; isolated from other agents.
         Every entry is exported into your sandbox's `.env`, so `key` must be a
-        shell identifier (`[A-Za-z_][A-Za-z0-9_]*`) and not a reserved name
-        such as `PATH`, `LD_PRELOAD`, `BASH_ENV`, `GIT_*` or a proxy variable.
+        credential name: upper-case, ending in `_KEY`, `_TOKEN`, `_SECRET`,
+        `_PASSWORD` or similar (or `GH_TOKEN`/`GITHUB_TOKEN`). Tool-control and
+        endpoint names (`PATH`, `LD_PRELOAD`, `TAR_OPTIONS`, `*_BASE_URL`,
+        `*_URL` …) are refused.
         """
         return await _self_write_file_impl(runtime, await _auth(ctx), key=key, content=content)
 
