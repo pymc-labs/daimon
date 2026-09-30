@@ -18,9 +18,9 @@ Grammar
 
   - ``'…'`` — single-quoted. Everything up to the next ``'`` is literal; there
     are no escapes, so a single quote cannot appear inside.
-  - ``"…"`` — double-quoted. ``\\\\``, ``\\"``, ``\\n``, ``\\r`` and ``\\t`` are
-    recognised escapes; any other ``\\x`` is kept as a literal backslash
-    followed by ``x``.
+  - ``"…"`` — double-quoted. ``\\\\``, ``\\"``, ``\\$``, a backslash before a backtick,
+    ``\\n``, ``\\r`` and ``\\t`` are recognised escapes; any other ``\\x`` is kept as a
+    literal backslash followed by ``x``.
   - unquoted — everything to the end of the line, with trailing whitespace
     stripped.
 
@@ -36,6 +36,27 @@ Two deliberate departures from other dotenv readers
    starts with ``#`` is a comment here.
 2. **No interpolation and no command substitution.** ``$VAR``, ``${VAR}``,
    ``$(…)`` and backticks are stored as the literal characters typed.
+
+Serialization is shell-safe
+---------------------------
+The serialized file is loaded in the sandbox with ``set -a; source .env``, so
+`serialize_env_line` must produce a line bash reads as one inert assignment,
+whatever the value holds: a value is left bare only when every character is in
+a small set bash never treats specially, otherwise it is single-quoted, and a
+value that contains a single quote, a newline or a carriage return is
+double-quoted with ``\\``, ``"``, ``$`` and backtick escaped and line breaks
+written as ``\\n``/``\\r``. Bash and `parse_env_file` read every such line back
+to the same value, except that an escaped line break is the two characters
+``\\n``/``\\r`` to bash. A NUL cannot be represented and is refused.
+
+Reserved names
+--------------
+A key name that changes how the shell, a loader, git or an HTTP client
+behaves (``PATH``, ``LD_PRELOAD``, ``BASH_ENV``, ``GIT_CONFIG_*``,
+``HTTPS_PROXY`` …) is refused wherever a key is stored and left out of the
+serialized file: exporting it into the sandbox would let whoever set the key
+run code or redirect traffic in every later turn. `env_name_problem` is the
+one rule.
 
 Rejection is whole-file
 -----------------------
@@ -68,6 +89,8 @@ __all__ = [
     "EnvProblem",
     "EnvRejection",
     "decode_env_bytes",
+    "env_name_problem",
+    "is_reserved_env_name",
     "parse_env_file",
     "serialize_env_file",
     "serialize_env_line",
@@ -83,6 +106,7 @@ EnvRejection = Literal[
     "not_utf8",
     "syntax",
     "bad_name",
+    "reserved_name",
     "duplicate_name",
     "value_too_large",
     "too_many_entries",
@@ -94,6 +118,7 @@ EnvRejection = Literal[
 _REJECTION_PRIORITY: Final[tuple[EnvRejection, ...]] = (
     "syntax",
     "bad_name",
+    "reserved_name",
     "duplicate_name",
     "value_too_large",
     "too_many_entries",
@@ -103,13 +128,90 @@ _EXPORT_PREFIX: Final[re.Pattern[str]] = re.compile(r"export[ \t]+")
 _DOUBLE_QUOTE_ESCAPES: Final[dict[str, str]] = {
     "\\": "\\",
     '"': '"',
+    "$": "$",
+    "`": "`",
     "n": "\n",
     "r": "\r",
     "t": "\t",
 }
-#: Characters that force a serialized value into double quotes wherever they
-#: appear. Leading/trailing whitespace and an empty value force quoting too.
-_MUST_QUOTE_CHARS: Final[frozenset[str]] = frozenset("\n\r\"'\\")
+#: The only ASCII characters a value may hold and still be written bare. None
+#: of them means anything to bash inside a word that follows ``NAME=`` (``~``
+#: does, and ``#`` is kept out so a bare value never looks like a comment to
+#: any reader). Non-ASCII characters are never special to bash and stay bare
+#: too, unless they are whitespace at either end, which the parser strips.
+_BARE_VALUE_CHARS: Final[frozenset[str]] = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-.,:/+=@%"
+)
+#: Characters a single-quoted value cannot hold: the quote itself, and the line
+#: breaks the one-line grammar has no room for.
+_NOT_SINGLE_QUOTABLE: Final[frozenset[str]] = frozenset("'\n\r")
+
+#: Names that change how bash, a dynamic loader, an interpreter, git or an HTTP
+#: client behaves once exported. Compared case-insensitively (curl honours
+#: ``https_proxy``). ``GH_TOKEN``/``GITHUB_TOKEN`` stay allowed: storing a CLI
+#: token under them is the documented use (`defaults/skills/cli-auth`).
+_RESERVED_ENV_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "SHELL",
+        "ENV",
+        "BASH_ENV",
+        "BASHOPTS",
+        "SHELLOPTS",
+        "CDPATH",
+        "GLOBIGNORE",
+        "IFS",
+        "PROMPT_COMMAND",
+        "PS1",
+        "PS2",
+        "PS3",
+        "PS4",
+        "TMPDIR",
+        "EDITOR",
+        "VISUAL",
+        "PAGER",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "FTP_PROXY",
+        "NO_PROXY",
+        "SSH_ASKPASS",
+        "SSH_AUTH_SOCK",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "PYTHONINSPECT",
+        "PYTHONUSERBASE",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "NODE_EXTRA_CA_CERTS",
+        "PERL5OPT",
+        "PERL5LIB",
+        "PERLLIB",
+        "RUBYOPT",
+        "RUBYLIB",
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "CURL_HOME",
+        "WGETRC",
+    }
+)
+_RESERVED_ENV_PREFIXES: Final[tuple[str, ...]] = (
+    "LD_",
+    "DYLD_",
+    "BASH_FUNC_",
+    "GIT_",
+    "PIP_",
+    "UV_",
+    "NPM_CONFIG_",
+    "YARN_",
+)
 
 
 class EnvProblem(BaseModel):
@@ -148,6 +250,25 @@ class EnvFileRejected(DaimonError):
             return self.rejection
         lines = ", ".join(str(problem.line) for problem in self.problems)
         return f"{self.rejection} (lines {lines})"
+
+
+def is_reserved_env_name(name: str) -> bool:
+    """Whether exporting `name` into the sandbox would change how its tools behave."""
+    upper = name.upper()
+    return upper in _RESERVED_ENV_NAMES or upper.startswith(_RESERVED_ENV_PREFIXES)
+
+
+def env_name_problem(name: str) -> Literal["bad_name", "reserved_name"] | None:
+    """Why `name` cannot be stored as a key, or None when it can.
+
+    The single rule every write path applies: a POSIX shell identifier that is
+    not a reserved name.
+    """
+    if ENV_NAME_PATTERN.fullmatch(name) is None:
+        return "bad_name"
+    if is_reserved_env_name(name):
+        return "reserved_name"
+    return None
 
 
 def decode_env_bytes(raw: bytes) -> str:
@@ -226,11 +347,15 @@ def parse_env_file(text: str) -> tuple[EnvEntry, ...]:
             problems["syntax"].append(EnvProblem(name=None, line=number))
             continue
         name = name_part.strip()
-        if ENV_NAME_PATTERN.fullmatch(name) is None:
+        name_problem = env_name_problem(name)
+        if name_problem == "bad_name":
             problems["bad_name"].append(EnvProblem(name=None, line=number))
             continue
+        if name_problem == "reserved_name":
+            problems["reserved_name"].append(EnvProblem(name=name, line=number))
+            continue
         value = _parse_value(value_part.strip())
-        if value is None:
+        if value is None or "\0" in value:
             problems["syntax"].append(EnvProblem(name=name, line=number))
             continue
         if len(value.encode()) > MAX_ENV_VALUE_BYTES:
@@ -257,22 +382,41 @@ def parse_env_file(text: str) -> tuple[EnvEntry, ...]:
     return tuple(entries)
 
 
-def serialize_env_line(name: str, value: str) -> str:
-    """Render one `NAME=value` line, quoting only when the value needs it.
+def _is_bare_char(char: str) -> bool:
+    return char in _BARE_VALUE_CHARS or ord(char) > 0x7F
 
-    Minimal quoting is load-bearing: the assembled bytes are hashed into the
-    fingerprint that decides whether a running agent's mounted `.env` is still
-    current, so quoting a value that did not need it would change every
-    fingerprint at once.
+
+def serialize_env_line(name: str, value: str) -> str:
+    """Render one `NAME=value` line that bash sources as one inert assignment.
+
+    Bare when every character is in `_BARE_VALUE_CHARS` or non-ASCII, single-quoted when
+    the value holds no single quote or line break, double-quoted with
+    ``\\``, ``"``, ``$`` and backtick escaped otherwise — never a form in
+    which bash expands, substitutes or splits anything.
+
+    Staying bare wherever that is safe is load-bearing: the assembled bytes are
+    hashed into the fingerprint that decides whether a running agent's mounted
+    `.env` is still current, so quoting a value that did not need it would
+    change every fingerprint at once.
+
+    Raises `ValueError` for a name that is not a POSIX identifier or a value
+    holding a NUL; neither message carries the value.
     """
-    if value and value == value.strip() and not _MUST_QUOTE_CHARS & set(value):
+    if ENV_NAME_PATTERN.fullmatch(name) is None:
+        raise ValueError("env name must match [A-Za-z_][A-Za-z0-9_]*")
+    if "\0" in value:
+        raise ValueError(f"value for {name} contains a NUL byte")
+    if value and value == value.strip() and all(_is_bare_char(char) for char in value):
         return f"{name}={value}"
+    if not _NOT_SINGLE_QUOTABLE & set(value):
+        return f"{name}='{value}'"
     escaped = (
         value.replace("\\", "\\\\")
         .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("`", "\\`")
         .replace("\n", "\\n")
         .replace("\r", "\\r")
-        .replace("\t", "\\t")
     )
     return f'{name}="{escaped}"'
 

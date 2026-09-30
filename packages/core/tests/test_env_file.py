@@ -15,6 +15,8 @@ from daimon.core.env_file import (
     MAX_ENV_VALUE_BYTES,
     EnvFileRejected,
     decode_env_bytes,
+    env_name_problem,
+    is_reserved_env_name,
     parse_env_file,
     serialize_env_file,
     serialize_env_line,
@@ -103,6 +105,47 @@ def test_parse_env_file_reports_every_duplicate_line_number() -> None:
     assert {problem.name for problem in error.problems} == {"A"}, (
         "a valid duplicated name is safe to name and identifies the problem"
     )
+
+
+@pytest.mark.parametrize(
+    "name", ["LD_PRELOAD", "PATH", "BASH_ENV", "GIT_CONFIG_KEY_0", "https_proxy", "NODE_OPTIONS"]
+)
+def test_parse_env_file_rejects_a_reserved_name_and_names_it(name: str) -> None:
+    with pytest.raises(EnvFileRejected) as caught:
+        parse_env_file(f"OK=1\n{name}=/tmp/x.so\n")
+    assert caught.value.rejection == "reserved_name", f"{name} must be refused as reserved"
+    assert [(p.name, p.line) for p in caught.value.problems] == [(name, 2)]
+
+
+def test_parse_env_file_rejects_a_nul_in_a_value() -> None:
+    with pytest.raises(EnvFileRejected) as caught:
+        parse_env_file("A=x\0y\n")
+    assert caught.value.rejection == "syntax", "a NUL has no shell representation"
+
+
+@pytest.mark.parametrize(
+    ("name", "reserved"),
+    [
+        ("LD_PRELOAD", True),
+        ("ld_library_path", True),
+        ("DYLD_INSERT_LIBRARIES", True),
+        ("GIT_SSH_COMMAND", True),
+        ("GIT_ASKPASS", True),
+        ("PYTHONSTARTUP", True),
+        ("PROMPT_COMMAND", True),
+        ("HTTP_PROXY", True),
+        ("NO_PROXY", True),
+        ("PIP_INDEX_URL", True),
+        ("OPENAI_API_KEY", False),
+        ("GH_TOKEN", False),
+        ("GITHUB_TOKEN", False),
+        ("PATHWAY_KEY", False),
+        ("LANGUAGE_API_KEY", False),
+    ],
+)
+def test_is_reserved_env_name(name: str, reserved: bool) -> None:
+    assert is_reserved_env_name(name) is reserved
+    assert (env_name_problem(name) == "reserved_name") is reserved
 
 
 def test_parse_env_file_does_not_interpolate_or_substitute() -> None:
@@ -229,6 +272,15 @@ _NASTY_VALUES: list[tuple[str, str]] = [
     ("looks like export", "export A=1"),
     ("4 KiB blob", "x" * MAX_ENV_VALUE_BYTES),
     ("escape sequence text", r"literal \n and \t"),
+    ("tilde", "~/x"),
+    ("semicolon", "a;b"),
+    ("pipe and ampersand", "a|b&c"),
+    ("redirects", "a>b<c"),
+    ("glob", "*?[a]"),
+    ("braces and parens", "{a}(b)"),
+    ("quote and dollar", "it's $(id)"),
+    ("quote and backtick", "it's `id`"),
+    ("leading non-breaking space", "\u00a0x"),
 ]
 
 
@@ -247,9 +299,27 @@ def test_serialize_env_line_leaves_a_plain_value_unquoted() -> None:
 
 
 def test_serialize_env_line_quotes_and_escapes_a_value_that_needs_it() -> None:
-    assert serialize_env_line("KEY", 'a"b\\c\nd\te') == 'KEY="a\\"b\\\\c\\nd\\te"', (
-        "quote, backslash, newline and tab are escaped inside a double-quoted value"
+    assert serialize_env_line("KEY", 'a"b\\c\nd\te$`') == 'KEY="a\\"b\\\\c\\nd\te\\$\\`"', (
+        "quote, backslash, newline, dollar and backtick are escaped inside a double-quoted value"
     )
+
+
+def test_serialize_env_line_single_quotes_a_value_with_shell_metacharacters() -> None:
+    assert serialize_env_line("KEY", "$(id);`x`") == "KEY='$(id);`x`'", (
+        "a value bash would expand is single-quoted, where nothing is special"
+    )
+
+
+@pytest.mark.parametrize("name", ["1A", "A-B", "A B", "", "A=B"])
+def test_serialize_env_line_refuses_a_name_that_is_not_an_identifier(name: str) -> None:
+    with pytest.raises(ValueError, match="env name"):
+        serialize_env_line(name, "v")
+
+
+def test_serialize_env_line_refuses_a_nul_without_echoing_the_value() -> None:
+    with pytest.raises(ValueError, match="NUL") as caught:
+        serialize_env_line("KEY", "sec\0ret")
+    assert "sec" not in str(caught.value), "the error must not carry the value"
 
 
 def test_serialize_env_file_is_empty_bytes_for_no_entries() -> None:

@@ -789,6 +789,23 @@ async def test_request_agent_key_rejects_invalid_key(
     assert await _row_count(db_session) == 0
 
 
+@pytest.mark.parametrize(
+    "key", ["LD_PRELOAD", "BASH_ENV", "PATH", "GIT_CONFIG_KEY_0", "HTTPS_PROXY", "NODE_OPTIONS"]
+)
+async def test_request_agent_key_rejects_a_reserved_key(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    key: str,
+) -> None:
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth_identity()
+    with pytest.raises(ToolError, match="reserved name"):
+        await _request_agent_key_impl(
+            runtime, auth, agent_name="daimon", key=key, purpose="x", channel_id="222"
+        )
+    assert await _row_count(db_session) == 0
+
+
 # ---------------------------------------------------------------------------
 # 8. An agent_name with no matching MA agent gets a ToolError; no row created
 # ---------------------------------------------------------------------------

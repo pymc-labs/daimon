@@ -546,6 +546,9 @@ def register_self_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Write or overwrite a per-agent file under `key`.
 
         Stored in your private agent_files namespace; isolated from other agents.
+        Every entry is exported into your sandbox's `.env`, so `key` must be a
+        shell identifier (`[A-Za-z_][A-Za-z0-9_]*`) and not a reserved name
+        such as `PATH`, `LD_PRELOAD`, `BASH_ENV`, `GIT_*` or a proxy variable.
         """
         return await _self_write_file_impl(runtime, await _auth(ctx), key=key, content=content)
 

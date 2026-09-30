@@ -12,6 +12,7 @@ from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.core._models import AgentFile
 from daimon.core.agent_env_crypto import decode_value, encode_value
 from daimon.core.config import load_crypto_settings
+from daimon.core.env_file import env_name_problem
 from daimon.core.errors import StoreError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores.domain import AgentFileRow
@@ -85,6 +86,28 @@ def _row(cipher: MultiFernet | None, orm: AgentFile) -> AgentFileRow:
     )
 
 
+def _require_storable(key: str, content: str) -> None:
+    """Refuse a key the sandbox would export unsafely, before anything is written.
+
+    Every write path funnels through here, so no form, upload or agent-key tool
+    can store `LD_PRELOAD`, `BASH_ENV`, a non-identifier or a NUL — whatever
+    check the caller did or did not run first. The message never carries the
+    value.
+    """
+    if key == "":
+        raise StoreError("key must not be empty")
+    problem = env_name_problem(key)
+    if problem == "bad_name":
+        raise StoreError(
+            "key must match [A-Za-z_][A-Za-z0-9_]* "
+            "(letters, digits, underscores; must not start with a digit)"
+        )
+    if problem == "reserved_name":
+        raise StoreError(f"{key} is a reserved name: it changes how the agent's tools run")
+    if "\0" in content:
+        raise StoreError(f"the value for {key} contains a NUL byte")
+
+
 @asynccontextmanager
 async def _encoding_writer(session: AsyncSession) -> AsyncIterator[None]:
     """Mark this statement as encoding-aware, without trusting later legacy SQL.
@@ -121,8 +144,7 @@ async def put_agent_file(
     conflict path updates only the latter — the creator of a key survives
     every later replacement of its value.
     """
-    if key == "":
-        raise StoreError("key must not be empty")
+    _require_storable(key, content)
 
     cipher = _write_cipher(session)
     content, encoding = encode_value(cipher, content)
@@ -189,8 +211,7 @@ async def put_agent_file_if_unchanged(
     a real race is between transactions, and a caller that already holds the
     row in its own transaction is not racing itself.
     """
-    if key == "":
-        raise StoreError("key must not be empty")
+    _require_storable(key, content)
 
     cipher = _write_cipher(session)
     content, encoding = encode_value(cipher, content)

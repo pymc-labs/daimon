@@ -46,6 +46,7 @@ from daimon.core.credential_requests import (
 )
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.env_file import is_reserved_env_name
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
@@ -443,6 +444,11 @@ async def _request_agent_key_impl(
         raise ToolError(
             "key must match [A-Za-z_][A-Za-z0-9_]* "
             "(letters, digits, underscores; must not start with a digit)"
+        )
+    if key is not None and is_reserved_env_name(key):
+        raise ToolError(
+            f"{key} is a reserved name: it changes how the agent's shell, git, "
+            "interpreters or HTTP clients run, so it cannot be stored as a key."
         )
     if key is None:
         named = _named_single_key(purpose)

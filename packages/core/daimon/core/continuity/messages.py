@@ -338,6 +338,7 @@ def render_change_confirmation(change: ConfigurationChange) -> str:
 _ENV_LINE_REASONS: Final[dict[EnvRejection, str]] = {
     "syntax": "I could not read this line.",
     "bad_name": "the name here is not usable as a key name.",
+    "reserved_name": "{name} is reserved: it changes how the agent's tools run.",
     "duplicate_name": "{name} is set more than once.",
     "value_too_large": "{name} is too long.",
     "too_many_entries": "{name} is past the number of keys I can take at once.",
@@ -353,6 +354,7 @@ _ENV_FILE_REASONS: Final[dict[EnvRejection, str]] = {
     "empty": "There are no keys in the file.",
     "syntax": "I could not read the file.",
     "bad_name": "The names in the file are not usable as key names.",
+    "reserved_name": "The file sets a reserved name that changes how the agent's tools run.",
     "duplicate_name": "The same name is set more than once.",
     "value_too_large": "One of the keys is too long.",
     "too_many_entries": "There are more keys in the file than I can take at once.",

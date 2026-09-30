@@ -119,11 +119,11 @@ async def test_self_write_then_read_round_trip(
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(tenant_id=tenant_id)
 
-    written = await _self_write_file_impl(runtime, auth, key="config.yaml", content="hello: world")
-    assert written.key == "config.yaml", "write must persist the requested key"
+    written = await _self_write_file_impl(runtime, auth, key="CONFIG_YAML", content="hello: world")
+    assert written.key == "CONFIG_YAML", "write must persist the requested key"
     assert written.content == "hello: world", "write must persist the requested content"
 
-    read = await _self_read_file_impl(runtime, auth, key="config.yaml")
+    read = await _self_read_file_impl(runtime, auth, key="CONFIG_YAML")
     assert read is not None, "read of just-written key must hit"
     assert read.key == "config.yaml", "read must return the stored row"
     assert read.content == REDACTED_VALUE, "values never come back as tool output"
@@ -139,8 +139,8 @@ async def test_self_list_files_returns_only_caller_partition(
     runtime = _runtime(committing_sessionmaker)
 
     auth_a = _auth_identity(tenant_id=tenant_id, agent_id=agent_a)
-    await _self_write_file_impl(runtime, auth_a, key="config.yaml", content="a")
-    await _self_write_file_impl(runtime, auth_a, key="notes.md", content="b")
+    await _self_write_file_impl(runtime, auth_a, key="CONFIG_YAML", content="a")
+    await _self_write_file_impl(runtime, auth_a, key="NOTES_MD", content="b")
 
     auth_b = _auth_identity(tenant_id=tenant_id, agent_id=agent_b)
     rows = await _self_list_files_impl(runtime, auth_b)
@@ -173,12 +173,12 @@ async def test_self_delete_file_after_write_removes_row(
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(tenant_id=tenant_id)
 
-    await _self_write_file_impl(runtime, auth, key="ephemeral.txt", content="bye")
+    await _self_write_file_impl(runtime, auth, key="EPHEMERAL_TXT", content="bye")
     rows_before = await _self_list_files_impl(runtime, auth)
     assert len(rows_before) == 1, "list must show the row that was just written"
 
-    result = await _self_delete_file_impl(runtime, auth, key="ephemeral.txt")
-    assert result == {"deleted": True, "key": "ephemeral.txt"}, (
+    result = await _self_delete_file_impl(runtime, auth, key="EPHEMERAL_TXT")
+    assert result == {"deleted": True, "key": "EPHEMERAL_TXT"}, (
         "delete must report success on a row that existed"
     )
 
