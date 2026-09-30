@@ -215,7 +215,8 @@ the same with or without Stripe and for either funding mode.
 - **Window**: `monthly` (the UTC calendar month), `total` (since `starts_at`,
   or ever) or `fixed` (from `starts_at` until `ends_at`, exclusive). A
   budget with a `starts_at` gates nothing before it, and a fixed one nothing
-  after its end. Panels show a fixed window as `START until END`.
+  after its end. Panels show a fixed window as `START until END`, and a
+  total window that has not started as `from START`.
 - **The gate** trips once spend reaches the limit, so a limit of 0 stops the
   channel. Like the other gates it runs once before a turn, so a turn in
   progress finishes past the limit.
@@ -232,8 +233,9 @@ What a budget does not cover:
   turns are neither attributed nor gated. A DM moved with `/dm` since then
   records the parent channel it came from
   (`direct_message_conversations.source_channel_id`): `/dm` is refused while
-  that channel's budget is used up, and the DM's turns count toward it and
-  are gated by it.
+  that channel's budget is used up, and the DM's turns and media calls
+  count toward it and are gated by it. `get_channel_budget` in such a DM
+  reads that channel's budget.
 - **MCP turns.** The MCP tools that start a turn (`start_turn`, `ask` and the
   like) record no channel and do not check budgets yet. A media tool call
   without a live `origin_context_id` is not attributed either.
