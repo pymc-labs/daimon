@@ -546,6 +546,43 @@ async def test_spend_recorded_after_the_grace_period_stays_ordinary_spend(
     )
 
 
+async def test_reconcile_with_overlapping_credit_restores_each_grant_once(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """Late spend refunds the earlier-ending grant; spend after its reconcile stays ordinary."""
+    tenant = await make_tenant(db_session)
+    long = await _timed(db_session, "LONGER", 0, 10)
+    short = await _timed(db_session, "SHORT1", 2, 6)
+    await _redeem(db_session_factory, tenant, "LONGER")
+    await _redeem(db_session_factory, tenant, "SHORT1")
+    await settle_promo_credit(db_session_factory, now=T0 + 2 * H)
+    await _spend(db_session, tenant, "3", T0 + 3 * H)
+
+    at_short_close = await settle_promo_credit(db_session_factory, now=T0 + 6 * H)
+    await _spend(db_session, tenant, "5", T0 + 5 * H)  # recorded late, inside both windows
+    reconciled = await settle_promo_credit(db_session_factory, now=T0 + 6 * H + LATE_SPEND_GRACE)
+    await _spend(db_session, tenant, "1", T0 + 5 * H)  # recorded after the short reconcile
+    at_long_close = await settle_promo_credit(db_session_factory, now=T0 + 10 * H)
+
+    assert at_short_close == _settled(0, 1, "7"), "the short grant should expire its $7 left"
+    assert reconciled == _settled(0, 0, restored=1, restored_usd="5"), (
+        "the late $5 should be refunded to the short grant, which ends first"
+    )
+    assert at_long_close == _settled(0, 1, "10"), (
+        "spend after the short reconcile stays on the short grant, so the long one keeps $10"
+    )
+    ledger = await _ledger(db_session, tenant)
+    assert f"promo_expiry_refund:{long.id}:{tenant.id}" not in ledger, (
+        "the long grant should never be refunded"
+    )
+    assert ledger[f"promo_expiry_refund:{short.id}:{tenant.id}"] == Decimal("5"), (
+        "the short grant should be refunded exactly once"
+    )
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("-1"), (
+        "only the $1 recorded after the reconcile should be ordinary spend"
+    )
+
+
 @pytest.mark.fresh_schema  # drops a CHECK to plant a row the ledger rejects
 async def test_a_rejected_row_in_a_full_batch_is_passed_over_by_the_next(
     db_session: AsyncSession, db_session_factory: Factory
