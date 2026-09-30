@@ -209,6 +209,9 @@ async def create_ma_session(
         tool_safety=deps.tool_safety,
         slack_turn_context_id=admission.slack_turn_context_id,
         private_dm_id=admission.private_dm_id,
+        origin_channel_id=admission.origin_channel_id,
+        origin_thread_id=admission.origin_thread_id,
+        origin_sealed=admission.origin_sealed,
     )
 
     has_repo = any(

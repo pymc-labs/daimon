@@ -37,7 +37,10 @@ from daimon.adapters.mcp.hub.identity import (
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pagination import Page
-from daimon.adapters.mcp.tools._session_access import session_belongs_to_caller
+from daimon.adapters.mcp.tools._session_access import (
+    session_belongs_to_caller,
+    sessions_outside_seals,
+)
 from daimon.adapters.mcp.tools.agent_chat import (
     AgentDescription,
     _ask_impl,  # pyright: ignore[reportPrivateUsage]
@@ -185,11 +188,12 @@ async def _verify_account_owns_session(
 async def _list_my_sessions_impl(
     runtime: McpRuntime, auth: AuthIdentity, agent: BetaManagedAgentsAgent
 ) -> list[SessionInfo]:
-    out: list[SessionInfo] = []
+    owned: list[BetaManagedAgentsSession] = []
     async for session in runtime.client.beta.sessions.list(agent_id=str(agent.id)):
         if _owned_by(session, auth):
-            out.append(SessionInfo.from_ma(session))
-    return out
+            owned.append(session)
+    # The hub runs outside every channel: sealed conversations stay hidden.
+    return [SessionInfo.from_ma(s) for s in await sessions_outside_seals(runtime, auth, owned)]
 
 
 def register_hub_tools(
@@ -296,7 +300,8 @@ def register_hub_tools(
         """Sessions you started with this daimon, for resuming with ``handle``.
 
         Other people's conversations with the same daimon are not listed and
-        their handles are not accepted.
+        their handles are not accepted; nor are conversations from a sealed
+        channel, which can only be read from inside it.
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
         return await _list_my_sessions_impl(runtime, auth, agent)

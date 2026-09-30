@@ -37,8 +37,11 @@ from daimon.core.credential_env import upload_env_and_mount
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
+    MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
+    MA_METADATA_KEY_SEALED,
     MA_METADATA_KEY_TENANT,
+    MA_METADATA_KEY_THREAD,
 )
 from daimon.core.errors import StoreError
 from daimon.core.github_credentials import get_pat
@@ -116,6 +119,9 @@ async def create_session(
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     slack_turn_context_id: uuid.UUID | None = None,
     private_dm_id: str | None = None,
+    origin_channel_id: str | None = None,
+    origin_thread_id: str | None = None,
+    origin_sealed: bool = False,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -130,6 +136,10 @@ async def create_session(
 
     ``slack_turn_context_id`` selects an isolated execution credential for private
     Slack turns. It is absent for channel, headless and MCP-created sessions.
+
+    ``origin_channel_id``/``origin_thread_id``/``origin_sealed`` name the channel
+    turn a session is opened for; they are stamped on it so the transcript tools
+    can refuse a sealed conversation's transcript outside its channel.
 
     When a per-agent GitHub PAT is resolvable and the vault was ensured, a
     GitHub Copilot MCP credential is mirrored into the vault
@@ -446,6 +456,13 @@ async def create_session(
         metadata[MA_METADATA_KEY_PRIVATE_DM] = str(slack_turn_context_id)
     elif private_dm_id is not None:
         metadata[MA_METADATA_KEY_PRIVATE_DM] = private_dm_id
+    if origin_channel_id is not None:
+        # Where the conversation runs, for the transcript tools' seal check.
+        metadata[MA_METADATA_KEY_CHANNEL] = origin_channel_id
+        if origin_thread_id is not None:
+            metadata[MA_METADATA_KEY_THREAD] = origin_thread_id
+        if origin_sealed:
+            metadata[MA_METADATA_KEY_SEALED] = "true"
 
     return await anthropic.beta.sessions.create(
         agent=agent_argument,

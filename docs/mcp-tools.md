@@ -211,9 +211,9 @@ Sessions tools: list / get / events.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_session` | all callers | Look up a session by id (tenant-scoped). |
-| `list_session_events` | all callers | List events for a session (SDK pass-through, single page). |
-| `list_sessions` | all callers | List sessions in the tenant pool. |
+| `get_session` | all callers | Look up one of your sessions by id (tenant-scoped). |
+| `list_session_events` | all callers | List events for one of your sessions (SDK pass-through, single page). |
+| `list_sessions` | all callers | List your sessions in the tenant pool. |
 
 ## `setup_target`
 

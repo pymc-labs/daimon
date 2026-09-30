@@ -72,7 +72,11 @@ from daimon.adapters.mcp.tools._ctx import (
     _check_admission,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._pagination import Page
-from daimon.adapters.mcp.tools._session_access import session_belongs_to_caller
+from daimon.adapters.mcp.tools._session_access import (
+    require_session_outside_seals,
+    session_belongs_to_caller,
+    sessions_outside_seals,
+)
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
@@ -242,11 +246,17 @@ async def _verify_agent_owns_session(
     would let one member read, drive or stop another's conversation. Raises
     ``ToolError("session not found")`` — same message as a genuinely missing
     session, so existence isn't leaked across agents or accounts.
+
+    A conversation that ran in a sealed channel is then refused outright: these
+    callers (agent keys, the hub) run outside every channel, and its transcript
+    holds what the seal keeps in. Checked on every call, so a follow-up after
+    the channel is sealed is refused too.
     """
     s = await runtime.client.beta.sessions.retrieve(handle)
     derived = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(s.agent.id))
     if auth.agent_id is None or derived != auth.agent_id or not _owned_by_caller(s, auth):
         raise ToolError("session not found")
+    await require_session_outside_seals(runtime, auth, s)
     return s
 
 
@@ -497,15 +507,15 @@ async def _list_sessions_impl(
 
     Resolves the caller's MA agent from the verified claim, lists that agent's
     sessions, and keeps only those tagged with the caller's account. Other
-    agents' sessions in the same tenant, and other members' sessions of this
-    agent, are never returned.
+    agents' sessions in the same tenant, other members' sessions of this
+    agent, and conversations that ran in a sealed channel are never returned.
     """
     ma_agent = await _resolve_ma_agent(runtime, auth)
-    results: list[SessionInfo] = []
+    owned: list[BetaManagedAgentsSession] = []
     async for s in runtime.client.beta.sessions.list(agent_id=str(ma_agent.id)):
         if _owned_by_caller(s, auth):
-            results.append(SessionInfo.from_ma(s))
-    return results
+            owned.append(s)
+    return [SessionInfo.from_ma(s) for s in await sessions_outside_seals(runtime, auth, owned)]
 
 
 async def _get_session_impl(

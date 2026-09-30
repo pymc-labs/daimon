@@ -186,7 +186,7 @@ conversation ids):
 | --- | --- | --- |
 | `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
 | `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord, Slack and Teams write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
-| `sealed_channel_ids` | nothing is sealed | the channel read tools (`read_channel`, `read_thread`, `get_message`, `list_threads`, `search_messages`) via `ChannelReadPolicy`, which the dispatcher in `tools/channels.py` loads per call; `admit()` also sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
+| `sealed_channel_ids` | nothing is sealed | the channel read tools (`read_channel`, `read_thread`, `get_message`, `list_threads`, `search_messages`) via `ChannelReadPolicy`, which the dispatcher in `tools/channels.py` loads per call; the session transcript tools (`list_sessions`, `get_session`, `list_session_events`, agent chat's `list_my_sessions`, `get_my_session`, `list_events`, `continue_turn` and the rest, and the hub's) via `tools/_session_access.py`; `admit()` also sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
 | `agent_channel_pins` | every agent runs wherever the cascade sends it | `admit()` after the agent is retrieved (every turn path: mention, follow-up, wizard submit, continuation, handoff thread, DM), the MCP and hub turn tools (`_admit` in `tools/_ctx.py`: `start_turn`, `ask`, `continue_turn`, new or resumed), `hand_off_task` via `decide_handoff`, `fork_agent` (a pinned agent can't be copied), and routines at save (`_check_agent_pin`) and at every fire (scheduler) |
 
@@ -213,7 +213,21 @@ one of the same account and responder, not only the current turn's: a member
 who copies an origin id out of a sealed-channel turn can read that channel
 from elsewhere until it expires -- someone who could read it anyway.
 Outside reads are refused after the platform's own caller check, and search
-drops sealed hits. Operators edit the policy with the CLI:
+drops sealed hits.
+
+A session transcript holds everything its turns saw, so the transcript tools
+apply the same seal. `admit()` records the turn's channel and thread on the
+`Admission`, and `create_session` stamps them on the session
+(`daimon_channel`, `daimon_thread`, plus `daimon_sealed=true` when the tenant
+sealed it at creation). Each read or follow-up judges the stamp against the
+current policy, as a channel read of that channel and thread: the main MCP
+server's session tools take the calling turn's `origin_context_id`; agent-chat
+keys and the hub run outside every channel, so they never list, read or
+continue a sealed conversation. Sealing a channel later covers its existing
+sessions, and a session stamped sealed stays sealed after an unseal. A session
+from before the stamp that a thread ran on (`thread_sessions`) has no known
+parent channel: while the tenant seals anything it is shown only to a turn in
+that same thread. Operators edit the policy with the CLI:
 
 ```bash
 daimon tenants access-policy get discord GUILD_ID [--json]

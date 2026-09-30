@@ -934,6 +934,9 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
     )
 
     assert admission.memory_read_only is expected, "memory_read_only must follow the policy"
+    assert (admission.origin_channel_id, admission.origin_thread_id) == (channel_id, thread_id)
+    # The seal stamp follows the channel seal only; a read-only DM is not sealed.
+    assert admission.origin_sealed is (expected and not is_dm)
 
 
 @pytest.mark.parametrize(
