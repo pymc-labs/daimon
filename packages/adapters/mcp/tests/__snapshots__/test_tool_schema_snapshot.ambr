@@ -2046,8 +2046,9 @@
       'description': '''
         Show a channel's spending budget: its limit, window and what it has spent.
         
-        For the channel this turn is in, omit ``channel_id`` and pass this
-        turn's ``origin_context_id``. For another channel, pass its id; a
+        For the channel this turn is in (in a DM, the channel it was moved
+        from), omit ``channel_id`` and pass this turn's
+        ``origin_context_id``. For another channel, pass its id; a
         thread id resolves to its parent channel. Any member may read the
         budget of a channel they can see. ``budget`` is null when the
         channel has none. Read ``summary`` back to the user.

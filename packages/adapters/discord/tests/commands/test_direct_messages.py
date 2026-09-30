@@ -1,4 +1,4 @@
-"""`/dm` admits against the source channel's budget and records it on the DM.
+"""`/dm` and later DM turns answer to the source channel's budget.
 
 Admission and the DM store are patched on the command module.
 """
@@ -16,6 +16,7 @@ from daimon.adapters.discord.commands import direct_messages as dm_module
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _GUILD = 700000101
@@ -92,3 +93,51 @@ async def test_dm_from_a_thread_admits_and_records_its_parent_channel(
         assert start_dm.await_args.kwargs["source_channel_id"] == str(_PARENT), (
             "the DM records its source channel"
         )
+
+
+async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        await make_dm_conversation(
+            session,
+            tenant=tenant,
+            account_id=account.id,
+            route_key="5",
+            external_user_id="999",
+            workspace_id=str(_GUILD),
+            source_channel_id=str(_PARENT),
+        )
+    monkeypatch.setattr(
+        dm_module,
+        "reply_to_dm",
+        AsyncMock(side_effect=AdmissionDenied(reason="channel_budget_exceeded")),
+    )
+    member = MagicMock()
+    member.guild_permissions.administrator = False
+    member.guild_permissions.manage_guild = False
+    guild = MagicMock()
+    guild.owner_id = 1
+    guild.fetch_member = AsyncMock(return_value=member)
+    bot = MagicMock()
+    bot.draining = False
+    bot.runtime.sessionmaker = db_session_factory
+    bot.get_guild.return_value = guild
+    bot.try_claim_global_turn.return_value = True
+    message = MagicMock()
+    message.author.bot = False
+    message.author.id = 999
+    message.channel = MagicMock(spec=discord.DMChannel)
+    message.channel.id = 5
+    message.channel.send = AsyncMock()
+    message.content = "hello"
+    cog = DirectMessageCog(bot)
+
+    await cog.on_message(message)
+
+    (reply,), _ = message.channel.send.await_args
+    assert reply == "Sorry, " + CHANNEL_BUDGET_NOTICE, "the member is told why the DM stopped"
+    bot.release_global_turn.assert_called_once()

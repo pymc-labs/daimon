@@ -182,7 +182,10 @@ def _no_discord() -> object:
 def _discord_channels(channels: dict[str, dict[str, object]]) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == "Bot t", "looked up with the bot token"
-        channel = channels.get(request.url.path.rsplit("/", 1)[-1])
+        channel_id = request.url.path.rsplit("/", 1)[-1]
+        if channel_id == "500":
+            return httpx.Response(500, json={})
+        channel = channels.get(channel_id)
         return httpx.Response(200, json=channel) if channel else httpx.Response(404, json={})
 
     return httpx.MockTransport(handler)
@@ -233,18 +236,26 @@ async def test_a_discord_thread_budgets_its_parent_and_a_foreign_channel_is_refu
             "clearing a thread clears its parent's budget"
         )
     async with db_session_factory.begin() as s:
-        await channel_budgets.set_channel_budget(
-            s,
-            tenant_id=tenant.tenant_id,
-            platform="discord",
-            channel_id="404",
-            limit_usd=Decimal("5"),
-            window="monthly",
-            starts_at=None,
-            ends_at=None,
-            set_by_account_id=None,
-        )
+        for raw in ("404", "901"):
+            await channel_budgets.set_channel_budget(
+                s,
+                tenant_id=tenant.tenant_id,
+                platform="discord",
+                channel_id=raw,
+                limit_usd=Decimal("5"),
+                window="monthly",
+                starts_at=None,
+                ends_at=None,
+                set_by_account_id=None,
+            )
     await budget_clear(**clear, channel_id="404", discord_transport=transport)
     assert "channel 404: budget cleared" in _out(args["console"]), (
         "a channel the bot cannot see is cleared as given"
+    )
+    with pytest.raises(DaimonError, match="HTTP 500"):
+        await budget_clear(**clear, channel_id="500", discord_transport=transport)
+    no_token = {**clear, "rt": build_cli_runtime(db_session_factory, settings=_no_discord())}
+    await budget_clear(**no_token, channel_id="901")
+    assert "channel 901: budget cleared" in _out(args["console"]), (
+        "without a bot token the id is cleared as given"
     )

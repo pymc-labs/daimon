@@ -34,6 +34,7 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.factories import (
     make_account,
     make_channel_budget,
+    make_dm_conversation,
     make_ledger_entry,
     make_tenant,
 )
@@ -162,6 +163,25 @@ async def _origin(
     return str(origin.id)
 
 
+async def _dm(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant: TenantRow,
+    account_id: uuid.UUID,
+    *,
+    scope_id: str,
+    source_channel_id: str | None,
+) -> None:
+    async with sessionmaker.begin() as session:
+        await make_dm_conversation(
+            session,
+            tenant=tenant,
+            account_id=account_id,
+            route_key=f"route-{scope_id}",
+            scope_id=scope_id,
+            source_channel_id=source_channel_id,
+        )
+
+
 async def test_get_without_a_channel_reads_the_calling_turns_channel(
     committing_sessionmaker: async_sessionmaker[AsyncSession], visible: list[str]
 ) -> None:
@@ -176,10 +196,21 @@ async def test_get_without_a_channel_reads_the_calling_turns_channel(
     dm = await _origin(
         committing_sessionmaker, tenant, account_id, parent_channel_id="dm-chan", thread_id="dm:x"
     )
+    await _dm(committing_sessionmaker, tenant, account_id, scope_id="dm:x", source_channel_id=None)
+    moved = await _origin(
+        committing_sessionmaker, tenant, account_id, parent_channel_id="dm-chan", thread_id="dm:m"
+    )
+    await _dm(
+        committing_sessionmaker, tenant, account_id, scope_id="dm:m", source_channel_id=_PARENT
+    )
 
     lookup = await _get_channel_budget_impl(runtime, member, None, here)
     assert lookup.channel_id == _PARENT and lookup.budget is not None
     assert visible == [], "the origin already places the caller in the channel"
+    from_dm = await _get_channel_budget_impl(runtime, member, None, moved)
+    assert from_dm.channel_id == _PARENT and from_dm.budget is not None, (
+        "a moved DM reads the budget of the channel it came from"
+    )
     with pytest.raises(ToolError, match="direct message belongs to no channel"):
         await _get_channel_budget_impl(runtime, member, None, dm)
     with pytest.raises(ToolError, match="unavailable or expired"):
@@ -307,6 +338,18 @@ async def test_origin_budget_channel_is_the_turns_channel_or_none(
     dm = await _origin(
         committing_sessionmaker, tenant, account_id, parent_channel_id="dm-chan", thread_id="dm:x"
     )
+    await _dm(committing_sessionmaker, tenant, account_id, scope_id="dm:x", source_channel_id=None)
+    moved = await _origin(
+        committing_sessionmaker, tenant, account_id, parent_channel_id="dm-chan", thread_id="dm:m"
+    )
+    await _dm(
+        committing_sessionmaker, tenant, account_id, scope_id="dm:m", source_channel_id=_PARENT
+    )
+    other, other_account = await _seed(committing_sessionmaker)
+    await _dm(committing_sessionmaker, other, other_account, scope_id="dm:y", source_channel_id="7")
+    foreign = await _origin(
+        committing_sessionmaker, tenant, account_id, parent_channel_id="dm-chan", thread_id="dm:y"
+    )
     responder = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_x")
 
     async def channel(auth: AuthIdentity, origin_context_id: str | None) -> str | None:
@@ -316,7 +359,9 @@ async def test_origin_budget_channel_is_the_turns_channel_or_none(
     assert await channel(dataclasses.replace(member, agent_id=responder), here) == _PARENT
     other_agent = dataclasses.replace(member, agent_id=uuid.uuid4())
     assert await channel(other_agent, here) is None, "another agent's origin is not attributed"
-    assert await channel(member, dm) is None, "a direct message belongs to no channel"
+    assert await channel(member, moved) == _PARENT, "a moved DM counts toward its source"
+    assert await channel(member, dm) is None, "an older DM belongs to no channel"
+    assert await channel(member, foreign) is None, "another tenant's DM is not consulted"
     assert await channel(member, str(uuid.uuid4())) is None, "an unknown origin"
     assert await channel(member, "not-a-uuid") is None, "a malformed origin"
     assert await channel(member, None) is None

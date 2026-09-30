@@ -56,7 +56,7 @@ class ChannelBudgetStatus:
     budget: ChannelBudgetRow
     spent_usd: Decimal
     is_active: bool
-    """False only for a `fixed` budget outside its window, which gates nothing."""
+    """False before a `total` or `fixed` budget starts, or after a `fixed` one ends."""
 
     @property
     def remaining_usd(self) -> Decimal:
@@ -138,24 +138,26 @@ def _instant_label(value: datetime) -> str:
     return f"{value:%Y-%m-%d %H:%M} UTC"
 
 
-def window_label(budget: ChannelBudgetRow) -> str:
+def window_label(budget: ChannelBudgetRow, *, started: bool = True) -> str:
     """The window in words, e.g. `monthly`, `since 2026-07-01`, `2026-07-01 until 2026-07-03`.
 
-    A fixed window's end is exclusive, hence "until".
+    A total window that has not `started` reads `from 2026-07-01`. A fixed
+    window's end is exclusive, hence "until".
     """
     if budget.window == "monthly":
         return "monthly"
     if budget.starts_at is None:
         return "total"
     if budget.window == "total" or budget.ends_at is None:
-        return f"since {_instant_label(budget.starts_at)}"
+        return f"{'since' if started else 'from'} {_instant_label(budget.starts_at)}"
     return f"{_instant_label(budget.starts_at)} until {_instant_label(budget.ends_at)}"
 
 
 def describe_budget(status: ChannelBudgetStatus) -> str:
     """`$1.20 of $5.00 (monthly)`: the line every surface shows for a channel budget."""
     budget = status.budget
-    return f"${status.spent_usd:,.2f} of ${budget.limit_usd:,.2f} ({window_label(budget)})"
+    label = window_label(budget, started=status.is_active)
+    return f"${status.spent_usd:,.2f} of ${budget.limit_usd:,.2f} ({label})"
 
 
 async def load_budget_status(
@@ -201,7 +203,7 @@ async def is_over_channel_budget(
 ) -> bool:
     """True iff the channel has an active budget whose spend has reached its limit.
 
-    `channel_id=None` (a DM, an MCP call, a routine with no channel) is never
+    `channel_id=None` (an older DM, an MCP call, a routine with no channel) is never
     gated. Exceptions propagate: admission fails closed.
     """
     if channel_id is None:

@@ -49,6 +49,11 @@ from daimon.core.stores import (
     wizard_session as wizard_session_store,
 )
 from daimon.core.stores.agent_memory_stores import insert_memory_store
+from daimon.core.stores.direct_messages import (
+    DirectMessageRow,
+    set_dm_enabled,
+    start_conversation,
+)
 from daimon.core.stores.domain import (
     AccountRow,
     AgentGithubBindingRow,
@@ -386,6 +391,40 @@ async def make_channel_budget(
         ends_at=ends_at,
         set_by_account_id=None,
     )
+
+
+async def make_dm_conversation(
+    session: AsyncSession,
+    *,
+    tenant: TenantRow,
+    account_id: uuid.UUID,
+    route_key: str = "dm-chan",
+    external_user_id: str = "u1",
+    workspace_id: str = "g1",
+    scope_id: str = "dm:1",
+    source_channel_id: str | None = "chan-1",
+) -> DirectMessageRow:
+    """A DM moved from `source_channel_id` (None: started before sources), with DMs enabled."""
+    await set_dm_enabled(session, tenant_id=tenant.id, enabled=True)
+    conversation = DirectMessageRow(
+        platform=tenant.platform,
+        route_key=route_key,
+        external_user_id=external_user_id,
+        tenant_id=tenant.id,
+        account_id=account_id,
+        workspace_id=workspace_id,
+        channel_id=route_key,
+        source_channel_id=source_channel_id,
+        scope_id=scope_id,
+        source_url="https://example.com/source",
+        context="",
+        memory_read_only=False,
+        history=[],
+        recent_message_ids=[],
+        active_until=None,
+    )
+    await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
+    return conversation
 
 
 async def make_agent_memory_store(
