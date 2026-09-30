@@ -116,3 +116,23 @@ def test_every_operation_kind_has_a_rule() -> None:
                 assert outcome in ("allow", "needs_admin", "managed_agent"), (
                     f"{operation} produced an outcome outside PolicyOutcome: {outcome!r}"
                 )
+
+
+def test_channel_admin_locality_allows_reachable_agent_but_not_managed_one() -> None:
+    local = TargetFacts(
+        is_daimon_managed=False, is_reachable_in_tenant=True, is_local_to_caller_channels=True
+    )
+    managed_local = local.model_copy(update={"is_daimon_managed": True})
+    for operation in ("agent_spec_edit", "key_replace", "key_remove", "mcp_remove", "repo_bind"):
+        assert decide_operation(operation, is_admin=False, target=local) == "allow", operation
+        assert (
+            decide_operation(operation, is_admin=False, target=managed_local) == "managed_agent"
+        ), f"{operation}: a managed agent stays refused to a channel admin"
+
+
+def test_locality_defaults_off_so_reachable_agent_still_needs_admin() -> None:
+    assert _facts(managed=False, reachable=True).is_local_to_caller_channels is False
+    outcome = decide_operation(
+        "agent_spec_edit", is_admin=False, target=_facts(managed=False, reachable=True)
+    )
+    assert outcome == "needs_admin", "no channel admins configured means no change"

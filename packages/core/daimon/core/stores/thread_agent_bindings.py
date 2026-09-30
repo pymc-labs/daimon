@@ -161,6 +161,27 @@ async def list_active_setup_bindings_for_tenant(
     return rows, len(bindings) > limit
 
 
+async def list_bound_parent_channel_ids(
+    session: AsyncSession, *, tenant_id: uuid.UUID, responder_name: str
+) -> list[str]:
+    """Parent channels of every thread that answers as `responder_name`, sorted.
+
+    Archived and locked threads count: reopening one routes to the agent again.
+    Only a deleted thread no longer answers.
+    """
+    ids = await session.execute(
+        select(ThreadAgentBinding.parent_channel_id)
+        .where(
+            ThreadAgentBinding.tenant_id == tenant_id,
+            ThreadAgentBinding.responder_name == responder_name,
+            ThreadAgentBinding.deleted.is_(False),
+        )
+        .distinct()
+        .order_by(ThreadAgentBinding.parent_channel_id)
+    )
+    return list(ids.scalars())
+
+
 async def update_target(
     session: AsyncSession,
     *,
