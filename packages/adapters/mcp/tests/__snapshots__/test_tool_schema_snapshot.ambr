@@ -3674,10 +3674,10 @@
     }),
     'self_read_file': dict({
       'description': '''
-        Read a per-agent file by `key`. Returns null if no file exists at that key.
+        Check a per-agent file by `key`. Returns null if no file exists at that key.
         
-        Values a person entered through a credential form are redacted; use them
-        from the session `.env` without echoing them.
+        The value is always redacted: use it from the session `.env` without
+        echoing it. The result shows when it was last set.
       ''',
       'parameters': dict({
         'additionalProperties': False,
