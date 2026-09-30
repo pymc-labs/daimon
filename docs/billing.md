@@ -215,7 +215,8 @@ the same with or without Stripe and for either funding mode.
 - **Window**: `monthly` (the UTC calendar month), `total` (since `starts_at`,
   or ever) or `fixed` (from `starts_at` until `ends_at`, exclusive). A
   budget with a `starts_at` gates nothing before it, and a fixed one nothing
-  after its end. Panels show a fixed window as `START until END`.
+  after its end. Panels show a fixed window as `START until END`, and a
+  total window that has not started as `from START`.
 - **The gate** trips once spend reaches the limit, so a limit of 0 stops the
   channel. Like the other gates it runs once before a turn, so a turn in
   progress finishes past the limit.
@@ -232,8 +233,9 @@ What a budget does not cover:
   turns are neither attributed nor gated. A DM moved with `/dm` since then
   records the parent channel it came from
   (`direct_message_conversations.source_channel_id`): `/dm` is refused while
-  that channel's budget is used up, and the DM's turns count toward it and
-  are gated by it.
+  that channel's budget is used up, and the DM's turns and media calls
+  count toward it and are gated by it. `get_channel_budget` in such a DM
+  reads that channel's budget.
 - **MCP turns.** The MCP tools that start a turn (`start_turn`, `ask` and the
   like) record no channel and do not check budgets yet. A media tool call
   without a live `origin_context_id` is not attributed either.
@@ -313,10 +315,9 @@ all turns; the cap gate applies even without Stripe.
 ## Promo codes
 
 An operator can hand out credit as a code that a tenant admin redeems. Nothing
-changes until a code exists; the only visible surface before that is the
-admin-only **Redeem code** button in `/billing`. The Discord ready message and
-the Slack install page point admins at `/billing` only while some code can be
-redeemed.
+is visible until some code can be redeemed: only then does `/billing` show
+admins a **Redeem code** button, and the Discord ready message and the Slack
+install page point them at it.
 
 ```sh
 daimon promo create --amount 20                    # prints a generated code once
@@ -329,27 +330,30 @@ daimon promo revoke CODE_ID
 
 Codes are deployment-wide and stored only as a SHA-256 hash, so a lost code
 cannot be shown again. Generated codes are 20 Crockford base32 characters in
-dash-separated groups of five; matching ignores case, spaces and dashes, and reads O as 0 and I or L as 1.
-`--code` sets a chosen code of at least 12 characters instead. `--amount` is at most $999,999.99. `--redeem-from` and `--redeem-until`
-bound when it can be redeemed, and `--max-redemptions` how many tenants may
-redeem it. Each tenant redeems a code at most once.
+dash-separated groups of five; matching ignores case, spaces and dashes, and
+reads O as 0 and I or L as 1. `--code` sets a chosen code of at least 12
+characters instead. `--amount` is at most $999,999.99. `--redeem-from` and
+`--redeem-until` bound when it can be redeemed, and `--max-redemptions` how
+many tenants may redeem it. Each tenant redeems a code at most once.
 
 - **Credit** codes add a `promo_credit` ledger entry at once, keyed
   `promo:{code_id}:{tenant_id}`. It is ordinary credit and never expires.
 - **Timed** codes grant their amount only between `--starts` and `--ends`.
   Redemption stays open until `--ends` unless `--redeem-until` is earlier. A
   code redeemed before its start is granted by the scheduler when the window
-  opens (same key). Fifteen minutes after the window closes, a `promo_expiry`
-  entry, keyed `promo_expiry:{code_id}:{tenant_id}`, removes only what was not
-  spent. Spend inside a window draws on timed credit first, the credit that
+  opens (same key). At the first scheduler tick after the window closes, a
+  `promo_expiry` entry, keyed `promo_expiry:{code_id}:{tenant_id}`, removes
+  what was not spent, so spend after the window comes from ordinary credit
+  only. Spend inside a window draws on timed credit first, the credit that
   ends earliest first, then on ordinary credit. A window that opens and closes
   while the scheduler is down expires without a grant.
-- **Late spend.** Turn debits are dated by the model call, not by when they
-  were written, so a call the [sweep](#the-tables) records after the window
-  closed still draws on the timed credit. The fifteen-minute wait bounds that
-  lag: spend recorded later counts as ordinary spend. Until the expiry runs,
-  the leftover credit still counts toward the balance, so turns in those
-  minutes can leave a tenant with no other credit slightly negative.
+- **Late spend.** Every turn debit stores `occurred_at`, the model call's own
+  time, so a call the [sweep](#the-tables) records after the window closed
+  still counts as spend inside it. Fifteen minutes after the close a
+  `promo_expiry_refund` entry, keyed
+  `promo_expiry_refund:{code_id}:{tenant_id}`, credits back that late spend,
+  never more than the expiry removed. Spend recorded later counts as ordinary
+  spend.
 
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
 timed credit only changes what the ledger holds. `/billing` shows live timed
@@ -377,7 +381,8 @@ including timed credit not yet started, stays.
 
 These tables are declared in `packages/core/daimon/core/_models.py` with stores
 beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
-`trial`, `topup`, `manual_credit`, `promo_credit`, `promo_expiry`, `turn_debit`, `checkpoint_debit`, `media_debit`,
+`trial`, `topup`, `manual_credit`, `promo_credit`, `promo_expiry`,
+`promo_expiry_refund`, `turn_debit`, `checkpoint_debit`, `media_debit`,
 `classifier_debit`, `thread_naming_debit`, and the two clawback reasons named
 after their Stripe events.
 

@@ -28,6 +28,7 @@ from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed, PromoRede
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.testing.factories import make_account, make_tenant
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -54,9 +55,11 @@ def _state(**overrides: Any) -> BillingPanelState:
     return BillingPanelState(**(base | overrides))
 
 
-def _view(*, is_admin: bool, runtime: Any = None) -> BillingPanelView:
+def _view(
+    *, is_admin: bool, runtime: Any = None, has_redeemable_promo_code: bool = True
+) -> BillingPanelView:
     return BillingPanelView(
-        _state(is_admin=is_admin),
+        _state(is_admin=is_admin, has_redeemable_promo_code=has_redeemable_promo_code),
         runtime=runtime or MagicMock(spec=DiscordRuntime),
         allowed_user_id=42,
         is_admin=is_admin,
@@ -96,10 +99,14 @@ def _buttons(view: BillingPanelView) -> list[str | None]:
 
 
 def test_only_the_admin_view_offers_redemption() -> None:
-    """Only the admin panel shows the redeem-code button."""
+    """Only the admin panel shows the redeem-code button, and only while a code is redeemable."""
     assert _buttons(_view(is_admin=True)) == ["🎟️ Redeem code", "🔄 Refresh", "Done"], (
         "the admin view should offer redemption first"
     )
+    assert _buttons(_view(is_admin=True, has_redeemable_promo_code=False)) == [
+        "🔄 Refresh",
+        "Done",
+    ], "without a redeemable code the admin view should not offer redemption"
     assert "🎟️ Redeem code" not in _buttons(_view(is_admin=False)), (
         "a member view should not offer redemption"
     )
@@ -154,7 +161,6 @@ def test_redeem_result_text() -> None:
     )
 
 
-@pytest.mark.asyncio
 async def test_redeem_button_opens_the_modal_only_for_a_live_admin() -> None:
     """The button rechecks admin rights before opening the redeem modal."""
     view = _view(is_admin=True)
@@ -174,7 +180,6 @@ async def test_redeem_button_opens_the_modal_only_for_a_live_admin() -> None:
     )
 
 
-@pytest.mark.asyncio
 async def test_modal_submit_from_a_demoted_admin_redeems_nothing() -> None:
     """A submit from a user who lost admin rights is refused before any lookup."""
     runtime = MagicMock(spec=DiscordRuntime)
@@ -190,7 +195,6 @@ async def test_modal_submit_from_a_demoted_admin_redeems_nothing() -> None:
     rerender.assert_not_awaited()
 
 
-@pytest.mark.asyncio
 async def test_modal_submit_answers_when_the_database_fails() -> None:
     """After defer() the admin still gets an ephemeral error, not a silent spinner."""
     runtime = MagicMock(spec=DiscordRuntime)
@@ -211,7 +215,6 @@ async def test_modal_submit_answers_when_the_database_fails() -> None:
     )
 
 
-@pytest.mark.asyncio
 async def test_modal_submit_redeems_rerenders_and_replies(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -225,15 +228,25 @@ async def test_modal_submit_redeems_rerenders_and_replies(
     )
     runtime = MagicMock(spec=DiscordRuntime)
     runtime.sessionmaker = db_session_factory
-    rerender = AsyncMock()
+    calls: list[str] = []
+
+    async def rerender_panel(_submitted: discord.Interaction) -> None:
+        calls.append("rerender")
+
+    def record_reply(*_args: object, **_kwargs: object) -> None:
+        calls.append("reply")
+
+    rerender = AsyncMock(side_effect=rerender_panel)
     modal = RedeemCodeModal(runtime=runtime, account_id=account.id, rerender=rerender)
     modal.code_in._value = "welcome-2026"
 
     interaction = _interaction(admin=True)
+    interaction.followup.send.side_effect = record_reply
     await modal.on_submit(interaction)
 
     interaction.response.defer.assert_awaited_once()
     rerender.assert_awaited_once_with(interaction)
+    assert calls == ["reply", "rerender"], "the reply should go out before the panel rerenders"
     assert "Redeemed **$10.00**" in interaction.followup.send.call_args.args[0], (
         "the reply should confirm the credit"
     )
@@ -249,7 +262,96 @@ async def test_modal_submit_redeems_rerenders_and_replies(
     assert rerender.await_count == 1, "a refused repeat should not rerender the panel"
 
 
-@pytest.mark.asyncio
+async def test_modal_submit_keeps_the_success_reply_when_the_rerender_fails(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A failed panel rerender after a redemption sends no error over the success reply."""
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
+    tenant = await make_tenant(db_session, id=tenant_id, workspace_id=str(GUILD_ID))
+    account = await make_account(db_session, tenant=tenant)
+    terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False)
+    await promo_store.insert_promo_code(
+        db_session, code_hash=hash_promo_code(normalize_promo_code("WELCOME-2026")), terms=terms
+    )
+    runtime = MagicMock(spec=DiscordRuntime)
+    runtime.sessionmaker = db_session_factory
+    rerender = AsyncMock(side_effect=discord.HTTPException(MagicMock(), "unknown message"))
+    modal = RedeemCodeModal(runtime=runtime, account_id=account.id, rerender=rerender)
+    modal.code_in._value = "WELCOME-2026"
+    interaction = _interaction(admin=True)
+
+    await modal.on_submit(interaction)
+
+    rerender.assert_awaited_once_with(interaction)
+    [reply] = interaction.followup.send.call_args_list
+    assert "Redeemed **$10.00**" in reply.args[0], "the only reply should confirm the credit"
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == Decimal("10"), (
+        "the credit should stay in the server ledger"
+    )
+
+
+async def _admin_snapshot(session: AsyncSession, *, now: datetime) -> BillingPanelState:
+    return await load_billing_snapshot(
+        session,
+        guild=MagicMock(spec=discord.Guild),
+        guild_id=str(GUILD_ID),
+        caller_user_id="42",
+        is_admin=True,
+        since=SINCE,
+        now=now,
+    )
+
+
+async def test_snapshot_offers_redemption_only_while_a_code_is_redeemable(
+    db_session: AsyncSession,
+) -> None:
+    """The redeem button stays hidden until some code can be redeemed."""
+    now = datetime.now(UTC)
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
+    await make_tenant(db_session, id=tenant_id, workspace_id=str(GUILD_ID))
+    before = await _admin_snapshot(db_session, now=now)
+    assert not before.has_redeemable_promo_code, "no code should mean no redeem button"
+
+    terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False)
+    await promo_store.insert_promo_code(db_session, code_hash="h", terms=terms)
+    after = await _admin_snapshot(db_session, now=now)
+    assert after.has_redeemable_promo_code, "a redeemable code should show the redeem button"
+    view = BillingPanelView(
+        after,
+        runtime=MagicMock(spec=DiscordRuntime),
+        allowed_user_id=42,
+        is_admin=True,
+        account_id=uuid.uuid4(),
+        now=now,
+        since=SINCE,
+    )
+    assert "🎟️ Redeem code" in _buttons(view), "the admin panel should render the button"
+
+
+async def test_snapshot_hides_redemption_when_the_lookup_fails(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed promo lookup hides the button and leaves the rest of the read working."""
+
+    async def failing_lookup(session: AsyncSession, *, now: datetime) -> bool:
+        await session.execute(text("SELECT 1/0"))  # aborts the surrounding transaction
+        return True
+
+    monkeypatch.setattr(
+        "daimon.adapters.discord.billing_panel.read.has_redeemable_promo_code", failing_lookup
+    )
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
+    await make_tenant(db_session, id=tenant_id, workspace_id=str(GUILD_ID))
+    terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False)
+    await promo_store.insert_promo_code(db_session, code_hash="h", terms=terms)
+
+    state = await _admin_snapshot(db_session, now=datetime.now(UTC))
+
+    assert state.is_admin and not state.has_redeemable_promo_code, (
+        "a failed lookup should still load the admin panel, without the redeem button"
+    )
+
+
 async def test_snapshot_carries_live_timed_credit(db_session: AsyncSession) -> None:
     """The billing snapshot includes timed credit whose window is open."""
     now = datetime.now(UTC)

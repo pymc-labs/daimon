@@ -76,13 +76,15 @@ async def test_server_admin_sets_lists_and_clears_channel_admins(
     tenant_id = await _tenant(committing_sessionmaker)
     runtime, admin = _runtime(committing_sessionmaker), _auth(tenant_id, admin=True)
 
-    assert (await _list_channel_admins_impl(runtime, admin)).channels == []
+    assert (await _list_channel_admins_impl(runtime, admin)).channels == [], "no grants yet"
     result = await _set_channel_admins_impl(
         runtime, admin, channel_id=CHANNEL, role_ids=[ROLE, ROLE], user_ids=[]
     )
-    assert result.channel.role_ids == [ROLE] and result.changed
+    assert result.channel.role_ids == [ROLE] and result.changed, (
+        "role ids are deduplicated and saved"
+    )
     listed = await _list_channel_admins_impl(runtime, admin)
-    assert [c.channel_id for c in listed.channels] == [CHANNEL]
+    assert [c.channel_id for c in listed.channels] == [CHANNEL], "the grant lists"
 
     cleared = await _set_channel_admins_impl(
         runtime, admin, channel_id=CHANNEL, role_ids=[], user_ids=[]
@@ -135,14 +137,18 @@ async def test_channel_admin_sets_only_their_own_channels_default(
     row = await get_scope(
         db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL)
     )
-    assert row is not None and row.agent_name == "helper"
+    assert row is not None and row.agent_name == "helper", (
+        "the channel admin set its channel's agent"
+    )
     with pytest.raises(ToolError, match="admin of that channel"):
         await propagation._set_agent_default_impl(runtime, member, "helper", OTHER_CHANNEL)  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(ToolError, match="requires a workspace or server admin"):
         await propagation._clear_agent_default_impl(runtime, member, None)  # pyright: ignore[reportPrivateUsage]
     cleared = await propagation._clear_agent_default_impl(runtime, member, CHANNEL)  # pyright: ignore[reportPrivateUsage]
-    assert cleared.cleared
-    assert await get_scope(db_session, scope=TenantScopeRef(tenant_id=tenant_id)) is None
+    assert cleared.cleared, "the channel admin cleared its channel's default"
+    assert await get_scope(db_session, scope=TenantScopeRef(tenant_id=tenant_id)) is None, (
+        "the tenant scope was never written"
+    )
 
 
 async def test_channel_admin_may_edit_an_agent_local_to_their_channel(
@@ -174,7 +180,7 @@ async def test_channel_admin_may_edit_an_agent_local_to_their_channel(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[ROLE], user_ids=[]
     )
     await require_admin_for_reachable_agent(runtime, role_member, agent_name="helper")
-    with pytest.raises(ToolError, match="an admin must change its setup"):
+    with pytest.raises(ToolError, match="is currently the default agent .* an admin must"):
         await require_admin_for_reachable_agent(runtime, role_member, agent_name="shared")
 
 
@@ -257,5 +263,5 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
         await make_routine(
             session, tenant=tenant, created_by_user_id="666666666666666666", agent_name="helper"
         )
-    with pytest.raises(ToolError, match="an admin must change its setup"):
+    with pytest.raises(ToolError, match="runs unattended .* so an admin must change its setup"):
         await require_admin_for_reachable_agent(runtime, member, agent_name="helper")

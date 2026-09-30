@@ -102,6 +102,12 @@ async def test_budget_period_and_activity_follow_the_window(db_session: AsyncSes
     assert describe_budget(ChannelBudgetStatus(fixed, spent, True)).endswith(
         "(2026-07-14 12:00 UTC until 2026-07-16 12:00 UTC)"
     ), "a fixed window's end reads as exclusive"
+    assert describe_budget(ChannelBudgetStatus(total, spent, True)).endswith(
+        "(since 2026-07-14 12:00 UTC)"
+    ), "a started total window counts since its start"
+    assert describe_budget(ChannelBudgetStatus(total, spent, False)).endswith(
+        "(from 2026-07-14 12:00 UTC)"
+    ), "a total window that has not started reads from its start"
 
 
 async def test_set_replaces_the_budget_and_clear_removes_it(db_session: AsyncSession) -> None:

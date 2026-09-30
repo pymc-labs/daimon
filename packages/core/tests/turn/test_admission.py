@@ -956,10 +956,10 @@ async def test_admit_stores_the_live_platform_role_ids_like_the_role(
         )
         async with db_session_factory() as session:
             row = await get_account_with_tenant(session, account_id=admission.account_id)
-        assert row is not None
+        assert row is not None, "the account exists"
         return row.platform_role_ids
 
-    assert await turn(["r2", "r1"]) == ("r1", "r2")
+    assert await turn(["r2", "r1"]) == ("r1", "r2"), "role ids are stored sorted"
     assert await turn(None) == ("r1", "r2"), "a turn with no role ids leaves them alone"
     assert await turn([]) == (), "a member who lost every role stores none"
 

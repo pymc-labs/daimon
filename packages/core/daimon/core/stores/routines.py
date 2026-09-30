@@ -22,8 +22,13 @@ import structlog
 from daimon.core._models import Account, PlatformPrincipal, Routine, Tenant
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.errors import StoreError
-from daimon.core.stores.domain import CatchUpPolicy, Role, RoutineDestinationKind, RoutineRow
-from pydantic import BaseModel, ConfigDict
+from daimon.core.stores.domain import (
+    CatchUpPolicy,
+    Role,
+    RoutineDestinationKind,
+    RoutineRow,
+    UnattendedRequester,
+)
 from sqlalchemy import and_, delete, false, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -113,19 +118,9 @@ async def list_routines_for_tenant(
     return [RoutineRow.model_validate(r) for r in rows]
 
 
-class RoutineCreator(BaseModel):
-    """A routine's creator, with the stored role and role ids its fires run with."""
-
-    model_config = ConfigDict(frozen=True)
-
-    platform_user_id: str
-    is_admin: bool = False
-    role_ids: tuple[str, ...] = ()
-
-
 async def list_routine_creators(
     session: AsyncSession, *, tenant_id: _uuid.UUID, platform: str, agent_name: str
-) -> list[RoutineCreator]:
+) -> list[UnattendedRequester]:
     """Who made the routines that run `agent_name`, paused ones included.
 
     A routine with no recorded creator never fires and is left out; a creator
@@ -150,7 +145,7 @@ async def list_routine_creators(
         .distinct()
     )
     return [
-        RoutineCreator(
+        UnattendedRequester(
             platform_user_id=user_id,
             is_admin=role == Role.ADMIN,
             role_ids=tuple(role_ids or ()),

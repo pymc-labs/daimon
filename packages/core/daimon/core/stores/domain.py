@@ -185,6 +185,16 @@ RoutineDestinationKind = Literal["channel", "thread"]
 RoutineDeliveryStatus = Literal["pending", "claimed", "delivered", "skipped"]
 
 
+class UnattendedRequester(BaseModel):
+    """Whose rights a routine or queued wake fires with: their stored role and role ids."""
+
+    model_config = ConfigDict(frozen=True)
+
+    platform_user_id: str
+    is_admin: bool = False
+    role_ids: tuple[str, ...] = ()
+
+
 class RoutineRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -549,6 +559,7 @@ class TimedPromoGrantRow(BaseModel):
     credit_ends_at: datetime
     granted_at: datetime | None
     expired_at: datetime | None
+    expired_usd: Decimal | None
 
 
 class SeededSkillRow(BaseModel):

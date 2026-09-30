@@ -27,7 +27,7 @@ async def test_set_channel_admins_upserts_sorted_unique_ids(db_session: AsyncSes
         user_ids=[],
         actor_account_id=None,
     )
-    assert first.role_ids == ("r1", "r2")
+    assert first.role_ids == ("r1", "r2"), "role ids are sorted and unique"
     second = await set_channel_admins(
         db_session,
         tenant_id=tenant.id,
@@ -39,7 +39,7 @@ async def test_set_channel_admins_upserts_sorted_unique_ids(db_session: AsyncSes
     )
     assert (second.role_ids, second.user_ids) == ((), ("u1",)), "a write replaces both lists"
     rows = await list_channel_admins(db_session, tenant_id=tenant.id, platform="discord")
-    assert [row.channel_id for row in rows] == ["c1"]
+    assert [row.channel_id for row in rows] == ["c1"], "one row per channel"
 
 
 async def test_grant_matches_user_or_role_and_stays_in_its_tenant(
@@ -66,9 +66,9 @@ async def test_grant_matches_user_or_role_and_stays_in_its_tenant(
             role_ids=roles,
         )
 
-    assert await grant(tenant.id, "u1", [])
-    assert await grant(tenant.id, "u9", ["r0", "r1"])
-    assert not await grant(tenant.id, "u9", ["r0"])
+    assert await grant(tenant.id, "u1", []), "a user grant counts"
+    assert await grant(tenant.id, "u9", ["r0", "r1"]), "a role grant counts"
+    assert not await grant(tenant.id, "u9", ["r0"]), "a role with no grant does not"
     assert not await grant(other.id, "u1", ["r1"]), "a grant never crosses tenants"
 
 
@@ -85,15 +85,27 @@ async def test_remove_user_drops_their_id_and_empty_rows(db_session: AsyncSessio
             actor_account_id=None,
         )
     key = {"tenant_id": tenant.id, "platform": "discord", "platform_user_id": "u1"}
-    assert await count_channel_admin_grants_for_user(db_session, **key) == 2
+    assert await count_channel_admin_grants_for_user(db_session, **key) == 2, (
+        "both grants are counted"
+    )
 
-    assert await remove_user_from_channel_admins(db_session, **key) == 2
+    assert await remove_user_from_channel_admins(db_session, **key) == 2, (
+        "removing the user touches both rows"
+    )
     ids = {"tenant_id": tenant.id, "platform": "discord"}
-    assert await get_channel_admins(db_session, **ids, channel_id="c1") is None
+    assert await get_channel_admins(db_session, **ids, channel_id="c1") is None, (
+        "a row left empty is deleted"
+    )
     kept = await get_channel_admins(db_session, **ids, channel_id="c2")
-    assert kept is not None and kept.user_ids == ("u2",) and kept.role_ids == ("r1",)
-    assert await delete_channel_admins(db_session, **ids, channel_id="c2")
-    assert not await delete_channel_admins(db_session, **ids, channel_id="c2")
+    assert kept is not None and kept.user_ids == ("u2",) and kept.role_ids == ("r1",), (
+        "other admins stay"
+    )
+    assert await delete_channel_admins(db_session, **ids, channel_id="c2"), (
+        "delete reports the removed row"
+    )
+    assert not await delete_channel_admins(db_session, **ids, channel_id="c2"), (
+        "a second delete finds nothing"
+    )
 
 
 async def test_platform_role_ids_round_trip_through_identity_read(
@@ -105,8 +117,12 @@ async def test_platform_role_ids_round_trip_through_identity_read(
         db_session, platform="discord", external_id="u1", tenant=tenant, account=account
     )
     before = await get_account_with_tenant(db_session, account_id=account.id)
-    assert before is not None and before.platform_role_ids == ()
+    assert before is not None and before.platform_role_ids == (), (
+        "no role ids until a turn stores them"
+    )
 
     await set_platform_role_ids(db_session, account.id, ["r2", "r1", "r1"])
     after = await get_account_with_tenant(db_session, account_id=account.id)
-    assert after is not None and after.platform_role_ids == ("r1", "r2")
+    assert after is not None and after.platform_role_ids == ("r1", "r2"), (
+        "role ids are stored sorted and unique"
+    )

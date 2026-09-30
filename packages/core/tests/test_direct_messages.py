@@ -2,22 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
 from daimon.core import direct_messages
 from daimon.core.direct_messages import reply_to_dm
-from daimon.core.stores.direct_messages import (
-    DirectMessageRow,
-    get_conversation,
-    set_dm_enabled,
-    start_conversation,
-)
+from daimon.core.stores.direct_messages import get_conversation
 from daimon.core.stores.domain import Role
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -30,27 +24,8 @@ async def test_a_dm_turn_is_admitted_against_its_source_channel(
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session)
         account = await make_account(session, tenant=tenant)
-        await set_dm_enabled(session, tenant_id=tenant.id, enabled=True)
-        await start_conversation(
-            session,
-            conversation=DirectMessageRow(
-                platform="discord",
-                route_key="dm-chan",
-                external_user_id="u1",
-                tenant_id=tenant.id,
-                account_id=account.id,
-                workspace_id="g1",
-                channel_id="dm-chan",
-                source_channel_id=source_channel_id,
-                scope_id="dm:1",
-                source_url="https://discord.com/channels/g1/chan-1",
-                context="",
-                memory_read_only=False,
-                history=[],
-                recent_message_ids=[],
-                active_until=None,
-            ),
-            now=datetime.now(UTC),
+        await make_dm_conversation(
+            session, tenant=tenant, account_id=account.id, source_channel_id=source_channel_id
         )
     admitted: list[dict[str, Any]] = []
 

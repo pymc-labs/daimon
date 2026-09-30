@@ -88,6 +88,9 @@ class TargetFacts(BaseModel):
     is_daimon_managed: bool
     is_reachable_in_tenant: bool
     is_local_to_caller_channels: bool = False
+    # Why a channel admin's agent is not local: an unattended run owed to someone
+    # with wider rights. Explains a refusal; decisions never read it.
+    runs_unattended_beyond_caller: bool = False
 
 
 def _decide_operation(

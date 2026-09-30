@@ -49,3 +49,5 @@ class BillingPanelState:
     timed_credit: tuple[ActiveTimedCredit, ...] = ()
     # The invoking channel's budget (both views); None when it has none.
     channel_budget: ChannelBudgetStatus | None = None
+    # Some promo code is redeemable now (admin view only); gates the redeem button
+    has_redeemable_promo_code: bool = False

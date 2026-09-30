@@ -1,4 +1,4 @@
-"""`/dm` admits against the source channel's budget and records it on the DM.
+"""`/dm` and later DM turns answer to the source channel's budget.
 
 Admission, the live role lookup and the DM store are patched on the module.
 """
@@ -12,6 +12,8 @@ import pytest
 from daimon.adapters.slack import direct_messages as dm_module
 from daimon.core.stores.domain import Role
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TEAM = "T_DM_BUDGET"
 _CHANNEL = "C_SOURCE"
@@ -59,3 +61,40 @@ async def test_dm_admits_and_records_the_channel_it_ran_in(
         assert start_dm.await_args.kwargs["source_channel_id"] == _CHANNEL, (
             "the DM records its source channel"
         )
+
+
+async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="slack")
+        account = await make_account(session, tenant=tenant)
+        await make_dm_conversation(
+            session,
+            tenant=tenant,
+            account_id=account.id,
+            route_key=f"{_TEAM}:D1",
+            external_user_id="U1",
+            workspace_id=_TEAM,
+            source_channel_id=_CHANNEL,
+        )
+    client = MagicMock()
+    client.chat_postMessage = AsyncMock()
+    monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=Role.USER))
+    monkeypatch.setattr(
+        dm_module,
+        "reply_to_dm",
+        AsyncMock(side_effect=AdmissionDenied(reason="channel_budget_exceeded")),
+    )
+    runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
+    event = {"type": "message", "channel_type": "im", "channel": "D1", "user": "U1"}
+
+    await dm_module.handle_direct_message(
+        runtime, {**event, "ts": "1.1", "text": "hi"}, team_id=_TEAM
+    )
+
+    reply = client.chat_postMessage.await_args.kwargs["text"]
+    assert reply.startswith("This channel has used its spending budget."), reply

@@ -656,9 +656,9 @@ def _channel_admins_blocks(
     if len(lines) < len(grants):
         lines.append(f"_and {len(grants) - len(lines)} more_")
     listing = "\n".join(lines) or "_no channel has its own admins yet_"
-    edit = (
-        _button(action_id=ACTION_CHANNEL_ADMINS, label="Edit this channel") if channel_id else None
-    )
+    # A DM (`D…`) has no channel admins to edit.
+    editable = bool(channel_id) and not channel_id.startswith("D")
+    edit = _button(action_id=ACTION_CHANNEL_ADMINS, label="Edit this channel") if editable else None
     return [
         _section(f"*{CHANNEL_ADMINS_LABEL}*\n{listing}", accessory=edit),
         _context(CHANNEL_ADMINS_NOTE),

@@ -1098,7 +1098,10 @@ def test_new_agent_form_metadata_carries_the_page_the_reader_was_on() -> None:
 
 
 def _routing(
-    *, channel_admins: list[ChannelAdminsRow] | None, isolated: bool | None = None
+    *,
+    channel_admins: list[ChannelAdminsRow] | None,
+    isolated: bool | None = None,
+    channel_id: str = _CHANNEL_ID,
 ) -> dict[str, Any]:
     return build_routing_view(
         _answering_map(),
@@ -1107,7 +1110,7 @@ def _routing(
         is_admin=channel_admins is not None,
         attributions={},
         setup_links=[],
-        channel_id=_CHANNEL_ID,
+        channel_id=channel_id,
         unrouted_agent_name=None,
         channel_admins=channel_admins,
         isolated=isolated,
@@ -1142,7 +1145,12 @@ def test_routing_view_lists_channel_admins_and_offers_edit_to_admins_only() -> N
     assert ACTION_CHANNEL_ADMINS in _action_ids(admin), "admins may edit this channel"
     member = _routing(channel_admins=None)
     assert ACTION_CHANNEL_ADMINS not in _action_ids(member), "members see no channel admins"
-    assert not any("Channel admins" in text for text in _texts(member))
+    assert not any("Channel admins" in text for text in _texts(member)), (
+        "members see no channel admins text"
+    )
+    in_dm = _routing(channel_admins=[grant], channel_id="D0DIRECT")
+    assert ACTION_CHANNEL_ADMINS not in _action_ids(in_dm), "a DM has no channel admins to edit"
+    assert "U0LEAD1" in "\n".join(_texts(in_dm)), "a DM panel still lists the grants"
 
 
 def test_channel_admins_listing_fits_one_section_without_clipping() -> None:
@@ -1170,8 +1178,16 @@ def test_channel_admins_form_prefills_members_and_keeps_the_ids_the_submission_r
     form = build_channel_admins_form(
         meta=_meta(view="channel_admins", root_view_id="V_ROUTING"), user_ids=["U0LEAD1"]
     )
-    assert form["callback_id"] == CALLBACK_CHANNEL_ADMINS
+    assert form["callback_id"] == CALLBACK_CHANNEL_ADMINS, (
+        "the form submits to the channel admins callback"
+    )
     (field,) = [block for block in form["blocks"] if block["type"] == "input"]
-    assert field["block_id"] == field["element"]["action_id"] == CHANNEL_ADMINS_INPUT_ID
-    assert field["element"]["initial_users"] == ["U0LEAD1"]
-    assert json.loads(form["private_metadata"])["r"] == "V_ROUTING"
+    assert field["block_id"] == field["element"]["action_id"] == CHANNEL_ADMINS_INPUT_ID, (
+        "the picker's block and action ids match"
+    )
+    assert field["element"]["initial_users"] == ["U0LEAD1"], (
+        "the picker starts with the current admins"
+    )
+    assert json.loads(form["private_metadata"])["r"] == "V_ROUTING", (
+        "the form returns to the routing panel"
+    )

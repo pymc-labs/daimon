@@ -22,8 +22,13 @@ import uuid as _uuid
 from datetime import datetime, timedelta
 from typing import Literal
 
-from daimon.core._models import TaskContinuation
-from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
+from daimon.core._models import Account, TaskContinuation
+from daimon.core.stores.domain import (
+    ContinuationReason,
+    Role,
+    TaskContinuationRow,
+    UnattendedRequester,
+)
 from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -575,3 +580,25 @@ async def count_pending_timer_rows(
             )
         )
     ).scalar_one()
+
+
+async def list_waiting_requesters(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, target_name: str
+) -> list[UnattendedRequester]:
+    """Who queued the pending or claimed wakes that will run `target_name` unattended."""
+    rows = await session.execute(
+        select(TaskContinuation.requester_external_user_id, Account.role, Account.platform_role_ids)
+        .outerjoin(Account, Account.id == TaskContinuation.requester_account_id)
+        .where(
+            TaskContinuation.tenant_id == tenant_id,
+            TaskContinuation.target_name == target_name,
+            TaskContinuation.status.in_(("pending", "claimed")),
+        )
+        .distinct()
+    )
+    return [
+        UnattendedRequester(
+            platform_user_id=user_id, is_admin=role == Role.ADMIN, role_ids=tuple(role_ids or ())
+        )
+        for user_id, role, role_ids in rows.tuples()
+    ]
