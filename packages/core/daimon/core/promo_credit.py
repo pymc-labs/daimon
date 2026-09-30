@@ -279,31 +279,45 @@ def _skip_bad_row(phase: str, row: TimedPromoGrantRow, exc: DBAPIError) -> None:
 async def _settle_grants(
     session_factory: async_sessionmaker[AsyncSession], *, now: datetime, limit: int
 ) -> int:
+    """Grant due redemptions, ``limit`` per transaction, until a batch comes back short."""
     granted = 0
-    async with session_factory() as session, session.begin():
-        for row in await promo_store.lock_due_grants(session, now=now, limit=limit):
-            try:
-                async with session.begin_nested():
-                    granted += await _settle_grant(session, row, now=now)
-            except DBAPIError as exc:
-                _skip_bad_row("grant", row, exc)
-    return granted
+    skipped: set[uuid.UUID] = set()
+    while True:
+        async with session_factory() as session, session.begin():
+            rows = await promo_store.lock_due_grants(session, now=now, limit=limit, exclude=skipped)
+            for row in rows:
+                try:
+                    async with session.begin_nested():
+                        granted += await _settle_grant(session, row, now=now)
+                except DBAPIError as exc:
+                    _skip_bad_row("grant", row, exc)
+                    skipped.add(row.redemption_id)
+        if len(rows) < limit:
+            return granted
 
 
 async def _settle_expiries(
     session_factory: async_sessionmaker[AsyncSession], *, now: datetime, limit: int
 ) -> tuple[int, Decimal]:
+    """Expire closed windows, ``limit`` per transaction, until a batch comes back short."""
     expired = 0
     expired_usd = Decimal("0")
-    async with session_factory() as session, session.begin():
-        for row in await promo_store.lock_due_expiries(session, now=now, limit=limit):
-            try:
-                async with session.begin_nested():
-                    expired_usd += await _settle_expiry(session, row, now=now)
-                expired += 1
-            except DBAPIError as exc:
-                _skip_bad_row("expiry", row, exc)
-    return expired, expired_usd
+    skipped: set[uuid.UUID] = set()
+    while True:
+        async with session_factory() as session, session.begin():
+            rows = await promo_store.lock_due_expiries(
+                session, now=now, limit=limit, exclude=skipped
+            )
+            for row in rows:
+                try:
+                    async with session.begin_nested():
+                        expired_usd += await _settle_expiry(session, row, now=now)
+                    expired += 1
+                except DBAPIError as exc:
+                    _skip_bad_row("expiry", row, exc)
+                    skipped.add(row.redemption_id)
+        if len(rows) < limit:
+            return expired, expired_usd
 
 
 async def settle_promo_credit(

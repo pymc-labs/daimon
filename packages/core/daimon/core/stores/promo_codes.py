@@ -8,6 +8,7 @@ swallowed here.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, cast
@@ -190,14 +191,18 @@ async def _grants(session: AsyncSession, stmt: Select[Any]) -> list[TimedPromoGr
 
 
 async def lock_due_grants(
-    session: AsyncSession, *, now: datetime, limit: int
+    session: AsyncSession, *, now: datetime, limit: int, exclude: Collection[uuid.UUID] = ()
 ) -> list[TimedPromoGrantRow]:
-    """Timed redemptions whose credit window has opened but whose credit is not yet granted."""
+    """Timed redemptions whose credit window has opened but whose credit is not yet granted.
+
+    ``exclude`` holds redemption ids to pass over, such as rows that already failed.
+    """
     stmt = (
         _grant_select(
             PromoRedemption.granted_at.is_(None),
             PromoRedemption.expired_at.is_(None),
             PromoCode.credit_starts_at <= now,
+            PromoRedemption.id.not_in(exclude),
         )
         .order_by(PromoCode.credit_starts_at, PromoRedemption.id)
         .limit(limit)
@@ -207,7 +212,7 @@ async def lock_due_grants(
 
 
 async def lock_due_expiries(
-    session: AsyncSession, *, now: datetime, limit: int
+    session: AsyncSession, *, now: datetime, limit: int, exclude: Collection[uuid.UUID] = ()
 ) -> list[TimedPromoGrantRow]:
     """Granted timed redemptions whose credit window has closed and not yet been settled."""
     stmt = (
@@ -215,6 +220,7 @@ async def lock_due_expiries(
             PromoRedemption.granted_at.is_not(None),
             PromoRedemption.expired_at.is_(None),
             PromoCode.credit_ends_at <= now,
+            PromoRedemption.id.not_in(exclude),
         )
         .order_by(PromoCode.credit_ends_at, PromoRedemption.id)
         .limit(limit)

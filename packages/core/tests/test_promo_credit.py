@@ -333,3 +333,19 @@ async def test_expiries_settle_even_when_the_grant_phase_fails(
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == 0, (
         "the unspent timed credit should be gone"
     )
+
+
+async def test_settlement_works_through_every_due_row_in_batches(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    """A backlog larger than one batch is settled in a single call."""
+    tenants = [await make_tenant(db_session) for _ in range(3)]
+    await _timed(db_session, "BACKLOG", 1, 5)
+    for tenant in tenants:
+        await _redeem(db_session_factory, tenant, "BACKLOG")
+
+    settled = await settle_promo_credit(db_session_factory, now=T0 + 2 * H, limit=2)
+
+    assert settled == _settled(3, 0), "all three due grants should settle despite limit=2"
+    settled = await settle_promo_credit(db_session_factory, now=T0 + 6 * H, limit=2)
+    assert settled == _settled(0, 3, "30"), "all three expiries should settle despite limit=2"
