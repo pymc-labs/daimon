@@ -30,6 +30,10 @@ from daimon.adapters.slack.agent_setup.submit import (
     run_new_agent_submission,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.access_policy import set_access_policy
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -328,6 +332,42 @@ async def test_run_new_agent_when_member_details_carries_admin_routing_sentence(
         "a just-created agent says it is not reachable yet"
     )
     assert "An admin can" in details, "a member is given the admin handoff, not a control"
+
+
+@pytest.mark.asyncio
+async def test_run_new_agent_inside_an_isolated_channel_says_why_it_is_not_shown(
+    fake_slack_web_client: Any,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A member in an isolated channel sees only its own agents, so the new one,
+    answering nowhere yet, can't be shown; the placeholder says why."""
+    client_fake: Any = fake_slack_web_client
+    runtime = _build_runtime_with_db(db_session_factory, fernet_key=Fernet.generate_key().decode())
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID)
+    async with db_session_factory.begin() as session:
+        await make_tenant(session, platform="slack", workspace_id=_TEAM_ID, id=tenant_id)
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(isolated_channel_ids=(_CHANNEL_ID,)),
+        )
+
+    await run_new_agent_submission(
+        runtime,
+        client_fake.client,
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        view_id=_FORM_VIEW_ID,
+        meta=_panel_meta(),
+        name="hidden-agent",
+        purpose=None,
+        model="claude-sonnet-4-6",
+    )
+
+    form = _views(client_fake, "views.update")[0]
+    assert form["view_id"] == _FORM_VIEW_ID
+    assert "This channel is isolated" in json.dumps(form["view"]), "not left on the placeholder"
 
 
 @pytest.mark.asyncio

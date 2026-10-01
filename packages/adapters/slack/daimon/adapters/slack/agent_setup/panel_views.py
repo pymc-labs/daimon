@@ -79,6 +79,7 @@ __all__ = [
     "CHANNEL_ADMINS_INPUT_ID",
     "build_agents_view",
     "build_channel_admins_form",
+    "build_created_view",
     "build_creating_view",
     "build_details_view",
     "build_error_view",
@@ -807,6 +808,27 @@ def build_creating_view(*, agent_name: str, meta: PanelMetadata) -> dict[str, An
             _section(f"Creating *{escape_mrkdwn(agent_name)}*…"),
             _context("This takes a few seconds."),
         ],
+        private_metadata=encode_panel_metadata(
+            meta.with_view("creating", agent_name=agent_name, root_view_id=meta.root_view_id)
+        ),
+        callback_id=CALLBACK_CREATING,
+    )
+
+
+def build_created_view(
+    *, agent_name: str, meta: PanelMetadata, isolated_here: bool
+) -> dict[str, Any]:
+    """What the placeholder becomes when the new agent can't be shown to its creator here."""
+    name = escape_mrkdwn(agent_name)
+    text = (
+        f"*{name}* was created. This channel is isolated, so it shows here once it is set "
+        "as the channel's agent."
+        if isolated_here
+        else f"*{name}* was created but is not listed yet. Reopen setup to see it."
+    )
+    return finish_modal(
+        title="New agent",
+        blocks=[_section(text)],
         private_metadata=encode_panel_metadata(
             meta.with_view("creating", agent_name=agent_name, root_view_id=meta.root_view_id)
         ),

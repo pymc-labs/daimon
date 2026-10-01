@@ -33,6 +33,7 @@ import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_setup.actions import load_agents_view
 from daimon.adapters.slack.agent_setup.panel_views import (
+    build_created_view,
     build_creating_view,
     build_details_view,
     build_new_agent_form,
@@ -51,6 +52,7 @@ from daimon.adapters.slack.agent_setup.write import (
     create_blank_agent,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.channel_isolation import load_isolation_viewer
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
@@ -324,8 +326,28 @@ async def run_new_agent_submission(
                     row.created_by_account_id for row in roster.rows if row.created_by_account_id
                 ],
             )
+            viewer = (
+                None
+                if details is not None
+                else await load_isolation_viewer(
+                    session,
+                    tenant_id=tenant_id,
+                    default=runtime.deployment_default,
+                    channel_id=channel_id or None,
+                    is_admin=is_admin,
+                )
+            )
 
-        if details is not None:
+        if details is None:
+            await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]
+                view_id=view_id,
+                view=build_created_view(
+                    agent_name=name,
+                    meta=meta,
+                    isolated_here=viewer is not None and viewer.inside_channel_id is not None,
+                ),
+            )
+        else:
             await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,
                 view=build_details_view(
