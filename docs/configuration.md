@@ -1035,10 +1035,6 @@ Settings, so `DAIMON_NOTEBOOK__ADMIN_SECRET`, `DAIMON_NOTEBOOK__ALLOW_EDITABLE`,
 once for the daimon side that calls it. They are read by different processes; a single
 shared env file would set both.
 
-No field in this model carries a `Field(description=...)`, so this section lists types
-and defaults only. `apps/notebook-host/src/notebook_host/config.py` documents them in
-inline comments.
-
 ### `DAIMON_NOTEBOOK__DATA_DIR`
 
 `Path` · optional · default `/data/notebooks`
@@ -1134,6 +1130,16 @@ inline comments.
 ### `DAIMON_NOTEBOOK__ORIGIN_SCHEME`
 
 `'https' | 'http'` · optional · default `https`
+
+### `DAIMON_NOTEBOOK__TENANTS`
+
+`tuple[UUID, ...]` · optional · default unset
+
+Tenant UUIDs a public host without DAIMON_NOTEBOOK__ORIGIN_BASE accepts uploads from, as
+a JSON array of strings. Their notebooks share one browser origin and can reach each
+other, so list only tenants one operator controls. Empty refuses every upload. Ignored
+with ORIGIN_BASE (every notebook gets its own origin) and on localhost. An unlisted
+tenant's 403 names its id; `daimon tenants list --json` shows every tenant's id.
 
 ### `DAIMON_NOTEBOOK__UIDS_FILE`
 

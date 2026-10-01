@@ -808,8 +808,9 @@ publisher asks for the editor and the operator allows it
 `DAIMON_NOTEBOOK__ORIGIN_BASE` set, each notebook is served from its own origin
 (`<label>.<origin_base>`); the proxy routes by Host and refuses cross-origin
 requests and WebSockets. Without it, notebooks share one origin, so a public
-host admits uploads from one tenant only, named in the bot's signed upload
-token.
+host admits uploads only from the tenants the operator lists in
+`DAIMON_NOTEBOOK__TENANTS`, matched against the tenant named in the bot's
+signed upload token.
 `apps/report-host/` serves one published PDF report with a chat sidebar.
 Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach daimon over HTTP with capability tokens, and the

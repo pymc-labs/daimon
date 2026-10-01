@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -153,9 +154,20 @@ class Settings(BaseSettings):
     # set, the proxy routes by Host, requires the exact origin on every
     # cross-origin request and WebSocket, and refuses path-mode /n/<slug>/ on
     # any other host. Unset: all notebooks share one origin, so a public host
-    # serves one tenant only (see README).
+    # serves only the tenants listed in ``tenants`` (see README).
     origin_base: str | None = None
     origin_scheme: Literal["https", "http"] = "https"
+    tenants: tuple[UUID, ...] = Field(
+        default=(),
+        description=(
+            "Tenant UUIDs a public host without DAIMON_NOTEBOOK__ORIGIN_BASE accepts uploads "
+            "from, as a JSON array of strings. Their notebooks share one browser origin and can "
+            "reach each other, so list only tenants one operator controls. Empty refuses every "
+            "upload. Ignored with ORIGIN_BASE (every notebook gets its own origin) and on "
+            "localhost. An unlisted tenant's 403 names its id; `daimon tenants list --json` "
+            "shows every tenant's id."
+        ),
+    )
 
     @property
     def is_local_dev(self) -> bool:
