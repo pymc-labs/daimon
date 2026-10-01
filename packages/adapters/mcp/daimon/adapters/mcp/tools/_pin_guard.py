@@ -31,6 +31,28 @@ from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
 
 
+def _trusted_admin(auth: AuthIdentity) -> bool:
+    """An admin this guard trusts to configure a pinned agent.
+
+    - A chat turn's credential (``chat_agent_id``): minted for one turn whose
+      admission recorded the adapter's live platform role as the account's
+      stored role, which ``is_admin`` reads -- current as of that turn. The
+      same vault token is reused by that person's later hub and routine
+      sessions, so there it is as current as their last platform turn.
+    - The deployment operator's own token (no agent, no chat turn, no
+      platform user; ``is_admin`` comes from the internal claim or the stored
+      role), which already controls the deployment.
+
+    An agent-scoped key (``agent_id``) is never trusted, whoever minted it:
+    it is long-lived and its account role may be stale.
+    """
+    if not auth.is_admin or auth.agent_id is not None:
+        return False
+    if auth.chat_agent_id is not None:
+        return auth.platform_user_id is not None
+    return auth.platform_user_id is None
+
+
 async def require_pin_write_access(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -42,8 +64,11 @@ async def require_pin_write_access(
 
     ``ma_agent`` may be a resolver, called only when the tenant pins anything,
     for paths that don't otherwise look the agent up.
+
+    Admins are trusted to configure an agent (`_trusted_admin`); agent
+    keys never are.
     """
-    if auth.is_admin:
+    if _trusted_admin(auth):
         return
     async with runtime.session_factory() as session:
         try:

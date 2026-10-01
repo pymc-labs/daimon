@@ -2669,10 +2669,19 @@ async def test_requests_for_a_pinned_agent_need_its_channel_or_an_admin(
     )
     await db_session.commit()
     client = _ma_client_with_agents(
-        [_ma_agent(agent_id="ag_acme", name="acme-project", tenant_id=tenant.id)]
+        [
+            _ma_agent(agent_id="ag_acme", name="acme-project", tenant_id=tenant.id),
+            _ma_agent(agent_id="ag_clientb", name="clientb-project", tenant_id=tenant.id),
+        ]
     )
     runtime = _runtime(committing_sessionmaker, client=client)
     auth = _auth_identity(tenant_id=tenant.id, is_admin=is_admin)
+    if is_admin:
+        # A chat turn's admin, executing as the channel's own (unpinned) agent:
+        # that turn's admission recorded the live role.
+        auth = dataclasses.replace(
+            auth, chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_clientb")
+        )
     await make_account(db_session, tenant=tenant, id=auth.account_id)
     await db_session.commit()
     async with committing_sessionmaker.begin() as session:
@@ -2733,3 +2742,88 @@ async def test_requests_for_a_pinned_agent_need_its_channel_or_an_admin(
         with pytest.raises(ToolError, match="pinned this agent to its own channels"):
             await request()
         assert await _row_count(db_session) == 0, "a refused request posts no card"
+
+
+async def test_an_admins_dm_turn_posts_a_credential_card_for_a_pinned_agent_into_their_dm(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """End to end: the card lands at the top of the admin's own Slack IM."""
+    import dataclasses
+    import re as _re
+
+    import yarl
+    from aioresponses import aioresponses
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.access_policy import set_access_policy
+
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=_SLACK_TEAM_ID)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"daimon": ("C_PINNED",)}),
+    )
+    await db_session.commit()
+    fernet = await _seed_slack_bot_token(committing_sessionmaker)
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_env_slack", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _slack_runtime(committing_sessionmaker, client=client, fernet=fernet)
+    auth = dataclasses.replace(
+        _auth_identity(
+            platform="slack",
+            external_id=_SLACK_TEAM_ID,
+            platform_user_id=_SLACK_USER_ID,
+            tenant_id=tenant.id,
+            is_admin=True,
+        ),
+        role=Role.ADMIN,
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_env_slack"),
+    )
+    from daimon.core.stores.accounts import set_role
+
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await set_role(db_session, auth.account_id, Role.ADMIN)
+    await db_session.commit()
+    async with committing_sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=auth.account_id,
+            platform="slack",
+            parent_channel_id="D0ADMIN1",
+            thread_id=f"dm:{uuid.uuid4()}",
+            responder_ma_agent_id="ag_env_slack",
+            responder_name="daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.ADMIN,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            now=datetime.now(UTC),
+        )
+
+    im = {"ok": True, "channel": {"id": "D0ADMIN1", "is_im": True, "user": _SLACK_USER_ID}}
+    with aioresponses() as m:
+        m.post("https://slack.com/api/conversations.info", payload=im, repeat=True)
+        m.get(_re.compile(r"https://slack\.com/api/conversations\.info.*"), payload=im, repeat=True)
+        m.post(
+            "https://slack.com/api/chat.postMessage",
+            payload={"ok": True, "ts": "1700000009.000900", "channel": "D0ADMIN1"},
+            repeat=True,
+        )
+        await _request_agent_key_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin.id),
+            expected_ma_agent_id="ag_env_slack",
+            agent_name="daimon",
+            key="OPENAI_API_KEY",
+            purpose="calling the OpenAI API",
+            channel_id="D0ADMIN1",
+        )
+        posts = m.requests[("POST", yarl.URL("https://slack.com/api/chat.postMessage"))]
+
+    body = posts[0].kwargs["json"]
+    assert body["channel"] == "D0ADMIN1"
+    assert "thread_ts" not in body or body["thread_ts"] is None, "a dm: scope is not a Slack ts"

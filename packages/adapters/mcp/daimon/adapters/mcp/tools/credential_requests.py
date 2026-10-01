@@ -42,6 +42,7 @@ from daimon.adapters.mcp.tools.teams._send import (
     _post_teams_credential_card_impl,  # pyright: ignore[reportPrivateUsage]
     edit_teams_card_state,
 )
+from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.credential_requests import (
@@ -452,7 +453,11 @@ async def _mint_and_post(
                 runtime,
                 auth,
                 channel_id=channel_id,
-                thread_ts=origin.thread_id,
+                # A /dm conversation's thread is its private scope ("dm:<uuid>"),
+                # not a Slack ts: the card goes to the top of the DM.
+                thread_ts=None
+                if origin.thread_id.startswith(DM_SCOPE_PREFIX)
+                else origin.thread_id,
                 kind=kind,
                 target=target,
                 token=token,

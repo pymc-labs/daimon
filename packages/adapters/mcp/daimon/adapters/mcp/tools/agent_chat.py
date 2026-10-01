@@ -73,6 +73,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import (
+    admin_readable_legacy_sessions,
     require_session_outside_seals,
     session_belongs_to_caller,
     sessions_outside_seals,
@@ -255,7 +256,11 @@ async def _verify_agent_owns_session(
     """
     s = await runtime.client.beta.sessions.retrieve(handle)
     derived = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(s.agent.id))
-    if auth.agent_id is None or derived != auth.agent_id or not _owned_by_caller(s, auth):
+    if auth.agent_id is None or derived != auth.agent_id:
+        raise ToolError("session not found")
+    if not _owned_by_caller(s, auth) and s.id not in await admin_readable_legacy_sessions(
+        runtime, auth, [s]
+    ):
         raise ToolError("session not found")
     await require_session_outside_seals(runtime, auth, s)
     return s
