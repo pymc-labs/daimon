@@ -136,6 +136,9 @@ def test_teams_guidance_splits_one_to_one_delivery_from_channels() -> None:
     assert "saves each output to the channel's Files and links it" in teams, (
         "with access, outputs are delivered as links, so the agent may reference them"
     )
+    assert "put only deliverables there and keep working files in /root/work" in teams, (
+        "every file in outputs is uploaded to the channel, so scratch files would land there too"
+    )
     assert "no file can be attached" in teams and "never promise one" in teams, (
         "without access a channel cannot take files at all"
     )

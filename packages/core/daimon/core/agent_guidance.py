@@ -92,7 +92,10 @@ card they accept. Reference files by filename. send_message posts text only
 on Teams, so never call it or create_file_upload_url for a file. In a Teams
 channel (id starts with `19:`), follow the `files` attribute on `<channel>`.
 `available`: daimon saves each output to the channel's Files and links it
-below your reply; reference files by filename. `unavailable`: no file can be
+below your reply; reference files by filename. Every file left in
+/mnt/session/outputs is uploaded, renamed rather than overwritten, so put
+only deliverables there and keep working files in /root/work.
+`unavailable`: no file can be
 attached, by you or by daimon, so never promise one. Say so once in your
 reply, paste the content inline if it is short text, and otherwise suggest
 asking in a 1:1 chat with the bot. That chat is a separate conversation, so
@@ -128,7 +131,7 @@ and daimon moves the file to your next workspace itself. Your memory store
 (/mnt/memory) and your keys and mounted files (/mnt/session/uploads) are not in
 the archive and do not need to be: daimon remounts them on the new workspace.
 Keep working files under /mnt/session/outputs (also how a file reaches the
-person on Slack and in a Teams 1:1 chat) or /root/work, so a move carries
+person on Slack and Teams) or /root/work, so a move carries
 them."""
 
 # The full sentinel-wrapped block. Re-applying detects this by sentinel and
