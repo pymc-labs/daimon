@@ -24,7 +24,8 @@ import structlog
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.access_policy import TenantAccessPolicy, is_write_protected
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
@@ -174,7 +175,13 @@ def make_slack_routine_poster(
             return await _dm_fallback(
                 client, row, "destination_unavailable", team_id=tenant.external_id, policy=dm_policy
             )
-        if is_write_protected(cleared, channel_id=target.channel_id):
+        if not authorize(
+            cleared,
+            subject=Subject(),
+            action=Action.POST,
+            surface=Surface.ROUTINE,
+            place=Place(channel_id=target.channel_id),
+        ):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
             return await _dm_fallback(
                 client, row, "protected_channel", team_id=tenant.external_id, policy=dm_policy

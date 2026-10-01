@@ -41,7 +41,7 @@ from daimon.adapters.mcp.tools.slack._client import (
     slack_web_client,
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
-from daimon.core.access_policy import TenantAccessPolicy, is_write_protected
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
@@ -266,11 +266,14 @@ async def _check_destination(
             raise ToolError(
                 "the workspace access policy could not be read; no destination was saved"
             ) from err
-    if is_write_protected(
+    if not authorize(
         policy,
-        channel_id=channel_id,
-        parent_channel_id=parent_channel_id,
-        category_id=category_id,
+        subject=Subject(),
+        action=Action.POST,
+        surface=Surface.ROUTINE,
+        place=Place(
+            channel_id=channel_id, parent_channel_id=parent_channel_id, category_id=category_id
+        ),
     ):
         raise ToolError(
             f"{channel_id} is a protected channel: daimon does not post there, so a routine "

@@ -32,7 +32,11 @@ from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.agent_pins import request_pin_refusal
+from daimon.core.agent_pins import (
+    FormPinRefused,
+    consume_form_unless_pinned,
+    request_pin_refusal,
+)
 from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
@@ -277,13 +281,18 @@ class TeamsCredentialRequests:
         if pin_refusal is not None:
             return dialog_message(pin_refusal)
         now = datetime.now(UTC)
-        async with self._runtime.sessionmaker.begin() as session:
-            consumed = await store.consume_credential_request(session, token=row.token, now=now)
-            flow = (
-                await begin_mcp_oauth_flow(session, request=consumed, app_root_url=root, now=now)
-                if consumed is not None
-                else None
-            )
+        try:
+            async with self._runtime.sessionmaker.begin() as session:
+                consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+                flow = (
+                    await begin_mcp_oauth_flow(
+                        session, request=consumed, app_root_url=root, now=now
+                    )
+                    if consumed is not None
+                    else None
+                )
+        except FormPinRefused as refused:
+            return dialog_message(refused.refusal)
         if consumed is None or flow is None:
             return dialog_message(NO_LONGER_VALID_MESSAGE)
         # The mcp process edits the card again once sign-in completes.
@@ -422,55 +431,63 @@ class TeamsCredentialRequests:
         )
         state: CardState = "applied"
         queued = False
-        async with self._runtime.sessionmaker.begin() as session:
-            consumed = await store.consume_credential_request(
-                session, token=row.token, now=datetime.now(UTC)
-            )
-            # Re-read under the write, holding the agent's key-set lock: an
-            # alias that appeared after the gate above was decided was never
-            # put to it, and one a concurrent writer is adding waits.
-            appeared = False
-            if consumed is not None:
-                await lock_agent_keys(
-                    session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
+        try:
+            async with self._runtime.sessionmaker.begin() as session:
+                consumed = await consume_form_unless_pinned(
+                    session, row=row, agent=agent, now=datetime.now(UTC)
                 )
-                appeared = (
-                    env_related_held(
-                        consumed.target,
-                        await list_turn_key_names(
-                            session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
-                        ),
+                # Re-read under the write, holding the agent's key-set lock: an
+                # alias that appeared after the gate above was decided was never
+                # put to it, and one a concurrent writer is adding waits.
+                appeared = False
+                if consumed is not None:
+                    await lock_agent_keys(
+                        session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
                     )
-                    != related_before
-                )
-            if consumed is not None and refuse:
-                await store.set_credential_request_outcome(
-                    session, token=row.token, outcome="write_failed"
-                )
-                state = "refused"
-            elif consumed is not None and appeared:
-                await store.set_credential_request_outcome(
-                    session, token=row.token, outcome="stale_replacement"
-                )
-                state = "superseded"
-            elif consumed is not None:
-                written = await put_agent_file_if_unchanged(
-                    session,
-                    tenant_id=consumed.tenant_id,
-                    agent_id=consumed.agent_id,
-                    key=consumed.target,
-                    content=secret,
-                    set_by_account_id=consumed.account_id,
-                    expected_updated_at=consumed.replaces_updated_at,
-                )
-                outcome = "applied" if written is not None else "stale_replacement"
-                await store.set_credential_request_outcome(
-                    session, token=row.token, outcome=outcome
-                )
-                if written is None:
+                    appeared = (
+                        env_related_held(
+                            consumed.target,
+                            await list_turn_key_names(
+                                session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
+                            ),
+                        )
+                        != related_before
+                    )
+                if consumed is not None and refuse:
+                    await store.set_credential_request_outcome(
+                        session, token=row.token, outcome="write_failed"
+                    )
+                    state = "refused"
+                elif consumed is not None and appeared:
+                    await store.set_credential_request_outcome(
+                        session, token=row.token, outcome="stale_replacement"
+                    )
                     state = "superseded"
-                else:
-                    queued = await record_input_continuation(session, consumed, platform="teams")
+                elif consumed is not None:
+                    written = await put_agent_file_if_unchanged(
+                        session,
+                        tenant_id=consumed.tenant_id,
+                        agent_id=consumed.agent_id,
+                        key=consumed.target,
+                        content=secret,
+                        set_by_account_id=consumed.account_id,
+                        expected_updated_at=consumed.replaces_updated_at,
+                    )
+                    outcome = "applied" if written is not None else "stale_replacement"
+                    await store.set_credential_request_outcome(
+                        session, token=row.token, outcome=outcome
+                    )
+                    if written is None:
+                        state = "superseded"
+                    else:
+                        queued = await record_input_continuation(
+                            session, consumed, platform="teams"
+                        )
+        except FormPinRefused:
+            # Decided with the consume: rolled back, the form stays live. The
+            # dialog showed the earlier refusal for a pin already set.
+            log.info("teams.credential.pin_refused", kind="env")
+            return
         if consumed is None:
             log.info("teams.credential.already_used", kind="env")
             return
@@ -541,8 +558,12 @@ class TeamsCredentialRequests:
             else McpConnectDecision(replaces=False, replace_allowed=False)
         )
         now = datetime.now(UTC)
-        async with self._runtime.sessionmaker.begin() as session:
-            consumed = await store.consume_credential_request(session, token=row.token, now=now)
+        try:
+            async with self._runtime.sessionmaker.begin() as session:
+                consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+        except FormPinRefused:
+            log.info("teams.credential.pin_refused", kind="mcp")
+            return
         if consumed is None:
             log.info("teams.credential.already_used", kind="mcp")
             return

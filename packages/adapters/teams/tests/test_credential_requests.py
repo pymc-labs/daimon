@@ -666,3 +666,41 @@ async def test_a_pinned_agents_form_from_outside_its_channels_is_refused_at_subm
         file = await get_agent_file(session, tenant_id=TENANT, agent_id=row.agent_id, key="API_KEY")
     assert file is None, "nothing is saved"
     dispatch.assert_not_awaited()
+
+
+async def _early_check_passes(*_args: object, **_kwargs: object) -> None:
+    """The pin lands after the submit path's early check: only the consume sees it."""
+    return None
+
+
+@pytest.mark.parametrize("kind", ["env", "mcp_oauth"])
+async def test_a_pin_after_the_early_check_is_decided_inside_the_consume(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    row = await _request(db_session_factory, account_id, kind=kind)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(agent_channel_pins={"daimon": ("19:other-channel",)}),
+        )
+    monkeypatch.setattr(
+        "daimon.adapters.teams.credential_requests.request_pin_refusal", _early_check_passes
+    )
+    runtime = _runtime(db_session_factory, mcp=kind == "mcp_oauth")
+    async with _running(TeamsApiFake(), runtime) as (service, dispatch):
+        answer = await post_activity(
+            service, _open(row.token) if kind == "mcp_oauth" else _submit(row.token)
+        )
+        await service.turns.drain(5)
+    if kind == "mcp_oauth":
+        assert answer["task"]["value"] == PIN_WRITE_REFUSAL
+    async with db_session_factory() as session:
+        live = await peek_credential_request(session, token=row.token)
+        file = await get_agent_file(session, tenant_id=TENANT, agent_id=row.agent_id, key="API_KEY")
+    assert live is not None and live.used_at is None, "the refused form was not spent"
+    assert file is None, "nothing is saved"
+    dispatch.assert_not_awaited()

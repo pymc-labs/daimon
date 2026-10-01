@@ -48,7 +48,11 @@ from daimon.adapters.slack.credential_submissions import (
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.agent_pins import request_pin_refusal
+from daimon.core.agent_pins import (
+    FormPinRefused,
+    consume_form_unless_pinned,
+    request_pin_refusal,
+)
 from daimon.core.credential_requests import (
     CredentialRequestKind,
 )
@@ -137,17 +141,25 @@ async def start_mcp_oauth_from_click(
         )
         return
     now = datetime.now(UTC)
-    async with runtime.sessionmaker() as session, session.begin():
-        consumed = await credential_requests_store.consume_credential_request(
-            session, token=row.token, now=now
-        )
-        flow = (
-            await begin_mcp_oauth_flow(
-                session, request=consumed, app_root_url=app_root_url, now=now
+    try:
+        async with runtime.sessionmaker() as session, session.begin():
+            consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+            flow = (
+                await begin_mcp_oauth_flow(
+                    session, request=consumed, app_root_url=app_root_url, now=now
+                )
+                if consumed is not None
+                else None
             )
-            if consumed is not None
-            else None
+    except FormPinRefused as refused:
+        await post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refused.refusal,
+            thread_ts=thread_ts,
         )
+        return
     if consumed is None or flow is None:
         await post_ephemeral(
             client,

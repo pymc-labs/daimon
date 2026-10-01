@@ -34,11 +34,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, Literal, cast
 
 import structlog
-from daimon.core.access_policy import (
-    TenantAccessPolicy,
-    is_invoker_allowed,
-    is_write_protected,
-)
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_subject
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow
@@ -287,11 +284,16 @@ def delivery_refusal(
     )
     if creator_refusal is not None:
         return creator_refusal
-    if is_write_protected(
+    if not authorize(
         policy,
-        channel_id=target.channel_id,
-        parent_channel_id=parent_channel_id,
-        category_id=category_id,
+        subject=Subject(),
+        action=Action.POST,
+        surface=Surface.ROUTINE,
+        place=Place(
+            channel_id=target.channel_id,
+            parent_channel_id=parent_channel_id,
+            category_id=category_id,
+        ),
     ):
         return "protected_channel"
     return None
@@ -301,8 +303,11 @@ def creator_refusal_for(
     policy: TenantAccessPolicy, *, creator_platform_user_id: str | None, creator_is_admin: bool
 ) -> SkipReason | None:
     """`invoker_not_allowed` unless the routine's creator may still invoke."""
-    if creator_platform_user_id is None or not is_invoker_allowed(
-        policy, external_user_id=creator_platform_user_id, is_admin=creator_is_admin
+    if not authorize(
+        policy,
+        subject=build_subject(is_admin=creator_is_admin, platform_user_id=creator_platform_user_id),
+        action=Action.ACT_FOR_CREATOR,
+        surface=Surface.ROUTINE,
     ):
         return "invoker_not_allowed"
     return None

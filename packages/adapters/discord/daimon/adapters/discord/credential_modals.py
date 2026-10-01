@@ -100,7 +100,7 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
 from daimon.adapters.discord.credential_origin import (
     is_credential_interaction_valid,
-    refuse_if_credential_target_unavailable,
+    resolve_credential_target,
 )
 from daimon.adapters.discord.credential_repo_bind import (
     refuse_if_shared_and_not_admin_for_request,
@@ -109,7 +109,7 @@ from daimon.adapters.discord.credential_repo_bind import (
 )
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.agent_pins import agent_pin_names
+from daimon.core.agent_pins import FormPinRefused, agent_pin_names, consume_form_unless_pinned
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
@@ -499,9 +499,8 @@ class EnvCredentialModal(discord.ui.Modal):
             )
             return
 
-        if await refuse_if_credential_target_unavailable(
-            interaction, runtime=self._runtime, row=self._row
-        ):
+        agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
+        if agent is None:
             return
         # The name a member may store is re-checked against the submitter's
         # live role: a key minted while they were an admin must not land as a
@@ -546,8 +545,8 @@ class EnvCredentialModal(discord.ui.Modal):
         is_continuation_queued = False
         try:
             async with self._runtime.sessionmaker() as session, session.begin():
-                consumed_row = await credential_requests.consume_credential_request(
-                    session, token=self._row.token, now=now
+                consumed_row = await consume_form_unless_pinned(
+                    session, row=self._row, agent=agent, now=now
                 )
                 if consumed_row is None:
                     await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
@@ -603,6 +602,10 @@ class EnvCredentialModal(discord.ui.Modal):
                 await credential_requests.set_credential_request_outcome(
                     session, token=consumed_row.token, outcome=outcome
                 )
+        except FormPinRefused as refused:
+            # Decided with the consume: rolled back, nothing stored.
+            await interaction.followup.send(refused.refusal, ephemeral=True)
+            return
         except AgentEnvEncryptionRequiredError as err:
             # Rolled back with the consume: nothing stored, the request stays live.
             _log.error("credential_modal.env_write_refused_no_crypto_keys")
@@ -770,9 +773,8 @@ class EnvFileModal(discord.ui.Modal):
             )
             return
 
-        if await refuse_if_credential_target_unavailable(
-            interaction, runtime=self._runtime, row=self._row
-        ):
+        agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
+        if agent is None:
             return
 
         now = datetime.now(UTC)
@@ -781,8 +783,8 @@ class EnvFileModal(discord.ui.Modal):
         is_continuation_queued = False
         try:
             async with self._runtime.sessionmaker() as session, session.begin():
-                consumed_row = await credential_requests.consume_credential_request(
-                    session, token=self._row.token, now=now
+                consumed_row = await consume_form_unless_pinned(
+                    session, row=self._row, agent=agent, now=now
                 )
                 if consumed_row is None:
                     await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
@@ -831,6 +833,10 @@ class EnvFileModal(discord.ui.Modal):
                     token=consumed_row.token,
                     outcome="stale_replacement" if collisions else "applied",
                 )
+        except FormPinRefused as refused:
+            # Decided with the consume: rolled back, nothing stored.
+            await interaction.followup.send(refused.refusal, ephemeral=True)
+            return
         except AgentEnvEncryptionRequiredError as err:
             # Rolled back with the consume: nothing stored, the request stays live.
             _log.error("credential_modal.env_write_refused_no_crypto_keys")
@@ -950,18 +956,21 @@ class McpCredentialModal(discord.ui.Modal):
             )
             return
 
-        if await refuse_if_credential_target_unavailable(
-            interaction, runtime=self._runtime, row=self._row
-        ):
+        agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
+        if agent is None:
             return
         connect = await _decide_mcp_connect_at_submit(
             interaction, runtime=self._runtime, row=self._row
         )
         now = datetime.now(UTC)
-        async with self._runtime.sessionmaker() as session, session.begin():
-            consumed_row = await credential_requests.consume_credential_request(
-                session, token=self._row.token, now=now
-            )
+        try:
+            async with self._runtime.sessionmaker() as session, session.begin():
+                consumed_row = await consume_form_unless_pinned(
+                    session, row=self._row, agent=agent, now=now
+                )
+        except FormPinRefused as refused:
+            await interaction.followup.send(refused.refusal, ephemeral=True)
+            return
         if consumed_row is None:
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return
@@ -1156,15 +1165,18 @@ class SkillRepoModal(discord.ui.Modal):
             await interaction.followup.send("Enter a GitHub token.", ephemeral=True)
             return
 
-        if await refuse_if_credential_target_unavailable(
-            interaction, runtime=self._runtime, row=self._row
-        ):
+        agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
+        if agent is None:
             return
         now = datetime.now(UTC)
-        async with self._runtime.sessionmaker() as session, session.begin():
-            consumed_row = await credential_requests.consume_credential_request(
-                session, token=self._row.token, now=now
-            )
+        try:
+            async with self._runtime.sessionmaker() as session, session.begin():
+                consumed_row = await consume_form_unless_pinned(
+                    session, row=self._row, agent=agent, now=now
+                )
+        except FormPinRefused as refused:
+            await interaction.followup.send(refused.refusal, ephemeral=True)
+            return
         if consumed_row is None:
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return
@@ -1507,15 +1519,18 @@ class RepoBindModal(discord.ui.Modal):
 
         pat = str(self.pat_in.value or "").strip()
 
-        if await refuse_if_credential_target_unavailable(
-            interaction, runtime=self._runtime, row=self._row
-        ):
+        agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
+        if agent is None:
             return
         now = datetime.now(UTC)
-        async with self._runtime.sessionmaker() as session, session.begin():
-            consumed_row = await credential_requests.consume_credential_request(
-                session, token=self._row.token, now=now
-            )
+        try:
+            async with self._runtime.sessionmaker() as session, session.begin():
+                consumed_row = await consume_form_unless_pinned(
+                    session, row=self._row, agent=agent, now=now
+                )
+        except FormPinRefused as refused:
+            await interaction.followup.send(refused.refusal, ephemeral=True)
+            return
         if consumed_row is None:
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return
