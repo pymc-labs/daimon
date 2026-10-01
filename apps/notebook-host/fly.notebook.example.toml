@@ -20,7 +20,7 @@
 #   - a wildcard certificate:
 #       fly certs add "*.<your-notebook-domain>" --app <your-app-name>
 # Without ORIGIN_BASE all notebooks share one origin with no browser
-# isolation, and the host admits a single tenant.
+# isolation, and the host admits only the tenants in DAIMON_NOTEBOOK__TENANTS.
 
 app = "<your-app-name>"
 primary_region = "ord"

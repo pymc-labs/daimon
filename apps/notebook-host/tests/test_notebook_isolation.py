@@ -15,6 +15,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import runpy
 import subprocess
@@ -888,29 +889,80 @@ def test_origin_mode_websocket_needs_the_exact_origin(
         assert exc.value.code == 1008, f"origin {origin!r} must not open b's kernel socket"
 
 
-def test_shared_origin_public_host_serves_one_tenant(
+_T1 = "11111111-1111-4111-8111-111111111111"
+_T2 = "22222222-2222-4222-8222-222222222222"
+_T3 = "33333333-3333-4333-8333-333333333333"
+
+
+def test_shared_origin_public_host_serves_listed_tenants_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Listed tenants share the origin; anyone else gets a 403 naming the setting and id."""
     monkeypatch.setenv("DAIMON_NOTEBOOK__PUBLIC_URL_BASE", "https://nbs.example.com")
+    # Upper case: the setting compares canonical UUIDs, not strings.
+    monkeypatch.setenv("DAIMON_NOTEBOOK__TENANTS", f'["{_T1}", "{_T2.upper()}"]')
     client, _, calls = _make_app(tmp_path, monkeypatch)
-    ok = client.put(f"/upload/{_mint('notebook', 'a', jti='1', tenant='t-1')}", content=b"# a\n")
-    assert ok.status_code == 200, ok.text
-    again = client.put(f"/upload/{_mint('notebook', 'b', jti='2', tenant='t-1')}", content=b"#\n")
-    assert again.status_code == 200
-    other = client.put(f"/upload/{_mint('notebook', 'c', jti='3', tenant='t-2')}", content=b"#\n")
-    assert other.status_code == 403, "a second tenant can't share the origin"
+    for i, tenant in enumerate((_T1, _T2)):
+        r = client.put(
+            f"/upload/{_mint('notebook', f's{i}', jti=str(i), tenant=tenant)}", content=b"#\n"
+        )
+        assert r.status_code == 200, f"listed tenant {tenant} must be served: {r.text}"
+    other = client.put(f"/upload/{_mint('notebook', 'c', jti='3', tenant=_T3)}", content=b"#\n")
+    assert other.status_code == 403, "an unlisted tenant can't share the origin"
+    detail = other.json()["detail"]
+    assert _T3 in detail and "DAIMON_NOTEBOOK__TENANTS" in detail, (
+        f"the refusal must carry the id and the setting for the operator to copy: {detail}"
+    )
     anon = client.put(f"/upload/{_mint('notebook', 'd', jti='4')}", content=b"#\n")
     assert anon.status_code == 403, "a token naming no tenant fails closed"
+    assert "DAIMON_NOTEBOOK__TENANTS" in anon.json()["detail"], "names the setting"
+    assert len(calls) == 2, "only the two listed tenants' uploads spawn a notebook"
+
+
+def test_shared_origin_public_host_with_no_tenants_refuses_every_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty list admits nobody, and a stale first-come claim file is not honoured."""
+    monkeypatch.setenv("DAIMON_NOTEBOOK__PUBLIC_URL_BASE", "https://nbs.example.com")
+    client, _, calls = _make_app(tmp_path, monkeypatch)
+    (tmp_path / "tenant.json").write_text(json.dumps({"tenant": _T1}))
+    r = client.put(f"/upload/{_mint('notebook', 'a', tenant=_T1)}", content=b"#\n")
+    assert r.status_code == 403, "tenant.json from the old first-come claim must be ignored"
+    detail = r.json()["detail"]
+    assert _T1 in detail and "DAIMON_NOTEBOOK__TENANTS" in detail, detail
+    assert calls == [], "a refused upload never spawns"
+
+
+def test_shared_origin_boot_warns_when_no_tenant_is_listed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from notebook_host.config import Settings
+    from notebook_host.main import warn_shared_origin
+
+    settings = Settings(admin_secrets=["x"], public_url_base="https://nbs.example.com")  # pyright: ignore[reportCallIssue, reportArgumentType]
+    with caplog.at_level(logging.WARNING, logger="notebook_host.main"):
+        warn_shared_origin(settings)
+    assert "DAIMON_NOTEBOOK__TENANTS is empty" in caplog.text, caplog.text
+
+
+def test_local_dev_host_admits_any_tenant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _, calls = _make_app(tmp_path, monkeypatch)
+    for i, tenant in enumerate((_T3, None)):
+        r = client.put(
+            f"/upload/{_mint('notebook', f's{i}', jti=str(i), tenant=tenant)}", content=b"#\n"
+        )
+        assert r.status_code == 200, f"localhost needs no tenant list: {r.text}"
     assert len(calls) == 2
-    assert (os.stat(tmp_path / "tenant.json").st_mode & 0o077) == 0
 
 
 def test_per_origin_host_serves_many_tenants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DAIMON_NOTEBOOK__ORIGIN_BASE", "nb.example.com")
+    # Per-notebook origins isolate every tenant, so the shared-origin list is moot.
+    monkeypatch.setenv("DAIMON_NOTEBOOK__TENANTS", f'["{_T3}"]')
     client, state, _ = _make_app(tmp_path, monkeypatch)
-    for i, tenant in enumerate(("t-1", "t-2")):
+    for i, tenant in enumerate((_T1, _T2)):
         r = client.put(
             f"/upload/{_mint('notebook', f's{i}', jti=str(i), tenant=tenant)}", content=b"#\n"
         )
@@ -1159,9 +1211,8 @@ def test_every_host_registry_is_private_from_the_moment_its_tmp_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A jailed uid polling data_dir/<registry>.tmp must never be able to open it."""
-    from notebook_host import admin, jail
+    from notebook_host import jail
     from notebook_host.blogs_store import BlogRecord, save_blogs
-    from notebook_host.config import load_settings
     from notebook_host.consumed_store import save_consumed
     from notebook_host.pids_store import PidRecord, save_pids
 
@@ -1197,9 +1248,6 @@ def test_every_host_registry_is_private_from_the_moment_its_tmp_exists(
         save_consumed(tmp_path / "consumed.json", {"j": 1})
         jail.save_uid_registry(tmp_path / "uids.json", {"b": 100000})
         jail.get_or_create_slug_uid(tmp_path / "uids.json", "c", start=100000, end=100009)
-        monkeypatch.setenv("DAIMON_NOTEBOOK__DATA_DIR", str(tmp_path))
-        monkeypatch.setenv("DAIMON_NOTEBOOK__PUBLIC_URL_BASE", "https://nbs.example.com")
-        admin._admit_tenant(load_settings(_env_file=None), "t-1")  # pyright: ignore[reportPrivateUsage]
     finally:
         os.umask(old)
     expected = {
@@ -1208,7 +1256,6 @@ def test_every_host_registry_is_private_from_the_moment_its_tmp_exists(
         "consumed.json",
         "uids.json",
         "uids.json.cursor",
-        "tenant.json",
     }
     assert expected <= set(seen), seen
     assert all(mode & 0o077 == 0 for mode in seen.values()), (
@@ -1262,7 +1309,7 @@ def test_legacy_slug_root_is_emptied_of_unknown_entries_before_it_opens_up(
     assert all(m == 0o711 for m in root_modes), "a converted root is never closed again"
 
 
-# --- origin-mode cookie hardening and tenant fail-closed ---------------------------
+# --- origin-mode cookie hardening ---------------------------
 
 
 def test_https_origin_cookies_are_host_prefixed_secure_and_hsts_is_sent(
@@ -1296,18 +1343,6 @@ def test_cookie_domain_strip_tolerates_spaces(
     h = httpx.Headers([("set-cookie", "a=1; Domain = nb.example.com ; Path=/n/b")])
     out = dict(_response_headers(h, own_origin=None, secure=False))
     assert b"domain" not in out[b"set-cookie"].lower()
-
-
-def test_unreadable_tenant_file_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("DAIMON_NOTEBOOK__PUBLIC_URL_BASE", "https://nbs.example.com")
-    client, _, calls = _make_app(tmp_path, monkeypatch)
-    (tmp_path / "tenant.json").write_text("{not json")
-    r = client.put(f"/upload/{_mint('notebook', 'a', tenant='t-2')}", content=b"#\n")
-    assert r.status_code == 503, "a damaged claim must never be re-claimed by a new tenant"
-    assert calls == []
-    assert (tmp_path / "tenant.json").read_text() == "{not json"
 
 
 # --- real marimo: a neighbour on localhost is refused -------------------------
