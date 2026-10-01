@@ -4,7 +4,10 @@ The shell half of `daimon.core.skills.ingest`. An added skill is always titled
 `{t8}-{agent}/{name}`, so it can never push a version onto a seeded or shared
 library skill (`{t8}-{name}`); a name that would mount beside one of those is
 refused. Its `user_skills` row is `source="upload"` under the agent's derived
-identity, so a later skill-repo sync keeps it attached but never replaces it.
+identity, so a later skill-repo sync never replaces or re-attaches it.
+
+A fork copies its parent's skill ids, so a skill id another agent also holds
+is never given a new version: that would change the other agent too.
 
 Who may add a skill is the caller's decision (`operation_policy`'s
 `skill_add`); this module only refuses what no caller may do.
@@ -14,7 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import io
+import re
 import shutil
+import tarfile
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -28,8 +33,10 @@ from daimon.core.defaults.ma_index import (
     find_attach_mount_collision,
     find_conflicting_skill_mount,
     find_skill_by_display_title,
+    list_agents_by_tenant,
+    list_skills_strict,
 )
-from daimon.core.defaults.metadata import tenant_scoped_display_title
+from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
@@ -41,7 +48,13 @@ from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-__all__ = ["SkillAddResult", "add_agent_skill", "fetch_attachment", "fetch_repo_skill"]
+__all__ = [
+    "SkillAddResult",
+    "add_agent_skill",
+    "fetch_attachment",
+    "fetch_repo_skill",
+    "repo_origin",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -79,19 +92,33 @@ async def fetch_repo_skill(
     max_tarball_decompressed_bytes: int,
 ) -> SkillBundle:
     """One skill from a GitHub repo: the folder at `path`, or the repo's only skill."""
-    fetched = await fetch_repo(
-        http_client,
-        url,
-        branch=branch,
-        token=token,
-        max_tarball_bytes=max_tarball_bytes,
-        max_tarball_decompressed_bytes=max_tarball_decompressed_bytes,
-    )
+    if "\x00" in path:
+        raise SkillIngestError("The path may not contain a NUL character.")
+    try:
+        fetched = await fetch_repo(
+            http_client,
+            url,
+            branch=branch,
+            token=token,
+            max_tarball_bytes=max_tarball_bytes,
+            max_tarball_decompressed_bytes=max_tarball_decompressed_bytes,
+        )
+    except tarfile.TarError as exc:
+        raise SkillIngestError("GitHub sent an archive that can't be read.") from exc
+    except httpx.HTTPError as exc:
+        raise SkillIngestError(f"Could not reach GitHub: {type(exc).__name__}.") from exc
     try:
         files = await asyncio.to_thread(_read_repo_skill, fetched.path, path)
     finally:
         shutil.rmtree(fetched.cleanup_dir, ignore_errors=True)
-    return bundle_from_files(files)
+    return await asyncio.to_thread(bundle_from_files, files)
+
+
+def repo_origin(url: str, *, path: str, branch: str) -> str:
+    """`owner/repo/path@branch` for the ledger: no scheme, credentials, query or fragment."""
+    tail = url.split("github.com/", 1)[-1]
+    owner_repo = "/".join(re.split(r"[/?#]", tail)[:2]).removesuffix(".git")
+    return f"{'/'.join(part for part in (owner_repo, path.strip('/')) if part)}@{branch}"
 
 
 def _read_repo_skill(repo_root: Path, path: str) -> dict[str, bytes]:
@@ -176,6 +203,23 @@ async def add_agent_skill(
         skill_id = known_id or await _find_own_skill(
             client, tenant_id=tenant_id, agent_name=agent_name, name=preview.name
         )
+        if skill_id is not None:
+            await _refuse_shared(
+                client,
+                tenant_id=tenant_id,
+                agent=agent,
+                agent_name=agent_name,
+                name=preview.name,
+                skill_id=skill_id,
+            )
+        await _refuse_mount_clash(
+            client,
+            tenant_id=tenant_id,
+            agent=agent,
+            agent_name=agent_name,
+            name=preview.name,
+            own_skill_id=skill_id,
+        )
         if skill_id is None:
             created = await client.beta.skills.create(
                 display_title=tenant_scoped_display_title(
@@ -236,7 +280,8 @@ async def _find_own_skill(
     A shared or seeded skill with the same name would mount at the same path
     and break the agent's sessions. An agent-scoped skill of the same title is
     this agent's own (an earlier upload whose row was removed), so it is
-    versioned rather than duplicated.
+    versioned rather than duplicated, once `_refuse_shared` finds no other
+    agent holding it.
     """
     conflict = await find_conflicting_skill_mount(
         client, tenant_id=tenant_id, name=name, agent_name=agent_name
@@ -249,6 +294,59 @@ async def _find_own_skill(
     title = tenant_scoped_display_title(tenant_id=tenant_id, name=name, agent_name=agent_name)
     own = await find_skill_by_display_title(client, title, on_truncation="raise")
     return own.id if own is not None else None
+
+
+async def _refuse_shared(
+    client: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    agent: BetaManagedAgentsAgent,
+    agent_name: str,
+    name: str,
+    skill_id: str,
+) -> None:
+    """Refuse a new version of `skill_id` while any other agent in the tenant has it."""
+    others = sorted(
+        other.name
+        for other in await list_agents_by_tenant(client, tenant_id=tenant_id)
+        if other.id != agent.id and any(skill.skill_id == skill_id for skill in other.skills)
+    )
+    if others:
+        raise SkillIngestError(
+            f"'{name}' on {agent_name} is also attached to {', '.join(others[:3])}, which "
+            "shares it through a fork, so a new version would change that agent too. Add "
+            f"this under a new name (e.g. {name}-2)."
+        )
+
+
+async def _refuse_mount_clash(
+    client: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    agent: BetaManagedAgentsAgent,
+    agent_name: str,
+    name: str,
+    own_skill_id: str | None,
+) -> None:
+    """Refuse before uploading when a skill already on the agent mounts at `name`.
+
+    A fork keeps its parent's agent-scoped skills, so `{parent}/name` would
+    sit beside this agent's `{agent}/name` and break its sessions.
+    """
+    bodies: dict[str, str] = {}
+    for row in await list_skills_strict(client):
+        body = strip_tenant_prefix(tenant_id=tenant_id, display_title=row.display_title or "")
+        if row.source == "custom" and body is not None:
+            bodies[row.id] = body
+    for skill in agent.skills:
+        if skill.skill_id == own_skill_id:
+            continue
+        body = skill.skill_id if skill.type == "anthropic" else bodies.get(skill.skill_id)
+        if body is not None and body.rsplit("/", 1)[-1] == name:
+            raise SkillIngestError(
+                f"{agent_name} already has a skill that loads as '{name}' ({body}). "
+                f"Rename this one (e.g. {name}-2)."
+            )
 
 
 async def _attach(

@@ -7,8 +7,9 @@ chat attachment (`daimon.core.skills.add`) hand their bytes here.
 An uploaded archive is untrusted input, so it is unpacked in memory and
 refused outright, never silently repaired, when an entry is a symlink, an
 absolute path, a `..` climb, encrypted, or over the caps `build_skill_zip`
-already enforces. The packed zip is byte-deterministic, so the preview's
-`content_hash` names exactly what a later confirmation uploads.
+already enforces, and a damaged one is refused the same way. The packed zip
+is byte-deterministic, so the preview's `content_hash` names exactly what a
+later confirmation uploads; `confirmation_hash` ties it to one agent.
 """
 
 from __future__ import annotations
@@ -17,7 +18,9 @@ import hashlib
 import io
 import re
 import stat
+import struct
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Final
@@ -33,14 +36,25 @@ __all__ = [
     "SkillBundle",
     "SkillIngestError",
     "SkillPreview",
+    "UPLOAD_SUFFIXES",
     "bundle_from_files",
     "bundle_from_markdown",
     "bundle_from_upload",
+    "confirmation_hash",
+    "require_upload_suffix",
 ]
 
 SKILL_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 #: The provider's own bound on a skill description.
 MAX_DESCRIPTION_CHARS: Final[int] = 1024
+#: What an uploaded file may be: the SKILL.md itself, or a zip of the folder.
+UPLOAD_SUFFIXES: Final[frozenset[str]] = frozenset({".md", ".zip"})
+
+# The provider refuses XML tags in a description; say so before uploading.
+_XML_TAG_RE: Final[re.Pattern[str]] = re.compile(r"<\s*/?\s*[A-Za-z][^<>]*>")
+_EOCD_SIGNATURE: Final[bytes] = b"PK\x05\x06"
+_EOCD_BYTES: Final[int] = 22
+_ZIP_COMMENT_MAX: Final[int] = 0xFFFF
 
 _SAFE_PATH_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9._/-]+$")
 _ZERO_TS: Final[tuple[int, int, int, int, int, int]] = (1980, 1, 1, 0, 0, 0)
@@ -87,7 +101,7 @@ class SkillPreview(BaseModel):
     """Files the agent could run: a script suffix, or a `#!` first line."""
     total_bytes: int
     content_hash: str
-    """sha256 of the packed zip. Confirming an upload names this value."""
+    """sha256 of the packed zip; a confirmation names it bound to one agent."""
 
 
 @dataclass(frozen=True)
@@ -101,17 +115,27 @@ def bundle_from_markdown(text: str) -> SkillBundle:
     return bundle_from_files({"SKILL.md": text.encode("utf-8")})
 
 
+def require_upload_suffix(filename: str) -> None:
+    """Refuse a file that is neither a SKILL.md nor a zip, before it is downloaded."""
+    if PurePosixPath(filename.lower()).suffix not in UPLOAD_SUFFIXES:
+        raise SkillIngestError(f"{filename}: upload a SKILL.md or a .zip of one skill's folder.")
+
+
+def confirmation_hash(preview: SkillPreview, *, agent_id: str) -> str:
+    """The hash a confirmation names: this content, for this one agent."""
+    return hashlib.sha256(f"{agent_id}\n{preview.content_hash}".encode()).hexdigest()
+
+
 def bundle_from_upload(data: bytes, *, filename: str) -> SkillBundle:
     """A `.md` file is the SKILL.md; a `.zip` is one skill's folder."""
+    require_upload_suffix(filename)
     suffix = PurePosixPath(filename.lower()).suffix
     if suffix == ".md":
         try:
             return bundle_from_markdown(data.decode("utf-8"))
         except UnicodeDecodeError as exc:
             raise SkillIngestError(f"{filename} is not UTF-8 text.") from exc
-    if suffix == ".zip":
-        return bundle_from_files(_read_zip(data))
-    raise SkillIngestError(f"{filename}: upload a SKILL.md or a .zip of one skill's folder.")
+    return bundle_from_files(_read_zip(data))
 
 
 def bundle_from_files(files: dict[str, bytes]) -> SkillBundle:
@@ -178,39 +202,58 @@ def _read_frontmatter(skill_md: bytes) -> tuple[str, str]:
             f"SKILL.md description is {len(description)} characters; the limit is "
             f"{MAX_DESCRIPTION_CHARS}."
         )
+    if _XML_TAG_RE.search(description):
+        raise SkillIngestError("SKILL.md description may not contain XML tags such as <tag>.")
     return name, description
 
 
+def _declared_entries(data: bytes) -> int:
+    """The entry count the zip's end record declares, read before its directory is parsed."""
+    start = data.rfind(_EOCD_SIGNATURE, max(0, len(data) - _EOCD_BYTES - _ZIP_COMMENT_MAX))
+    if start < 0 or len(data) - start < _EOCD_BYTES:
+        raise SkillIngestError("That file is not a readable zip.")
+    # A zip64 archive declares 0xFFFF here, which is over the cap anyway.
+    (total,) = struct.unpack_from("<H", data, start + 10)
+    return total
+
+
 def _read_zip(data: bytes) -> dict[str, bytes]:
+    if _declared_entries(data) > MAX_FILES * 2:
+        raise SkillIngestError(f"A skill may hold at most {MAX_FILES} files.")
     try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile as exc:
-        raise SkillIngestError("That file is not a readable zip.") from exc
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            return _read_entries(archive)
+    except (zipfile.BadZipFile, NotImplementedError, zlib.error, EOFError) as exc:
+        raise SkillIngestError(
+            "That zip is damaged or uses a compression that can't be read."
+        ) from exc
+
+
+def _read_entries(archive: zipfile.ZipFile) -> dict[str, bytes]:
     files: dict[str, bytes] = {}
     budget = MAX_UNCOMPRESSED_BYTES
-    with archive:
-        entries = [info for info in archive.infolist() if not info.is_dir()]
-        if len(entries) > MAX_FILES * 2:
-            raise SkillIngestError(f"A skill may hold at most {MAX_FILES} files.")
-        for info in entries:
-            path = info.filename
-            if stat.S_ISLNK(info.external_attr >> 16):
-                raise SkillIngestError(f"{path} is a symlink; skills may not hold links.")
-            if info.flag_bits & 0x1:
-                raise SkillIngestError(f"{path} is encrypted.")
-            if _is_junk(path):
-                continue
-            _require_safe_path(path)
-            if path in files:
-                raise SkillIngestError(f"{path} appears twice in the zip.")
-            # Read at most one byte past the budget: a header can understate
-            # the size, and a bomb must stop here, not after it has expanded.
-            with archive.open(info) as member:
-                body = member.read(budget + 1)
-            if len(body) > budget:
-                raise SkillIngestError(f"A skill may hold at most {MAX_UNCOMPRESSED_BYTES} bytes.")
-            budget -= len(body)
-            files[path] = body
+    entries = [info for info in archive.infolist() if not info.is_dir()]
+    if len(entries) > MAX_FILES * 2:
+        raise SkillIngestError(f"A skill may hold at most {MAX_FILES} files.")
+    for info in entries:
+        path = info.filename
+        if stat.S_ISLNK(info.external_attr >> 16):
+            raise SkillIngestError(f"{path} is a symlink; skills may not hold links.")
+        if info.flag_bits & 0x1:
+            raise SkillIngestError(f"{path} is encrypted.")
+        if _is_junk(path):
+            continue
+        _require_safe_path(path)
+        if path in files:
+            raise SkillIngestError(f"{path} appears twice in the zip.")
+        # Read at most one byte past the budget: a header can understate
+        # the size, and a bomb must stop here, not after it has expanded.
+        with archive.open(info) as member:
+            body = member.read(budget + 1)
+        if len(body) > budget:
+            raise SkillIngestError(f"A skill may hold at most {MAX_UNCOMPRESSED_BYTES} bytes.")
+        budget -= len(body)
+        files[path] = body
     return files
 
 

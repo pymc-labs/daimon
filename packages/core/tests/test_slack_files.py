@@ -78,3 +78,21 @@ async def test_fetch_slack_file_refuses_a_file_over_max_bytes_before_downloading
         await fetch_slack_file(client, bot_token="xoxb-1", file_id="F1", max_bytes=10)
     await client.aclose()
     assert downloads == [], "the size Slack reports stops the download"
+
+
+@pytest.mark.asyncio
+async def test_fetch_slack_file_refuses_a_name_outside_suffixes_before_downloading() -> None:
+    downloads: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/files.info"):
+            file = {"url_private_download": "https://files.slack.com/F1/dl", "name": "a.pdf"}
+            return httpx.Response(200, json={"ok": True, "file": file})
+        downloads.append(str(request.url))
+        return httpx.Response(200, content=b"x")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(httpx.HTTPError, match=r"a.pdf is not a \.md or \.zip file"):
+        await fetch_slack_file(client, bot_token="xoxb-1", file_id="F1", suffixes={".zip", ".md"})
+    await client.aclose()
+    assert downloads == [], "the name Slack reports stops the download"

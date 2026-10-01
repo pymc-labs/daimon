@@ -15,7 +15,12 @@ from anthropic.types.beta.skills import VersionCreateResponse
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.skills.add import add_agent_skill, fetch_attachment, fetch_repo_skill
+from daimon.core.skills.add import (
+    add_agent_skill,
+    fetch_attachment,
+    fetch_repo_skill,
+    repo_origin,
+)
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_markdown
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.testing.archives import make_tarball
@@ -52,6 +57,7 @@ def _skill(skill_id: str, title: str) -> dict[str, Any]:
 class _FakeMA:
     agent: BetaManagedAgentsAgent
     skills: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+    others: list[BetaManagedAgentsAgent] = field(default_factory=list[BetaManagedAgentsAgent])
     created_titles: list[str] = field(default_factory=list[str])
     versions: list[str] = field(default_factory=list[str])
     updates: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
@@ -62,6 +68,13 @@ class _FakeMA:
         router.add("POST", r"/v1/skills", self._create)
         router.add("POST", r"/v1/skills/(?P<id>[^/]+)/versions", self._version)
         router.add("GET", rf"/v1/agents/{self.agent.id}", self._agent)
+        router.add(
+            "GET",
+            r"/v1/agents",
+            lambda _r, _m: list_response(
+                [a.model_dump(mode="json") for a in (self.agent, *self.others)]
+            ),
+        )
         router.add("POST", rf"/v1/agents/{self.agent.id}", self._update)
         return router
 
@@ -270,3 +283,90 @@ async def test_an_attachment_is_fetched_without_following_redirects() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         with pytest.raises(httpx.HTTPStatusError):
             await fetch_attachment(http, "https://cdn.discordapp.com/a/b/s.zip")
+
+
+async def test_a_skill_a_fork_shares_is_never_given_a_new_version(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    fake = _FakeMA(agent=ma_agent(id="ag_1", name="agent", tenant_id=tenant.id, tools=[_TOOLSET]))
+    first = await _add(fake, db_session_factory, tenant.id)
+    held = [{"type": "custom", "skill_id": first.skill_id, "version": "1"}]
+    fake.agent = ma_agent(id="ag_1", name="agent", tenant_id=tenant.id, skills=held)
+    fake.others = [ma_agent(id="ag_2", name="agent-fork", tenant_id=tenant.id, skills=held)]
+
+    with pytest.raises(SkillIngestError, match="also attached to agent-fork"):
+        await _add(fake, db_session_factory, tenant.id, text=_md("Write them twice."))
+    assert fake.versions == [], "the fork's copy is untouched"
+
+
+async def test_an_earlier_upload_is_adopted_only_when_no_other_agent_holds_it(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    title = tenant_scoped_display_title(tenant_id=tenant.id, name="notes", agent_name="agent")
+    held = [{"type": "custom", "skill_id": "sk_old", "version": "1"}]
+    fake = _FakeMA(
+        agent=ma_agent(id="ag_1", name="agent", tenant_id=tenant.id),
+        skills=[_skill("sk_old", title)],
+        others=[ma_agent(id="ag_2", name="other", tenant_id=tenant.id, skills=held)],
+    )
+    with pytest.raises(SkillIngestError, match="also attached to other"):
+        await _add(fake, db_session_factory, tenant.id)
+
+    fake.others = []
+    adopted = await _add(fake, db_session_factory, tenant.id)
+    assert (adopted.action, adopted.skill_id, fake.versions) == ("updated", "sk_old", ["sk_old"])
+
+
+async def test_a_skill_already_loading_under_that_name_is_refused_before_uploading(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    inherited = tenant_scoped_display_title(tenant_id=tenant.id, name="notes", agent_name="parent")
+    fake = _FakeMA(
+        agent=ma_agent(
+            id="ag_1",
+            name="agent",
+            tenant_id=tenant.id,
+            skills=[{"type": "custom", "skill_id": "sk_parent", "version": "1"}],
+        ),
+        skills=[_skill("sk_parent", inherited)],
+    )
+    with pytest.raises(SkillIngestError, match="already has a skill that loads as 'notes'"):
+        await _add(fake, db_session_factory, tenant.id)
+    assert fake.created_titles == [] and fake.updates == []
+
+
+async def _fetch_with(handler: Any, *, path: str = "") -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        await fetch_repo_skill(
+            http,
+            url="https://github.com/o/r",
+            branch="main",
+            path=path,
+            token=None,
+            max_tarball_bytes=10_000_000,
+            max_tarball_decompressed_bytes=10_000_000,
+        )
+
+
+async def test_repo_fetch_failures_are_refusals() -> None:
+    def garbage(_r: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not a tarball")
+
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("down", request=request)
+
+    with pytest.raises(SkillIngestError, match="can't be read"):
+        await _fetch_with(garbage)
+    with pytest.raises(SkillIngestError, match="Could not reach GitHub"):
+        await _fetch_with(unreachable)
+    with pytest.raises(SkillIngestError, match="NUL"):
+        await _fetch_with(garbage, path="skills\x00/notes")
+
+
+def test_a_repo_origin_keeps_no_credentials_or_query() -> None:
+    url = "https://user:ghp_secret@github.com/o/r.git?token=abc#frag"
+    assert repo_origin(url, path="/skills/notes/", branch="main") == "o/r/skills/notes@main"
+    assert repo_origin("https://github.com/o/r", path="", branch="dev") == "o/r@dev"
