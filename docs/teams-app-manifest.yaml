@@ -10,8 +10,10 @@
 #      - Certificates & secrets → New client secret → DAIMON_TEAMS__CLIENT_SECRET.
 #      - Application (client) ID → DAIMON_TEAMS__CLIENT_ID.
 #      - Directory (tenant) ID → DAIMON_TEAMS__TENANT_ID.
-#    No API permissions are required — the bot calls the Bot Framework REST
-#    API, which authorizes on the app registration itself.
+#    No API permissions are required: the bot calls the Bot Framework REST
+#    API, which authorizes on the app registration itself, and reads channel
+#    messages through Microsoft Graph under the resource-specific consent
+#    below, which a team owner grants when installing the app in a team.
 # 2. Azure portal → Create a resource → Azure Bot:
 #      - Type of App: Single Tenant; point it at the registration above.
 #      - Configuration → Messaging endpoint:
@@ -25,11 +27,12 @@
 #
 # The adapter provisions the tenant for DAIMON_TEAMS__TENANT_ID at boot; there
 # is no install flow. The bot answers in 1:1 chat and when @mentioned in a
-# channel; group chats are refused, so the manifest does not offer them.
+# channel, replaying the thread it is in; group chats are refused, so the
+# manifest does not offer them.
 
 manifestVersion: "1.16"
 id: "${DAIMON_TEAMS__CLIENT_ID}"        # must equal the Entra app id
-version: "0.1.0"
+version: "0.2.0"                       # bump on every change, then re-upload
 developer:
   name: daimon
   websiteUrl: https://DAIMON_HOST
@@ -75,3 +78,12 @@ permissions:
   - messageTeamMembers
 validDomains:
   - DAIMON_HOST                         # token.botframework.com is implicit
+webApplicationInfo:
+  id: "${DAIMON_TEAMS__CLIENT_ID}"
+  resource: https://RscBasedStoreApp    # unused by RSC, but must be set
+authorization:
+  permissions:
+    resourceSpecific:
+      # Read the channel threads the bot is mentioned in, and their images.
+      - name: ChannelMessage.Read.Group
+        type: Application
