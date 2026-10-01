@@ -20,6 +20,7 @@ typo is silent — check the spelling here.
 - [Anthropic](#anthropic)
 - [CLI](#cli)
 - [Logging](#logging)
+- [Observability](#observability)
 - [Ops](#ops)
 - [MCP Server](#mcp-server)
 - [Hub](#hub)
@@ -166,6 +167,17 @@ Read from `daimon.core.config.LogSettings`. Prefix `DAIMON_LOG__`.
 `'DEBUG' | 'INFO' | 'WARNING' | 'ERROR'` · optional · default `INFO`
 
 Minimum log level emitted by the structured logger.
+
+## Observability
+
+Read from `daimon.core.config.ObservabilitySettings`. Prefix `DAIMON_OBSERVABILITY__`.
+
+### `DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S`
+
+`float` · optional · default `30`
+
+Seconds between runtime.health structured log lines from each long-running process.
+Default 30; set DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S=0 to disable.
 
 ## Ops
 
@@ -631,11 +643,11 @@ storage for local development.
 
 `tuple[SecretStr, ...]` · optional · default unset · secret
 
-Ordered tuple of Fernet keys used to encrypt/decrypt stored credentials. Required to
-save agent keys: without keys, saving an agent environment value is refused unless
-`allow_plaintext` is set. The first key encrypts new values; older keys remain valid for
-decrypting existing ciphertext during rotation. Run `daimon crypto verify` to confirm no
-plaintext rows remain.
+Ordered Fernet keys used to encrypt/decrypt stored credentials: a single key, a comma-
+separated list, or a JSON list. Required to save agent keys: without keys, saving an
+agent environment value is refused unless `allow_plaintext` is set. The first key
+encrypts new values; older keys remain valid for decrypting existing ciphertext during
+rotation. Run `daimon crypto verify` to confirm no plaintext rows remain.
 
 ### `DAIMON_CRYPTO__ALLOW_PLAINTEXT`
 

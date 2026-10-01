@@ -2162,3 +2162,34 @@ async def test_a_family_change_during_an_admin_rotation_is_still_refused(
     async with db_session_factory() as s:
         request_row = await peek_credential_request(s, token=token)
     assert request_row is not None and request_row.outcome == "stale_replacement"
+
+
+@pytest.mark.asyncio
+async def test_env_file_submission_that_fails_to_save_replies_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """An unexpected save error is answered, not left to escape into the spawned task."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_env_file", name="specialist", tenant_id=tenant_id)
+    token = await _seed_env_file_request(db_session, tenant_id=tenant_id, live_agent=live_agent)
+    await db_session.commit()
+    _patch_file_download(monkeypatch, b"ALPHA_TOKEN=alpha-private\n")
+
+    async def _broken_apply(*args: object, **kwargs: object) -> Any:
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(credential_submissions_mod, "_apply_env_file_entries", _broken_apply)
+    runtime = _build_runtime(
+        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+    )
+
+    await _run_env_file_submission(runtime, token)
+
+    texts = _ephemeral_texts(fake_slack_web_client)
+    assert texts and "Something went wrong" in texts[-1]
+    async with db_session_factory() as s:
+        row = await peek_credential_request(s, token=token)
+    assert row is not None and row.used_at is None, "the request stays live for a retry"

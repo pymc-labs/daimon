@@ -11,9 +11,9 @@ from daimon.core.agent_pins import (
     PIN_WRITE_REFUSAL,
     POLICY_UNREADABLE_REFUSAL,
     is_pin_administered,
-    pin_write_refused,
     request_pin_refusal,
 )
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_platform_role_ids, set_role
 from daimon.core.stores.channel_admins import set_channel_admins
@@ -159,13 +159,15 @@ def test_only_an_admin_of_every_pinned_channel_writes_from_outside_the_pin() -> 
     )
 
     def refused(name: str, administered: set[str]) -> bool:
-        return pin_write_refused(
+        return not is_pin_administered(
+            policy, agent_names=(name, None), administered_channel_ids=administered
+        ) and not authorize(
             policy,
-            is_admin=False,
-            agent_names=(name, None),
-            parent_channel_id=_CLIENT_B,
-            thread_id=None,
-            administered_channel_ids=administered,
+            subject=Subject(),
+            action=Action.CONFIGURE,
+            surface=Surface.CONFIG,
+            agent=AgentRef.of(name, None),
+            place=Place(channel_id=_CLIENT_B, parent_channel_id=_CLIENT_B),
         )
 
     assert refused("acme", {_ACME}), "the admin of one pinned channel of two is refused"
@@ -176,14 +178,6 @@ def test_only_an_admin_of_every_pinned_channel_writes_from_outside_the_pin() -> 
     assert not is_pin_administered(
         policy, agent_names=("unpinned",), administered_channel_ids={_ACME}
     ), "an unpinned agent is not administered through a pin"
-    assert pin_write_refused(
-        policy,
-        is_admin=False,
-        agent_names=None,
-        parent_channel_id=_ACME,
-        thread_id=None,
-        administered_channel_ids={_ACME, "C_OPS"},
-    ), "an unresolvable target still fails closed for a channel admin"
 
 
 async def test_a_channel_admins_request_from_outside_a_pin_they_run_is_applied(

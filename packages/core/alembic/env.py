@@ -49,6 +49,8 @@ async def run_migrations_online() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        # Migrations re-encrypt agent keys; keep bound values out of SQL errors.
+        hide_parameters=True,
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

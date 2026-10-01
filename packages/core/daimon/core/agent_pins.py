@@ -6,7 +6,8 @@ so does a channel admin of every channel the agent is pinned to; on an agent
 the operator pinned to channels, anyone else may only act from a conversation
 inside those channels; an unpinned agent is unaffected. The
 request tools, the direct configuration tools and the private forms' submit
-paths all call `pin_write_refusal`, so the rule and its names can't drift.
+paths all decide it with `daimon.core.authz.authorize(CONFIGURE)`, so the rule
+and its names can't drift.
 """
 
 from __future__ import annotations
@@ -14,11 +15,8 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.access_policy import (
-    TenantAccessPolicy,
-    is_outside_agent_pin,
-    origin_pin_location,
-)
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -65,40 +63,6 @@ def is_pin_administered(
     )
 
 
-def pin_write_refused(
-    policy: TenantAccessPolicy,
-    *,
-    is_admin: bool,
-    agent_names: tuple[str | None, ...] | None,
-    parent_channel_id: str | None,
-    thread_id: str | None,
-    administered_channel_ids: Collection[str] = (),
-) -> bool:
-    """True when this write must be refused.
-
-    ``agent_names`` is None when the target could not be established (a legacy
-    or vanished agent); under any pin that fails closed. ``parent_channel_id``
-    and ``thread_id`` locate the conversation the write comes from; both None
-    means there is none, which is outside every pin. A caller administering
-    every channel the agent is pinned to may write from anywhere, as an admin
-    may: the pin keeps the agent inside channels they already run.
-    """
-    if is_admin or not policy.agent_channel_pins:
-        return False
-    if agent_names is None:
-        return True
-    if is_pin_administered(
-        policy, agent_names=agent_names, administered_channel_ids=administered_channel_ids
-    ):
-        return False
-    channel_id, parent = origin_pin_location(
-        parent_channel_id=parent_channel_id, thread_id=thread_id
-    )
-    return is_outside_agent_pin(
-        policy, agent_names=agent_names, channel_id=channel_id, parent_channel_id=parent
-    )
-
-
 async def request_pin_refusal(
     session: AsyncSession, *, row: CredentialRequestRow, agent: BetaManagedAgentsAgent | None
 ) -> str | None:
@@ -131,12 +95,18 @@ async def request_pin_refusal(
                 role_ids=frozenset(account.platform_role_ids),
             ),
         )
-    refused = pin_write_refused(
+    if names is not None and is_pin_administered(
+        policy, agent_names=names, administered_channel_ids=administered
+    ):
+        return None
+    decision = authorize(
         policy,
-        is_admin=is_admin,
-        agent_names=names,
-        parent_channel_id=row.parent_channel_id,
-        thread_id=row.origin_thread_id,
-        administered_channel_ids=administered,
+        subject=Subject(is_admin=is_admin),
+        action=Action.CONFIGURE,
+        surface=Surface.CONFIG,
+        agent=AgentRef.unresolved() if names is None else AgentRef.of(*names),
+        place=Place.from_origin(
+            parent_channel_id=row.parent_channel_id, thread_id=row.origin_thread_id
+        ),
     )
-    return PIN_WRITE_REFUSAL if refused else None
+    return None if decision else PIN_WRITE_REFUSAL
