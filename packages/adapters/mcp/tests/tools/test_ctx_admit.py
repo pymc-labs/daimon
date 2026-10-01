@@ -9,7 +9,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._ctx import (
+    _admission_recheck,  # pyright: ignore[reportPrivateUsage]
+    _admit,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
@@ -231,3 +234,24 @@ async def test_admit_refuses_a_bound_key_over_its_channel_budget(
             unbound, sessionmaker=db_session_factory, billing_config=None, tool_name="ask"
         )
     assert result is unbound, "an unbound key runs in no channel, so no channel budget gates it"
+
+
+async def test_admission_recheck_refuses_a_bound_key_once_its_pin_moves_away(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The action-time re-check decides with the key's channel too: a pin moved
+    off it between admission and the session create stops the turn."""
+    auth = _key(await _member(db_session, policy=_PINNED), bound="c-acme")
+    recheck = _admission_recheck(
+        auth, sessionmaker=db_session_factory, tool_name="start_turn", agent_names=_pinned_names
+    )
+    await recheck()
+    await set_access_policy(
+        db_session,
+        tenant_id=auth.tenant_id,
+        policy=TenantAccessPolicy(agent_channel_pins={"acme-project": ("c-new",)}),
+    )
+    await db_session.commit()
+
+    with pytest.raises(ToolError, match="TERMINAL ERROR: An operator pinned"):
+        await recheck()

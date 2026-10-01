@@ -1298,6 +1298,42 @@ async def test_create_routine_without_a_destination_budgets_the_turns_channel(
     assert unknown.channel_id is None, "without a live origin the routine is unbudgeted"
 
 
+async def test_create_routine_by_a_channel_bound_key_records_its_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """A key minted in a channel spends there, so its routine with no destination does too."""
+    tenant = await make_tenant(db_session, platform="discord")
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    runtime = _runtime(
+        committing_sessionmaker,
+        client=_ma_client_with_agents(
+            [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+        ),
+    )
+    key = dataclasses.replace(
+        _auth_identity(tenant_id=tenant.id, talking_to=None),
+        account_id=account.id,
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_resolved"),
+    )
+
+    async def create(auth: AuthIdentity) -> RoutineRow:
+        return await _create_routine_impl(
+            runtime,
+            auth,
+            agent_name="daimon",
+            cron_expr="0 9 * * 1",
+            timezone="UTC",
+            trigger_message="weekly summary",
+        )
+
+    bound = await create(dataclasses.replace(key, bound_channel_id="555"))
+    assert bound.channel_id == "555", "a bound key's routine is budgeted against its channel"
+    unbound = await create(key)
+    assert unbound.channel_id is None, "an unbound key's routine stays unbudgeted"
+
+
 async def test_create_routine_refuses_a_pinned_agent_without_a_pinned_destination(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
