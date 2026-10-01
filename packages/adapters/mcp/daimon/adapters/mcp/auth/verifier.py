@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import uuid
 
+from daimon.core.channel_admins import CHANNEL_ADMIN_PLATFORMS
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.channel_admins import has_channel_admin_grant
 from daimon.core.stores.domain import Role
@@ -79,6 +80,7 @@ class DaimonJWTVerifier(JWTVerifier):
             access.claims["platform_role_ids"] = list(identity_row.platform_role_ids)
             access.claims["channel_admin"] = (
                 identity_row.role is not Role.ADMIN
+                and identity_row.platform in CHANNEL_ADMIN_PLATFORMS
                 and identity_row.platform_user_id is not None
                 and await has_channel_admin_grant(
                     session,

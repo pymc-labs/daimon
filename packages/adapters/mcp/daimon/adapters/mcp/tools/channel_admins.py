@@ -15,7 +15,11 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
+from daimon.core.channel_admins import (
+    CHANNEL_ADMIN_PLATFORMS,
+    InvalidChannelAdminIds,
+    normalize_channel_admin_ids,
+)
 from daimon.core.stores.channel_admins import (
     delete_channel_admins,
     list_channel_admins,
@@ -60,7 +64,7 @@ class SetChannelAdminsResult:
 
 
 def _platform(auth: AuthIdentity) -> str:
-    if auth.platform not in ("discord", "slack"):
+    if auth.platform not in CHANNEL_ADMIN_PLATFORMS:
         raise ToolError("Channel admins exist only on Discord and Slack.")
     return auth.platform
 
