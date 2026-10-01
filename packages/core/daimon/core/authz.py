@@ -12,9 +12,20 @@ own refusal copy.
 `AgentRef` (with a default that keeps today's decisions), populate it in the
 matching ``build_*`` function, and decide it in `_decide`. Admission records
 the built values on the `Admission`, and every action-time re-check
-(`daimon.core.turn.admission.reauthorize`, the send, form-submit and OAuth
-checks) asks `authorize` with values from the same builders, so a new rule is
-applied at action time too without touching those call sites.
+(`daimon.core.turn.admission.reauthorize`, the MCP/hub turn re-check, the
+send, form-submit and OAuth checks) asks `authorize` again with a fresh
+policy. Two limits to check when adding a rule:
+
+- `reauthorize` reuses the facts recorded at admission (only the policy is
+  re-read). A rule whose facts can change during a turn needs those facts
+  refreshed there too.
+- Some callers still short-circuit before `authorize`: the hub's admin
+  exemption in ``_ctx._policy_gate``, `require_pin_write_access` for a
+  trusted admin or an unpinned tenant, and the hub's session reads, which
+  describe a non-admin hub caller as `Surface.AGENT_CHAT`. A rule that must
+  also bind admins or unpinned agents (isolation), or that opens reads to a
+  non-admin hub caller (channel admins), has to remove the matching
+  short-circuit or pass the real surface.
 
 **Example: channel admins reading their channels' sealed sessions.** Add
 ``administered_channel_ids: frozenset[str] = frozenset()`` to `Subject`,
@@ -22,8 +33,10 @@ populate it in `build_subject` (and `mcp_subject` on the MCP side), and in
 `_decide` allow `Action.READ_SESSION` when ``facts.seal_ids`` is non-empty,
 every seal id is in ``subject.administered_channel_ids`` and the session is
 not ``facts.private``. Never for `Action.CONTINUE_SESSION`. The hub's session
-reads already ask `authorize(READ_SESSION)` with the session's seal ids, so
-nothing else changes.
+reads ask `authorize(READ_SESSION)` with the session's seal ids, but a
+non-admin caller is described as `Surface.AGENT_CHAT` and other accounts'
+sessions are filtered before `authorize` for them: pass `Surface.HUB` and the
+other-account sessions to `authorize` for every hub caller as part of the rule.
 
 The rules, in the vocabulary of the formal model (`formal/access_control`):
 
@@ -423,16 +436,23 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     # Action.READ_SESSION / Action.CONTINUE_SESSION
     facts = req.session or SessionFacts()
     # Admins are trusted to READ any channel conversation of the agent from
-    # their own hub session, sealed or not, anyone's -- never a private DM,
-    # and never to continue it (a follow-up would join the channel's session).
+    # their own hub session, sealed or not, anyone's -- never another
+    # person's private DM, and never to continue it (a follow-up would join
+    # the channel's session). Their own sessions, DMs included, are read
+    # without the seal filter: ownership was already proven by the caller.
     admin_hub_read = (
         req.action is Action.READ_SESSION
         and req.surface is Surface.HUB
         and subject.is_admin
         and subject.platform_user_id is not None
         and not subject.via_agent_key
-        and not facts.private
-        and (facts.channel is not None or facts.legacy_thread_id is not None)
+        and (
+            facts.owned
+            or (
+                not facts.private
+                and (facts.channel is not None or facts.legacy_thread_id is not None)
+            )
+        )
     )
     if admin_hub_read:
         return ALLOW

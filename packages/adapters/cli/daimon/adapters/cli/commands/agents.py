@@ -32,6 +32,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_READER_OF,
+    MA_METADATA_KEY_READER_SOURCE,
     MA_METADATA_KEY_SPEC_HASH,
     build_metadata,
 )
@@ -813,6 +815,11 @@ async def agents_rekey(
             managed=(agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"),
             spec_hash=agent.metadata.get(MA_METADATA_KEY_SPEC_HASH),
         )
+        # A report reader's link to its source agent is what holds it to the
+        # source's pins; a re-key must not drop it.
+        for key in (MA_METADATA_KEY_READER_OF, MA_METADATA_KEY_READER_SOURCE):
+            if key in agent.metadata:
+                new_meta[key] = agent.metadata[key]
         await rt.anthropic.beta.agents.update(
             agent.id,
             version=agent.version,

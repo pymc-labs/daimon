@@ -14,7 +14,7 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.tenant_balance import is_over_balance
-from daimon.core.turn.outcomes import TurnObservation
+from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.termination import TerminationReason
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -48,6 +48,145 @@ def _require_admin(auth: AuthIdentity) -> None:  # pyright: ignore[reportUnusedF
             "the requested action and target from the conversation. They are not available "
             "to this permission check; do not invent missing details. Do not retry the mutation."
         )
+
+
+def _refused(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    auth: AuthIdentity,
+    tool_name: str,
+    reason: TerminationReason,
+) -> None:
+    """Record a refused turn; a re-check inside a running turn finishes that turn's row."""
+    if tool_name not in {"ask", "start_turn", "continue_turn"}:
+        return
+    if (observation := current_outcome.get()) is not None:
+        observation.finish(reason=reason)
+        return
+    TurnObservation(
+        sessionmaker,
+        auth.tenant_id,
+        "mcp",
+        account_id=auth.account_id,
+        agent_id=str(auth.agent_id) if auth.agent_id is not None else None,
+    ).finish(reason=reason)
+
+
+async def _policy_gate(
+    auth: AuthIdentity,
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tool_name: str,
+    agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None,
+    pin_exempt: bool,
+) -> None:
+    """The access-policy half of ``_admit``: the agent pin, then the invoker allowlist.
+
+    Reads the policy fresh on every call, so ``_admission_recheck`` can run it
+    again right before a turn's session is created or its message is sent.
+    """
+
+    def refused(reason: TerminationReason) -> None:
+        _refused(sessionmaker, auth, tool_name, reason)
+
+    try:
+        async with sessionmaker() as session:
+            policy = await load_access_policy(session, tenant_id=auth.tenant_id)
+            account = await get_account(session, auth.account_id)
+    except AccessPolicyUnreadable as exc:
+        refused(TerminationReason.ADMISSION_DENIED)
+        raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
+
+    # The hub admin exemption needs no agent lookup (`authorize` allows it
+    # before reading names), so skip the lookup for it. The stored role is
+    # read again here, so a re-check also sees a demotion saved meanwhile.
+    hub_admin = (
+        pin_exempt
+        and auth.platform_user_id is not None
+        and account is not None
+        and account.role is Role.ADMIN
+    )
+    if (
+        agent_names is not None
+        and policy.agent_channel_pins
+        and not hub_admin
+        and not authorize(
+            policy,
+            subject=(
+                # The hub mounts a person's own agent identity, never an
+                # agent key; a demoted hub admin is held like any member.
+                build_subject(is_admin=False, platform_user_id=auth.platform_user_id)
+                if pin_exempt
+                else mcp_subject(auth)
+            ),
+            action=Action.RUN_AGENT,
+            surface=Surface.HUB if pin_exempt else Surface.AGENT_CHAT,
+            agent=AgentRef.of(*await agent_names()),
+        )
+    ):
+        log.info(
+            "mcp.admission_denied",
+            tenant_id=str(auth.tenant_id),
+            platform_user_id=auth.platform_user_id,
+            tool=tool_name,
+            gate="agent_pin",
+        )
+        refused(TerminationReason.ADMISSION_DENIED)
+        raise ToolError(
+            "TERMINAL ERROR: An operator pinned this agent to specific channels, so it "
+            "only runs in a conversation inside them, not from here. Ask it in one of "
+            "those channels; a question about a shared report can't be answered here."
+        )
+
+    if auth.platform_user_id is None:
+        return
+    is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
+    if not authorize(
+        policy,
+        subject=mcp_subject(auth, is_admin=is_admin),
+        action=Action.START_TURN,
+    ):
+        log.info(
+            "mcp.admission_denied",
+            tenant_id=str(auth.tenant_id),
+            platform_user_id=auth.platform_user_id,
+            tool=tool_name,
+            gate="invoker_policy",
+        )
+        refused(TerminationReason.ADMISSION_DENIED)
+        raise ToolError(
+            "TERMINAL ERROR: You aren't on this workspace's list of people who can "
+            "use daimon. A workspace admin can add you."
+        )
+
+
+def _admission_recheck(  # pyright: ignore[reportUnusedFunction]
+    auth: AuthIdentity,
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tool_name: str,
+    agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None,
+    pin_exempt: bool = False,
+) -> Callable[[], Awaitable[None]]:
+    """The policy decision of ``_admit`` again, for the moment a turn acts.
+
+    ``_admit`` decides at the start of the tool call; the session create and
+    the message send come after MA round trips, and a pin or allowlist change
+    saved in between must still stop them. The agent-chat and hub turn tools
+    hand this to the turn implementation, which awaits it immediately before
+    each create and send (a resumed handle included). Billing is not
+    re-checked: it was charged against at admission.
+    """
+
+    async def recheck() -> None:
+        await _policy_gate(
+            auth,
+            sessionmaker=sessionmaker,
+            tool_name=tool_name,
+            agent_names=agent_names,
+            pin_exempt=pin_exempt,
+        )
+
+    return recheck
 
 
 async def _admit(  # pyright: ignore[reportUnusedFunction]
@@ -93,81 +232,20 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     """
 
     def refused(reason: TerminationReason) -> None:
-        if tool_name in {"ask", "start_turn", "continue_turn"}:
-            TurnObservation(
-                sessionmaker,
-                auth.tenant_id,
-                "mcp",
-                account_id=auth.account_id,
-                agent_id=str(auth.agent_id) if auth.agent_id is not None else None,
-            ).finish(reason=reason)
+        _refused(sessionmaker, auth, tool_name, reason)
 
     if auth.platform_user_id is None and agent_names is None:
         return auth
 
-    try:
-        async with sessionmaker() as session:
-            policy = await load_access_policy(session, tenant_id=auth.tenant_id)
-            account = await get_account(session, auth.account_id)
-    except AccessPolicyUnreadable as exc:
-        refused(TerminationReason.ADMISSION_DENIED)
-        raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
-
-    # The hub admin exemption needs no agent lookup (`authorize` allows it
-    # before reading names), so skip the lookup for it.
-    hub_admin = pin_exempt and auth.platform_user_id is not None
-    if (
-        agent_names is not None
-        and policy.agent_channel_pins
-        and not hub_admin
-        and not authorize(
-            policy,
-            subject=(
-                # The hub mounts a person's own agent identity; `pin_exempt`
-                # is set only for a hub admin, so it is never an agent key.
-                build_subject(is_admin=True, platform_user_id=auth.platform_user_id)
-                if pin_exempt
-                else mcp_subject(auth)
-            ),
-            action=Action.RUN_AGENT,
-            surface=Surface.HUB if pin_exempt else Surface.AGENT_CHAT,
-            agent=AgentRef.of(*await agent_names()),
-        )
-    ):
-        log.info(
-            "mcp.admission_denied",
-            tenant_id=str(auth.tenant_id),
-            platform_user_id=auth.platform_user_id,
-            tool=tool_name,
-            gate="agent_pin",
-        )
-        refused(TerminationReason.ADMISSION_DENIED)
-        raise ToolError(
-            "TERMINAL ERROR: An operator pinned this agent to specific channels, so it "
-            "only runs in a conversation inside them, not from here. Talk to it in its "
-            "channel."
-        )
-
+    await _policy_gate(
+        auth,
+        sessionmaker=sessionmaker,
+        tool_name=tool_name,
+        agent_names=agent_names,
+        pin_exempt=pin_exempt,
+    )
     if auth.platform_user_id is None:
         return auth
-    is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
-    if not authorize(
-        policy,
-        subject=mcp_subject(auth, is_admin=is_admin),
-        action=Action.START_TURN,
-    ):
-        log.info(
-            "mcp.admission_denied",
-            tenant_id=str(auth.tenant_id),
-            platform_user_id=auth.platform_user_id,
-            tool=tool_name,
-            gate="invoker_policy",
-        )
-        refused(TerminationReason.ADMISSION_DENIED)
-        raise ToolError(
-            "TERMINAL ERROR: You aren't on this workspace's list of people who can "
-            "use daimon. A workspace admin can add you."
-        )
 
     if await is_over_balance(sessionmaker=sessionmaker, tenant_id=auth.tenant_id):
         log.info(

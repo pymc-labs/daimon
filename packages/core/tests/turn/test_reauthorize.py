@@ -171,3 +171,30 @@ async def test_bind_session_decides_again_before_any_session_is_found_or_created
             session_account_id=admission.account_id,
             reuse_existing=True,
         )
+
+
+async def test_a_dm_source_sealed_after_admission_refuses_the_dm_session(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The DM path records its source in the grant; a seal on it since admission stops the DM."""
+    from dataclasses import replace
+
+    from daimon.core.turn.admission import DmSource
+    from daimon.core.turn.errors import DmSourceSealedError
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps, admission = await _admit(db_session_factory, tmp_path, tenant, is_dm=True)
+    assert admission.grant is not None
+    admission = replace(
+        admission,
+        grant=replace(
+            admission.grant, dm_source=DmSource(channel_id="src-chan", thread_id="src-thr")
+        ),
+    )
+
+    await _set_policy(db_session, tenant, TenantAccessPolicy(sealed_channel_ids=("src-chan",)))
+
+    with pytest.raises(DmSourceSealedError):
+        await reauthorize(deps, admission)

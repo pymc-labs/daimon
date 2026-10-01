@@ -26,7 +26,7 @@ from datetime import datetime
 from typing import Literal
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import TenantAccessPolicy, is_dm_source_sealed
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -52,17 +52,27 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.errors import AdmissionDenied, MissingTurnConfigError
+from daimon.core.turn.errors import AdmissionDenied, DmSourceSealedError, MissingTurnConfigError
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 
 __all__ = [
     "Admission",
     "AdmissionDenied",
     "AdmissionGrant",
+    "DmSource",
     "MissingTurnConfigError",
     "admit",
     "reauthorize",
 ]
+
+
+@dataclass(frozen=True)
+class DmSource:
+    """Where a DM conversation was started from, re-checked by `reauthorize`."""
+
+    channel_id: str | None
+    thread_id: str | None
+    thread_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -86,6 +96,8 @@ class AdmissionGrant:
     channel_id: str
     thread_id: str | None
     is_dm: bool
+    # Set by the DM path: the conversation's source, whose seal is re-checked.
+    dm_source: DmSource | None = None
 
 
 @dataclass(frozen=True)
@@ -445,6 +457,13 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
     _require_turn_start(policy, grant.subject, grant.turn_place)
     _require_run_agent(policy, grant)
+    if grant.dm_source is not None and is_dm_source_sealed(
+        policy,
+        source_channel_id=grant.dm_source.channel_id,
+        source_thread_id=grant.dm_source.thread_id,
+        source_thread_keys=grant.dm_source.thread_keys,
+    ):
+        raise DmSourceSealedError("dm_source_sealed")
     seal_ids = admission.origin_seal_ids | _seal_ids(
         policy, channel_id=grant.channel_id, thread_id=grant.thread_id
     )

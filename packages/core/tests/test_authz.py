@@ -417,6 +417,19 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         _deny("not_owner"),
     ),
     (
+        "admin_trust admin reads their OWN sealed DM-shaped session from the hub",
+        SEALED,
+        {
+            "subject": ADMIN,
+            "action": Action.READ_SESSION,
+            "surface": Surface.HUB,
+            "session": SessionFacts(
+                channel="D123", owned=True, private=True, seal_ids=frozenset({"C_SEAL"})
+            ),
+        },
+        ALLOW,
+    ),
+    (
         "admin_trust admin never continues a sealed channel session",
         SEALED,
         {
