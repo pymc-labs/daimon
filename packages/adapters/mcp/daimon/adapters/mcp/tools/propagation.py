@@ -21,6 +21,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core.routing_facts import (
     build_clear_default_note,
@@ -79,6 +80,7 @@ async def _set_agent_default_impl(
     channel_id: str | None,
     expected_ma_agent_id: str | None = None,
 ) -> SetDefaultResult:
+    require_scope(auth, "channels:write")
     _require_admin(auth)
     if expected_ma_agent_id is not None or auth.platform in CHAT_PLATFORMS:
         await resolve_setup_agent(
@@ -120,6 +122,7 @@ async def _clear_agent_default_impl(
     auth: AuthIdentity,
     channel_id: str | None,
 ) -> ClearDefaultResult:
+    require_scope(auth, "channels:write")
     _require_admin(auth)
 
     tenant_id: uuid.UUID = auth.tenant_id
@@ -289,7 +292,7 @@ async def _explain_agent_resolution_impl(
 
 
 def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_agent_default(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -321,7 +324,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime, await _auth(ctx), agent_name, channel_id, expected_ma_agent_id
         )
 
-    @mcp.tool(tags={"admin"})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def clear_agent_default(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str | None = None,

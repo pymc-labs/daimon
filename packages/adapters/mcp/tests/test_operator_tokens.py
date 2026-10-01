@@ -87,6 +87,19 @@ async def test_tenant_read_token_lists_exactly_its_tools(
     )
 
 
+async def test_channels_write_token_lists_exactly_its_tools(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _tenant_id, _jti, token = await _operator_token(sessionmaker, "channels:write")
+    names = await _tool_names(_make_app(sessionmaker), token)
+    assert names == {
+        "set_channel_budget",
+        "clear_channel_budget",
+        "set_agent_default",
+        "clear_agent_default",
+    }, "channels:write covers the channel budget and channel agent tools"
+
+
 async def test_operator_token_cannot_call_a_tool_outside_its_scopes(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -20,6 +20,10 @@ from daimon.adapters.mcp.tools.promo_issuing import (
     _list_promo_codes_impl,  # pyright: ignore[reportPrivateUsage]
     _revoke_promo_code_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.propagation import (
+    _clear_agent_default_impl,  # pyright: ignore[reportPrivateUsage]
+    _set_agent_default_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.tenant_summary import (
     ChannelAdmins,
     _get_tenant_summary_impl,  # pyright: ignore[reportPrivateUsage]
@@ -191,6 +195,17 @@ async def test_operator_without_the_scope_is_refused_by_the_tool_itself(
     _tenant, auth = await _operator(committing_sessionmaker, "promo:redeem")
     with pytest.raises(ToolError, match="does not have the tenant:read scope"):
         await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
+
+
+async def test_agent_default_tools_require_channels_write(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
+    runtime = _runtime(committing_sessionmaker)
+    with pytest.raises(ToolError, match="does not have the channels:write scope"):
+        await _set_agent_default_impl(runtime, auth, "helper", "c1")
+    with pytest.raises(ToolError, match="does not have the channels:write scope"):
+        await _clear_agent_default_impl(runtime, auth, "c1")
 
 
 async def test_server_admin_cannot_create_promo_codes(
