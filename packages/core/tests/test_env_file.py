@@ -800,3 +800,34 @@ def test_an_import_onto_a_stored_family_collides_and_says_so() -> None:
     assert "would change the credential AWS_ACCESS_KEY_ID belongs to" in env_collision_line(
         collisions[0], held
     )
+
+
+@pytest.mark.parametrize(
+    "name", ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]
+)
+def test_git_commit_identity_names_are_writable_by_everyone(name: str) -> None:
+    """Commit identity is plain text to git, never a command, path or config."""
+    from daimon.core.env_file import env_name_hard_denied, env_name_member_writable
+
+    assert not env_name_hard_denied(name)
+    assert env_name_member_writable(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "GIT_SSH_COMMAND",
+        "GIT_SSH",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_ASKPASS",
+        "GIT_EXEC_PATH",
+        "GIT_PROXY_COMMAND",
+        "GIT_AUTHOR_DATE",
+        "GIT_DIR",
+    ],
+)
+def test_every_other_git_name_stays_refused(name: str) -> None:
+    from daimon.core.env_file import env_name_hard_denied
+
+    assert env_name_hard_denied(name)

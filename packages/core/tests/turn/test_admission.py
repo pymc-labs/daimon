@@ -1147,7 +1147,7 @@ async def test_admit_refuses_a_pinned_agent_outside_its_channels(
     is_dm: bool,
     role: Role,
 ) -> None:
-    """The pin holds however the turn got here, admins and DMs included."""
+    """The pin holds in every channel and thread, admins included, and for a member's DM."""
     tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON)
     deps = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
@@ -1359,3 +1359,38 @@ async def test_admit_refuses_an_agent_pinned_by_its_display_name(
             role=Role.USER,
         )
     assert exc_info.value.reason == "agent_pinned_elsewhere"
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    platform: str,
+) -> None:
+    """Admins are trusted: a DM reaches only them, so the pin doesn't apply there.
+
+    On Teams the adapter passes ADMIN for the deployment's ``admin_user_ids``
+    in a personal chat, so the same rule covers them.
+    """
+    tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform=platform,  # pyright: ignore[reportArgumentType]
+        external_user_id="anyone",
+        channel_id="general",
+        thread_id="dm-scope",
+        now=_NOW,
+        role=Role.ADMIN,
+        is_dm=True,
+    )
+
+    assert isinstance(admission, Admission)
+    # Every DM-admitted session is stamped private (Teams personal chats too),
+    # so no admin reads it from the hub.
+    assert admission.private_dm_id == "dm-scope"
