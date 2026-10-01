@@ -85,7 +85,7 @@ There are no channel admins: only the listed admins administer a channel.
 Like Discord and Slack, a channel turn replays the conversation it sits in,
 read through Microsoft Graph and marked untrusted for the agent. The first
 turn in a thread gets the root post and its newest 50 replies, a later turn
-only the replies since the bot's last answer, and a mention that starts a
+only the replies newer than the last message it read, and a mention that starts a
 thread the channel's 25 most recently active posts. One page is read per turn,
 marked `truncated` when there is more. System events, deleted posts and the
 bot's own cards are left out; mentions read as `@name`, files as names.
@@ -135,16 +135,18 @@ consent above) a followed thread stays mention-only.
   inside its HTML, so the bot reads the message from Graph and passes its
   images to the agent. Files live in the team's SharePoint site, which no
   team-scoped permission reaches: they work only in teams whose site an admin
-  granted (below). There, a shared file reaches the agent as a short-lived
-  download link, and each file the agent writes is uploaded to the channel's
-  Files tab (never overwriting) and linked below its answer, or in one message
-  when the answer has no room. Elsewhere, or when Graph refuses, the bot names
-  a shared file and tells the person it could not open it, and an output is
-  logged (`teams.channel_output.skipped` or `.upload_failed`, no name or
-  content) and dropped from the delivery listing; the agent's own copy stays
-  in its workspace. The turn context tells the agent which case applies
-  (`files="available"` or `"unavailable"`), learned from the last folder
-  lookup or upload and rechecked every 10 minutes while unavailable.
+  granted (below). There, a shared file from that site (never another one)
+  reaches the agent as a short-lived download link, and each file the agent
+  writes is uploaded to the channel's Files tab (never overwriting) and linked
+  below its answer, or in one message when the answer has no room (never
+  after an unprompted answer); a failed upload is named there instead.
+  Elsewhere, or when Graph refuses, the bot names a shared file and tells the
+  person it could not open it, and an output is logged
+  (`teams.channel_output.skipped` or `.upload_failed`, no name or content) and
+  dropped from the delivery listing; the agent's own copy stays in its
+  workspace. The turn context tells the agent which case applies
+  (`files="available"` or `"unavailable"`), learned per channel from the last
+  folder lookup or upload and rechecked every 10 minutes while unavailable.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and

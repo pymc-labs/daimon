@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Teams channel turns replay their thread, as on Discord and Slack.** The
   first turn in a thread reads the root post and its newest replies through
-  Microsoft Graph, a later turn only what came after the bot's last answer,
+  Microsoft Graph, a later turn only what came after the last message it read,
   and a mention that starts a thread the channel's recent posts, all marked
   untrusted. A bare @mention asks about the thread. Images pasted into a
   channel message now reach the agent; files shared in a channel are named and
@@ -77,9 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   With the Graph application permission `Sites.Selected` and a write grant on
   a team's SharePoint site, files shared in its channels reach the agent as
   download links, and files the agent writes are uploaded to the channel's
-  Files tab and linked below its answer, or in one message. The turn tells
-  the agent whether this works there. Without a grant, or when Graph refuses,
-  channels behave as before. The manifest is unchanged; `docs/teams.md` has
+  Files tab and linked below its answer, or in one message; one that fails to
+  upload is named there. The turn tells the agent whether this works in that
+  channel. Without a grant, in private and shared channels, or when Graph
+  refuses, channels behave as before. The manifest is unchanged; `docs/teams.md` has
   the grant steps.
 
 - **Teams threads can be followed, as on Discord.** Ask the agent to follow a
