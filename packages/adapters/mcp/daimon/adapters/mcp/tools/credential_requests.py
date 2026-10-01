@@ -49,8 +49,13 @@ from daimon.core.credential_requests import (
     mint_request_token,
 )
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_alias_shadowed, env_name_problem
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.env_file import (
+    MEMBER_SECRET_SUFFIX_HINT,
+    env_alias_shadowed,
+    env_name_problem,
+    env_shadow_phrase,
+)
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_attach import decide_mcp_connect
@@ -68,7 +73,7 @@ from daimon.core.stores.credential_requests import (
     update_credential_request_message,
 )
 from daimon.core.stores.domain import CredentialRequestRow, TurnOriginRow
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn_keys import list_turn_key_names
 from fastmcp import Context, FastMCP
@@ -271,10 +276,11 @@ async def _require_key_replacement_allowed(
         "key_replace", is_admin=auth.is_admin, is_daimon_managed=is_daimon_managed
     ):
         async with runtime.session_factory() as session:
-            reachable = await is_agent_reachable_in_tenant(
+            reachable = await is_agent_shared_for_key_changes(
                 session,
                 tenant_id=auth.tenant_id,
-                agent_name=ma_agent.name,
+                agent_names=(ma_agent.name, str(ma_agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
+                ma_agent_id=str(ma_agent.id),
                 default=runtime.deployment_default,
             )
     outcome = decide_operation(
@@ -285,8 +291,8 @@ async def _require_key_replacement_allowed(
     if outcome in ("managed_agent", "needs_admin") and adding is not None:
         raise ToolError(
             f"'{ma_agent.name}' is shared with everyone here, and adding '{adding}' "
-            f"would replace '{key}', which its tools already read as the same "
-            "credential. That needs a server or workspace admin, and the caller is not "
+            f"{env_shadow_phrase(adding, key)}. That needs a server or workspace "
+            "admin, and the caller is not "
             f"one. Nothing changed: the existing '{key}' is still in use and no card "
             f"was posted. Tell them an admin can ask Daimon to replace '{key}' on "
             f"'{ma_agent.name}'. Do not ask anyone for the value here and do not retry."

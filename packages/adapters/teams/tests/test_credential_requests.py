@@ -500,3 +500,53 @@ async def test_concurrent_submits_of_two_alias_names_store_only_one(
             outcomes.append(spent.outcome)
     assert len(rows) == 1, f"exactly one alias may land, got {[r.key for r in rows]}"
     assert sorted(o or "" for o in outcomes) == ["applied", "stale_replacement"]
+
+
+async def test_a_teams_submit_waits_for_another_adapters_alias_write(
+    db_engine: AsyncEngine, db_clean: None
+) -> None:
+    """Cross-writer: another adapter holds the key-set lock while adding GH_TOKEN.
+
+    The Teams submit for GITHUB_TOKEN must wait for that write and then see it,
+    not read "neither held" from under an uncommitted insert.
+    """
+    import asyncio
+
+    from daimon.core.defaults.provisioning import provision_tenant
+    from daimon.core.stores.agent_files import list_agent_files, lock_agent_keys
+
+    committing = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    await provision_tenant(committing, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with committing.begin() as session:
+        tenant = await get_tenant(session, TENANT)
+        assert tenant is not None
+        account = (await make_account(session, tenant=tenant)).id
+    row = await _request(committing, account, target="GITHUB_TOKEN")
+    holding = asyncio.Event()
+
+    async def other_adapter_adds_gh_token() -> None:
+        async with committing.begin() as session:
+            await lock_agent_keys(session, tenant_id=TENANT, agent_id=row.agent_id)
+            await put_agent_file(
+                session,
+                tenant_id=TENANT,
+                agent_id=row.agent_id,
+                key="GH_TOKEN",
+                content="the-value-in-use",
+                set_by_account_id=account,
+            )
+            holding.set()
+            await asyncio.sleep(0.5)
+
+    async with _running(TeamsApiFake(), _runtime(committing)) as (service, _):
+        other = asyncio.create_task(other_adapter_adds_gh_token())
+        await holding.wait()
+        await post_activity(service, _submit(row.token))
+        await service.turns.drain(5)
+        await other
+
+    async with committing() as session:
+        rows = await list_agent_files(session, tenant_id=TENANT, agent_id=row.agent_id)
+        spent = await peek_credential_request(session, token=row.token)
+    assert [r.key for r in rows] == ["GH_TOKEN"], "the Teams alias must not land beside it"
+    assert spent is not None and spent.outcome == "stale_replacement"

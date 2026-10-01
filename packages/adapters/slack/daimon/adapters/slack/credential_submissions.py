@@ -97,7 +97,7 @@ from daimon.core.stores.agent_files import (
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.turn_keys import list_turn_key_names
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -249,10 +249,11 @@ async def _replacement_refused_at_submit(
             "key_replace", is_admin=is_admin, is_daimon_managed=is_daimon_managed
         ):
             async with runtime.sessionmaker() as session:
-                is_reachable_in_tenant = await is_agent_reachable_in_tenant(
+                is_reachable_in_tenant = await is_agent_shared_for_key_changes(
                     session,
                     tenant_id=row.tenant_id,
-                    agent_name=str(agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name),
+                    agent_names=(agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
+                    ma_agent_id=str(agent.id),
                     default=runtime.deployment_default,
                 )
     outcome = decide_operation(

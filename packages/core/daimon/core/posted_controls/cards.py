@@ -36,6 +36,7 @@ from typing import Final, Literal, Self, cast
 
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.credential_requests import build_custom_id, split_skill_repo_target
+from daimon.core.env_file import env_shadow_phrase
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.stores.domain import CredentialRequestRow
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -365,9 +366,8 @@ def _refusal_content(
     if refusal == "replacement_admin_required" and replaces is not None:
         return (
             f"🛡️ {target} was not added for {agent_name}.",
-            f"Adding {target} would replace {replaces}, which {agent_name}'s tools already "
-            f"read as the same credential. An admin can ask {responder_name} to replace "
-            f"{replaces} on {agent_name}.",
+            f"Adding {target} {env_shadow_phrase(target, replaces)}. An admin can ask "
+            f"{responder_name} to replace {replaces} on {agent_name}.",
             f"The existing {replaces} is unchanged.",
         )
     if refusal == "replacement_admin_required":

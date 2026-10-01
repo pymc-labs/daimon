@@ -15,6 +15,7 @@ from daimon.core.env_file import (
     MAX_ENV_VALUE_BYTES,
     EnvFileRejected,
     decode_env_bytes,
+    env_alias_of,
     env_alias_shadowed,
     env_collision_line,
     env_import_collisions,
@@ -22,6 +23,7 @@ from daimon.core.env_file import (
     env_name_member_writable,
     env_name_problem,
     env_row_skip_reason,
+    env_shadow_phrase,
     is_reserved_env_name,
     parse_env_file,
     serialize_env_file,
@@ -752,3 +754,49 @@ def test_alias_pair_refusal_copy_names_the_key_not_the_value() -> None:
     )
     assert "GITHUB_TOKEN" in text and "same tool" in text
     assert "secret-" not in text
+
+
+# --- aliases vs credential families ------------------------------------------
+
+
+def test_a_fresh_agent_may_import_a_whole_aws_family_in_one_file() -> None:
+    entries = parse_env_file(
+        "AWS_ACCESS_KEY_ID=AKIAEXAMPLE\nAWS_SECRET_ACCESS_KEY=s\nAWS_SESSION_TOKEN=t\n"
+    )
+    assert [e.name for e in entries] == [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+    ]
+    assert env_import_collisions(entries, held=()) == ()
+
+
+def test_the_two_aws_session_token_names_are_still_mutually_exclusive() -> None:
+    with pytest.raises(EnvFileRejected) as caught:
+        parse_env_file("AWS_SESSION_TOKEN=a\nAWS_SECURITY_TOKEN=b\n")
+    assert caught.value.rejection == "alias_pair"
+
+
+@pytest.mark.parametrize(
+    ("adding", "held"),
+    [
+        ("AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID"),
+        ("AWS_SESSION_TOKEN", "AWS_ACCESS_KEY_ID"),
+        ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"),
+    ],
+)
+def test_adding_to_a_stored_family_changes_it(adding: str, held: str) -> None:
+    """A member must not graft a session token or secret onto someone else's access key."""
+    assert env_alias_shadowed(adding, [held]) == held
+    assert env_alias_of(adding, [held]) is None, "a family member is not an alias"
+    assert env_shadow_phrase(adding, held) == f"would change the credential {held} belongs to"
+
+
+def test_an_import_onto_a_stored_family_collides_and_says_so() -> None:
+    entries = parse_env_file("AWS_SESSION_TOKEN=t\n")
+    held = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}
+    collisions = env_import_collisions(entries, held)
+    assert [e.name for e in collisions] == ["AWS_SESSION_TOKEN"]
+    assert "would change the credential AWS_ACCESS_KEY_ID belongs to" in env_collision_line(
+        collisions[0], held
+    )

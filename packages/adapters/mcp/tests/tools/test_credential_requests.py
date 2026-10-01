@@ -2571,6 +2571,54 @@ async def test_request_agent_key_treats_an_alias_of_a_held_key_as_a_replacement(
             purpose="a GitHub token",
             channel_id="222",
         )
-    assert "adding 'GITHUB_TOKEN' would replace 'GH_TOKEN'" in str(caught.value)
+    assert "adding 'GITHUB_TOKEN' would replace GH_TOKEN" in str(caught.value)
+    assert await _row_count(db_session) == 0
+    assert posted == {}
+
+
+async def test_request_agent_key_treats_adding_to_a_stored_aws_family_as_a_replacement(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member grafting AWS_SESSION_TOKEN onto a held access key on a shared agent is refused."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_shared", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(
+        committing_sessionmaker,
+        client=client,
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+    )
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_shared")
+    async with committing_sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant.id,
+            agent_id=agent_uuid,
+            key="AWS_ACCESS_KEY_ID",
+            content="AKIAEXAMPLE",
+            set_by_account_id=None,
+        )
+    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9306", posted=posted)
+
+    with pytest.raises(ToolError, match="would change the credential AWS_ACCESS_KEY_ID"):
+        await _request_agent_key_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin_id),
+            expected_ma_agent_id="ag_shared",
+            agent_name="daimon",
+            key="AWS_SESSION_TOKEN",
+            purpose="an AWS session token",
+            channel_id="222",
+        )
     assert await _row_count(db_session) == 0
     assert posted == {}

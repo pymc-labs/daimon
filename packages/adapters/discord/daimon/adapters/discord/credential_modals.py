@@ -121,7 +121,7 @@ from daimon.core.credential_requests import (
     split_skill_repo_target,
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
@@ -176,7 +176,7 @@ from daimon.core.stores.agent_files import (
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.turn_keys import list_turn_key_names
 
 import discord
@@ -405,10 +405,11 @@ async def _decide_key_replacement(
     reachable = False
     if needs_reachability_read("key_replace", is_admin=False, is_daimon_managed=is_daimon_managed):
         async with runtime.sessionmaker() as session:
-            reachable = await is_agent_reachable_in_tenant(
+            reachable = await is_agent_shared_for_key_changes(
                 session,
                 tenant_id=row.tenant_id,
-                agent_name=agent.name,
+                agent_names=(agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
+                ma_agent_id=str(agent.id),
                 default=runtime.deployment_default,
             )
     return decide_operation(

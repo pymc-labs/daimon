@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from typing import Literal, cast
 
 from daimon.core._models import Account, ChannelConfig, TenantConfig, ThreadAgentBinding, UserConfig
@@ -226,3 +227,54 @@ async def _fetch_tenant(session: AsyncSession, *, tenant_id: uuid.UUID) -> Tenan
         agent_name_set_by_account_id=orm.agent_name_set_by_account_id,
         agent_name_set_at=orm.agent_name_set_at,
     )
+
+
+async def is_agent_shared_for_key_changes(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_names: Collection[str],
+    ma_agent_id: str,
+    default: DeploymentDefault,
+) -> bool:
+    """Whether replacing or removing this agent's keys reaches other people.
+
+    Wider than `is_agent_reachable_in_tenant`, and checked against EVERY name
+    the agent answers to (its display name and its ``daimon_name`` routing
+    name) so a mismatch between them cannot make a shared agent look private:
+
+    - a channel, tenant or deployment default names it, under any name;
+    - a live handoff or setup thread is bound to it (by stable MA id);
+    - it is someone's personal default, under any name.
+
+    Fails closed: no name at all counts as shared. Same semantics as #336's
+    `is_agent_shared_for_attachments` for MCP servers, widened to both names;
+    one should replace the other once both land.
+    """
+    names = {name for name in agent_names if name}
+    if not names:
+        return True
+    tenant_row, channel_rows = await list_propagations_for_tenant(session, tenant_id=tenant_id)
+    if any(
+        is_agent_reachable(name, tenant=tenant_row, channels=channel_rows, default=default)
+        for name in names
+    ):
+        return True
+    bound = await session.scalar(
+        select(ThreadAgentBinding.id)
+        .where(
+            ThreadAgentBinding.tenant_id == tenant_id,
+            ThreadAgentBinding.responder_ma_agent_id == ma_agent_id,
+            ThreadAgentBinding.deleted.is_(False),
+        )
+        .limit(1)
+    )
+    if bound is not None:
+        return True
+    personal = await session.scalar(
+        select(UserConfig.account_id)
+        .join(Account, Account.id == UserConfig.account_id)
+        .where(Account.tenant_id == tenant_id, UserConfig.agent_name.in_(names))
+        .limit(1)
+    )
+    return personal is not None

@@ -62,6 +62,8 @@ def _runtime_with_agent(
     tenant_id: uuid.UUID,
     managed: bool = False,
     default_name: str | None = None,
+    display_name: str = "project-agent",
+    routing_name: str | None = None,
 ) -> tuple[McpRuntime, uuid.UUID]:
     """A runtime whose MA lists one agent for the tenant; returns its derived id.
 
@@ -70,17 +72,22 @@ def _runtime_with_agent(
     `managed` makes it the built-in agent; `default_name` makes it reachable
     tenant-wide as the deployment default.
     """
-    from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.scope import DeploymentDefault as _DeploymentDefault
     from daimon.testing.ma import build_fake_anthropic, list_response
     from daimon.testing.ma_models import ma_agent
 
+    metadata: dict[str, str] = {}
+    if managed:
+        metadata[MA_METADATA_KEY_MANAGED] = "true"
+    if routing_name is not None:
+        metadata[MA_METADATA_KEY_NAME] = routing_name
     agent = ma_agent(
         id="ag_self",
-        name="project-agent",
+        name=display_name,
         tenant_id=tenant_id,
-        metadata={MA_METADATA_KEY_MANAGED: "true"} if managed else None,
+        metadata=metadata or None,
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1458,3 +1465,117 @@ async def test_concurrent_self_writes_of_two_alias_names_store_only_one(
     assert len(rows) == 1, f"exactly one alias may land, got {[r.key for r in rows]}"
     refused = [r for r in results if isinstance(r, ToolError)]
     assert len(refused) == 1 and "would replace" in str(refused[0])
+
+
+async def _held(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    key: str,
+) -> None:
+    from daimon.core.stores.agent_files import put_agent_file
+
+    async with sessionmaker.begin() as session:
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            key=key,
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+
+
+async def _assert_delete_then_add_refused(
+    runtime: McpRuntime,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+) -> None:
+    from daimon.core.stores.agent_files import list_agent_files
+
+    auth = _auth_identity(tenant_id=tenant_id, agent_id=agent_id)
+    await _held(sessionmaker, tenant_id=tenant_id, agent_id=agent_id, key="GITHUB_TOKEN")
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+        await _self_delete_file_impl(runtime, auth, key="GITHUB_TOKEN")
+    with pytest.raises(ToolError, match="would replace GITHUB_TOKEN"):
+        await _self_write_file_impl(runtime, auth, key="GH_TOKEN", content="attacker")
+    async with sessionmaker() as session:
+        rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
+    assert [(r.key, r.content) for r in rows] == [("GITHUB_TOKEN", "the-value-in-use")]
+
+
+async def test_delete_then_add_refused_when_display_and_routing_names_differ(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Display 'Acme Display', daimon_name 'acme', a channel configured for 'acme'."""
+    from daimon.core.scope import ChannelScopeRef
+    from daimon.core.stores.scoped_config_write import set_fields
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    runtime, agent_id = _runtime_with_agent(
+        committing_sessionmaker,
+        tenant_id=tenant_id,
+        display_name="Acme Display",
+        routing_name="acme",
+    )
+    async with committing_sessionmaker.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="chan-acme"),
+            tenant_id=tenant_id,
+            agent_name="acme",
+        )
+    await _assert_delete_then_add_refused(
+        runtime, committing_sessionmaker, tenant_id=tenant_id, agent_id=agent_id
+    )
+
+
+async def test_delete_then_add_refused_while_a_handoff_thread_is_bound_to_the_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.thread_agent_bindings import create_binding
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    runtime, agent_id = _runtime_with_agent(committing_sessionmaker, tenant_id=tenant_id)
+    async with committing_sessionmaker.begin() as session:
+        await create_binding(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            parent_channel_id="chan-1",
+            thread_id="thread-1",
+            responder_ma_agent_id="ag_self",
+            responder_name="project-agent",
+            kind="handoff",
+        )
+    await _assert_delete_then_add_refused(
+        runtime, committing_sessionmaker, tenant_id=tenant_id, agent_id=agent_id
+    )
+
+
+async def test_delete_then_add_refused_when_the_agent_is_someones_personal_default(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.scope import UserScopeRef
+    from daimon.core.stores.scoped_config_write import set_fields
+    from daimon.core.stores.tenants import get_tenant
+    from daimon.testing.factories import make_account
+
+    tenant_id = await _seed_tenant(committing_sessionmaker)
+    runtime, agent_id = _runtime_with_agent(committing_sessionmaker, tenant_id=tenant_id)
+    async with committing_sessionmaker.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None
+        account = await make_account(session, tenant=tenant)
+        await set_fields(
+            session,
+            scope=UserScopeRef(account_id=account.id),
+            tenant_id=tenant_id,
+            agent_name="project-agent",
+        )
+    await _assert_delete_then_add_refused(
+        runtime, committing_sessionmaker, tenant_id=tenant_id, agent_id=agent_id
+    )

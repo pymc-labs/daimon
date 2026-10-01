@@ -32,8 +32,13 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.core.broker import dispatch_mint_token
 from daimon.core.broker.errors import NoBindingError, ProviderConfigError
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_alias_shadowed, env_name_problem
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.env_file import (
+    MEMBER_SECRET_SUFFIX_HINT,
+    env_alias_shadowed,
+    env_name_problem,
+    env_shadow_phrase,
+)
 from daimon.core.errors import StoreError
 from daimon.core.github_visibility import pat_can_access_repo
 from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
@@ -50,7 +55,7 @@ from daimon.core.stores.agent_repo_binding import (
     set_binding,
 )
 from daimon.core.stores.domain import AgentFileRow, AgentRepoBindingRow, RepoAccessProof
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.turn_keys import list_turn_key_names
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -186,9 +191,8 @@ async def _self_write_file_impl(
             )
             if shadowed is not None:
                 raise ToolError(
-                    f"Adding {key} would replace {shadowed}, which this agent's tools "
-                    "already read as the same credential. Nothing was saved. Ask a "
-                    f"person to replace {shadowed} through a form."
+                    f"Adding {key} {env_shadow_phrase(key, shadowed)}. Nothing was saved. "
+                    f"Ask a person to replace {shadowed} through a form."
                 )
             row = await put_agent_file_if_unchanged(
                 session,
@@ -295,10 +299,11 @@ async def _require_member_may_remove(
     reachable = False
     if needs_reachability_read("key_remove", is_admin=False, is_daimon_managed=is_daimon_managed):
         async with runtime.session_factory() as session:
-            reachable = await is_agent_reachable_in_tenant(
+            reachable = await is_agent_shared_for_key_changes(
                 session,
                 tenant_id=auth.tenant_id,
-                agent_name=agent.name,
+                agent_names=(agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
+                ma_agent_id=str(agent.id),
                 default=runtime.deployment_default,
             )
     outcome = decide_operation(

@@ -112,10 +112,12 @@ __all__ = [
     "EnvProblem",
     "EnvRejection",
     "decode_env_bytes",
+    "env_alias_of",
     "env_alias_shadowed",
     "env_collision_line",
     "env_import_collisions",
     "env_row_skip_reason",
+    "env_shadow_phrase",
     "MEMBER_SECRET_SUFFIX_HINT",
     "env_name_hard_denied",
     "env_name_member_writable",
@@ -579,42 +581,66 @@ def env_name_member_writable(name: str) -> bool:
     return name.endswith(_MEMBER_ALLOW_SUFFIXES)
 
 
-#: Names one tool reads as the same credential, so adding one where another is
-#: already stored retargets that tool as surely as overwriting it: `gh`
-#: prefers ``GH_TOKEN`` over ``GITHUB_TOKEN``, the Anthropic SDK sends
-#: ``ANTHROPIC_AUTH_TOKEN`` beside ``ANTHROPIC_API_KEY``, the AWS SDK pairs the
-#: access key with whatever secret and session token sit beside it. Treated
-#: symmetrically: any member of a group added while another is held is a
-#: REPLACEMENT of the held one, and goes through the replacement gate.
+#: ALIASES: mutually exclusive names one tool reads as the same credential, so
+#: adding one where another is stored retargets that tool as surely as
+#: overwriting it (`gh` prefers ``GH_TOKEN`` over ``GITHUB_TOKEN``). Any member
+#: added while another is held is a REPLACEMENT of the held one, and a file
+#: that sets two of them is ambiguous.
 _ALIAS_GROUPS: Final[tuple[frozenset[str], ...]] = (
     frozenset({"GH_TOKEN", "GITHUB_TOKEN"}),
     frozenset({"GITLAB_TOKEN", "GLAB_TOKEN"}),
     frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}),
-    frozenset(
-        {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"}
-    ),
+    frozenset({"AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"}),
     frozenset({"OPENAI_API_KEY", "OPENAI_KEY"}),
     frozenset({"FLY_API_TOKEN", "FLY_ACCESS_TOKEN"}),
     frozenset({"NPM_TOKEN", "NODE_AUTH_TOKEN"}),
     frozenset({"GOOGLE_API_KEY", "GEMINI_API_KEY"}),
     frozenset({"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}),
 )
+#: FAMILIES: complementary names one tool reads TOGETHER as one credential
+#: (the AWS SDK pairs the access key with whatever secret and session token
+#: sit beside it). A fresh agent may receive a whole family at once, in one
+#: file; adding or changing any member while another is stored changes the
+#: credential the stored member belongs to, so it is a REPLACEMENT too.
+_CREDENTIAL_FAMILIES: Final[tuple[frozenset[str], ...]] = (
+    frozenset(
+        {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"}
+    ),
+)
+
+
+def _first_held(name: str, groups: Sequence[frozenset[str]], held: set[str]) -> str | None:
+    for group in groups:
+        if name in group:
+            for other in sorted(group - {name}):
+                if other in held:
+                    return other
+    return None
+
+
+def env_alias_of(name: str, held: Iterable[str]) -> str | None:
+    """A held name that is a mutually exclusive alias of `name`, or None."""
+    return _first_held(name, _ALIAS_GROUPS, set(held))
 
 
 def env_alias_shadowed(name: str, held: Iterable[str]) -> str | None:
-    """The held key that adding `name` would retarget, or None.
+    """The held key that adding `name` would retarget or change, or None.
 
-    `name` itself being held is an ordinary replacement and not this
-    function's business; this answers only for a *different* name the same
-    tool reads as the same credential.
+    An alias of `name` (it would be shadowed) or another member of its
+    credential family (the stored credential would change). `name` itself
+    being held is an ordinary replacement and not this function's business.
     """
     held_set = set(held)
-    for group in _ALIAS_GROUPS:
-        if name in group:
-            for other in sorted(group - {name}):
-                if other in held_set:
-                    return other
-    return None
+    return _first_held(name, _ALIAS_GROUPS, held_set) or _first_held(
+        name, _CREDENTIAL_FAMILIES, held_set
+    )
+
+
+def env_shadow_phrase(name: str, held_name: str) -> str:
+    """How adding `name` affects `held_name`, for refusal copy (no values)."""
+    if env_alias_of(name, [held_name]) is not None:
+        return f"would replace {held_name}, which the same tool reads as this credential"
+    return f"would change the credential {held_name} belongs to"
 
 
 def env_import_collisions(entries: Sequence[EnvEntry], held: Iterable[str]) -> tuple[EnvEntry, ...]:
@@ -637,10 +663,8 @@ def env_collision_line(entry: EnvEntry, held: Iterable[str]) -> str:
     if entry.name in held_set:
         return f"line {entry.line}: {entry.name} is already set."
     shadowed = env_alias_shadowed(entry.name, held_set)
-    return (
-        f"line {entry.line}: {entry.name} would replace {shadowed}, which is already set "
-        "and read by the same tool."
-    )
+    assert shadowed is not None, "only a colliding entry gets a collision line"
+    return f"line {entry.line}: {entry.name} {env_shadow_phrase(entry.name, shadowed)}."
 
 
 def env_row_skip_reason(name: str, value: str) -> str | None:
@@ -802,12 +826,13 @@ def parse_env_file(text: str, *, member_writable_only: bool = False) -> tuple[En
         if len(numbers) > 1:
             problems["duplicate_name"].extend(EnvProblem(name=name, line=n) for n in numbers)
 
-    # Two names one tool reads as the same credential: whichever the tool
-    # prefers silently wins, so the file is ambiguous. Each later name of a
-    # pair is reported against the earlier one.
+    # Two mutually exclusive aliases: whichever the tool prefers silently wins,
+    # so the file is ambiguous. Each later name of a pair is reported against
+    # the earlier one. Members of one credential FAMILY (the AWS bundle) belong
+    # together and may arrive in one file.
     seen: list[str] = []
     for entry in entries:
-        if env_alias_shadowed(entry.name, seen) is not None:
+        if env_alias_of(entry.name, seen) is not None:
             problems["alias_pair"].append(EnvProblem(name=entry.name, line=entry.line))
         seen.append(entry.name)
 
