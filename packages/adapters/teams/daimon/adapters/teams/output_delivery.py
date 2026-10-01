@@ -8,9 +8,10 @@ server-side offer that is checked against the clicker and expires.
 
 In a channel each file is uploaded to the channel's Files folder through
 Graph (`channel_files`), and the links are edited in below the answer, or
-sent as one message when they do not fit: a note per file cluttered the
-thread. Without access, or on any Graph failure, a file goes down the skip
-path to be logged, and the agent guidance has the agent say so in its reply.
+sent as one message when they do not fit (never after an unprompted
+answer): a note per file cluttered the thread. A failed upload is named
+there too. Without access a file goes down the skip path to be logged, and
+the agent guidance has the agent say so in its reply.
 Either way the listing entry, the delivery ledger, is deleted; the sandbox
 keeps its copy, so the agent can still read or paste it later.
 """
@@ -65,6 +66,7 @@ _EXPIRED = "That file offer has expired. Ask me again and I'll resend it."
 _UPLOAD_FAILED = "I couldn't upload `{name}`. Ask me again to retry."
 _DECLINED = "Okay, I won't send `{name}`."
 _SAVED = "Saved to this channel's files:"
+_NOT_SAVED = "I couldn't save `{name}` to this channel's files."
 
 # Edits a line in below the answer on screen; False if it cannot go there.
 AppendToAnswer = Callable[[str], Awaitable[bool]]
@@ -207,6 +209,7 @@ class TeamsOutputDelivery:
                     status=err.status,
                     reason=err.reason,
                 )
+                notices.append(_NOT_SAVED.format(name=sanitize_title(name)))
                 return
             links.append(_file_link(sanitize_title(item.name or name), item.web_url))
 
@@ -225,6 +228,10 @@ class TeamsOutputDelivery:
         if not text:
             return
         if append is not None and await append(text):
+            return
+        if inbound.unprompted:
+            # Nobody asked: an unprompted turn posts its answer and nothing else.
+            log.info("teams.channel_output.links_withheld", reason="unprompted")
             return
         try:
             await self._sender.send(

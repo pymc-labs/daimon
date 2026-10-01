@@ -339,23 +339,50 @@ async def test_channel_links_go_in_one_message_when_the_answer_cannot_take_them(
     assert (message.text or "").count("](https://example.sharepoint.com/") == 2, "both files"
 
 
-async def test_a_refused_channel_upload_is_logged_and_deleted_without_a_note(
+async def test_a_refused_channel_upload_is_named_below_the_answer_logged_and_deleted(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A 403 (grant removed) falls back to today's channel behaviour: a log line, a delete."""
+    """A 403 (grant removed) after `files="available"`: the answer says the file did not land."""
 
     def denied(_: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"error": {"code": "accessDenied"}})
 
     harness = _harness(db_session_factory, channel_files=_channel_files(denied))
+    appended: list[str] = []
+
+    async def append(text: str) -> bool:
+        appended.append(text)
+        return True
 
     with structlog.testing.capture_logs() as logs:
-        await harness.delivery.sweep(_in_channel(), "sesn_1")
+        await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
 
-    assert harness.sender.sent == [], "no note in the thread; the agent said so in its reply"
+    assert appended == ["I couldn't save `data.csv` to this channel's files."], (
+        "the lost file is named in the answer, not silently dropped"
+    )
+    assert harness.sender.sent == [], "the note rides on the answer, not a new message"
     failed = [e for e in logs if e["event"] == "teams.channel_output.upload_failed"]
     assert [(e["file_id"], e["status"]) for e in failed] == [("file_csv", 403)]
     assert harness.deletes == ["file_csv"], "the ledger entry goes, as on the skip path"
+
+
+async def test_an_unprompted_turn_posts_no_links_message_when_the_answer_cannot_take_them(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Nobody asked: an unprompted turn posts its answer and nothing beyond it."""
+    harness = _harness(db_session_factory, channel_files=_channel_files(_uploaded))
+
+    async def full(_: str) -> bool:
+        return False
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(
+            dataclasses.replace(_in_channel(), unprompted=True), "sesn_1", append=full
+        )
+
+    assert harness.sender.sent == [], "no standalone message after an unprompted answer"
+    assert any(e["event"] == "teams.channel_output.links_withheld" for e in logs), "but logged"
+    assert harness.deletes == ["file_csv"], "the file was still saved to the channel's Files"
 
 
 async def test_oversize_output_in_a_dm_gets_the_limit_notice(
