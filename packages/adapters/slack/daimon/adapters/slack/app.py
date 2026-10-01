@@ -2533,7 +2533,7 @@ class SlackApp:
             role=role,
             now=datetime.now(UTC),
         )
-        # A timer runs only as the agent it was set with; a thread rerouted in
+        # A wake runs only as the agent it was queued for; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.
         check_wake_responder(
             reason=row.reason,
@@ -2541,6 +2541,7 @@ class SlackApp:
             target_name=row.target_name,
             admitted_ma_agent_id=follow_admission.agent.id,
             admitted_name=follow_admission.agent.name,
+            asking_ma_agent_id=from_ma_agent_id,
         )
         follow_deadline = turn_deadline(now=datetime.now(UTC))
         follow_prepared = await bind_session(
