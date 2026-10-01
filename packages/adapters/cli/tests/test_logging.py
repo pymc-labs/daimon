@@ -36,3 +36,22 @@ def test_bootstrap_logging_tracebacks_never_print_frame_locals(
     captured = capsys.readouterr()
     assert "boom" in captured.err
     assert "canary-local-value-3b9f" not in captured.err
+
+
+def test_bootstrap_logging_redacts_credential_text_in_exceptions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+
+    configure_bootstrap_logging()
+    canary = "canary-" + "cli-exception-7c1d"
+    try:
+        raise RuntimeError(json.dumps({"api_key": canary}))
+    except RuntimeError:
+        structlog.get_logger("daimon.adapters.cli.test").exception(
+            "admin.failed", note=f"token={canary}"
+        )
+
+    captured = capsys.readouterr()
+    assert "RuntimeError" in captured.err
+    assert canary not in captured.err

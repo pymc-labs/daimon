@@ -45,7 +45,9 @@ import ast
 import bisect
 import contextvars
 import json
+import logging
 import re
+import traceback
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -56,6 +58,7 @@ from sentry_sdk.scrubber import DEFAULT_DENYLIST, EventScrubber
 if TYPE_CHECKING:
     from sentry_sdk._types import Event, Hint
     from sentry_sdk.integrations import Integration
+    from structlog.typing import EventDict, WrappedLogger
 
 # Keys whose values must never leave the process in a Sentry event.
 _APP_DENYLIST: list[str] = [
@@ -526,6 +529,38 @@ def _redact_url(url: str) -> str:
     return urlunsplit((parts.scheme, host, _redact_path_tokens(parts.path), "", ""))
 
 
+def _scrub_url_fields(data: dict[str, object]) -> None:
+    """SDK span/trace URL fields by meaning: fragments dropped, every query
+    value redacted (whatever the parameter is called), URLs reduced."""
+    for key in list(data.keys()):
+        lowered = key.lower()
+        value = data[key]
+        if lowered.endswith("fragment"):
+            del data[key]
+        elif lowered.endswith("query") and isinstance(value, str):
+            data[key] = _redact_query(value.lstrip("?"))
+        elif lowered in ("url", "http.url", "url.full", "http.target", "url.path") and isinstance(
+            value, str
+        ):
+            data[key] = (
+                redact_request_target(value) if value.startswith("/") else _redact_url(value)
+            )
+
+
+def redact_request_target(target: str) -> str:
+    """A request target (`/path?query#frag`) safe to log: capability path
+    segments replaced, every query value redacted, fragment dropped."""
+    without_fragment = target.split("#", 1)[0]
+    path, separator, query = without_fragment.partition("?")
+    path = _redact_path_tokens(path)
+    return f"{path}?{_redact_query(query)}" if separator else path
+
+
+def redact_log_text(text: str) -> str:
+    """Free text safe to log: the same rules as Sentry exception text."""
+    return _redact_secret_text(text)
+
+
 def _redact_query(query: str) -> str:
     """Keep parameter names, redact every value."""
     pairs = parse_qsl(query, keep_blank_values=True)
@@ -659,6 +694,12 @@ def _scrub_event_fields(event: Event, hint: Hint) -> Event | None:
     # Contexts are free-form mappings: redact secret-keyed values at any depth.
     contexts = event.get("contexts")
     if isinstance(contexts, dict):
+        trace = cast("dict[str, object]", contexts).get("trace")
+        trace_data = (
+            cast("dict[str, object]", trace).get("data") if isinstance(trace, dict) else None
+        )
+        if isinstance(trace_data, dict):
+            _scrub_url_fields(cast("dict[str, object]", trace_data))
         _redact_secret_keys(cast("dict[str, object]", contexts))
 
     # Exception messages can quote a secret (a URL query, a header, a key).
@@ -683,7 +724,9 @@ def _scrub_event_fields(event: Event, hint: Hint) -> Event | None:
                 for field in ("data", "tags"):
                     mapping = typed_span.get(field)
                     if isinstance(mapping, dict):
-                        _redact_secret_keys(cast("dict[str, object]", mapping))
+                        typed_mapping = cast("dict[str, object]", mapping)
+                        _scrub_url_fields(typed_mapping)
+                        _redact_secret_keys(typed_mapping)
     transaction = event.get("transaction")
     if isinstance(transaction, str):
         event["transaction"] = _redact_secret_text(transaction)
@@ -702,6 +745,81 @@ def _scrub_event_fields(event: Event, hint: Hint) -> Event | None:
     event.pop("user", None)
 
     return event
+
+
+_ACCESS_LOGGER = "uvicorn.access"
+# Loggers whose records can carry request targets or third-party URLs.
+_REDACTED_LOGGERS = ("", "uvicorn", "uvicorn.error", _ACCESS_LOGGER)
+# Outbound-request loggers that print full URLs at INFO.
+_QUIETED_LOGGERS = ("httpx", "httpcore")
+
+
+class LogRedactionFilter(logging.Filter):
+    """Redact stdlib log records (uvicorn access/error, anything on root).
+
+    Access records keep their positional args (uvicorn's formatter reads
+    them) with the request target redacted; other records are redacted as
+    formatted text, and their traceback text is redacted too.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            record.name == _ACCESS_LOGGER
+            and isinstance(record.args, tuple)
+            and len(record.args) >= 3
+        ):
+            args = list(record.args)
+            if isinstance(args[2], str):
+                args[2] = redact_request_target(args[2])
+            record.args = tuple(args)
+            return True
+        if record.exc_info and not record.exc_text:
+            record.exc_text = _redact_secret_text(
+                "".join(traceback.format_exception(*record.exc_info))
+            ).rstrip("\n")
+        try:
+            message = record.getMessage()
+        except (TypeError, ValueError):
+            return True
+        redacted = _redact_secret_text(message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = None
+        return True
+
+
+def install_log_redaction() -> None:
+    """Redact uvicorn and root stdlib logging in this process; idempotent.
+
+    Call after the server has configured logging (an app factory runs after
+    uvicorn's own `dictConfig`). Filters go on the loggers and on every
+    handler they already have, so propagated records are covered too.
+    """
+    redaction = LogRedactionFilter()
+    for name in _REDACTED_LOGGERS:
+        logger = logging.getLogger(name)
+        targets: list[logging.Filterer] = [logger, *logger.handlers]
+        for target in targets:
+            if not any(isinstance(f, LogRedactionFilter) for f in target.filters):
+                target.addFilter(redaction)
+    for name in _QUIETED_LOGGERS:
+        logger = logging.getLogger(name)
+        logger.setLevel(max(logger.getEffectiveLevel(), logging.WARNING))
+
+
+def redact_log_event(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
+    """structlog processor: redact string fields and rendered exceptions.
+
+    Place it after the exception renderer/formatter so traceback text is
+    already a field.
+    """
+    del logger, method_name
+    for key, value in list(event_dict.items()):
+        if isinstance(value, str):
+            event_dict[key] = _redact_secret_text(value)
+        elif key == "exception":
+            event_dict[key] = _redact_value(value)
+    return event_dict
 
 
 def _event_scrubber() -> EventScrubber:

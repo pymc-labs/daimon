@@ -14,7 +14,7 @@ from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.logging_setup import configure_log_level
-from daimon.core.observability import init_sentry
+from daimon.core.observability import init_sentry, install_log_redaction
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 
 log = structlog.get_logger()
@@ -48,6 +48,7 @@ async def main() -> None:
                 log_config=None,  # JSON chain already configured; uvicorn uses structlog.
             )
         )
+        install_log_redaction()
         log.info("starting_teams_adapter", port=settings.teams.port)
         await server.serve()
 

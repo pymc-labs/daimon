@@ -76,7 +76,7 @@ from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.notebooks._rate_limit import RateLimiter
-from daimon.core.observability import init_sentry
+from daimon.core.observability import init_sentry, install_log_redaction
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import TokenVerifier
@@ -173,6 +173,9 @@ def create_mcp_app(
         traces_sample_rate=effective_settings.sentry.traces_sample_rate,
         integrations=[StarletteIntegration()],
     )
+    # uvicorn has configured its loggers by the time it calls this factory:
+    # redact request targets (capability paths, OAuth query values) in them.
+    install_log_redaction()
     _validate_settings(effective_settings, skip_auth=auth is not None)
 
     effective_sessionmaker = sessionmaker

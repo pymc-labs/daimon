@@ -524,3 +524,31 @@ def test_path_capability_tokens_are_redacted_in_text(text: str, kept: str) -> No
     assert kept in out
     assert "Zx9Zx9" not in out
     assert "c2lnbmF0dXJl" not in out
+
+
+def test_outbound_http_span_query_and_fragment_never_reach_the_transport(
+    capturing_sentry: CapturingTransport,
+) -> None:
+    """The real httpx integration splits the URL into http.query / http.fragment."""
+    import httpx
+
+    opaque = [_canary() for _ in range(4)]
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    with (
+        sentry_sdk.start_transaction(name="probe", op="task"),
+        httpx.Client(transport=httpx.MockTransport(_handler)) as client,
+    ):
+        response = client.get(
+            f"https://connector.example/mcp?code={opaque[0]}&state={opaque[1]}"
+            f"&v={opaque[2]}#{opaque[3]}"
+        )
+    sentry_sdk.flush()
+
+    assert response.status_code == 200
+    rendered = capturing_sentry.rendered()
+    assert "connector.example" in rendered, "the outbound span was captured"
+    for value in opaque:
+        assert value not in rendered

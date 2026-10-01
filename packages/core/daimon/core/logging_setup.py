@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 
 import structlog
+from daimon.core.observability import redact_log_event
 
 
 def configure_log_level(level: str) -> None:
@@ -28,6 +29,8 @@ def configure_log_level(level: str) -> None:
         structlog.processors.ExceptionRenderer(
             structlog.tracebacks.ExceptionDictTransformer(show_locals=False)
         ),
+        # Exception text and string fields can quote a credential.
+        redact_log_event,
         structlog.processors.JSONRenderer(),
     ]
     structlog.configure(

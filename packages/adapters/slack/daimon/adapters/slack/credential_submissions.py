@@ -516,8 +516,11 @@ async def run_env_credential_submission(
             client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
         )
         return
-    except Exception:
-        log.exception("credential_request.env_write_failed", key_present=True)
+    except Exception as exc:
+        # Type only: the message of an error at a credential boundary can quote values.
+        log.error(
+            "credential_request.env_write_failed", key_present=True, error_type=type(exc).__name__
+        )
         await post_ephemeral(
             client,
             thread_ts=thread_ts,
@@ -797,7 +800,12 @@ async def run_env_file_credential_submission(
         # Handled here, not in the spawned task, so the person gets a reply.
         # Rolled back with the consume, so the request stays live. The Sentry
         # capture carries id tags only; frame locals are never sent.
-        log.exception("credential_request.env_file_write_failed", key_count=len(entries))
+        # Type only: the message of an error at a credential boundary can quote values.
+        log.error(
+            "credential_request.env_file_write_failed",
+            key_count=len(entries),
+            error_type=type(exc).__name__,
+        )
         capture_exception_with_scope(exc)
         await post_ephemeral(
             client,

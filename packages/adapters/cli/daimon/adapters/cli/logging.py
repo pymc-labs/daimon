@@ -7,6 +7,7 @@ import logging
 import sys
 
 import structlog
+from daimon.core.observability import redact_log_event
 
 
 def _base_processors() -> list[structlog.typing.Processor]:
@@ -21,6 +22,9 @@ def configure_bootstrap_logging() -> None:
     structlog.configure(
         processors=[
             *_base_processors(),
+            # Render tracebacks to text first so the redaction sees them.
+            structlog.processors.format_exc_info,
+            redact_log_event,
             structlog.dev.ConsoleRenderer(
                 colors=True,
                 # Tracebacks must not print frame locals: they can hold decrypted keys.
