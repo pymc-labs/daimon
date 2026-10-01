@@ -43,6 +43,7 @@ from daimon.adapters.mcp.tools.slack._client import (
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
 from daimon.core.access_policy import TenantAccessPolicy, is_outside_agent_pin, is_write_protected
+from daimon.core.channel_isolation import routine_destination_channel
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.ma_identity import derive_agent_uuid
@@ -285,17 +286,21 @@ def _sees_routine(caller: CallerIsolation, row: RoutineRow) -> bool:
     return caller.sees(row.agent_name) and place in (None, caller.inside_channel_id)
 
 
-def _require_placement(caller: CallerIsolation, *, agent_name: str, channel_id: str | None) -> None:
-    """Refuse an agent the caller can't see, or a destination across an isolation line."""
+def _require_placement(
+    caller: CallerIsolation, *, agent_name: str, destination_channel_id: str | None
+) -> None:
+    """Refuse an agent the caller can't see, or a routine delivering across an isolation line.
+
+    No destination means a DM, which is outside every channel.
+    """
     if not caller.sees(agent_name):
         raise ToolError(f"no agent named {agent_name!r} found for this tenant")
-    owner = caller.isolation.channel_of(agent_name)
-    if channel_id is None or caller.isolation.isolated_channel(channel_id) == owner:
+    if not caller.isolation.crosses(agent_name, destination_channel_id):
         return
-    if owner is not None:
+    if caller.isolation.channel_of(agent_name) is not None:
         raise ToolError(
-            f"{agent_name} belongs to an isolated channel, so its routines post only there. "
-            "Nothing was saved."
+            f"{agent_name} belongs to an isolated channel, so its routines post only there: "
+            "give it a destination in that channel. Nothing was saved."
         )
     raise ToolError(
         "That channel is isolated, so only its own agents post there. Nothing was saved."
@@ -432,7 +437,7 @@ async def _create_routine_impl(
         )
 
     caller = await load_caller_isolation(runtime, auth)
-    _require_placement(caller, agent_name=agent_name, channel_id=budget_channel_id)
+    _require_placement(caller, agent_name=agent_name, destination_channel_id=destination_channel_id)
     match = await find_agent_by_daimon_tag(
         runtime.client,
         tenant_id=tenant_id,
@@ -524,11 +529,16 @@ async def _update_routine_impl(
         if row is None or not _sees_routine(caller, row):
             raise ToolError("routine not found")
         _require_routine_owner(auth, row)
-        channel_id = new_destination_channel_id if destination_id is not None else row.channel_id
+        if clear_destination:
+            destination_channel_id = None
+        elif destination_id is not None:
+            destination_channel_id = new_destination_channel_id
+        else:
+            destination_channel_id = routine_destination_channel(row)
         _require_placement(
             caller,
             agent_name=agent_name or row.agent_name,
-            channel_id=None if clear_destination else channel_id,
+            destination_channel_id=destination_channel_id,
         )
         if clear_destination:
             effective_kind, effective_id = None, None

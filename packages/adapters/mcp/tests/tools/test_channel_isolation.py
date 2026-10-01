@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import daimon.adapters.mcp.tools._isolation as isolation_mod
+import daimon.adapters.mcp.tools.routines as routines_mod
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
@@ -37,6 +38,7 @@ from daimon.adapters.mcp.tools.propagation import (
 from daimon.adapters.mcp.tools.routines import (
     _create_routine_impl,  # pyright: ignore[reportPrivateUsage]
     _list_routines_impl,  # pyright: ignore[reportPrivateUsage]
+    _update_routine_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.skills import (
     _get_impl,  # pyright: ignore[reportPrivateUsage]
@@ -278,6 +280,51 @@ async def test_routines_of_an_isolated_channel_show_only_inside_it(
             cron_expr="0 * * * *",
             timezone="UTC",
             trigger_message="hi",
+        )
+
+
+async def test_an_isolated_channels_routines_must_deliver_inside_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no destination a routine reports by DM, outside every channel, so C's
+    agent needs a destination in C, on create and on every update."""
+    world, runtime = await _world(committing_sessionmaker)
+
+    async def destination(
+        runtime: McpRuntime, auth: AuthIdentity, **kwargs: str | None
+    ) -> str | None:
+        return kwargs["destination_id"]
+
+    monkeypatch.setattr(routines_mod, "_check_destination", destination)
+    inside = world.auth(admin=False, executing="agent_local")
+    every_hour = {"cron_expr": "0 * * * *", "timezone": "UTC", "trigger_message": "hi"}
+    for kind, target in ((None, None), ("channel", OTHER)):
+        with pytest.raises(ToolError, match="give it a destination in that channel"):
+            await _create_routine_impl(
+                runtime,
+                inside,
+                agent_name="local",
+                destination_kind=kind,
+                destination_id=target,
+                **every_hour,
+            )
+    routine = await _create_routine_impl(
+        runtime,
+        inside,
+        agent_name="local",
+        destination_kind="channel",
+        destination_id=ROOM,
+        **every_hour,
+    )
+    updated = await _update_routine_impl(
+        runtime, inside, routine_id=routine.id, trigger_message="hey"
+    )
+    assert updated.trigger_message == "hey", "a routine posting into C still updates"
+    with pytest.raises(ToolError, match="give it a destination in that channel"):
+        await _update_routine_impl(runtime, inside, routine_id=routine.id, clear_destination=True)
+    with pytest.raises(ToolError, match="give it a destination in that channel"):
+        await _update_routine_impl(
+            runtime, inside, routine_id=routine.id, destination_kind="channel", destination_id=OTHER
         )
 
 
