@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
+import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
@@ -24,6 +25,7 @@ import anthropic
 import structlog
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
+from daimon.adapters.teams.card import enable_files_card
 from daimon.adapters.teams.card_actions import toast
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.commands import (
@@ -54,6 +56,12 @@ from daimon.adapters.teams.participation import TeamsParticipation
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
+from daimon.adapters.teams.site_grant import (
+    STATE_TTL_S,
+    authorize_url,
+    redirect_uri,
+    sign_state,
+)
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
@@ -252,6 +260,8 @@ class TeamsApp:
         # Bot Framework retries a slow delivery with the same activity id.
         # Not durable: a retry landing after a restart runs a second turn.
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
+        # Group id -> when its enable-files sign-in was offered (monotonic).
+        self._files_offered: dict[str, float] = {}
         self._recovery: asyncio.Task[None] | None = None
         self._wake_poller: asyncio.Task[None] | None = None
         # When each busy conversation last got a message: a newer one supersedes
@@ -863,14 +873,15 @@ class TeamsApp:
             return adopted
 
         reader = self._reader
+        # A channel activity carries only the text: its media are on Graph's copy.
+        media = await reader.read_media(inbound) if reader else None
         attachments = await prepare_attachments(
             self.runtime.http_client,
             inbound.files,
             bot_token=self._bot_token,
             service_url=inbound.service_url,
             channel=inbound.kind == "channel",
-            # A channel activity carries only the text: its media are on Graph's copy.
-            channel_media=await reader.read_media(inbound) if reader else None,
+            channel_media=media,
             graph_token=reader.token if reader else None,
         )
         config = admission.config
@@ -942,11 +953,11 @@ class TeamsApp:
             kind: Literal["transcript", "history"] = (
                 "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
             )
-            loss = render_unexpected_loss(kind)
-            if not await final.prepend_revealed_answer(loss):
-                await self._say(inbound, loss)
+            # Above the answer or not at all: a message of its own lands below it.
+            if not await final.prepend_revealed_answer(render_unexpected_loss(kind)):
+                log.info("teams.turn.loss_notice_dropped")
         if summary is not None and not final.answer_prefix_applied:
-            await self._say(inbound, summary)
+            log.info("teams.turn.summary_dropped")
         if outcome.mapping_id is not None and final.final_message_id is not None:
             mark = final.final_message_id
             if inbound.kind == "channel":
@@ -957,9 +968,41 @@ class TeamsApp:
             async with self.runtime.sessionmaker.begin() as session:
                 await update_watermark(session, id=outcome.mapping_id, watermark_message_id=mark)
         if prepared.continuity.pending:
-            pending = render_current_work_must_finish(admission.agent.name, handoff=False)
-            if not await final.append_to_answer(pending):
-                await self._say(inbound, pending)
+            # The change was saved where it was made; the next turn applies it.
+            log.info("teams.turn.change_pending", reasons=prepared.continuity.pending)
+        if media is not None and any(f.refused for f in media.files):
+            await self._offer_enable_files(inbound, media.group_id)
+
+    async def _offer_enable_files(self, inbound: TeamsInbound, group_id: str | None) -> None:
+        """An admin whose channel files were refused gets the sign-in that grants them.
+
+        A card, not a status line: never unprompted, and again only once the last
+        offer's sign-in has expired.
+        """
+        teams = self._teams
+        now = time.monotonic()
+        if (
+            group_id is None
+            or teams.public_url is None
+            or inbound.unprompted
+            or self._role(inbound) is not Role.ADMIN
+            or now - self._files_offered.get(group_id, -STATE_TTL_S) < STATE_TTL_S
+        ):
+            return
+        self._files_offered[group_id] = now
+        state = sign_state(group_id, secret=teams.client_secret.get_secret_value(), now=time.time())
+        url = authorize_url(
+            tenant_id=teams.tenant_id,
+            client_id=teams.client_id,
+            redirect_uri=redirect_uri(teams.public_url),
+            state=state,
+        )
+        try:
+            await self._sender.send(
+                inbound.conversation_id, enable_files_card(url), service_url=inbound.service_url
+            )
+        except TEAMS_SEND_ERRORS:
+            log.warning("teams.enable_files.send_failed", exc_info=True)
 
     async def _files_reachable(self, inbound: TeamsInbound) -> bool | None:
         if inbound.kind != "channel":

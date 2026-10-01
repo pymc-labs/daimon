@@ -134,6 +134,8 @@ class TeamsTurnLifecycle:
         self.answer_prefix_applied = False
         # Each answer message as on screen, id -> (text, is_last), for later edits.
         self._shown: dict[str, tuple[str, bool]] = {}
+        # Shown messages that are notice cards, not answers: edited as cards.
+        self._notices: set[str] = set()
         # Edits of a shown answer, from the turn and the output sweep, one at a time.
         self._answer_edits = asyncio.Lock()
 
@@ -209,9 +211,12 @@ class TeamsTurnLifecycle:
 
     async def _close(self, text: str) -> None:
         """Replace the card with a final notice; an edit that timed out is sent once more."""
-        self._message_id = await self._edit(card.notice_card(text), self._message_id)
-        self.final_message_id = self._message_id
+        self._message_id = message_id = await self._edit(card.notice_card(text), self._message_id)
+        self.final_message_id = message_id
         self.card_closed = True
+        # A tool-only or failed turn's notice still carries what is edited into it.
+        self._notices.add(message_id)
+        self._shown[message_id] = (text, True)
 
     def _answer_text(self, state: TurnState) -> str:
         sealed = extract_sealed_responses(state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS)
@@ -309,8 +314,12 @@ class TeamsTurnLifecycle:
             updated = change(shown[0])
             if len(updated) > card.TEAMS_LIMIT:
                 return False
+            if message_id in self._notices:
+                rendered = card.notice_card(updated)
+            else:
+                rendered = card.answer_message(updated, is_last=shown[1])
             try:
-                await self._edit(card.answer_message(updated, is_last=shown[1]), message_id)
+                await self._edit(rendered, message_id)
             except _TIMEOUTS:
                 log.warning(events[0], exc_info=True)  # may have landed
             except TEAMS_SEND_ERRORS:

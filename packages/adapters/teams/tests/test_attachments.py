@@ -173,7 +173,7 @@ async def test_image_past_the_pixel_cap_and_channel_shares_are_explained() -> No
     assert f"`image` was not inlined (larger than {MAX_VISION_IMAGE_DIMENSION}px)" in (
         prepared.prefix
     )
-    assert "`r.pdf` was shared but can't be opened here." in prepared.prefix
+    assert "`r.pdf` was shared but can't be opened: daimon could not fetch it" in prepared.prefix
 
 
 async def test_graph_token_only_goes_to_graph_and_a_refused_image_is_explained() -> None:

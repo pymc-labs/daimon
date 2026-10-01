@@ -266,12 +266,17 @@ async def test_a_late_notice_whose_edit_timed_out_counts_as_shown() -> None:
     assert [a.id for a in sender.activities[2:]] == ["m-1", "m-1"], "edited, then retried once"
 
 
-async def test_a_late_notice_without_an_answer_on_screen_is_sent_on_its_own() -> None:
+async def test_a_late_notice_on_a_turn_without_an_answer_is_edited_into_its_card() -> None:
+    """No answer on screen: the turn's own closing card takes the notice, nothing new posts."""
     sender = FakeSender()
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(TurnState(content=[]))
+    posted = len(sender.activities)
 
-    assert not await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    edit = sender.activities[-1]
+    assert len(sender.activities) == posted + 1 and edit.id == "m-1", "an edit of the card"
+    assert "I lost the workspace." in json.dumps(edit.model_dump(mode="json"))
 
 
 async def test_file_links_are_edited_in_below_a_prefixed_single_message_answer() -> None:

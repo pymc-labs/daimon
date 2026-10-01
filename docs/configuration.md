@@ -536,6 +536,15 @@ listener.
 When False, /api/messages answers 503 while the health endpoints stay live — the process
 keeps running so ingress can be re-enabled without a redeploy.
 
+### `DAIMON_TEAMS__PUBLIC_URL`
+
+`HttpUrl | None` · optional · default unset
+
+Externally reachable base URL of the Teams service (the Bot Framework messaging endpoint
+without /api/messages). Enables the admin sign-in that grants daimon a team's SharePoint
+site; its callback is &lt;public_url&gt;/oauth/teams/files/callback, which must be a Web
+redirect URI on the app registration.
+
 ### `DAIMON_TEAMS__ADMIN_USER_IDS`
 
 `tuple[str, ...]` · optional · default unset

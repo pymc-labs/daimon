@@ -23,6 +23,7 @@ from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
+    AAD_OBJECT_ID,
     ENTRA_TENANT_ID,
     TEAM_GROUP_ID,
     TeamsApiFake,
@@ -30,6 +31,7 @@ from .conftest import (
     patched_turns,
     post_activity,
     running_service,
+    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
@@ -238,6 +240,35 @@ async def test_a_channel_reply_whose_activity_names_no_media_is_read_from_graph(
     assert any(r.url.path == f"{CHANNEL_PATH}/{ROOT}/replies/{REPLY}" for r in seen), (
         "the mentioned message is read from Graph even with no markers in the activity"
     )
+
+
+@pytest.mark.parametrize("admin", [True, False])
+async def test_an_admin_whose_channel_files_are_refused_gets_the_enable_files_sign_in(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    admin: bool,
+) -> None:
+    """A card, once: the sign-in that grants the team's site goes to a daimon admin only."""
+    admins = (AAD_OBJECT_ID,) if admin else ()
+    teams = teams_settings(admins=admins, public_url="https://teams.example")
+    runtime = build_teams_runtime(db_session_factory, teams=teams, http_client=_graph([]))
+    with patched_turns():
+        async with running_service(runtime, teams_api_fake) as service:
+            for _ in range(2):
+                await post_activity(service, _load("channel_attachments_reply"))
+                await service.turns.drain(timeout=30)
+
+    offers = [text for text in _cards(teams_api_fake) if "Enable files" in text]
+    if not admin:
+        assert offers == [], "only a daimon admin is offered the sign-in"
+        return
+    [offer] = offers
+    assert "login.microsoftonline.com" in offer and "Sites.FullControl.All" in offer
+    assert "redirect_uri=https%3A%2F%2Fteams.example%2Foauth%2Fteams%2Ffiles%2Fcallback" in offer
+
+
+def _cards(fake: TeamsApiFake) -> list[str]:
+    return [json.dumps(r.body) for r in fake.activity_requests if r.body.get("attachments")]
 
 
 async def test_a_channel_file_on_a_granted_site_is_linked_and_the_agent_told_files_work(

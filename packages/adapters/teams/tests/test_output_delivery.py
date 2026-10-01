@@ -339,10 +339,10 @@ async def test_channel_links_go_in_one_message_when_the_answer_cannot_take_them(
     assert (message.text or "").count("](https://example.sharepoint.com/") == 2, "both files"
 
 
-async def test_a_refused_channel_upload_is_named_below_the_answer_logged_and_deleted(
+async def test_a_refused_channel_upload_is_only_logged_and_deleted(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A 403 (grant removed) after `files="available"`: the answer says the file did not land."""
+    """A 403 (grant removed) after `files="available"`: logged, and nothing added to the thread."""
 
     def denied(_: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"error": {"code": "accessDenied"}})
@@ -357,10 +357,8 @@ async def test_a_refused_channel_upload_is_named_below_the_answer_logged_and_del
     with structlog.testing.capture_logs() as logs:
         await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
 
-    assert appended == ["I couldn't save `data.csv` to this channel's files."], (
-        "the lost file is named in the answer, not silently dropped"
-    )
-    assert harness.sender.sent == [], "the note rides on the answer, not a new message"
+    assert appended == [], "no status line below the answer"
+    assert harness.sender.sent == [], "nor a message of its own"
     failed = [e for e in logs if e["event"] == "teams.channel_output.upload_failed"]
     assert [(e["file_id"], e["status"]) for e in failed] == [("file_csv", 403)]
     assert harness.deletes == ["file_csv"], "the ledger entry goes, as on the skip path"
@@ -385,10 +383,10 @@ async def test_an_unprompted_turn_posts_no_links_message_when_the_answer_cannot_
     assert harness.deletes == ["file_csv"], "the file was still saved to the channel's Files"
 
 
-async def test_oversize_output_in_a_dm_is_named_below_the_answer(
+async def test_oversize_output_in_a_dm_is_only_logged(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The per-file cap is core's: no consent card, the limit below the answer, then delete."""
+    """The per-file cap is core's: no consent card, no note, a log line, then delete."""
     harness = _harness(db_session_factory, [_csv(size=21 * 1024 * 1024)])
     appended: list[str] = []
 
@@ -396,9 +394,9 @@ async def test_oversize_output_in_a_dm_is_named_below_the_answer(
         appended.append(text)
         return True
 
-    await harness.delivery.sweep(make_inbound(), "sesn_1", append=append)
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(make_inbound(), "sesn_1", append=append)
 
-    [notice] = appended
-    assert "over the 20 MiB delivery limit" in notice
-    assert harness.sender.activities == [], "never a message of its own"
+    assert appended == [] and harness.sender.activities == [], "nothing posted"
+    assert any(e["event"] == "teams.output.oversize" for e in logs)
     assert harness.deletes == ["file_csv"]

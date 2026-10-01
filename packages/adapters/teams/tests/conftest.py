@@ -45,7 +45,6 @@ from jsonschema.exceptions import best_match
 from microsoft_teams.api import MessageActivityInput, SentActivity
 from microsoft_teams.common import Client, ClientOptions
 from microsoft_teams.common.http.client import MiddlewareContext
-from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Synthetic identifiers only.
@@ -80,13 +79,18 @@ CODE_BLOCK = {
 MAX_ACTIVITY_BYTES = 26_000  # a margin under Teams' 28 KB
 
 
-def teams_settings(*, enabled: bool = True, admins: tuple[str, ...] = ()) -> TeamsSettings:
-    return TeamsSettings(
-        client_id=BOT_CLIENT_ID,
-        client_secret=SecretStr("test-secret"),
-        tenant_id=ENTRA_TENANT_ID,
-        enabled=enabled,
-        admin_user_ids=admins,
+def teams_settings(
+    *, enabled: bool = True, admins: tuple[str, ...] = (), public_url: str | None = None
+) -> TeamsSettings:
+    return TeamsSettings.model_validate(
+        {
+            "client_id": BOT_CLIENT_ID,
+            "client_secret": "test-secret",
+            "tenant_id": ENTRA_TENANT_ID,
+            "enabled": enabled,
+            "admin_user_ids": admins,
+            "public_url": public_url,
+        }
     )
 
 

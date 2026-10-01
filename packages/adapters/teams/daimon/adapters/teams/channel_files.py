@@ -65,6 +65,10 @@ class ChannelFiles:
             return None
         return access.is_available
 
+    def forget(self, group: str) -> None:
+        """Drop what was learned about a team's channels: its site was just granted."""
+        self._access = {k: v for k, v in self._access.items() if k[0].lower() != group}
+
     def _record(self, group: str, inbound: TeamsInbound, *, is_available: bool) -> None:
         self._access[group, inbound.channel_id] = _Access(is_available, self._clock())
 
@@ -117,7 +121,7 @@ class ChannelFiles:
                     log.warning(
                         "teams.channel_file.unreachable", status=err.status, reason=err.reason
                     )
-                    file = dataclasses.replace(file, refused=err.status in (401, 403))
+                    file = dataclasses.replace(file, refused=err.status == 403)
             files.append(file)
         return dataclasses.replace(media, files=tuple(files))
 

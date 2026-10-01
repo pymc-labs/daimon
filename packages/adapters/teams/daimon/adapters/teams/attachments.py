@@ -98,10 +98,12 @@ class SharedFile:
 
 @dataclass(frozen=True)
 class ChannelMedia:
-    """What a channel message carries per Graph: hosted image URLs and shared files."""
+    """What a channel message carries per Graph: hosted image URLs and shared files,
+    and the team's group id they were read under."""
 
     image_urls: tuple[str, ...] = ()
     files: tuple[SharedFile, ...] = ()
+    group_id: str | None = None
 
 
 class _EmbeddedCounter(HTMLParser):
@@ -296,7 +298,10 @@ async def prepare_attachments(
             )
             continue
         if file.kind == "unreachable":
-            lines.append(f"[attachment] `{file.name}` was shared but can't be opened here.")
+            lines.append(
+                f"[attachment] `{file.name}` was shared but can't be opened: "
+                "daimon could not fetch it from this channel."
+            )
             continue
         pasted = file.kind in ("pasted_image", "graph_image")
         if not pasted and not file.name.lower().endswith(_IMAGE_EXTENSIONS):

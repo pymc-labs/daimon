@@ -21,7 +21,14 @@ from daimon.core.turn.status_lines import (
     has_running_tool,
 )
 from microsoft_teams.api import MessageActivityInput
-from microsoft_teams.cards import ActionSet, AdaptiveCard, CardElement, ExecuteAction, TextBlock
+from microsoft_teams.cards import (
+    ActionSet,
+    AdaptiveCard,
+    CardElement,
+    ExecuteAction,
+    OpenUrlAction,
+    TextBlock,
+)
 
 # A Teams message is capped by payload size (about 28 KB), not characters;
 # 4 000 stays under it at 4 UTF-8 bytes each, the widest (an emoji).
@@ -59,6 +66,20 @@ def on_activity(state: CardState, turn: TurnState) -> CardState:
 
 def _card(body: list[CardElement], *, fallback: str) -> MessageActivityInput:
     return MessageActivityInput().add_card(AdaptiveCard(body=body, fallback_text=fallback))
+
+
+ENABLE_FILES = (
+    "I can't open this team's files yet. A Microsoft 365 admin (SharePoint or global) "
+    "can turn them on for this team with one sign-in."
+)
+
+
+def enable_files_card(url: str) -> MessageActivityInput:
+    """Offers the sign-in that grants daimon this team's SharePoint site."""
+    body: list[CardElement] = [TextBlock(text=ENABLE_FILES, wrap=True)]
+    action = OpenUrlAction(title="Enable files", url=url)
+    card = AdaptiveCard(body=body, actions=[action], fallback_text=ENABLE_FILES)
+    return MessageActivityInput().add_card(card)
 
 
 def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActivityInput:

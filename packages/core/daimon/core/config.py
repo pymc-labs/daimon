@@ -503,6 +503,16 @@ class TeamsSettings(BaseModel):
             "re-enabled without a redeploy."
         ),
     )
+    public_url: HttpUrl | None = Field(
+        default=None,
+        description=(
+            "Externally reachable base URL of the Teams service (the Bot "
+            "Framework messaging endpoint without /api/messages). Enables the "
+            "admin sign-in that grants daimon a team's SharePoint site; its "
+            "callback is <public_url>/oauth/teams/files/callback, which must be "
+            "a Web redirect URI on the app registration."
+        ),
+    )
     admin_user_ids: tuple[str, ...] = Field(
         default=(),
         description=(

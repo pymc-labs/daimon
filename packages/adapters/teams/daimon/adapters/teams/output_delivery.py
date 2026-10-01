@@ -9,10 +9,10 @@ server-side offer that is checked against the clicker and expires.
 In a channel each file is uploaded to the channel's Files folder through
 Graph (`channel_files`), and the links are edited in below the answer, or
 sent as one message when they do not fit (never after an unprompted
-answer). A failed or oversize file is named there too, but never posted on
-its own: status text below an answer is thread clutter. Without access a
-file goes down the skip path to be logged, and the agent guidance has the
-agent say so in its reply. A declined offer is only logged.
+answer). A failed, oversize or declined file is only logged: status text
+around an answer is thread clutter. Without access a file goes down the
+skip path to be logged, and the agent guidance has the agent say so in its
+reply.
 Either way the listing entry, the delivery ledger, is deleted; the sandbox
 keeps its copy, so the agent can still read or paste it later.
 """
@@ -45,7 +45,6 @@ from daimon.core.output_delivery import (
     SkippedFile,
     delete_output_file,
     download_output_file,
-    render_oversize_notice,
     sweep_session_outputs,
 )
 from microsoft_teams.api import (
@@ -66,7 +65,6 @@ OFFER_TTL_S = 3600.0
 _EXPIRED = "That file offer has expired. Ask me again and I'll resend it."
 _UPLOAD_FAILED = "I couldn't upload `{name}`. Ask me again to retry."
 _SAVED = "Saved to this channel's files:"
-_NOT_SAVED = "I couldn't save `{name}` to this channel's files."
 
 # Edits a line in below the answer on screen; False if it cannot go there.
 AppendToAnswer = Callable[[str], Awaitable[bool]]
@@ -74,6 +72,10 @@ AppendToAnswer = Callable[[str], Awaitable[bool]]
 
 async def _log_channel_skip(file: SkippedFile) -> None:
     log.info("teams.channel_output.skipped", file_id=file.file_id, size_bytes=file.size_bytes)
+
+
+async def _log_skip(file: SkippedFile) -> None:
+    log.info("teams.output.oversize", file_id=file.file_id, size_bytes=file.size_bytes)
 
 
 def _file_link(name: str, web_url: str | None) -> str:
@@ -173,7 +175,7 @@ class TeamsOutputDelivery:
                 self._runtime.anthropic,
                 session_id=session_id,
                 post=functools.partial(self._offer, inbound, session_id),
-                on_skip=functools.partial(self._skip_notice, append),
+                on_skip=_log_skip,
                 sleep=self._sleep,
             )
         finally:
@@ -196,7 +198,6 @@ class TeamsOutputDelivery:
             )
             return
         links: list[str] = []
-        notices: list[str] = []
 
         async def upload(file: DeliverableFile) -> None:
             name = display_filename_for(file.filename, file.mime_type)
@@ -209,28 +210,20 @@ class TeamsOutputDelivery:
                     status=err.status,
                     reason=err.reason,
                 )
-                notices.append(_NOT_SAVED.format(name=sanitize_title(name)))
                 return
             links.append(_file_link(sanitize_title(item.name or name), item.web_url))
-
-        async def oversize(file: SkippedFile) -> None:
-            notices.append(render_oversize_notice(file))
 
         await sweep_session_outputs(
             self._runtime.anthropic,
             session_id=session_id,
             post=upload,
-            on_skip=oversize,
+            on_skip=_log_skip,
             sleep=self._sleep,
         )
-        saved = ["\n".join([_SAVED, *links])] if links else []
-        text = "\n\n".join([*saved, *notices])
-        if not text:
-            return
-        if append is not None and await append(text):
-            return
         if not links:
-            log.info("teams.channel_output.notices_withheld", count=len(notices))
+            return
+        text = "\n".join([_SAVED, *links])
+        if append is not None and await append(text):
             return
         if inbound.unprompted:
             # Nobody asked: an unprompted turn posts its answer and nothing else.
@@ -244,10 +237,6 @@ class TeamsOutputDelivery:
             )
         except TEAMS_SEND_ERRORS:
             log.warning("teams.channel_output.links_failed", exc_info=True)
-
-    async def _skip_notice(self, append: AppendToAnswer | None, file: SkippedFile) -> None:
-        if append is None or not await append(render_oversize_notice(file)):
-            log.info("teams.output.oversize_withheld", file_id=file.file_id)
 
     async def _offer(self, inbound: TeamsInbound, session_id: str, file: DeliverableFile) -> None:
         """Send a consent card, then defer: the click decides the file's fate."""

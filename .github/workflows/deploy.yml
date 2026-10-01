@@ -242,10 +242,16 @@ jobs:
               sudo chmod 755 /usr/local/bin/daimon-refresh-env
               sudo /usr/local/bin/daimon-refresh-env
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.notebook.yml /etc/daimon/compose.notebook.yml
+              caddyfile_before=$(sudo sha256sum /etc/daimon/Caddyfile 2>/dev/null || true)
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/Caddyfile /etc/daimon/Caddyfile
               cd /etc/daimon
               sudo -E docker compose -f compose.notebook.yml pull
               sudo -E docker compose -f compose.notebook.yml up -d --remove-orphans
+              # Caddy reads its config only at start, and `up -d` does not
+              # recreate it for a changed bind-mounted file: restart on change.
+              if [ "$caddyfile_before" != "$(sudo sha256sum /etc/daimon/Caddyfile)" ]; then
+                sudo -E docker compose -f compose.notebook.yml restart caddy
+              fi
               # Gate: report-host must come up and stay up. `up -d` alone does
               # not fail on a crash-looping container, and a green step that
               # proves nothing is worse than a red one -- same reasoning as
