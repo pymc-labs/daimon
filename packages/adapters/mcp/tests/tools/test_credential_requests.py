@@ -2428,22 +2428,42 @@ async def test_request_agent_key_on_teams_posts_a_card_and_edits_it_when_replace
     assert REPLACED_HEADLINE in put.content.decode(), "and says it was replaced"
 
 
-async def test_request_agent_key_on_teams_refuses_an_env_file(
+async def test_request_agent_key_on_teams_posts_an_env_file_card(
     committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
 ) -> None:
     runtime, auth, origin_id, requests = await _teams_setup(committing_sessionmaker, db_session)
-    with pytest.raises(ToolError, match="Request each key by name"):
-        await _request_agent_key_impl(
-            runtime,
-            auth,
-            origin_context_id=origin_id,
-            expected_ma_agent_id="ag_t",
-            agent_name="daimon",
-            key=None,
-            purpose="x",
-            channel_id="c",
-        )
-    assert await _row_count(db_session) == 0 and not requests, "nothing minted or posted"
+    result = await _request_agent_key_impl(
+        runtime,
+        auth,
+        origin_context_id=origin_id,
+        expected_ma_agent_id="ag_t",
+        agent_name="daimon",
+        key=None,
+        purpose="x",
+        channel_id="c",
+    )
+    assert result.kind == "env_file" and result.target == ENV_FILE_TARGET
+    posts = [r for r in requests if r.method == "POST" and "/activities" in str(r.url)]
+    assert len(posts) == 1, "the card is posted for the pasted-file form"
+
+
+async def test_request_repo_binding_on_teams_posts_a_card(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    runtime, auth, origin_id, requests = await _teams_setup(committing_sessionmaker, db_session)
+    result = await _request_repo_binding_impl(
+        runtime,
+        auth,
+        origin_context_id=origin_id,
+        expected_ma_agent_id="ag_t",
+        agent_name="daimon",
+        repo_url="https://github.com/o/r",
+        purpose="x",
+        channel_id="c",
+    )
+    assert result.kind == "repo"
+    posts = [r for r in requests if r.method == "POST" and "/activities" in str(r.url)]
+    assert len(posts) == 1 and "o/r" in posts[0].content.decode()
 
 
 @pytest.mark.parametrize("key", ["OPENAI_API_KEY", None], ids=["one-key", "env-file"])
