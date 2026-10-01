@@ -101,8 +101,7 @@ def build_channel_summaries(
                 channel_id=channel_id,
                 agent_name=resolved.agent_name,
                 environment_name=resolved.environment_name,
-                # No per-channel isolation or admins exist yet; the fields keep
-                # the shape integrations bind to stable for when they do.
+                # Later isolation and channel-admin features fill these in build_channel_summaries.
                 isolated=False,
                 admins=ChannelAdmins(role_ids=[], user_ids=[]),
                 budget=_budget_summary(status) if status is not None else None,
