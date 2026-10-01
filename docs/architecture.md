@@ -548,6 +548,15 @@ user are never admins on these surfaces, whatever role their account holds or
 who minted them. A pin binds a bearer with no platform user too: such callers
 skip billing, not admission.
 
+The pin decisions (turn admission, MCP and hub turns, routine save and fire,
+handoff, configuration writes and form submits), pinned sends and direct
+messages, channel and session seal reads, and fork are decided by one pure
+function, `daimon.core.authz.authorize` (who is acting, what they want to do,
+where the result lands, which agent, which channel); each caller keeps only
+its own I/O and refusal copy. The live protection and invoker checks in the
+scheduler and routine delivery, the hub's admin sealed-read exemption and the
+OAuth no-request rule still use the same `access_policy` predicates directly.
+
 ## Tenancy and isolation
 
 One Discord guild, Slack workspace or Teams (Entra) organisation is one tenant. The tenant UUID is

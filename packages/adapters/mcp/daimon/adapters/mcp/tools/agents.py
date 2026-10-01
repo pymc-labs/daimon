@@ -37,6 +37,7 @@ from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
+from daimon.core.authz import Action, AgentRef, Subject, authorize
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import (
@@ -839,10 +840,14 @@ async def _fork_agent_impl(
             raise ToolError(
                 "fork_agent: the workspace access policy could not be read; nothing was created."
             ) from exc
-    if any(
-        name in policy.agent_channel_pins
-        for name in (source.name, source.metadata.get(MA_METADATA_KEY_NAME))
-        if name is not None
+    if (
+        authorize(
+            policy,
+            subject=Subject(is_admin=auth.is_admin, platform_user_id=auth.platform_user_id),
+            action=Action.FORK,
+            agent=AgentRef.of(source.name, source.metadata.get(MA_METADATA_KEY_NAME)),
+        ).reason
+        == "agent_pinned"
     ):
         raise ToolError(
             f"fork_agent: {source_name} is pinned to specific channels by an operator, so it "

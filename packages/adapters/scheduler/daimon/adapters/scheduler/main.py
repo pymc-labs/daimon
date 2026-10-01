@@ -38,10 +38,10 @@ from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core.access_policy import (
     TenantAccessPolicy,
     is_invoker_allowed,
-    is_outside_agent_pin,
     is_write_protected,
 )
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -249,10 +249,13 @@ async def _build_fire(
                 # A pinned agent fires only when it posts straight into one of
                 # its pinned channels; `_check_agent_pin` refuses anything else
                 # at save time, and this holds for a pin added since.
-                if policy_error is None and is_outside_agent_pin(
+                if policy_error is None and not authorize(
                     policy,
-                    agent_names=(row.agent_name,),
-                    channel_id=target.channel_id if target is not None else None,
+                    subject=Subject(),
+                    action=Action.RUN_AGENT,
+                    surface=Surface.ROUTINE,
+                    agent=AgentRef.of(row.agent_name),
+                    place=Place(channel_id=target.channel_id if target is not None else None),
                 ):
                     policy_error = "agent_pinned_elsewhere"
             if policy_error is not None:
@@ -326,10 +329,13 @@ async def _build_fire(
         # display name or a rename.
         if fire_policy is not None and fire_policy.agent_channel_pins:
             ran = await client.beta.agents.retrieve(resolved_agent_id)
-            if is_outside_agent_pin(
+            if not authorize(
                 fire_policy,
-                agent_names=(row.agent_name, *agent_pin_names(ran.name, ran.metadata)),
-                channel_id=fire_channel_id,
+                subject=Subject(),
+                action=Action.RUN_AGENT,
+                surface=Surface.ROUTINE,
+                agent=AgentRef.of(row.agent_name, *agent_pin_names(ran.name, ran.metadata)),
+                place=Place(channel_id=fire_channel_id),
             ):
                 log.info(
                     "routine.skipped.invoker_policy",
