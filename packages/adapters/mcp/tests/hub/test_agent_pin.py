@@ -30,7 +30,7 @@ from .test_turn_parity import _TOKEN, _call_tool, _runtime  # pyright: ignore[re
     ids=["ask-new", "ask-resume", "start_turn", "continue_turn"],
 )
 @pytest.mark.parametrize("role", [Role.USER, Role.ADMIN])
-async def test_hub_refuses_a_turn_on_a_pinned_agent(
+async def test_hub_refuses_a_members_turn_and_exempts_an_admins_on_a_pinned_agent(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tool_name: str,
@@ -80,6 +80,10 @@ async def test_hub_refuses_a_turn_on_a_pinned_agent(
         )
 
     payload = result["result"]
+    if role is Role.ADMIN:
+        # An admin's hub turn reaches only them, so the pin doesn't apply.
+        assert "pinned this agent" not in str(payload)
+        return
     assert payload["isError"], f"a pinned agent must be refused over the hub, got {payload!r}"
     assert "pinned this agent" in str(payload)
     create_session.assert_not_awaited()

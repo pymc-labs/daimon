@@ -1359,3 +1359,29 @@ async def test_admit_refuses_an_agent_pinned_by_its_display_name(
             role=Role.USER,
         )
     assert exc_info.value.reason == "agent_pinned_elsewhere"
+
+
+async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Admins are trusted: a DM reaches only them, so the pin doesn't apply there."""
+    tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="anyone",
+        channel_id="general",
+        thread_id="dm-scope",
+        now=_NOW,
+        role=Role.ADMIN,
+        is_dm=True,
+    )
+
+    assert isinstance(admission, Admission)

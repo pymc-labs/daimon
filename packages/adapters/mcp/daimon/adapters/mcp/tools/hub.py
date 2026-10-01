@@ -38,6 +38,8 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import (
+    admin_sealed_reads,
+    caller_is_hub_admin,
     session_belongs_to_caller,
     sessions_outside_seals,
 )
@@ -192,7 +194,8 @@ async def _list_my_sessions_impl(
     async for session in runtime.client.beta.sessions.list(agent_id=str(agent.id)):
         if _owned_by(session, auth):
             owned.append(session)
-    # The hub runs outside every channel: sealed conversations stay hidden.
+    # The hub runs outside every channel: sealed conversations stay hidden,
+    # except an admin's own (`admin_sealed_reads`), which reach only them.
     return [SessionInfo.from_ma(s) for s in await sessions_outside_seals(runtime, auth, owned)]
 
 
@@ -211,6 +214,7 @@ def register_hub_tools(
             billing_config=billing_config,
             tool_name=tool_name,
             agent_names=names,
+            admin_exempt_from_pins=True,
         )
 
     @mcp.tool
@@ -246,9 +250,10 @@ def register_hub_tools(
         the handle; resume with it rather than asking again.
         """
         auth = await _admitted(ctx, daimon_id, "ask")
-        if handle is not None:
-            await _verify_account_owns_session(runtime, auth, handle)
-        return _ask_tool_result(await _ask_impl(runtime, auth, message, handle=handle))
+        with admin_sealed_reads(await caller_is_hub_admin(runtime, auth)):
+            if handle is not None:
+                await _verify_account_owns_session(runtime, auth, handle)
+            return _ask_tool_result(await _ask_impl(runtime, auth, message, handle=handle))
 
     @mcp.tool
     async def start_turn(  # pyright: ignore[reportUnusedFunction]
@@ -267,8 +272,9 @@ def register_hub_tools(
     ) -> dict[str, str]:
         """Send a follow-up on an existing session without waiting."""
         auth = await _admitted(ctx, daimon_id, "continue_turn")
-        await _verify_account_owns_session(runtime, auth, handle)
-        return await _continue_turn_impl(runtime, auth, handle, message)
+        with admin_sealed_reads(await caller_is_hub_admin(runtime, auth)):
+            await _verify_account_owns_session(runtime, auth, handle)
+            return await _continue_turn_impl(runtime, auth, handle, message)
 
     @mcp.tool
     async def get_session(  # pyright: ignore[reportUnusedFunction]
@@ -276,8 +282,9 @@ def register_hub_tools(
     ) -> SessionInfo:
         """Status of one session. Poll until ``idle`` before reading ``list_events``."""
         _, _, auth = await _identity(runtime, ctx, daimon_id)
-        await _verify_account_owns_session(runtime, auth, handle)
-        return await _get_session_impl(runtime, auth, handle)
+        with admin_sealed_reads(await caller_is_hub_admin(runtime, auth)):
+            await _verify_account_owns_session(runtime, auth, handle)
+            return await _get_session_impl(runtime, auth, handle)
 
     @mcp.tool
     async def list_events(  # pyright: ignore[reportUnusedFunction]
@@ -290,8 +297,9 @@ def register_hub_tools(
     ) -> Page[SessionEventOut]:
         """A session's transcript. The daimon's reply is in ``agent.message`` events."""
         _, _, auth = await _identity(runtime, ctx, daimon_id)
-        await _verify_account_owns_session(runtime, auth, handle)
-        return await _list_events_impl(runtime, auth, handle, page, limit, order)
+        with admin_sealed_reads(await caller_is_hub_admin(runtime, auth)):
+            await _verify_account_owns_session(runtime, auth, handle)
+            return await _list_events_impl(runtime, auth, handle, page, limit, order)
 
     @mcp.tool
     async def list_my_sessions(  # pyright: ignore[reportUnusedFunction]
@@ -300,8 +308,9 @@ def register_hub_tools(
         """Sessions you started with this daimon, for resuming with ``handle``.
 
         Other people's conversations with the same daimon are not listed and
-        their handles are not accepted; nor are conversations from a sealed
-        channel, which can only be read from inside it.
+        their handles are not accepted; nor, unless you are a workspace admin,
+        are conversations from a sealed channel, which can only be read from inside it.
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
-        return await _list_my_sessions_impl(runtime, auth, agent)
+        with admin_sealed_reads(await caller_is_hub_admin(runtime, auth)):
+            return await _list_my_sessions_impl(runtime, auth, agent)

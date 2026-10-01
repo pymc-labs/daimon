@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -15,6 +17,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_THREAD,
 )
 from daimon.core.session_seal import seal_ids
+from daimon.core.stores.accounts import get_account
+from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_sessions import thread_ids_for_sessions
 from fastmcp.exceptions import ToolError
 
@@ -22,6 +26,38 @@ _SEALED_SESSION_MSG = (
     "this conversation ran in a sealed channel: its transcript can only be read "
     "or continued from a conversation inside that channel. Tell the caller. Do not retry."
 )
+
+
+# Set only by the hub, for a person's own login whose stored role is admin:
+# the hub runs headless and its output reaches only that person, so an admin
+# may read and continue their own sealed conversations there. Agent keys
+# (agent chat), chat turns, routines and members never set it.
+_SEALED_READS_ALLOWED: ContextVar[bool] = ContextVar("daimon_admin_sealed_reads", default=False)
+
+
+async def caller_is_hub_admin(runtime: McpRuntime, auth: AuthIdentity) -> bool:
+    """Whether a hub caller is an admin, by the account's stored role.
+
+    The hub has no live platform role (it pins ``is_admin=False``); the stored
+    role is refreshed from the platform on every turn the person takes in the
+    workspace. A token with no platform user, or an agent-scoped key, is never
+    an admin here.
+    """
+    if auth.platform_user_id is None or auth.chat_agent_id is not None:
+        return False
+    async with runtime.session_factory() as db:
+        account = await get_account(db, auth.account_id)
+    return account is not None and account.role is Role.ADMIN
+
+
+@contextmanager
+def admin_sealed_reads(enabled: bool) -> Iterator[None]:
+    """Let the enclosed hub call read and continue the admin's sealed sessions."""
+    token = _SEALED_READS_ALLOWED.set(enabled)
+    try:
+        yield
+    finally:
+        _SEALED_READS_ALLOWED.reset(token)
 
 
 def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:
@@ -98,12 +134,16 @@ async def sessions_outside_seals(
 
     ``origin_context_id`` is the calling turn's origin, checked as the channel
     read tools check it (`load_read_policy`); without one every sealed
-    conversation is dropped. Only a chat turn's own credential can claim one:
+    conversation is dropped -- except inside `admin_sealed_reads`, where an
+    admin's hub call keeps their own sealed sessions (ownership is still
+    checked by the caller first). Only a chat turn's own credential can claim one:
     an agent key (``agent_id``) runs outside every channel. Call after the
     ownership filter.
     """
     if not sessions:
         return []
+    if _SEALED_READS_ALLOWED.get():
+        return list(sessions)
     if auth.agent_id is not None or auth.chat_agent_id is None:
         origin_context_id = None
     read = await load_read_policy(

@@ -21,6 +21,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.adapters.mcp.tools import hub
+from daimon.adapters.mcp.tools._session_access import admin_sealed_reads, caller_is_hub_admin
 from daimon.adapters.mcp.tools.agent_chat import (
     _ask_impl,  # pyright: ignore[reportPrivateUsage]
     _continue_turn_impl,  # pyright: ignore[reportPrivateUsage]
@@ -41,6 +42,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_jwt
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing import ma_agent, ma_session
@@ -417,6 +419,61 @@ async def test_hub_lists_no_sealed_conversation(world: _World) -> None:
     listed = await hub._list_my_sessions_impl(world.runtime(), world.agent_key_auth(), ma)  # pyright: ignore[reportPrivateUsage]
 
     assert [s.id for s in listed] == ["ses_mine"]
+
+
+def _hub_auth(world: _World, **extra: Any) -> AuthIdentity:
+    """A hub caller: a person's own login, agent identity chosen per call."""
+    return AuthIdentity(
+        account_id=world.account_id,
+        tenant_id=world.tenant_id,
+        role=Role.USER,
+        platform=world.platform,
+        agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT),
+        platform_user_id="u1",
+        **extra,
+    )
+
+
+async def test_an_admin_reads_and_continues_their_sealed_conversation_from_the_hub(
+    world: _World,
+) -> None:
+    """Admins are trusted: the hub's output reaches only the admin."""
+    await world.seal(_SEALED)
+    await set_role(world.db, world.account_id, Role.ADMIN)
+    await world.db.commit()
+    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
+    world.add_session("ses_mine")
+    runtime = world.runtime()
+    auth = _hub_auth(world)
+    ma = ma_agent(id=_AGENT, name="acme-project")
+
+    assert await caller_is_hub_admin(runtime, auth)
+    with admin_sealed_reads(await caller_is_hub_admin(runtime, auth)):
+        listed = await hub._list_my_sessions_impl(runtime, auth, ma)  # pyright: ignore[reportPrivateUsage]
+        await _list_events_impl(runtime, auth, "ses_acme", None, None, None)
+        await _continue_turn_impl(runtime, auth, "ses_acme", "what did they say?")
+    assert sorted(s.id for s in listed) == ["ses_acme", "ses_mine"]
+    assert world.sent, "the admin's follow-up reaches the session"
+
+
+async def test_admin_exemption_never_reaches_members_agent_keys_or_tokenless_callers(
+    world: _World,
+) -> None:
+    await world.seal(_SEALED)
+    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
+    runtime = world.runtime()
+
+    # A member over the hub.
+    assert not await caller_is_hub_admin(runtime, _hub_auth(world))
+    await set_role(world.db, world.account_id, Role.ADMIN)
+    await world.db.commit()
+    # A stored admin with no platform user (an operator token) or a chat turn.
+    assert not await caller_is_hub_admin(runtime, world.agent_key_auth())
+    assert not await caller_is_hub_admin(runtime, _hub_auth(world, chat_agent_id=uuid.uuid4()))
+    # Agent chat (agent keys) never enters the exemption, admins included.
+    with pytest.raises(ToolError, match="sealed channel"):
+        await _continue_turn_impl(runtime, world.agent_key_auth(), "ses_acme", "hi")
+    assert world.sent == [], "a refused follow-up must never reach the session"
 
 
 # --- a sealed turn can't open or drive another session -----------------------

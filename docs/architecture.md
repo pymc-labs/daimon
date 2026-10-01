@@ -479,6 +479,29 @@ Third-party MCP tool results travel from Managed Agents straight to the model
 without passing through daimon, so they carry no marker; the guidance
 paragraph covers them by name ("whatever a tool returns").
 
+## Trust model
+
+Admins are trusted; pins and seals protect members and channels. An agent pin
+(`agent_channel_pins`) and a sealed channel (`sealed_channel_ids`) exist to
+keep one client's context away from other people -- members of other
+channels, and anyone reading where an agent posts -- not to restrict a
+workspace admin. So an admin is exempt only where the output reaches no one
+but them:
+
+| Surface | Members | Admins |
+| --- | --- | --- |
+| Channel, thread, handoff, routine that posts to a channel | pin and seal apply | pin and seal apply |
+| DM (`admit(is_dm=True)`) | pinned agent refused | pin exempt (live platform role) |
+| Hub `ask` / `start_turn` / `continue_turn` | pinned agent refused | pin exempt |
+| Hub `list_my_sessions` / `get_session` / `list_events` / `continue_turn` on a sealed conversation | refused | allowed (own sessions only) |
+| Agent chat (agent-scoped keys) | refused | refused |
+
+Who counts as an admin: in admission, the live role the adapter passes for this
+turn; in the hub, the account's stored role, which every platform turn
+refreshes (the hub has no live platform role and pins `is_admin=False`).
+Agent-scoped keys, chat-turn credentials and tokens with no platform user are
+never admins on these surfaces, whatever role their account holds.
+
 ## Tenancy and isolation
 
 One Discord guild, Slack workspace or Teams (Entra) organisation is one tenant. The tenant UUID is

@@ -266,8 +266,11 @@ async def admit_impl(
     # what its credentials reach. It runs after the cascade because it depends
     # on which agent answers, and it checks both the cascade's name and the
     # agent's own, so a handed-off thread (resolved by id) is covered too. A DM
-    # has no channel, so it is outside every pin. Admins get no exemption. ---
-    if is_outside_agent_pin(
+    # has no channel, so it is outside every pin. Admins are trusted and exempt
+    # only in a DM, where the reply reaches no one else; in a channel or
+    # thread other members would see it, so the pin holds for them too. The
+    # role is the adapter's live one, never a stored role. ---
+    if not (is_dm and role is Role.ADMIN) and is_outside_agent_pin(
         policy,
         agent_names=(config.agent_name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME)),
         channel_id=None if is_dm else (thread_id or channel_id),

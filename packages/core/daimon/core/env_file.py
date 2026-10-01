@@ -218,10 +218,16 @@ _MEMBER_DENY_SUFFIXES: Final[tuple[str, ...]] = (
     "_FILE",
 )
 _MEMBER_DENY_EXACT: Final[frozenset[str]] = frozenset({"ETCDCTL_KEY"})
+#: Commit identity git reads as plain text, never as a command, path or
+#: config: allowed for everyone although every other ``GIT_*`` name is refused.
+_GIT_IDENTITY_NAMES: Final[frozenset[str]] = frozenset(
+    {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
+)
 #: Bare secret words a member may use as a whole key name, plus the two names
 #: kept for the documented CLI-token use (`defaults/skills/cli-auth`).
 _MEMBER_ALLOW_EXACT: Final[frozenset[str]] = frozenset(
     {
+        *_GIT_IDENTITY_NAMES,
         "GH_TOKEN",
         "GITHUB_TOKEN",
         "TOKEN",
@@ -546,7 +552,7 @@ def env_name_hard_denied(name: str) -> bool:
     and again when the `.env` is assembled, for admins too.
     """
     upper = name.upper()
-    if upper in _HARD_DENY_EXCEPTIONS:
+    if upper in _HARD_DENY_EXCEPTIONS or upper in _GIT_IDENTITY_NAMES:
         return False
     if upper in _HARD_DENY_EXACT:
         return True
