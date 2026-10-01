@@ -366,11 +366,12 @@ and routines, each by its channel), and no unattended run of it owed to a
 server admin or another channel's admin
 (`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
 channels' default agent. A `/dm` conversation counts as the channel it was
-started from. A session counts in the channel its spend was attributed to
-and a routine in the one its spend counts against; one with none recorded
-could run anywhere, and an agent answering nowhere is local to nobody, so
-locality only narrows what key and MCP server replacements and removals
-count as shared, never past it. A channel admin binds only a shared agent
+started from. A session counts in the channel recorded when it was created
+(`thread_sessions.channel_id`) and in any its spend was attributed to, and a
+routine in the one its spend counts against; one with none recorded could run
+anywhere, and the refusal says so. An agent answering nowhere is local to
+nobody, so locality only narrows what key and MCP server replacements and
+removals count as shared, never past it. A channel admin binds only a shared agent
 (managed or tenant-wide), one answering nowhere yet, or one already local
 to them, never another channel's own agent. No chat tool or panel binds a
 pinned agent as the default of a channel outside its pin, for server admins
