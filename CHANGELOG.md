@@ -64,6 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Teams takes every private form Discord and Slack do.** A key value can
+  span lines, `request_agent_key` without a key posts a `.env` form on Teams
+  (the file is pasted, since a dialog has no file input), and repo and
+  skill-repo cards open a GitHub token form that binds the working repo or
+  imports and attaches the skills, with Slack's admin gate and whole-file
+  rules. A token that cannot read the repo is refused in the dialog before
+  the request is spent.
 - **Teams channel turns replay their thread, as on Discord and Slack.** The
   first turn in a thread reads the root post and its newest replies through
   Microsoft Graph, a later turn only what came after the last message it read,
