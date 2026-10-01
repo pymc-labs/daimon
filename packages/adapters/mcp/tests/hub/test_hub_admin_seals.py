@@ -377,3 +377,58 @@ async def test_a_channel_admin_never_continues_a_sealed_conversation_from_the_hu
 
     assert result.get("isError") and "continue it in its channel" in str(result), result
     assert hub.sent == [], "a refused follow-up must never reach the session"
+
+
+async def test_a_channel_admin_reads_only_sessions_sealed_inside_their_channels(
+    hub: _Hub,
+) -> None:
+    """Every seal on the session must lie in an administered channel: the channel itself,
+    its thread sealed on its own, or a Slack-style channel:ts. A seal inherited from
+    another channel keeps it closed."""
+    await set_access_policy(
+        hub.db,
+        tenant_id=hub.tenant_id,
+        policy=TenantAccessPolicy(sealed_channel_ids=(_SEALED, "chan-ops", "thr-own")),
+    )
+    await _grant(hub, _SEALED)
+    await _grant(hub, "chan-open")
+    theirs = uuid.uuid4()
+    hub.add_session(
+        "ses_thread_sealed",
+        account=theirs,
+        daimon_channel="chan-open",
+        daimon_thread="thr-own",
+        daimon_sealed="thr-own",
+    )
+    hub.add_session(
+        "ses_mixed",
+        account=theirs,
+        daimon_channel=_SEALED,
+        daimon_thread="thr-1",
+        daimon_sealed=f"{_SEALED},thr-1,{_SEALED}:171.2",
+    )
+    hub.add_session(
+        "ses_inherited",
+        account=theirs,
+        daimon_channel=_SEALED,
+        daimon_thread="thr-1",
+        daimon_sealed=f"{_SEALED},chan-ops",
+    )
+    hub.add_session(
+        "ses_inherited_thread",
+        account=theirs,
+        daimon_channel="chan-open",
+        daimon_thread="thr-2",
+        daimon_sealed="thr-own",
+    )
+
+    listed = str(await hub.call("list_my_sessions"))
+    for handle in ("ses_thread_sealed", "ses_mixed"):
+        assert handle in listed, handle
+        events = await hub.call("list_events", handle=handle)
+        assert not events.get("isError") and _TOPIC in str(events), (handle, events)
+    for handle in ("ses_inherited", "ses_inherited_thread"):
+        assert handle not in listed, f"{handle} carries a seal from outside their channels"
+        events = await hub.call("list_events", handle=handle)
+        assert events.get("isError") and _TOPIC not in str(events), (handle, events)
+    assert hub.sent == []
