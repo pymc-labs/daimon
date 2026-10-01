@@ -18,6 +18,7 @@ import httpx
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
+from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import decrypt_token
@@ -147,7 +148,13 @@ async def complete_mcp_oauth_flow(
             agent_id=flow.agent_id,
             server_name=flow.server_name,
             url=flow.mcp_server_url,
-            is_admin=account is not None and account.role is Role.ADMIN,
+            # A sign-in records no platform identity, so it holds no channel
+            # admin grant: repointing a shared server stays a server admin's.
+            platform="",
+            caller=ChannelAdminCaller(
+                platform_user_id=None,
+                is_server_admin=account is not None and account.role is Role.ADMIN,
+            ),
             default=default,
             shares_token=False,
         )

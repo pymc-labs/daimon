@@ -7,9 +7,15 @@ import uuid
 import pytest
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
-from daimon.core.mcp_attach import McpServerReplaceRefusedError, decide_mcp_connect
+from daimon.core.channel_admins import ChannelAdminCaller
+from daimon.core.mcp_attach import (
+    McpServerReplaceRefusedError,
+    decide_mcp_connect,
+    decide_mcp_replacement,
+)
 from daimon.core.mcp_server_url import canonical_mcp_url, same_mcp_url
-from daimon.core.scope import DeploymentDefault, UserScopeRef
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault, UserScopeRef
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import make_account, make_tenant
@@ -79,11 +85,58 @@ async def test_an_agent_answering_in_a_bound_thread_or_as_a_personal_default_is_
         agent_id=uuid.uuid4(),
         server_name="linear",
         url="https://attacker.example/mcp",
-        is_admin=False,
+        platform="discord",
+        caller=ChannelAdminCaller(platform_user_id="u1"),
         default=DeploymentDefault(agent_name="other"),
         shares_token=False,
     )
     assert decision.refused
+
+
+async def test_a_channel_admin_replaces_a_server_only_on_an_agent_local_to_them(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Repointing a server goes through channel admin locality, as key changes do."""
+    tenant = await make_tenant(db_session)
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"),
+        tenant_id=tenant.id,
+        agent_name="private-bot",
+        mode="agent",
+    )
+    for channel_id, user_id in (("c1", "u1"), ("c9", "u9")):
+        await set_channel_admins(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id=channel_id,
+            role_ids=[],
+            user_ids=[user_id],
+            actor_account_id=None,
+        )
+    await db_session.commit()
+
+    async def outcome(user_id: str, *, managed: bool = False, platform: str = "discord") -> str:
+        agent = _agent(tenant.id)
+        if managed:
+            agent = agent.model_copy(
+                update={"metadata": {**agent.metadata, "daimon_managed": "true"}}
+            )
+        return await decide_mcp_replacement(
+            db_session_factory,
+            tenant_id=tenant.id,
+            platform=platform,
+            agent=agent,
+            caller=ChannelAdminCaller(platform_user_id=user_id),
+            default=DeploymentDefault(agent_name="other"),
+        )
+
+    assert await outcome("u1") == "allow", "c1's admin repoints the agent only c1 uses"
+    assert await outcome("u9") == "needs_admin", "an admin of another channel may not"
+    assert await outcome("u5") == "needs_admin", "a plain member may not"
+    assert await outcome("u1", managed=True) == "managed_agent", "managed stays a server admin's"
+    assert await outcome("u1", platform="teams") == "needs_admin", "teams has no channel admins"
 
 
 async def test_the_first_shared_token_for_an_already_connected_url_is_a_replacement(
@@ -102,7 +155,8 @@ async def test_the_first_shared_token_for_an_already_connected_url_is_a_replacem
         agent_id=uuid.uuid4(),
         server_name="linear-2",
         url=_URL + "/",
-        is_admin=False,
+        platform="discord",
+        caller=ChannelAdminCaller(platform_user_id="u1"),
         default=DeploymentDefault(agent_name="private-bot"),
         shares_token=True,
     )
