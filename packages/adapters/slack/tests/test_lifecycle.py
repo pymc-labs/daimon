@@ -1606,3 +1606,23 @@ async def test_rejected_native_table_retries_plain_chunks_without_duplicate_pros
         sum(block.get("type") == "actions" for body in delivered for block in body["blocks"]) == 1
     )
     assert any(entry["event"] == "turn.table_delivery_failed" for entry in logs)
+
+
+async def test_terminal_success_linkifies_emphasized_urls(fake_slack_web_client: Any) -> None:
+    """A final answer wrapping a bare URL in ** must be normalized to an explicit
+    markdown link before posting, so Slack's autolinker cannot absorb the closing
+    asterisks into the URL (reported: notebook URL rendered with a trailing '*')."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    state = TurnState(
+        content=[TextBlock(kind="text", text="Here: **🔗 https://x.up.railway.app/n/abc**")]
+    )
+    await lc.on_terminal_success(state)
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    assert blocks[0]["type"] == "markdown"
+    assert (
+        "[https://x.up.railway.app/n/abc](https://x.up.railway.app/n/abc)" in blocks[0]["text"]
+    ), "the emphasized bare URL must be rewritten to an explicit [url](url) link"

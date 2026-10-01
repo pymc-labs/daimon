@@ -12,6 +12,9 @@ This page is the map to read before the code. `CONTRIBUTING.md` has the dev
 setup and the quality gates; [configuration.md](configuration.md) has every
 setting; [self-hosting.md](self-hosting.md) has the deployment.
 
+Discord, Slack, scheduler and MCP emit `runtime.health` every 30 seconds with
+Anthropic response attempts, database pool use, event loop lag and active turns.
+
 ## The shape
 
 ```mermaid
@@ -129,6 +132,17 @@ config). The order is load-bearing and documented as such in the module:
 
 The policy, protection, balance and cap gates each raise `AdmissionDenied` with a
 reason literal; each adapter renders its own notice. See [billing.md](billing.md).
+
+A Slack `app_mention` runs a turn only when its text contains the bot's own
+`<@U…>` mention token, follow-ups in a thread included. Slack's docs say the
+event fires only on a direct mention, but installs have reported it arriving
+for thread replies that never mentioned the bot, so `_handle_app_mention`
+checks the text itself, as Discord checks `message.mentions`. The bot's user
+id comes from `auth.test`, cached per workspace. The check runs after dedup and
+the token read and before the Slack Connect rejection, so an external sender
+who never addressed the bot gets no notice. A dropped event is logged as
+`slack.event_dropped.no_explicit_mention`; a failed `auth.test` drops the event
+without an error reply.
 
 Discord checks its per-guild in-flight limit before the optional process-wide
 turn limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`). Guild mentions, unprompted
@@ -533,6 +547,15 @@ Agent-scoped keys, chat-turn credentials in the hub and tokens with no platform
 user are never admins on these surfaces, whatever role their account holds or
 who minted them. A pin binds a bearer with no platform user too: such callers
 skip billing, not admission.
+
+The pin decisions (turn admission, MCP and hub turns, routine save and fire,
+handoff, configuration writes and form submits), pinned sends and direct
+messages, channel and session seal reads, and fork are decided by one pure
+function, `daimon.core.authz.authorize` (who is acting, what they want to do,
+where the result lands, which agent, which channel); each caller keeps only
+its own I/O and refusal copy. The live protection and invoker checks in the
+scheduler and routine delivery, the hub's admin sealed-read exemption and the
+OAuth no-request rule still use the same `access_policy` predicates directly.
 
 ## Tenancy and isolation
 

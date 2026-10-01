@@ -82,6 +82,7 @@ from daimon.core.mcp_token_connect import (
     McpTokenWriteFailedError,
     connect_mcp_server_with_token,
 )
+from daimon.core.observability import capture_exception_with_scope
 from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
@@ -515,8 +516,12 @@ async def run_env_credential_submission(
             client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
         )
         return
-    except Exception:
-        log.exception("credential_request.env_write_failed", key_present=True)
+    except Exception as exc:
+        # Type only: the message of an error at a credential boundary can quote values.
+        log.error(
+            "credential_request.env_write_failed", key_present=True, error_type=type(exc).__name__
+        )
+        capture_exception_with_scope(exc)
         await post_ephemeral(
             client,
             thread_ts=thread_ts,
@@ -790,6 +795,25 @@ async def run_env_file_credential_submission(
         log.error("credential_request.env_file_refused_no_crypto_keys")
         await post_ephemeral(
             client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
+        )
+        return
+    except Exception as exc:
+        # Handled here, not in the spawned task, so the person gets a reply.
+        # Rolled back with the consume, so the request stays live. The Sentry
+        # capture carries id tags only; frame locals are never sent.
+        # Type only: the message of an error at a credential boundary can quote values.
+        log.error(
+            "credential_request.env_file_write_failed",
+            key_count=len(entries),
+            error_type=type(exc).__name__,
+        )
+        capture_exception_with_scope(exc)
+        await post_ephemeral(
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text="Something went wrong — please try again.",
         )
         return
     if consumed is None:
