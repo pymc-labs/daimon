@@ -77,7 +77,7 @@ def main() -> None:
     for an unhandled error).
     """
     try:
-        app(standalone_mode=False)
+        rc = app(standalone_mode=False)
     except click.exceptions.Exit as exc:
         raise SystemExit(exc.exit_code) from None
     except click.exceptions.Abort:
@@ -94,6 +94,10 @@ def main() -> None:
         trace = "".join(traceback.format_exception(exc))
         print(redact_text(trace), file=sys.stderr, end="")
         raise SystemExit(1) from None
+    # Without standalone mode a command's typer.Exit(code=N) comes back as
+    # the return value; keep it as the process exit code.
+    if isinstance(rc, int) and rc:
+        raise SystemExit(rc)
 
 
 if __name__ == "__main__":

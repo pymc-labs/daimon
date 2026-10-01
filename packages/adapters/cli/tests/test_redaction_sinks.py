@@ -474,3 +474,90 @@ def test_warnings_and_unraisable_exceptions_are_redacted(
     out = capfd.readouterr()
     assert "RuntimeError" in out.err
     _assert_clean(out.out + out.err, canary, "unraisablehook")
+
+
+@pytest.mark.parametrize("code", [1, 3, 4, 5])
+def test_a_commands_exit_code_survives_main(code: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`daimon` runs Typer without standalone mode; a command's exit code is kept."""
+    name = f"exit-probe-{code}"
+
+    @cli_main.app.command(name, hidden=True)
+    def _probe() -> None:
+        raise typer.Exit(code=code)
+
+    monkeypatch.setattr("sys.argv", ["daimon", name])
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.main()
+    assert exit_info.value.code == code
+
+
+def test_a_successful_command_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.argv", ["daimon", "version"])
+    cli_main.main()
+
+
+def test_run_cli_keeps_exit_code_one_for_a_domain_error() -> None:
+    async def _fail() -> None:
+        raise StoreError("store unavailable")
+
+    with pytest.raises(typer.Exit) as exit_info:
+        run_cli(_fail(), console=Console(file=io.StringIO()))
+    assert exit_info.value.exit_code == 1
+
+
+def test_production_json_logs_keep_ids_counts_and_flags(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+
+    configure_log_level("INFO")
+    capsys.readouterr()
+    fields: dict[str, object] = {
+        "ma_session_id": "sesn_abc",
+        "old_session_id": "sesn_old",
+        "new_session_id": "sesn_new",
+        "managed_session_id": "sesn_m",
+        "predecessor_session_id": "sesn_p",
+        "author_id": "U123",
+        "sessions_deleted": 2,
+        "sessions_failed": 0,
+        "exempt_sessions": ["sesn_x"],
+        "token_present": True,
+        "idempotency_key": "idem-1",
+        "key": "GH_TOKEN",
+        "keys": ["GH_TOKEN", "OPENAI_API_KEY"],
+        "key_count": 2,
+        "token_count": 42,
+        "nothing": None,
+    }
+    structlog.get_logger("daimon.test").info("sessions.swept", **fields)
+    line = next(raw for raw in capsys.readouterr().out.splitlines() if "sessions.swept" in raw)
+    parsed = json.loads(line)
+    for name, value in fields.items():
+        assert parsed[name] == value, name
+
+
+def test_a_malformed_log_call_never_raises(capsys: pytest.CaptureFixture[str]) -> None:
+    install_log_redaction()
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger = logging.getLogger("daimon.test.bad_call")
+    logger.addHandler(handler)
+    logger.propagate = False
+
+    class _Broken:
+        def __str__(self) -> str:
+            raise ValueError("no str")
+
+        __repr__ = __str__
+
+    try:
+        try:
+            _raise("boom")
+        except RuntimeError:
+            logger.exception("bad %d", "x")
+        logger.error(_Broken())
+    finally:
+        logger.removeHandler(handler)
+        logger.propagate = True
+    assert "[redaction failed" in stream.getvalue()

@@ -106,8 +106,11 @@ _SECRET_NAME_PATTERN = re.compile(
 )
 # Names that contain a secret-looking word but carry counts, ids or labels.
 _SECRET_NAME_ALLOW = re.compile(
-    r"^(?:author|authors|authored|authority|session_id|token_count|key_count|key_name|key_names)$"
+    r"^(?:author|authors|authored|authority|author_id|key_name|key_names|idempotency_key)$"
     r"|^(?:input|output|prompt|completion|total|num|max|min|reasoning|cache(?:_[a-z]+)*)_tokens?$"
+    # Ids, counts and flags: `ma_session_id`, `sessions_deleted`,
+    # `exempt_sessions`, `token_present`, `key_count`.
+    r"|session_id$|^sessions_[a-z_]+$|^[a-z_]+_sessions$|_present$|_count$"
 )
 # OAuth's `code` and `state` are bearer material, but common words in prose, so
 # they are secret only in a query string (handled there) or an OAuth context.
@@ -919,9 +922,31 @@ def redact_rendered(logger: WrappedLogger, method_name: str, event_dict: EventDi
     structlog passes the rendered string here, not a dict."""
     del logger, method_name
     rendered = cast("object", event_dict)
-    if isinstance(rendered, str):
-        return cast("EventDict", _redact_secret_text(rendered))
-    return event_dict
+    if not isinstance(rendered, str):
+        return event_dict
+    if rendered.startswith("{"):
+        try:
+            parsed = json.loads(rendered)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            # A JSON line: fields were redacted by name already; only rescan
+            # free-text string values. Numbers, flags and nulls are untouched.
+            return cast(
+                "EventDict",
+                json.dumps(_rescan_strings(cast("object", parsed))),
+            )
+    return cast("EventDict", _redact_secret_text(rendered))
+
+
+def _rescan_strings(value: object) -> object:
+    if isinstance(value, str):
+        return _redact_secret_text(value)
+    if isinstance(value, dict):
+        return {k: _rescan_strings(v) for k, v in cast("dict[str, object]", value).items()}
+    if isinstance(value, list):
+        return [_rescan_strings(v) for v in cast("list[object]", value)]
+    return value
 
 
 def _redacting_handle(self: logging.Handler, record: logging.LogRecord) -> bool | logging.LogRecord:
@@ -931,7 +956,16 @@ def _redacting_handle(self: logging.Handler, record: logging.LogRecord) -> bool 
     its logging integration keeps exc_info."""
     if type(self).__module__.startswith("sentry_sdk"):
         return _handler_handle(self, record)
-    return _handler_handle(self, _redacted_for_output(record))
+    try:
+        redacted = _redacted_for_output(record)
+    except Exception as exc:
+        redacted = copy.copy(record)
+        redacted.msg = f"[redaction failed: {type(exc).__name__}]"
+        redacted.args = None
+        redacted.exc_info = None
+        redacted.exc_text = None
+        redacted.stack_info = None
+    return _handler_handle(self, redacted)
 
 
 def _redacting_unraisablehook(unraisable: sys.UnraisableHookArgs) -> None:
@@ -987,6 +1021,9 @@ def redact_log_event(logger: WrappedLogger, method_name: str, event_dict: EventD
 
 
 _LOG_EXEMPT_FIELDS = frozenset({"event", "level", "timestamp", "logger", "exception"})
+# Log fields that carry key NAMES (`key="GH_TOKEN"`), not values. Free text
+# `key=<value>` is still treated as a secret.
+_LOG_NAME_FIELDS = frozenset({"key", "keys"})
 
 
 def _redact_log_field(key: str, value: object) -> object:
@@ -997,7 +1034,7 @@ def _redact_log_field(key: str, value: object) -> object:
     """
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    if key not in _LOG_EXEMPT_FIELDS and _is_secret_name(key):
+    if key not in _LOG_EXEMPT_FIELDS and key not in _LOG_NAME_FIELDS and _is_secret_name(key):
         return _REDACTED
     if isinstance(value, str):
         return _redact_secret_text(value)
