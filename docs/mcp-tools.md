@@ -85,9 +85,9 @@ Channel admin tools: who administers one channel on top of the server admins.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `clear_channel_admins` | admin only | Remove every channel admin from one channel, leaving it to the server admins. |
-| `list_channel_admins` | admin only | List the channels that have their own admins, with the roles and members named for each. |
-| `set_channel_admins` | admin only | Name who administers one channel, on top of the server admins. |
+| `clear_channel_admins` | admin only, operator tokens with channels:write | Remove every channel admin from one channel, leaving it to the server admins. |
+| `list_channel_admins` | admin only, operator tokens with tenant:read | List the channels that have their own admins, with the roles and members named for each. |
+| `set_channel_admins` | admin only, operator tokens with channels:write | Name who administers one channel, on top of the server admins. |
 
 ## `channel_budgets`
 

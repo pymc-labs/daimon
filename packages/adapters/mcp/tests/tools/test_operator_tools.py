@@ -28,6 +28,11 @@ from daimon.adapters.mcp.tools._ctx import (
 from daimon.adapters.mcp.tools._pin_guard import (
     _trusted_credential,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.channel_admins import (
+    _clear_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
+    _list_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
+    _set_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.promo_issuing import (
     _create_promo_code_impl,  # pyright: ignore[reportPrivateUsage]
     _list_promo_codes_impl,  # pyright: ignore[reportPrivateUsage]
@@ -224,6 +229,22 @@ async def test_agent_default_tools_require_channels_write(
         await _set_agent_default_impl(runtime, auth, "helper", "c1")
     with pytest.raises(ToolError, match="does not have the channels:write scope"):
         await _clear_agent_default_impl(runtime, auth, "c1")
+
+
+async def test_channel_admin_tools_require_their_scopes(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = _runtime(committing_sessionmaker)
+    _tenant, reader = await _operator(committing_sessionmaker, "tenant:read")
+    _tenant, writer = await _operator(committing_sessionmaker, "channels:write")
+    with pytest.raises(ToolError, match="does not have the channels:write scope"):
+        await _set_channel_admins_impl(
+            runtime, reader, channel_id="111111111111111111", role_ids=[], user_ids=[]
+        )
+    with pytest.raises(ToolError, match="does not have the channels:write scope"):
+        await _clear_channel_admins_impl(runtime, reader, channel_id="111111111111111111")
+    with pytest.raises(ToolError, match="does not have the tenant:read scope"):
+        await _list_channel_admins_impl(runtime, writer)
 
 
 async def test_server_admin_cannot_create_promo_codes(
