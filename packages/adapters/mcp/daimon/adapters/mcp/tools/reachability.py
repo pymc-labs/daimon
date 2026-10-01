@@ -20,8 +20,10 @@ from __future__ import annotations
 
 from typing import Final
 
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_target_facts, may_bind_as_channel_default
 from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
 from daimon.core.operation_policy import OperationKind, TargetFacts, decide_operation
@@ -47,20 +49,24 @@ async def target_facts(
     auth: AuthIdentity,
     operation: OperationKind,
     *,
-    agent_name: str,
+    agent_names: tuple[str | None, ...],
+    ma_agent_id: str | None,
     is_daimon_managed: bool,
 ) -> TargetFacts:
-    """Policy facts for `agent_name` in the caller's own tenant, read only when needed."""
+    """Policy facts for the agent carrying `agent_names` in the caller's own tenant."""
     async with runtime.session_factory() as session:
         return await load_target_facts(
             session,
             operation,
             tenant_id=auth.tenant_id,
             platform=auth.platform or "",
-            agent_name=agent_name,
+            agent_names=agent_names,
+            ma_agent_id=ma_agent_id,
             default=runtime.deployment_default,
             caller=channel_admin_caller(auth),
             is_daimon_managed=is_daimon_managed,
+            caller_account_id=auth.account_id,
+            caller_platform_user_id=auth.platform_user_id,
         )
 
 
@@ -84,8 +90,20 @@ async def require_channel_admin(
         )
 
 
+def _target_names(agent_name: str, agent: BetaManagedAgentsAgent | None) -> tuple[str | None, ...]:
+    """The name asked for plus, once resolved, every name the agent itself carries."""
+    if agent is None:
+        return (agent_name,)
+    return (agent_name, *agent_pin_names(agent.name, agent.metadata))
+
+
 async def require_bindable_by_channel_admin(
-    runtime: McpRuntime, auth: AuthIdentity, *, agent_name: str, is_daimon_managed: bool
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    agent_name: str,
+    agent: BetaManagedAgentsAgent | None,
+    is_daimon_managed: bool,
 ) -> None:
     """Raise ``ToolError`` when a channel admin binds another channel's own agent."""
     if auth.is_admin:
@@ -95,7 +113,8 @@ async def require_bindable_by_channel_admin(
             session,
             tenant_id=auth.tenant_id,
             platform=auth.platform or "",
-            agent_name=agent_name,
+            agent_names=tuple(name for name in _target_names(agent_name, agent) if name),
+            ma_agent_id=str(agent.id) if agent is not None else None,
             default=runtime.deployment_default,
             caller=channel_admin_caller(auth),
             is_daimon_managed=is_daimon_managed,
@@ -115,6 +134,7 @@ async def require_admin_for_reachable_agent(
     auth: AuthIdentity,
     *,
     agent_name: str,
+    agent: BetaManagedAgentsAgent | None = None,
 ) -> None:
     """Raise ``ToolError`` if a non-admin caller is patching a currently-reachable agent.
 
@@ -125,12 +145,18 @@ async def require_admin_for_reachable_agent(
     the agent answers in. ``tenant_id`` always comes from ``auth.tenant_id`` —
     never from a caller-supplied parameter — so a caller cannot point the read
     at another tenant's config rows. The decision itself is
-    `daimon.core.operation_policy.decide_operation`'s.
+    `daimon.core.operation_policy.decide_operation`'s. Pass the resolved
+    ``agent`` so every name it carries and its bound threads count.
     """
     if auth.is_admin:
         return
     facts = await target_facts(
-        runtime, auth, "agent_spec_edit", agent_name=agent_name, is_daimon_managed=False
+        runtime,
+        auth,
+        "agent_spec_edit",
+        agent_names=_target_names(agent_name, agent),
+        ma_agent_id=str(agent.id) if agent is not None else None,
+        is_daimon_managed=False,
     )
     outcome = decide_operation("agent_spec_edit", is_admin=False, target=facts)
     if outcome == "needs_admin":

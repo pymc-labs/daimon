@@ -10,13 +10,12 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import anthropic
-from daimon.core.access_policy import TenantAccessPolicy, is_sealed_source
+from daimon.core.access_policy import DM_SCOPE_PREFIX, TenantAccessPolicy, is_sealed_source
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import (
-    DM_SCOPE_PREFIX,
     DirectMessageRow,
     claim_message,
     dm_enabled,

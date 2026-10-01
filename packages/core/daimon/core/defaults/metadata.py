@@ -8,6 +8,15 @@ import uuid
 from typing import Any
 
 MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
+# Stamped on a session opened for a channel turn: the channel it runs in, the
+# thread under it (when there is one), and -- once any of its turns ran sealed --
+# the sealed id that sealed it (the channel, or a thread sealed on its own). The
+# transcript tools judge a session against the current seal policy from the
+# first two, and keep it inside the recorded seal from the third, so unsealing
+# later never opens up a transcript written under the seal.
+MA_METADATA_KEY_CHANNEL = "daimon_channel"
+MA_METADATA_KEY_THREAD = "daimon_thread"
+MA_METADATA_KEY_SEALED = "daimon_sealed"
 
 MA_METADATA_KEY_TENANT = "daimon_tenant"
 MA_METADATA_KEY_NAME = "daimon_name"
@@ -25,9 +34,11 @@ MA_METADATA_KEY_READER_OF = "daimon_reader_of"
 # skips a session carrying it: the operator absorbs that usage, it is never
 # debited to the tenant named by `daimon_tenant`. Absent on a billed session.
 MA_METADATA_KEY_BILLING_EXEMPT = "daimon_billing_exempt"
-# The parent channel a session was created for, so the usage sweep can
-# attribute its spend to that channel's budget. Absent on DM and MCP sessions.
-MA_METADATA_KEY_CHANNEL = "daimon_channel"
+# The parent channel whose budget the usage sweep attributes a session's spend
+# to; for a DM, the channel it was moved from. Apart from `daimon_channel`,
+# which drives the seal: a DM is budgeted to a channel it never runs in.
+# Absent on MCP sessions and sessions with no channel.
+MA_METADATA_KEY_BUDGET_CHANNEL = "daimon_budget_channel"
 
 # Marks a whole MA workspace as a throwaway one that the test-only workspace
 # nuke is allowed to empty. Stamped on a single sentinel agent, never on a

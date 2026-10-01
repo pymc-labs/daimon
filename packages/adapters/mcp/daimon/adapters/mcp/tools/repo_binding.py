@@ -23,6 +23,7 @@ import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 
 # The URL-shape rule and the agent resolution are the ones `request_repo_binding`
 # already applies; imported rather than re-spelled so the two chat entry points
@@ -36,6 +37,7 @@ from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.adapters.mcp.tools.task_continuity import (
     _REPLY_VERBATIM,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.continuity.tool_messages import render_tool_unsaved_work_question
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
@@ -123,10 +125,16 @@ async def _bind_public_repo_impl(
     agent_uuid, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin
     )
+    await require_pin_write_access(runtime, auth, ma_agent=ma_agent, origin=origin)
 
     is_daimon_managed = ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     facts = await target_facts(
-        runtime, auth, "repo_bind", agent_name=agent_name, is_daimon_managed=is_daimon_managed
+        runtime,
+        auth,
+        "repo_bind",
+        agent_names=(agent_name, *agent_pin_names(ma_agent.name, ma_agent.metadata)),
+        ma_agent_id=str(ma_agent.id),
+        is_daimon_managed=is_daimon_managed,
     )
     outcome = decide_operation("repo_bind", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":

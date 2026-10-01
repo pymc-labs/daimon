@@ -16,7 +16,6 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Literal
 
-import anthropic
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.teams.card_actions import (
@@ -33,19 +32,32 @@ from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+from daimon.core.agent_pins import request_pin_refusal
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.credential_requests import availability_for_request
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
-from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_name_problem
-from daimon.core.errors import DaimonError
-from daimon.core.mcp_attach import attach_mcp_server_to_agent
+from daimon.core.env_file import (
+    MEMBER_SECRET_SUFFIX_HINT,
+    env_alias_shadowed,
+    env_name_problem,
+    env_related_held,
+)
+from daimon.core.mcp_attach import (
+    McpConnectDecision,
+    McpServerReplaceRefusedError,
+    decide_mcp_connect,
+)
 from daimon.core.mcp_oauth import INVITE_BUTTON_LABEL, begin_mcp_oauth_flow, invite_copy, start_url
 from daimon.core.mcp_token_check import is_token_rejected
-from daimon.core.mcp_vault import add_external_mcp_credential
+from daimon.core.mcp_token_connect import (
+    McpAgentGoneError,
+    McpAttachFailedError,
+    McpTokenWriteFailedError,
+    connect_mcp_server_with_token,
+)
 from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
 from daimon.core.posted_controls import (
     ALREADY_USED_MESSAGE,
@@ -64,11 +76,13 @@ from daimon.core.stores import credential_requests as store
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
     agent_env_writes_allowed,
+    lock_agent_keys,
     put_agent_file_if_unchanged,
 )
 from daimon.core.stores.domain import CredentialRequestRow
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.teams_threads import conversation_of
+from daimon.core.turn_keys import list_turn_key_names
 from microsoft_teams.api import (
     Attachment,
     InvokeActivity,
@@ -254,6 +268,13 @@ class TeamsCredentialRequests:
         root = mcp.app_root_url
         if root is None or mcp.jwt_secret is None or self._runtime.turn_deps.fernet is None:
             return dialog_message(_UNCONFIGURED_OAUTH)
+        agent = await find_agent_by_derived_uuid(
+            self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+        )
+        async with self._runtime.sessionmaker() as session:
+            pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
+        if pin_refusal is not None:
+            return dialog_message(pin_refusal)
         now = datetime.now(UTC)
         async with self._runtime.sessionmaker.begin() as session:
             consumed = await store.consume_credential_request(session, token=row.token, now=now)
@@ -297,11 +318,15 @@ class TeamsCredentialRequests:
         )
         if agent is None:
             return dialog_message(_AGENT_GONE)
+        async with self._runtime.sessionmaker() as session:
+            pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
+        if pin_refusal is not None:
+            return dialog_message(pin_refusal)
         url = activity.service_url
         work = (
             self._save_env(row, agent, secret, is_admin=actor.is_admin, service_url=url)
             if row.kind == "env"
-            else self._save_mcp(row, agent, secret, service_url=url)
+            else self._save_mcp(row, agent, secret, is_admin=actor.is_admin, service_url=url)
         )
         self._spawn(self._background(work, kind=row.kind), name="teams.cred.save")
         return TaskModuleResponse()
@@ -322,11 +347,14 @@ class TeamsCredentialRequests:
         *,
         outcome: ConfigurationChange | None = None,
         reason: RefusalReason | None = None,
+        replaces: str | None = None,
     ) -> None:
         """Edit the posted card. Best effort: the outcome is already recorded."""
         if row.posted_message_id is None:
             return
-        card = card_for_request(row, state=state, outcome=outcome, refusal=reason)
+        card = card_for_request(
+            row, state=state, outcome=outcome, refusal=reason, replaces=replaces
+        )
         attachment = Attachment(content_type=ADAPTIVE_CARD_TYPE, content=build_adaptive_card(card))
         edit = MessageActivityInput(id=row.posted_message_id).add_attachments(attachment)
         try:
@@ -348,11 +376,17 @@ class TeamsCredentialRequests:
             managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
             if needs_reachability_read("key_replace", is_admin=False, is_daimon_managed=managed):
                 async with self._runtime.sessionmaker() as session:
-                    reachable = await is_agent_reachable_in_tenant(
+                    reachable = await is_agent_shared_for_key_changes(
                         session,
                         tenant_id=row.tenant_id,
-                        agent_name=str(agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name),
+                        agent_names=(
+                            agent.name,
+                            str(agent.metadata.get(MA_METADATA_KEY_NAME) or ""),
+                        ),
+                        ma_agent_id=str(agent.id),
                         default=self._runtime.deployment_default,
+                        caller_account_id=row.account_id,
+                        caller_platform_user_id=row.requester_platform_user_id,
                     )
         facts = TargetFacts(is_daimon_managed=managed, is_reachable_in_tenant=reachable)
         return decide_operation("key_replace", is_admin=is_admin, target=facts) != "allow"
@@ -367,8 +401,23 @@ class TeamsCredentialRequests:
         service_url: str | None,
     ) -> None:
         """Consume, write and queue the continuation in one transaction, as Slack does."""
-        refuse = row.replaces_updated_at is not None and await self._replacement_refused(
-            row, agent, is_admin=is_admin
+        # A new name a tool reads as a key already held (GH_TOKEN beside
+        # GITHUB_TOKEN) retargets it like an overwrite, so it takes the same
+        # gate, decided for this submitter.
+        #
+        # Snapshot the related credentials (aliases and family members) before the
+        # transaction, for every submit. Under the lock the write proceeds only if
+        # that set is unchanged: a related key added or removed after the gate was
+        # decided was never put to it. An unchanged set — rotating
+        # AWS_SECRET_ACCESS_KEY beside a stored AWS_ACCESS_KEY_ID — is fine.
+        async with self._runtime.sessionmaker() as session:
+            held = await list_turn_key_names(
+                session, tenant_id=row.tenant_id, agent_id=row.agent_id
+            )
+        related_before = env_related_held(row.target, held)
+        shadowed = env_alias_shadowed(row.target, held) if row.replaces_updated_at is None else None
+        refuse = (row.replaces_updated_at is not None or shadowed is not None) and (
+            await self._replacement_refused(row, agent, is_admin=is_admin)
         )
         state: CardState = "applied"
         queued = False
@@ -376,11 +425,33 @@ class TeamsCredentialRequests:
             consumed = await store.consume_credential_request(
                 session, token=row.token, now=datetime.now(UTC)
             )
+            # Re-read under the write, holding the agent's key-set lock: an
+            # alias that appeared after the gate above was decided was never
+            # put to it, and one a concurrent writer is adding waits.
+            appeared = False
+            if consumed is not None:
+                await lock_agent_keys(
+                    session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
+                )
+                appeared = (
+                    env_related_held(
+                        consumed.target,
+                        await list_turn_key_names(
+                            session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id
+                        ),
+                    )
+                    != related_before
+                )
             if consumed is not None and refuse:
                 await store.set_credential_request_outcome(
                     session, token=row.token, outcome="write_failed"
                 )
                 state = "refused"
+            elif consumed is not None and appeared:
+                await store.set_credential_request_outcome(
+                    session, token=row.token, outcome="stale_replacement"
+                )
+                state = "superseded"
             elif consumed is not None:
                 written = await put_agent_file_if_unchanged(
                     session,
@@ -418,6 +489,7 @@ class TeamsCredentialRequests:
             service_url,
             outcome=change if state == "applied" else None,
             reason="replacement_admin_required" if state == "refused" else None,
+            replaces=shadowed if state == "refused" else None,
         )
         if queued:
             await self._resume(consumed, service_url)
@@ -440,12 +512,31 @@ class TeamsCredentialRequests:
         agent: BetaManagedAgentsAgent,
         secret: str,
         *,
+        is_admin: bool,
         service_url: str | None,
     ) -> None:
-        """Consume, probe, store and attach, reporting partial states as Slack does."""
+        """Decide, consume, probe, then attach-and-publish (see mcp_token_connect)."""
         mcp = self._runtime.settings.mcp
         if mcp.public_url is None or mcp.jwt_secret is None:
             return
+        # Repointing a server or setting the agent-wide token for a URL the
+        # agent already uses is `mcp_replace`: decided against the live
+        # submitter before the consume, as on Discord and Slack.
+        connect = (
+            await decide_mcp_connect(
+                self._runtime.sessionmaker,
+                tenant_id=row.tenant_id,
+                agent=agent,
+                agent_id=row.agent_id,
+                server_name=row.target,
+                url=row.mcp_server_url,
+                is_admin=is_admin,
+                default=self._runtime.deployment_default,
+                shares_token=True,
+            )
+            if row.mcp_server_url is not None
+            else McpConnectDecision(replaces=False, replace_allowed=False)
+        )
         now = datetime.now(UTC)
         async with self._runtime.sessionmaker.begin() as session:
             consumed = await store.consume_credential_request(session, token=row.token, now=now)
@@ -457,47 +548,48 @@ class TeamsCredentialRequests:
         if url is None:
             log.error("teams.credential.mcp_missing_server_url")
             return await self._refuse(consumed, "target_unavailable", service_url)
+        if connect.refused:
+            return await self._refuse(consumed, "replacement_admin_required", service_url)
         log.info("teams.credential.mcp", mcp_server_url=url)
         probe = self._runtime.mcp_token_probe
         if await is_token_rejected(probe, mcp_server_url=url, token=secret):
             return await self._refuse(consumed, "token_rejected", service_url)
-        fernet = self._runtime.turn_deps.fernet
-        try:
-            if fernet is not None:
-                await save_agent_mcp_credential(
-                    sessionmaker=self._runtime.sessionmaker,
-                    fernet=fernet,
-                    tenant_id=consumed.tenant_id,
-                    agent_id=consumed.agent_id,
-                    mcp_server_url=url,
-                    plaintext_token=secret,
-                )
-            await add_external_mcp_credential(
-                self._runtime.anthropic,
-                account_id=consumed.account_id,
-                agent_id=consumed.agent_id,
-                jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
-                public_url=str(mcp.public_url),
-                mcp_server_url=url,
-                token=secret,
-                now=now,
-                session_factory=self._runtime.sessionmaker,
-            )
-        except Exception as err:
-            log.warning("teams.credential.mcp_write_failed", err_type=type(err).__name__)
-            return await self._refuse(consumed, "target_unavailable", service_url)
+        # Attach first, publish the agent-wide token only after that authorized
+        # attach, then the submitter's own vault copy: no other session may ever
+        # mirror a token this submission is refused for.
         attached = True
         try:
-            await attach_mcp_server_to_agent(
-                self._runtime.anthropic, agent.id, server_name=consumed.target, url=url
+            await connect_mcp_server_with_token(
+                self._runtime.anthropic,
+                sessionmaker=self._runtime.sessionmaker,
+                fernet=self._runtime.turn_deps.fernet,
+                tenant_id=consumed.tenant_id,
+                agent_id=consumed.agent_id,
+                account_id=consumed.account_id,
+                server_name=consumed.target,
+                mcp_server_url=url,
+                token=secret,
+                replace_allowed=connect.replace_allowed,
+                jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
+                public_url=str(mcp.public_url),
+                now=now,
             )
-        except (DaimonError, anthropic.APIError) as err:
-            log.warning("teams.credential.mcp_attach_failed", err_type=type(err).__name__)
+        except McpServerReplaceRefusedError:
+            return await self._refuse(consumed, "replacement_admin_required", service_url)
+        except (McpAgentGoneError, McpAttachFailedError) as err:
+            log.warning(
+                "teams.credential.mcp_attach_failed", err_type=type(err.__cause__ or err).__name__
+            )
+            return await self._refuse(consumed, "target_unavailable", service_url)
+        except McpTokenWriteFailedError as err:
+            log.warning(
+                "teams.credential.mcp_write_failed", err_type=type(err.__cause__ or err).__name__
+            )
             attached = False
         async with self._runtime.sessionmaker.begin() as session:
             outcome = "applied" if attached else "write_failed"
             await store.set_credential_request_outcome(session, token=row.token, outcome=outcome)
-            # Stored but not attached: audited, but no turn is promised on it.
+            # Attached but the token not fully stored: audited, no turn promised.
             queued = await record_input_continuation(
                 session, consumed, platform="teams", carries_work=attached
             )

@@ -356,8 +356,8 @@ the six `DAIMON_SCHEDULER__*` settings in
 
 Per run, four gates still apply — the tenant's invoker allowlist, checked
 against the creator, the tenant's credit balance, the per-person monthly cap
-and, for a routine with a `channel_id`, that channel's budget. See
-[billing.md](billing.md#channel-budgets). A run refused by a budget records
+and, for a routine with a `channel_id`, that channel's budget, checked last,
+after the agent's channel pin. See [billing.md](billing.md#channel-budgets). A run refused by a budget records
 `channel_budget_exceeded` and the routine fires again at its next slot. A
 Discord thread destination saved before channel budgets existed has no
 `channel_id` until its destination is set again. Taking someone off the allowlist stops

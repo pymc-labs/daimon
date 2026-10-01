@@ -28,6 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+import anthropic as anthropic_pkg
 import structlog
 from anthropic.types.beta.beta_managed_agents_system_content_block_param import (
     BetaManagedAgentsSystemContentBlockParam,
@@ -40,6 +41,7 @@ from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
+from daimon.core.session_seal import inherited_seal_ids, origin_stamp, seal_ids
 from daimon.core.session_snapshot import (
     SessionSnapshot,
     fingerprint_identity,
@@ -48,9 +50,14 @@ from daimon.core.session_snapshot import (
     snapshot_from_created_session,
 )
 from daimon.core.sessions import create_session
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import TransferKind
-from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
+from daimon.core.stores.thread_sessions import (
+    create_thread_session,
+    get_live_thread_session,
+    get_thread_session_by_id,
+)
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
@@ -181,6 +188,7 @@ async def create_ma_session(
     *,
     tenant_id: uuid.UUID,
     extra_resources: tuple[Resource, ...] = (),
+    predecessor_session_id: str | None = None,
 ) -> CreatedSession:
     """Create a brand-new MA session and snapshot the configuration it froze.
 
@@ -188,7 +196,22 @@ async def create_ma_session(
     divergent second call site is exactly the bug shape this phase exists to
     kill. The snapshot is taken from the object `sessions.create` returned,
     the authority on what the session will execute.
+
+    A session that replaces `predecessor_session_id` -- by transcript,
+    checkpoint, bundle, handoff or dead-session recovery -- carries its
+    predecessor's work, so it is stamped with its predecessor's seal as well
+    as this turn's (`daimon.core.session_seal.inherited_seal_ids`).
     """
+    seal: set[str] = set(admission.origin_seal_ids)
+    if predecessor_session_id is not None and admission.origin_channel_id is not None:
+        async with deps.sessionmaker() as db:
+            policy = await load_access_policy(db, tenant_id=tenant_id)
+        seal |= await inherited_seal_ids(
+            deps.anthropic,
+            predecessor_session_id=predecessor_session_id,
+            own_thread_id=admission.origin_thread_id or admission.origin_channel_id,
+            tenant_seals_anything=bool(policy.sealed_channel_ids),
+        )
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
     ma_session = await create_session(
@@ -209,7 +232,10 @@ async def create_ma_session(
         tool_safety=deps.tool_safety,
         slack_turn_context_id=admission.slack_turn_context_id,
         private_dm_id=admission.private_dm_id,
-        channel_id=admission.channel_id,
+        budget_channel_id=admission.budget_channel_id,
+        origin_channel_id=admission.origin_channel_id,
+        origin_thread_id=admission.origin_thread_id,
+        origin_seal_ids=frozenset(seal),
     )
 
     has_repo = any(
@@ -296,8 +322,21 @@ async def create_fresh_session(
     records about where that work came from. A first session for a thread
     passes none of them.
     """
+    predecessor_session_id: str | None = None
+    if predecessor_id is not None:
+        async with deps.sessionmaker() as session:
+            predecessor = await get_thread_session_by_id(session, id=predecessor_id)
+        # A lineage row that can't be found still means old work is carried:
+        # inherited_seal_ids seals an unreadable predecessor to this thread.
+        predecessor_session_id = (
+            predecessor.ma_session_id if predecessor is not None else "unknown-predecessor"
+        )
     created = await create_ma_session(
-        deps, admission, tenant_id=tenant_id, extra_resources=extra_resources
+        deps,
+        admission,
+        tenant_id=tenant_id,
+        extra_resources=extra_resources,
+        predecessor_session_id=predecessor_session_id,
     )
     async with deps.sessionmaker() as session:
         fresh = await insert_mapping(
@@ -340,7 +379,7 @@ def bind_recorder(
     06-05's dead-session recovery cycle can re-invoke it against the NEW
     session id after a recreate, rather than reusing a stale binding.
 
-    `channel_id` is `Admission.channel_id`: the channel whose budget the
+    `channel_id` is `Admission.budget_channel_id`: the channel whose budget the
     turn's spend counts toward.
     """
     if (observation := current_outcome.get()) is not None:
@@ -409,6 +448,50 @@ async def bind_session(
         raise
     observation.session_id = result.ma_session_id
     return result
+
+
+async def _stamp_reused_seal(
+    deps: TurnDeps, prepared: PreparedTurn, *, now: Callable[[], dt.datetime]
+) -> None:
+    """Add this sealed turn's seal to a session it reuses.
+
+    A fresh session is stamped at creation; one opened before its channel was
+    sealed lacks this seal and would be readable again after an unseal once
+    this turn has written sealed content into it. The recorded seal only
+    grows: a thread seal already on the session is kept beside a channel
+    one. A session that has gone away is left to the dead-session recovery,
+    whose replacement inherits its seal. One MA won't update mid-turn blocks
+    this turn: running it unstamped is the leak this exists to close.
+    """
+    admission = prepared.admission
+    if not prepared.reused or not admission.origin_seal_ids or admission.origin_channel_id is None:
+        return
+    try:
+        current = await deps.anthropic.beta.sessions.retrieve(prepared.ma_session_id)
+        recorded = seal_ids(current.metadata)
+        if admission.origin_seal_ids <= recorded:
+            return
+        await deps.anthropic.beta.sessions.update(
+            prepared.ma_session_id,
+            metadata=dict(
+                origin_stamp(
+                    channel_id=admission.origin_channel_id,
+                    thread_id=admission.origin_thread_id,
+                    seal=recorded | admission.origin_seal_ids,
+                )
+            ),
+        )
+    except anthropic_pkg.NotFoundError:
+        log.info("turn.seal_stamp_session_gone", ma_session_id=prepared.ma_session_id)
+    except anthropic_pkg.APIStatusError as error:
+        # MA refuses updates mid-turn ("... while session is running"); any
+        # other refusal fails the turn rather than running it unstamped.
+        if error.status_code != 409 and "while session is running" not in str(error):
+            raise
+        log.info("turn.seal_stamp_busy", ma_session_id=prepared.ma_session_id)
+        raise SessionBusyError(
+            pending_reasons=("seal",), retry_after=now() + dt.timedelta(seconds=5)
+        ) from error
 
 
 async def bind_session_impl(
@@ -496,7 +579,7 @@ async def bind_session_impl(
             tenant_id=tenant_id,
             external_user_id=external_user_id,
             markup=deps.markup,
-            channel_id=admission.channel_id,
+            channel_id=admission.budget_channel_id,
         )
 
         # `SessionOps` is built here rather than at import time so that
@@ -522,6 +605,7 @@ async def bind_session_impl(
             now=now,
         )
         if isinstance(outcome, PreparationDeferred):
+            await _stamp_reused_seal(deps, outcome.prepared, now=now)
             return outcome.prepared
         if isinstance(outcome, PreparationBusy):
             raise SessionBusyError(
@@ -534,6 +618,7 @@ async def bind_session_impl(
                 retry_after=outcome.retry_after,
                 preserved=outcome.preserved,
             )
+        await _stamp_reused_seal(deps, outcome, now=now)
         return outcome
 
     try:

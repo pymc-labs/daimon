@@ -61,7 +61,12 @@ async def test_reach_and_locality_follow_channels_and_threads(db_session: AsyncS
         kind="handoff",
     )
     reach = await load_agent_reach(
-        db_session, tenant_id=tenant.id, platform="discord", agent_name="helper", default=DEFAULT
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        agent_names=("helper",),
+        ma_agent_id=None,
+        default=DEFAULT,
     )
     assert reach.channel_ids == {"c1", "c2"}, "a thread counts as its parent channel"
 
@@ -72,7 +77,8 @@ async def test_reach_and_locality_follow_channels_and_threads(db_session: AsyncS
             db_session,
             tenant_id=tenant.id,
             platform="discord",
-            agent_name="helper",
+            agent_names=("helper",),
+            ma_agent_id=None,
             default=DEFAULT,
             caller=caller,
         )
@@ -119,7 +125,8 @@ async def test_load_target_facts_marks_only_a_channel_admins_local_agent(
             "agent_spec_edit",
             tenant_id=tenant.id,
             platform="discord",
-            agent_name="helper",
+            agent_names=("helper",),
+            ma_agent_id=None,
             default=DEFAULT,
             caller=caller,
             is_daimon_managed=False,
@@ -171,7 +178,8 @@ async def test_channel_admin_binds_only_shared_unrouted_or_own_channel_agents(
             db_session,
             tenant_id=tenant.id,
             platform="discord",
-            agent_name=name,
+            agent_names=(name,),
+            ma_agent_id=None,
             default=DEFAULT,
             caller=who,
             is_daimon_managed=managed,
@@ -210,7 +218,8 @@ async def _is_local(db_session: AsyncSession, tenant_id, agent_name: str = "help
         db_session,
         tenant_id=tenant_id,
         platform="discord",
-        agent_name=agent_name,
+        agent_names=(agent_name,),
+        ma_agent_id=None,
         default=DEFAULT,
         caller=ChannelAdminCaller(platform_user_id="u1"),
     )
@@ -263,7 +272,8 @@ async def test_only_a_stronger_requesters_routine_keeps_an_agent_from_a_channel_
         db_session,
         tenant_id=tenant.id,
         platform="discord",
-        agent_name="scheduled",
+        agent_names=("scheduled",),
+        ma_agent_id=None,
         default=DEFAULT,
         caller=ChannelAdminCaller(platform_user_id="u1"),
         is_daimon_managed=False,
@@ -383,7 +393,12 @@ async def _dm_from(
 
 async def _dm_agent_channels(db_session: AsyncSession, tenant_id) -> frozenset[str]:
     reach = await load_agent_reach(
-        db_session, tenant_id=tenant_id, platform="discord", agent_name="dm-agent", default=DEFAULT
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        agent_names=("dm-agent",),
+        ma_agent_id=None,
+        default=DEFAULT,
     )
     return reach.channel_ids
 

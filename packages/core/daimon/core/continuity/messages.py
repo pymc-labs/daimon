@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Final, Literal
 
-from daimon.core.env_file import EnvProblem, EnvRejection
+from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, EnvProblem, EnvRejection
 from pydantic import BaseModel, ConfigDict
 
 __all__ = [
@@ -334,18 +334,24 @@ def render_change_confirmation(change: ConfigurationChange) -> str:
 
 
 #: Per-line reason for a rejected `.env` upload, one phrase per rejection kind.
-#: ``{name}`` is filled only where the parser knows the name is a valid key
-#: name; a value is never available to these templates.
+#: ``{name}`` is filled only where the problem carries a name, which the parser
+#: sets only for a syntactically valid identifier — including a reserved or
+#: member-refused one, whose NAME is safe to show; a value is never available
+#: to these templates. The member refusal lists `MEMBER_SECRET_SUFFIX_HINT`,
+#: the same suffixes the policy accepts.
 _ENV_LINE_REASONS: Final[dict[EnvRejection, str]] = {
     "syntax": "I could not read this line.",
     "bad_name": "the name here is not usable as a key name.",
     "reserved_name": "{name} is reserved: it changes how the agent's tools run.",
     "not_credential_name": (
         "{name} is not a secret name a member can add. Use a name ending in "
-        "_KEY, _KEY_ID, _TOKEN, _SECRET, _PASSWORD, _PASSPHRASE or _PAT. An admin "
-        "can add identity, account, region and URL names."
+        + MEMBER_SECRET_SUFFIX_HINT
+        + ". An admin can add identity, account, region, path and URL names."
     ),
     "duplicate_name": "{name} is set more than once.",
+    "alias_pair": (
+        "{name} is read by the same tool as another key in this file; keep only one of them."
+    ),
     "value_too_large": "{name} is too long.",
     "too_many_entries": "{name} is past the number of keys I can take at once.",
     "file_too_large": "this line could not be read.",
@@ -363,10 +369,12 @@ _ENV_FILE_REASONS: Final[dict[EnvRejection, str]] = {
     "reserved_name": "The file sets a reserved name that changes how the agent's tools run.",
     "not_credential_name": (
         "A name in the file is not a secret name a member can add. Member keys must "
-        "end in _KEY, _KEY_ID, _TOKEN, _SECRET, _PASSWORD, _PASSPHRASE or _PAT; an "
-        "admin can add identity, account, region and URL names."
+        "end in "
+        + MEMBER_SECRET_SUFFIX_HINT
+        + "; an admin can add identity, account, region, path and URL names."
     ),
     "duplicate_name": "The same name is set more than once.",
+    "alias_pair": "The file sets two names one tool reads as the same credential.",
     "value_too_large": "One of the keys is too long.",
     "too_many_entries": "There are more keys in the file than I can take at once.",
 }

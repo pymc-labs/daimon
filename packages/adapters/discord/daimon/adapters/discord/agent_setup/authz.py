@@ -96,10 +96,12 @@ async def _target_facts(
             operation,
             tenant_id=tenant_id,
             platform="discord",
-            agent_name=entry.name,
+            agent_names=(entry.name, entry.routing_name),
+            ma_agent_id=entry.ma_agent_id,
             default=runtime.deployment_default,
             caller=caller,
             is_daimon_managed=entry.is_system,
+            caller_platform_user_id=str(interaction.user.id),
         )
 
 

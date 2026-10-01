@@ -105,6 +105,7 @@ async def _set_agent_default_impl(
             runtime,
             auth,
             agent_name=agent_name,
+            agent=agent,
             is_daimon_managed=agent is not None
             and agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
         )

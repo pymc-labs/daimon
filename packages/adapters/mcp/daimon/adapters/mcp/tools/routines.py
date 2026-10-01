@@ -42,8 +42,9 @@ from daimon.adapters.mcp.tools.slack._client import (
 )
 from daimon.adapters.mcp.tools.slack._visibility import check_channel_access
 from daimon.core.access_policy import TenantAccessPolicy, is_outside_agent_pin, is_write_protected
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.cron import next_slot_at_or_after
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routine_delivery import destination_shape_error
 from daimon.core.scope import ScopeContext
@@ -290,6 +291,7 @@ def _check_agent_pin(
     *,
     platform: str,
     agent_name: str,
+    agent_names: tuple[str | None, ...],
     kind: RoutineDestinationKind | None,
     destination_id: str | None,
 ) -> None:
@@ -299,8 +301,11 @@ def _check_agent_pin(
     channels: the scheduler can't resolve a Discord thread's parent at fire
     time, so a thread destination is refused here rather than skipped later.
     The scheduler re-checks at every fire, so a pin added later still holds.
+
+    ``agent_names`` is every name the resolved agent answers to (the supplied
+    name, its MA name and its config name), so a pin on any of them holds.
     """
-    if agent_name not in policy.agent_channel_pins:
+    if not any(name in policy.agent_channel_pins for name in agent_names if name):
         return
     target_channel_id: str | None = None
     if kind is not None and destination_id is not None:
@@ -308,7 +313,7 @@ def _check_agent_pin(
             target_channel_id = destination_id
         elif platform == "slack":
             target_channel_id = destination_id.partition(":")[0]
-    if is_outside_agent_pin(policy, agent_names=(agent_name,), channel_id=target_channel_id):
+    if is_outside_agent_pin(policy, agent_names=agent_names, channel_id=target_channel_id):
         raise ToolError(
             f"{agent_name} is pinned to specific channels by an operator, so its routines "
             "must post straight into one of them (a channel destination, not a thread "
@@ -394,13 +399,6 @@ async def _create_routine_impl(
     )
     async with runtime.session_factory() as session:
         policy = await _load_policy_for_save(session, tenant_id=tenant_id)
-    _check_agent_pin(
-        policy,
-        platform=auth.platform or "",
-        agent_name=agent_name,
-        kind=destination_kind,
-        destination_id=destination_id,
-    )
     budget_channel_id = destination_channel_id
     if destination_kind is None:
         budget_channel_id = await origin_budget_channel(
@@ -414,6 +412,14 @@ async def _create_routine_impl(
     )
     if match is None:
         raise ToolError(f"no agent named {agent_name!r} found for this tenant")
+    _check_agent_pin(
+        policy,
+        platform=auth.platform or "",
+        agent_name=agent_name,
+        agent_names=(agent_name, *agent_pin_names(match.name, match.metadata)),
+        kind=destination_kind,
+        destination_id=destination_id,
+    )
     agent_id = match.id
     await _require_agent_in_scope(
         runtime,
@@ -498,13 +504,7 @@ async def _update_routine_impl(
             effective_kind, effective_id = destination_kind, destination_id
         else:
             effective_kind, effective_id = row.destination_kind, row.destination_id
-        _check_agent_pin(
-            await _load_policy_for_save(session, tenant_id=tenant_id),
-            platform=auth.platform or "",
-            agent_name=agent_name if agent_name is not None else row.agent_name,
-            kind=effective_kind,
-            destination_id=effective_id,
-        )
+        update_policy = await _load_policy_for_save(session, tenant_id=tenant_id)
 
         # Recompute next_fire_at only when cron or timezone is being changed.
         next_fire_at: datetime | None = None
@@ -526,6 +526,31 @@ async def _update_routine_impl(
             if match is None:
                 raise ToolError(f"no agent named {agent_name!r} found for this tenant")
             new_agent_id = match.id
+        if update_policy.agent_channel_pins:
+            # Check the agent the routine will run, by all its names.
+            effective_id_ma = new_agent_id or row.agent_id
+            effective_agent = next(
+                (
+                    agent
+                    for agent in await list_agents_by_tenant(runtime.client, tenant_id=tenant_id)
+                    if agent.id == effective_id_ma
+                ),
+                None,
+            )
+            if effective_agent is None:
+                raise ToolError("the routine's agent no longer exists. Nothing was saved.")
+            effective_name = agent_name if new_agent_id is not None else row.agent_name
+            _check_agent_pin(
+                update_policy,
+                platform=auth.platform or "",
+                agent_name=effective_name or effective_agent.name,
+                agent_names=(
+                    effective_name,
+                    *agent_pin_names(effective_agent.name, effective_agent.metadata),
+                ),
+                kind=effective_kind,
+                destination_id=effective_id,
+            )
         if clear_destination:
             effective_channel_id = None
         elif destination_kind is not None:

@@ -96,7 +96,7 @@ compares parsed names against what it holds.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Final, Literal
 
 from daimon.core.errors import DaimonError
@@ -112,6 +112,13 @@ __all__ = [
     "EnvProblem",
     "EnvRejection",
     "decode_env_bytes",
+    "env_alias_of",
+    "env_alias_shadowed",
+    "env_collision_line",
+    "env_import_collisions",
+    "env_related_held",
+    "env_row_skip_reason",
+    "env_shadow_phrase",
     "MEMBER_SECRET_SUFFIX_HINT",
     "env_name_hard_denied",
     "env_name_member_writable",
@@ -135,6 +142,7 @@ EnvRejection = Literal[
     "reserved_name",
     "not_credential_name",
     "duplicate_name",
+    "alias_pair",
     "value_too_large",
     "too_many_entries",
     "empty",
@@ -148,6 +156,7 @@ _REJECTION_PRIORITY: Final[tuple[EnvRejection, ...]] = (
     "reserved_name",
     "not_credential_name",
     "duplicate_name",
+    "alias_pair",
     "value_too_large",
     "too_many_entries",
 )
@@ -192,7 +201,23 @@ _MEMBER_ALLOW_SUFFIXES: Final[tuple[str, ...]] = (
 )
 #: Suffixes a member never writes: a value under them points the agent's own
 #: tooling somewhere else.
-_MEMBER_DENY_SUFFIXES: Final[tuple[str, ...]] = ("_URL", "_HOST", "_URI", "_ENDPOINT")
+#: ``*_CLIENT_KEY``, ``*_SSL_KEY``, ``*_TLS_KEY`` and ``ETCDCTL_KEY`` end in
+#: ``_KEY`` but name a TLS key *file* the tool opens, not a secret value.
+#: ``*_FILE`` names a path for the same reason; it never ends in a secret
+#: suffix, so it is admin-only by construction, and listed here to make that
+#: explicit. The ``*_FILE`` names that make a tool EXECUTE the file are
+#: hard-denied instead.
+_MEMBER_DENY_SUFFIXES: Final[tuple[str, ...]] = (
+    "_URL",
+    "_HOST",
+    "_URI",
+    "_ENDPOINT",
+    "_CLIENT_KEY",
+    "_SSL_KEY",
+    "_TLS_KEY",
+    "_FILE",
+)
+_MEMBER_DENY_EXACT: Final[frozenset[str]] = frozenset({"ETCDCTL_KEY"})
 #: Bare secret words a member may use as a whole key name, plus the two names
 #: kept for the documented CLI-token use (`defaults/skills/cli-auth`).
 _MEMBER_ALLOW_EXACT: Final[frozenset[str]] = frozenset(
@@ -218,7 +243,7 @@ _HARD_DENY_EXCEPTIONS: Final[frozenset[str]] = frozenset(
 )
 #: The accepted member suffixes, as refusal copy shows them.
 MEMBER_SECRET_SUFFIX_HINT: Final[str] = (
-    "_KEY, _KEY_ID, _TOKEN, _SECRET, _PASSWORD, _PASSPHRASE or _PAT"
+    ", ".join(_MEMBER_ALLOW_SUFFIXES[:-1]) + " or " + _MEMBER_ALLOW_SUFFIXES[-1]
 )
 _MEMBER_NAME_SHAPE: Final[re.Pattern[str]] = re.compile(r"[A-Z][A-Z0-9_]{1,63}")
 
@@ -342,6 +367,36 @@ _HARD_DENY_EXACT: Final[frozenset[str]] = frozenset(
         "GH_HOST",
         "GITHUB_API_URL",
         "SSLKEYLOGFILE",
+        "SVN_SSH",
+        "CONFIG_SITE",
+        "GCC_EXEC_PREFIX",
+        "CCACHE_PREFIX",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "RUSTDOC",
+        "DOTNET_ADDITIONAL_DEPS",
+        "CLOUDSDK_PYTHON",
+        "COVERAGE_PROCESS_START",
+        "COVERAGE_RCFILE",
+        "NODE_REPL_EXTERNAL_MODULE",
+        "PYENV_VERSION",
+        "LESSKEYIN",
+        "LESSKEY_SYSTEM",
+        "LESSEDIT",
+        "MANROFFOPT",
+        "AS",
+        "NM",
+        "RANLIB",
+        "STRIP",
+        "FC",
+        "MAKE",
+        "MAKESHELL",
+        "GOINSECURE",
+        "GONOPROXY",
+        "GODEBUG",
+        "FCEDIT",
+        "ANSIBLE_VAULT_PASSWORD_FILE",
+        "VIMINIT",
+        "EXINIT",
     }
 )
 #: HARD DENY prefixes.
@@ -373,6 +428,10 @@ _HARD_DENY_PREFIXES: Final[tuple[str, ...]] = (
     "CONDA_",
     "BUNDLE_",
     "POETRY_",
+    "COR_PROFILER",
+    "CORECLR_",
+    "LUA_PATH",
+    "LUA_CPATH",
     "MAVEN_",
     "GRADLE_",
     "DOCKER_",
@@ -425,6 +484,8 @@ _HARD_DENY_SUFFIXES: Final[tuple[str, ...]] = (
     "_CONFIG_DIR",
     "CONFIGDIR",
     "_BROWSER",
+    "_RSH",
+    "PASSCOMMAND",
 )
 #: HARD DENY substrings: a redirect target can sit mid-name (``*_REGISTRY_*``).
 _HARD_DENY_SUBSTRINGS: Final[tuple[str, ...]] = (
@@ -501,21 +562,141 @@ def env_name_hard_denied(name: str) -> bool:
 def env_name_member_writable(name: str) -> bool:
     """LAYER 2. Whether a non-admin may write a key under `name`.
 
-    A short upper-snake name that ends in a secret suffix (``_KEY``,
-    ``_TOKEN``, ``_SECRET``, ``_PASSWORD`` …) and is neither a redirection
-    suffix (``*_URL``/``*_HOST``) nor hard-denied, plus bare secret words and
-    the two documented CLI-token names. An admin is not bound by this — only by
-    `env_name_hard_denied`.
+    A short upper-snake name that ends in one of `_MEMBER_ALLOW_SUFFIXES`
+    (the list `MEMBER_SECRET_SUFFIX_HINT` shows people) and is not hard-denied,
+    not a path/redirect name (`_MEMBER_DENY_SUFFIXES`: ``*_URL``, ``*_HOST``,
+    ``*_FILE``, ``*_CLIENT_KEY`` …) and not ``ETCDCTL_KEY``; plus bare secret
+    words and the two documented CLI-token names. An admin is not bound by
+    this — only by `env_name_hard_denied`.
     """
     if env_name_hard_denied(name):
         return False
     if name in _MEMBER_ALLOW_EXACT:
         return True
+    if name in _MEMBER_DENY_EXACT:
+        return False
     if _MEMBER_NAME_SHAPE.fullmatch(name) is None:
         return False
     if name.endswith(_MEMBER_DENY_SUFFIXES):
         return False
     return name.endswith(_MEMBER_ALLOW_SUFFIXES)
+
+
+#: ALIASES: mutually exclusive names one tool reads as the same credential, so
+#: adding one where another is stored retargets that tool as surely as
+#: overwriting it (`gh` prefers ``GH_TOKEN`` over ``GITHUB_TOKEN``). Any member
+#: added while another is held is a REPLACEMENT of the held one, and a file
+#: that sets two of them is ambiguous.
+_ALIAS_GROUPS: Final[tuple[frozenset[str], ...]] = (
+    frozenset({"GH_TOKEN", "GITHUB_TOKEN"}),
+    frozenset({"GITLAB_TOKEN", "GLAB_TOKEN"}),
+    frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}),
+    frozenset({"AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"}),
+    frozenset({"OPENAI_API_KEY", "OPENAI_KEY"}),
+    frozenset({"FLY_API_TOKEN", "FLY_ACCESS_TOKEN"}),
+    frozenset({"NPM_TOKEN", "NODE_AUTH_TOKEN"}),
+    frozenset({"GOOGLE_API_KEY", "GEMINI_API_KEY"}),
+    frozenset({"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}),
+)
+#: FAMILIES: complementary names one tool reads TOGETHER as one credential
+#: (the AWS SDK pairs the access key with whatever secret and session token
+#: sit beside it). A fresh agent may receive a whole family at once, in one
+#: file; adding or changing any member while another is stored changes the
+#: credential the stored member belongs to, so it is a REPLACEMENT too.
+_CREDENTIAL_FAMILIES: Final[tuple[frozenset[str], ...]] = (
+    frozenset(
+        {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"}
+    ),
+)
+
+
+def _first_held(name: str, groups: Sequence[frozenset[str]], held: set[str]) -> str | None:
+    for group in groups:
+        if name in group:
+            for other in sorted(group - {name}):
+                if other in held:
+                    return other
+    return None
+
+
+def env_alias_of(name: str, held: Iterable[str]) -> str | None:
+    """A held name that is a mutually exclusive alias of `name`, or None."""
+    return _first_held(name, _ALIAS_GROUPS, set(held))
+
+
+def env_alias_shadowed(name: str, held: Iterable[str]) -> str | None:
+    """The held key that adding `name` would retarget or change, or None.
+
+    An alias of `name` (it would be shadowed) or another member of its
+    credential family (the stored credential would change). `name` itself
+    being held is an ordinary replacement and not this function's business.
+    """
+    held_set = set(held)
+    return _first_held(name, _ALIAS_GROUPS, held_set) or _first_held(
+        name, _CREDENTIAL_FAMILIES, held_set
+    )
+
+
+def env_related_held(name: str, held: Iterable[str]) -> frozenset[str]:
+    """The held names that are aliases of `name` or members of its family.
+
+    Snapshotted before a write and compared under the key-set lock: a change
+    between the two means someone added or removed a related credential after
+    the replacement gate was decided, so the write must not proceed. An
+    unchanged set — an admin rotating `AWS_SECRET_ACCESS_KEY` beside a stored
+    `AWS_ACCESS_KEY_ID` — is not a conflict.
+    """
+    related: set[str] = set()
+    for group in (*_ALIAS_GROUPS, *_CREDENTIAL_FAMILIES):
+        if name in group:
+            related |= group - {name}
+    return frozenset(related & set(held))
+
+
+def env_shadow_phrase(name: str, held_name: str) -> str:
+    """How adding `name` affects `held_name`, for refusal copy (no values)."""
+    if env_alias_of(name, [held_name]) is not None:
+        return f"would replace {held_name}, which the same tool reads as this credential"
+    return f"would change the credential {held_name} belongs to"
+
+
+def env_import_collisions(entries: Sequence[EnvEntry], held: Iterable[str]) -> tuple[EnvEntry, ...]:
+    """Entries of an import that would replace a held key, directly or by alias.
+
+    A whole-file import only ever adds, so both count: the same name, and a
+    different name the same tool reads as a held credential.
+    """
+    held_set = set(held)
+    return tuple(
+        entry
+        for entry in entries
+        if entry.name in held_set or env_alias_shadowed(entry.name, held_set) is not None
+    )
+
+
+def env_collision_line(entry: EnvEntry, held: Iterable[str]) -> str:
+    """One refusal line for an import collision: names and a line number, no value."""
+    held_set = set(held)
+    if entry.name in held_set:
+        return f"line {entry.line}: {entry.name} is already set."
+    shadowed = env_alias_shadowed(entry.name, held_set)
+    assert shadowed is not None, "only a colliding entry gets a collision line"
+    return f"line {entry.line}: {entry.name} {env_shadow_phrase(entry.name, shadowed)}."
+
+
+def env_row_skip_reason(name: str, value: str) -> str | None:
+    """Why a stored row is left out of the mounted `.env`, or None if it mounts.
+
+    The one rule for both the assembler and anything that names mounted keys:
+    a non-identifier, a hard-denied name, or a NUL in the value.
+    """
+    if ENV_NAME_PATTERN.fullmatch(name) is None:
+        return "bad_name"
+    if env_name_hard_denied(name):
+        return "reserved_name"
+    if "\0" in value:
+        return "nul_in_value"
+    return None
 
 
 def is_reserved_env_name(name: str) -> bool:
@@ -661,6 +842,16 @@ def parse_env_file(text: str, *, member_writable_only: bool = False) -> tuple[En
     for name, numbers in lines_by_name.items():
         if len(numbers) > 1:
             problems["duplicate_name"].extend(EnvProblem(name=name, line=n) for n in numbers)
+
+    # Two mutually exclusive aliases: whichever the tool prefers silently wins,
+    # so the file is ambiguous. Each later name of a pair is reported against
+    # the earlier one. Members of one credential FAMILY (the AWS bundle) belong
+    # together and may arrive in one file.
+    seen: list[str] = []
+    for entry in entries:
+        if env_alias_of(entry.name, seen) is not None:
+            problems["alias_pair"].append(EnvProblem(name=entry.name, line=entry.line))
+        seen.append(entry.name)
 
     if len(entries) > MAX_ENV_FILE_ENTRIES:
         problems["too_many_entries"].extend(

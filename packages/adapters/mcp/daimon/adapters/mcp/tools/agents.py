@@ -7,6 +7,7 @@ that can be unit-tested without a FastMCP Context.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import time
 import uuid
@@ -31,9 +32,11 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
 from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
+from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import (
@@ -62,7 +65,12 @@ from daimon.core.github_app_auth import build_app_jwt, get_installation_id_for_r
 from daimon.core.github_repo_auth import InstallationLookup
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_attach import attach_mcp_server_to_agent
+from daimon.core.mcp_attach import (
+    McpServerReplaceRefusedError,
+    attach_mcp_server_to_agent,
+    decide_mcp_replacement,
+    replaced_server_url,
+)
 from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_report_failures
@@ -561,6 +569,7 @@ async def _update_agent_impl(
         runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id
     )
     _reject_system_agent(agent)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
 
     touched_fields = {field_name for field_name, value in scalars.items() if value is not None}
     if tools is not None:
@@ -570,7 +579,19 @@ async def _update_agent_impl(
     if skills is not None:
         touched_fields.add("skills")
     if touched_fields & reachability.REACHABILITY_GATED_FIELDS:
-        await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=name)
+        await reachability.require_admin_for_reachable_agent(
+            runtime, auth, agent_name=name, agent=agent
+        )
+    mcp_replace_allowed = (
+        await _require_mcp_replace_allowed(
+            runtime,
+            auth,
+            agent,
+            [(str(entry.get("name")), str(entry.get("url"))) for entry in mcp_servers],
+        )
+        if mcp_servers is not None
+        else False
+    )
 
     # Resolve skill names outside the closure — name resolution does not depend on
     # the agent's current state and must not be repeated on each retry attempt.
@@ -608,6 +629,17 @@ async def _update_agent_impl(
                     "or use remove_skill before adding more."
                 )
         if mcp_servers is not None:
+            if not mcp_replace_allowed and any(
+                replaced_server_url(
+                    fresh, server_name=str(entry.get("name")), url=str(entry.get("url"))
+                )
+                for entry in mcp_servers
+            ):
+                # Attached under this name at another URL since the check above.
+                raise ToolError(
+                    f"'{name}' now has one of these server names at another URL; repointing "
+                    "it needs an admin. Nothing was changed."
+                )
             patch["mcp_servers"] = merge_mcp_servers_with_ma(mcp_servers, fresh)
             # merge_mcp_servers_with_ma's return type is `list | None` at the
             # signature level (None only for a None input), but `mcp_servers`
@@ -637,8 +669,20 @@ async def _update_agent_impl(
                 patch["tools"] = merge_default_agent_toolset(effective_tools)
         return await runtime.client.beta.agents.update(fresh.id, version=fresh.version, **patch)
 
+    # An MCP server change is serialized with the token forms' attach-then-
+    # publish for this agent; other fields need no lock.
+    mcp_lock = (
+        agent_mcp_write_lock(
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id),
+        )
+        if mcp_servers is not None
+        else contextlib.nullcontext()
+    )
     try:
-        updated = await update_agent_with_version_retry(runtime.client, agent.id, _apply)
+        async with mcp_lock:
+            updated = await update_agent_with_version_retry(runtime.client, agent.id, _apply)
     except anthropic.ConflictError as exc:
         # Residual conflict after the one retry — surface as a clean ToolError.
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc
@@ -675,6 +719,40 @@ async def _update_agent_impl(
     return result
 
 
+async def _require_mcp_replace_allowed(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    agent: BetaManagedAgentsAgent,
+    servers: list[tuple[str, str]],
+) -> bool:
+    """Gate repointing an existing server name at another URL (`mcp_replace`).
+
+    Returns whether a replacement is authorized, for the fresh-agent re-check
+    in the write. Refuses here when one is needed and the caller may not make
+    it; the attachment rules count handoff threads and personal defaults as
+    shared, which the plain reachability gate does not.
+    """
+    replaced = [
+        name for name, url in servers if replaced_server_url(agent, server_name=name, url=url)
+    ]
+    if not replaced:
+        return False
+    outcome = await decide_mcp_replacement(
+        runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        agent=agent,
+        is_admin=auth.is_admin,
+        default=runtime.deployment_default,
+    )
+    if outcome != "allow":
+        raise ToolError(
+            f"'{agent.name}' already has {', '.join(repr(n) for n in replaced)} at another URL "
+            "and is shared, so repointing it needs a server or workspace admin, and the caller "
+            "is not one. Nothing was changed. Do not retry under another name."
+        )
+    return True
+
+
 async def _attach_mcp_server_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -699,7 +777,10 @@ async def _attach_mcp_server_impl(
         runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
     )
     _reject_system_agent(agent)
-    await reachability.require_admin_for_reachable_agent(runtime, auth, agent_name=agent_name)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
+    await reachability.require_admin_for_reachable_agent(
+        runtime, auth, agent_name=agent_name, agent=agent
+    )
 
     existing = list(agent.mcp_servers or [])
     # No-op check on the initially-found agent (acceptable: a concurrent change
@@ -714,9 +795,24 @@ async def _attach_mcp_server_impl(
     # The reserved-server guard above is not repeated there: it depends only on
     # caller inputs, so each entry point applies its own policy.
     try:
-        updated = await attach_mcp_server_to_agent(
-            runtime.client, agent.id, server_name=server_name, url=url
-        )
+        # Serialized with the token forms' attach-then-publish for this agent.
+        async with agent_mcp_write_lock(
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id),
+        ):
+            replace_allowed = await _require_mcp_replace_allowed(
+                runtime, auth, agent, [(server_name, url)]
+            )
+            updated = await attach_mcp_server_to_agent(
+                runtime.client,
+                agent.id,
+                server_name=server_name,
+                url=url,
+                replace_allowed=replace_allowed,
+            )
+    except McpServerReplaceRefusedError as exc:
+        raise ToolError(str(exc)) from exc
     except anthropic.ConflictError as exc:
         # Residual conflict after the one retry — surface as a clean ToolError.
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc

@@ -15,9 +15,15 @@ from daimon.core.env_file import (
     MAX_ENV_VALUE_BYTES,
     EnvFileRejected,
     decode_env_bytes,
+    env_alias_of,
+    env_alias_shadowed,
+    env_collision_line,
+    env_import_collisions,
     env_name_hard_denied,
     env_name_member_writable,
     env_name_problem,
+    env_row_skip_reason,
+    env_shadow_phrase,
     is_reserved_env_name,
     parse_env_file,
     serialize_env_file,
@@ -598,3 +604,199 @@ def test_opaque_secret_exceptions_escape_their_prefix_and_nothing_else(name: str
     assert not env_name_hard_denied(name)
     neighbour = name.split("_", 1)[0] + "_CONFIG_USERCONFIG"
     assert env_name_hard_denied(neighbour), "the prefix still blocks everything else"
+
+
+# --- follow-up: more exec-on-env names, path-valued keys, alias groups -------
+
+_FOLLOWUP_HARD_DENY: list[str] = [
+    "RSYNC_RSH",
+    "CVS_RSH",
+    "GIT_PASSCOMMAND",
+    "SSHPASSCOMMAND",
+    "SVN_SSH",
+    "CONFIG_SITE",
+    "GCC_EXEC_PREFIX",
+    "CCACHE_PREFIX",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTDOC",
+    "COR_PROFILER",
+    "COR_PROFILER_PATH",
+    "CORECLR_PROFILER",
+    "CORECLR_ENABLE_PROFILING",
+    "DOTNET_ADDITIONAL_DEPS",
+    "LUA_PATH",
+    "LUA_PATH_5_4",
+    "LUA_CPATH",
+    "LUA_CPATH_5_4",
+    "CLOUDSDK_PYTHON",
+    "COVERAGE_PROCESS_START",
+    "COVERAGE_RCFILE",
+    "NODE_REPL_EXTERNAL_MODULE",
+    "PYENV_VERSION",
+    "LESSKEYIN",
+    "LESSKEY_SYSTEM",
+    "LESSEDIT",
+    "MANROFFOPT",
+    "AS",
+    "NM",
+    "RANLIB",
+    "STRIP",
+    "FC",
+    "MAKE",
+    "MAKESHELL",
+    "GOINSECURE",
+    "GONOPROXY",
+    "GODEBUG",
+    "FCEDIT",
+    "ANSIBLE_VAULT_PASSWORD_FILE",
+]
+
+
+@pytest.mark.parametrize("name", _FOLLOWUP_HARD_DENY)
+def test_followup_exec_on_env_names_are_hard_denied(name: str) -> None:
+    assert env_name_hard_denied(name), f"{name} must be refused for everyone"
+    assert env_name_problem(name, is_admin=True) == "reserved_name"
+
+
+@pytest.mark.parametrize(
+    "name", ["KAFKA_CLIENT_KEY", "ETCDCTL_KEY", "DB_PASSWORD_FILE", "SERVICE_ACCOUNT_KEY_FILE"]
+)
+def test_path_valued_key_names_are_admin_only(name: str) -> None:
+    """A name that holds a PATH the tool opens is not a secret a member may add."""
+    assert not env_name_hard_denied(name), f"an admin may still set {name}"
+    assert env_name_problem(name, is_admin=False) == "not_credential_name"
+    assert env_name_problem(name, is_admin=True) is None
+
+
+def test_member_suffix_hint_lists_exactly_the_accepted_suffixes() -> None:
+    from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT
+
+    for suffix in ("_KEY", "_API_KEY", "_KEY_ID", "_TOKEN", "_SECRET", "_PASSWORD", "_PASSWD"):
+        assert suffix in MEMBER_SECRET_SUFFIX_HINT, f"the refusal must name {suffix}"
+        assert env_name_member_writable(f"ACME{suffix}"), f"ACME{suffix} must be writable"
+
+
+@pytest.mark.parametrize(
+    ("adding", "held", "shadowed"),
+    [
+        ("GITHUB_TOKEN", ["GH_TOKEN"], "GH_TOKEN"),
+        ("GH_TOKEN", ["GITHUB_TOKEN"], "GITHUB_TOKEN"),
+        ("ANTHROPIC_AUTH_TOKEN", ["ANTHROPIC_API_KEY"], "ANTHROPIC_API_KEY"),
+        ("AWS_SESSION_TOKEN", ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"], "AWS_ACCESS_KEY_ID"),
+        ("OPENAI_KEY", ["OPENAI_API_KEY"], "OPENAI_API_KEY"),
+        ("GH_TOKEN", ["OPENAI_API_KEY"], None),
+        ("GH_TOKEN", ["GH_TOKEN"], None),
+    ],
+)
+def test_env_alias_shadowed(adding: str, held: list[str], shadowed: str | None) -> None:
+    assert env_alias_shadowed(adding, held) == shadowed
+
+
+def test_an_import_collides_on_an_alias_and_says_which_key() -> None:
+    entries = parse_env_file("OPENAI_API_KEY=a\nGITHUB_TOKEN=secret-b\n")
+    held = {"GH_TOKEN"}
+    collisions = env_import_collisions(entries, held)
+    assert [e.name for e in collisions] == ["GITHUB_TOKEN"]
+    line = env_collision_line(collisions[0], held)
+    assert "GITHUB_TOKEN would replace GH_TOKEN" in line
+    assert "secret-b" not in line, "no value in the line"
+
+
+def test_skip_reason_is_the_assemblers_rule() -> None:
+    assert env_row_skip_reason("API_KEY", "v") is None
+    assert env_row_skip_reason("TAR_OPTIONS", "v") == "reserved_name"
+    assert env_row_skip_reason("A-B", "v") == "bad_name"
+    assert env_row_skip_reason("API_KEY", "a\0b") == "nul_in_value"
+
+
+@pytest.mark.parametrize("name", ["VIMINIT", "EXINIT"])
+def test_editor_init_commands_are_hard_denied(name: str) -> None:
+    assert env_name_hard_denied(name)
+
+
+@pytest.mark.parametrize("name", ["POSTGRES_SSL_KEY", "MQTT_TLS_KEY"])
+def test_tls_key_file_names_are_admin_only(name: str) -> None:
+    assert not env_name_hard_denied(name)
+    assert env_name_problem(name, is_admin=False) == "not_credential_name"
+    assert env_name_problem(name, is_admin=True) is None
+
+
+@pytest.mark.parametrize(
+    ("adding", "held"),
+    [
+        ("AWS_SECURITY_TOKEN", "AWS_SESSION_TOKEN"),
+        ("GLAB_TOKEN", "GITLAB_TOKEN"),
+        ("FLY_ACCESS_TOKEN", "FLY_API_TOKEN"),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
+        ("NODE_AUTH_TOKEN", "NPM_TOKEN"),
+    ],
+)
+def test_more_alias_groups(adding: str, held: str) -> None:
+    assert env_alias_shadowed(adding, [held]) == held
+    assert env_alias_shadowed(held, [adding]) == adding
+
+
+def test_a_file_with_both_names_of_an_alias_pair_is_refused() -> None:
+    """Whichever name the tool prefers would silently win: the file is ambiguous."""
+    with pytest.raises(EnvFileRejected) as caught:
+        parse_env_file("OPENAI_API_KEY=a\nGH_TOKEN=b\nGITHUB_TOKEN=c\n")
+    assert caught.value.rejection == "alias_pair"
+    assert [(p.name, p.line) for p in caught.value.problems] == [("GITHUB_TOKEN", 3)]
+
+
+def test_alias_pair_refusal_copy_names_the_key_not_the_value() -> None:
+    from daimon.core.continuity.messages import render_env_import_rejected
+
+    with pytest.raises(EnvFileRejected) as caught:
+        parse_env_file("GH_TOKEN=secret-b\nGITHUB_TOKEN=secret-c\n")
+    text = render_env_import_rejected(
+        caught.value.rejection, caught.value.problems, target_name="tester"
+    )
+    assert "GITHUB_TOKEN" in text and "same tool" in text
+    assert "secret-" not in text
+
+
+# --- aliases vs credential families ------------------------------------------
+
+
+def test_a_fresh_agent_may_import_a_whole_aws_family_in_one_file() -> None:
+    entries = parse_env_file(
+        "AWS_ACCESS_KEY_ID=AKIAEXAMPLE\nAWS_SECRET_ACCESS_KEY=s\nAWS_SESSION_TOKEN=t\n"
+    )
+    assert [e.name for e in entries] == [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+    ]
+    assert env_import_collisions(entries, held=()) == ()
+
+
+def test_the_two_aws_session_token_names_are_still_mutually_exclusive() -> None:
+    with pytest.raises(EnvFileRejected) as caught:
+        parse_env_file("AWS_SESSION_TOKEN=a\nAWS_SECURITY_TOKEN=b\n")
+    assert caught.value.rejection == "alias_pair"
+
+
+@pytest.mark.parametrize(
+    ("adding", "held"),
+    [
+        ("AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID"),
+        ("AWS_SESSION_TOKEN", "AWS_ACCESS_KEY_ID"),
+        ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"),
+    ],
+)
+def test_adding_to_a_stored_family_changes_it(adding: str, held: str) -> None:
+    """A member must not graft a session token or secret onto someone else's access key."""
+    assert env_alias_shadowed(adding, [held]) == held
+    assert env_alias_of(adding, [held]) is None, "a family member is not an alias"
+    assert env_shadow_phrase(adding, held) == f"would change the credential {held} belongs to"
+
+
+def test_an_import_onto_a_stored_family_collides_and_says_so() -> None:
+    entries = parse_env_file("AWS_SESSION_TOKEN=t\n")
+    held = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}
+    collisions = env_import_collisions(entries, held)
+    assert [e.name for e in collisions] == ["AWS_SESSION_TOKEN"]
+    assert "would change the credential AWS_ACCESS_KEY_ID belongs to" in env_collision_line(
+        collisions[0], held
+    )

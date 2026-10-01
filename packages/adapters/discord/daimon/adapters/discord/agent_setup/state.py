@@ -35,6 +35,9 @@ class RosterEntry:
     # before reconcile); used to derive the per-agent uuid for credential reads.
     ma_agent_id: str = ""
     is_system: bool = False
+    # The `daimon_name` routing name channel and personal defaults are stored
+    # under; it can differ from the MA display name after a rename.
+    routing_name: str = ""
 
 
 @dataclasses.dataclass(frozen=True)

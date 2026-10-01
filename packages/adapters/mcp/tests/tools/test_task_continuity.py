@@ -1090,3 +1090,90 @@ async def test_handoff_to_another_channels_agent_is_admin_only(
         assert binding is None, "a refused handoff must leave the thread unbound"
     else:
         assert binding is not None and binding.responder_ma_agent_id == _DESTINATION_ID
+
+
+async def test_handoff_from_a_dm_is_outside_every_pin(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A private DM conversation runs in no channel. Even when its recorded channel
+    is one the agent is pinned to, the DM scope must count as outside."""
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={_DESTINATION_NAME: ("C_PARENT",)}),
+    )
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform="discord",
+        platform_user_id="42",
+        is_admin=True,
+    )
+
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="dm:3f1c0a52-0000-4000-8000-000000000000",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.ADMIN,
+    ) as origin:
+        with pytest.raises(ToolError, match="pinned to other channels"):
+            await _hand_off_task_impl(
+                runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+            )
+
+
+async def test_handoff_refuses_an_agent_pinned_by_its_display_name(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The destination's config name is unpinned; its MA display name is pinned."""
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"Research Display": ("C_RX",)}),
+    )
+    await db_session.commit()
+    destination = ma_agent(
+        id=_DESTINATION_ID,
+        name="Research Display",
+        model=ma_model_config("claude-sonnet-5", speed="standard"),
+        metadata={MA_METADATA_KEY_TENANT: str(tenant.id), MA_METADATA_KEY_NAME: _DESTINATION_NAME},
+    ).model_dump(mode="json")
+    runtime = _runtime(committing_sessionmaker, _client([destination]))
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform="discord",
+        platform_user_id="42",
+        is_admin=True,
+    )
+
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.ADMIN,
+    ) as origin:
+        with pytest.raises(ToolError, match="pinned to other channels"):
+            await _hand_off_task_impl(
+                runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+            )

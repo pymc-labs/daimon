@@ -36,10 +36,11 @@ import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.operation_policy import (
     OperationKind,
     PolicyOutcome,
@@ -96,9 +97,11 @@ async def gather_target_facts(
     *,
     operation: OperationKind,
     tenant_id: uuid.UUID,
-    agent_name: str,
+    agent_names: tuple[str | None, ...],
+    ma_agent_id: str | None,
     is_daimon_managed: bool,
     caller: ChannelAdminCaller,
+    caller_account_id: uuid.UUID | None = None,
 ) -> TargetFacts:
     """The policy facts about one target, read fresh and only while the decision turns on them.
 
@@ -117,10 +120,13 @@ async def gather_target_facts(
             operation,
             tenant_id=tenant_id,
             platform="slack",
-            agent_name=agent_name,
+            agent_names=agent_names,
+            ma_agent_id=ma_agent_id,
             default=runtime.deployment_default,
             caller=caller,
             is_daimon_managed=is_daimon_managed,
+            caller_account_id=caller_account_id,
+            caller_platform_user_id=caller.platform_user_id,
         )
 
 
@@ -167,7 +173,8 @@ async def refuse_unless_allowed(
         runtime,
         operation=operation,
         tenant_id=tenant_id,
-        agent_name=_agent_name_of(agent),
+        agent_names=agent_pin_names(agent.name, agent.metadata),
+        ma_agent_id=str(agent.id),
         is_daimon_managed=_is_daimon_managed(agent),
         caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
     )
@@ -208,7 +215,10 @@ async def refuse_unless_allowed_for_agent_name(
         runtime,
         operation=operation,
         tenant_id=tenant_id,
-        agent_name=agent_name,
+        agent_names=(agent_name,)
+        if agent is None
+        else (agent_name, *agent_pin_names(agent.name, agent.metadata)),
+        ma_agent_id=None if agent is None else str(agent.id),
         is_daimon_managed=agent is not None and _is_daimon_managed(agent),
         caller=ChannelAdminCaller(platform_user_id=user_id, is_server_admin=is_admin),
     )
@@ -244,10 +254,6 @@ def _allowed_whatever_the_target(operation: OperationKind, *, is_admin: bool) ->
 
 def _is_daimon_managed(agent: BetaManagedAgentsAgent) -> bool:
     return agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-
-
-def _agent_name_of(agent: BetaManagedAgentsAgent) -> str:
-    return str(agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name)
 
 
 def refusal_message(operation: OperationKind, outcome: PolicyOutcome) -> str:
