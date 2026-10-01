@@ -225,7 +225,6 @@ def _runtime(
     settings.thread_naming = thread_naming
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100
-    discord_settings.per_caller_thread_sessions = True
     settings.discord = discord_settings
     anthropic = build_fake_anthropic(router.dispatch)
     resolver_cache = new_resolver_cache()

@@ -334,34 +334,18 @@ def test_discord_health_port_defaults_to_8081(monkeypatch: pytest.MonkeyPatch) -
     assert settings.discord.health_port == 8081, "health_port defaults to 8081"
 
 
-def test_discord_per_caller_thread_sessions_defaults_to_true(
+def test_discord_ignores_the_removed_per_caller_thread_sessions_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#196: fresh deploys must run per-caller thread sessions by default so the
-    #162 confused-deputy (frozen thread-starter identity) leak does not ship."""
-    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
-    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
-    monkeypatch.setenv("DAIMON_DISCORD__BOT_TOKEN", "discord-token")
-    monkeypatch.delenv("DAIMON_DISCORD__PER_CALLER_THREAD_SESSIONS", raising=False)
-    settings = load_settings(_env_file=None)
-    assert settings.discord is not None, "discord subtree present when bot_token is set"
-    assert settings.discord.per_caller_thread_sessions is True, (
-        "per_caller_thread_sessions must default to True on a fresh deploy (#196)"
-    )
-
-
-def test_discord_per_caller_thread_sessions_opt_out_preserved(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Operators can still explicitly disable per-caller thread sessions."""
+    """Deployments that still set the removed variable keep booting."""
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     monkeypatch.setenv("DAIMON_DISCORD__BOT_TOKEN", "discord-token")
     monkeypatch.setenv("DAIMON_DISCORD__PER_CALLER_THREAD_SESSIONS", "false")
     settings = load_settings(_env_file=None)
-    assert settings.discord is not None, "discord subtree present when bot_token is set"
-    assert settings.discord.per_caller_thread_sessions is False, (
-        "explicit false must still opt out of per-caller thread sessions"
+    assert settings.discord is not None, "a leftover removed setting must not break loading"
+    assert not hasattr(settings.discord, "per_caller_thread_sessions"), (
+        "the removed setting must not come back as a field"
     )
 
 
