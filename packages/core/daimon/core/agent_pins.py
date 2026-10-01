@@ -118,15 +118,10 @@ async def request_pin_refusal(
     if not policy.agent_channel_pins:
         return None
     account = await get_account(session, row.account_id)
+    is_admin = account is not None and account.role is Role.ADMIN
     names = None if agent is None else agent_pin_names(agent.name, agent.metadata)
-    refused = pin_write_refused(
-        policy,
-        is_admin=account is not None and account.role is Role.ADMIN,
-        agent_names=names,
-        parent_channel_id=row.parent_channel_id,
-        thread_id=row.origin_thread_id,
-    )
-    if refused and account is not None and names is not None:
+    administered: frozenset[str] = frozenset()
+    if account is not None and not is_admin and names is not None:
         administered = await load_administered_channel_ids(
             session,
             tenant_id=row.tenant_id,
@@ -136,7 +131,12 @@ async def request_pin_refusal(
                 role_ids=frozenset(account.platform_role_ids),
             ),
         )
-        refused = not is_pin_administered(
-            policy, agent_names=names, administered_channel_ids=administered
-        )
+    refused = pin_write_refused(
+        policy,
+        is_admin=is_admin,
+        agent_names=names,
+        parent_channel_id=row.parent_channel_id,
+        thread_id=row.origin_thread_id,
+        administered_channel_ids=administered,
+    )
     return PIN_WRITE_REFUSAL if refused else None
