@@ -36,7 +36,6 @@ __all__ = [
     "ReportRegistered",
     "put_admin_report",
     "delete_admin_report",
-    "revoke_admin_recipient",
 ]
 
 # Conservative per-call timeout, matching the notebook host client's sibling
@@ -204,25 +203,6 @@ async def delete_admin_report(
         params={"tenant_id": str(tenant_id)},
         headers=_bearer_headers(admin_secret),
     )
-    if not r.is_success:
-        raise ReportHostError(f"report host returned {r.status_code}: {r.text[:200]}")
-    try:
-        return _DeletedWire.model_validate(r.json()).deleted
-    except ValidationError as exc:
-        raise ReportHostError(f"report host response missing expected field: {exc}") from exc
-
-
-async def revoke_admin_recipient(
-    *,
-    client: httpx.AsyncClient,
-    settings: ReportHostSettings,
-    slug: str,
-    token: str,
-) -> bool:
-    """``DELETE /admin/reports/{slug}/recipients/{token}``; True if a link was revoked."""
-    host_url, admin_secret = _require_configured(settings)
-    url = f"{str(host_url).rstrip('/')}/admin/reports/{slug}/recipients/{token}"
-    r = await _send(client, "DELETE", url, headers=_bearer_headers(admin_secret))
     if not r.is_success:
         raise ReportHostError(f"report host returned {r.status_code}: {r.text[:200]}")
     try:

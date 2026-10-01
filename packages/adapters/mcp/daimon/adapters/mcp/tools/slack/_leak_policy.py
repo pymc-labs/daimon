@@ -21,13 +21,6 @@ TURN_CONTEXT_TTL = timedelta(minutes=60)
 DM_REDIRECT_MSG = "that DM's content is only shareable in a DM with me — ask me there instead"
 
 
-def resolve_destination(channels: frozenset[str]) -> str | None:
-    """Exactly one live turn channel → that's the destination; else fail closed."""
-    if len(channels) == 1:
-        return next(iter(channels))
-    return None
-
-
 def is_dm_destination(destination: str | None) -> bool:
     """Slack im (1:1 DM) channel ids start with 'D' — audience is the user alone."""
     return destination is not None and destination.startswith("D")

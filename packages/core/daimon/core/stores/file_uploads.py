@@ -16,11 +16,10 @@ from __future__ import annotations
 import secrets
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, cast
 
 from daimon.core._models import FileUpload
 from daimon.core.stores.domain import FileUploadRow
-from sqlalchemy import CursorResult, delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Matches Discord's per-file upload ceiling — a larger row could never be
@@ -117,12 +116,3 @@ async def get_upload(
         )
     ).scalar_one_or_none()
     return None if row is None else FileUploadRow.model_validate(row)
-
-
-async def delete_expired_uploads(session: AsyncSession, *, now: datetime) -> int:
-    """Drop uploads past their TTL. Returns the number removed."""
-    result = await session.execute(
-        delete(FileUpload).where(FileUpload.created_at < now - UPLOAD_TTL)
-    )
-    await session.flush()
-    return cast(CursorResult[Any], result).rowcount

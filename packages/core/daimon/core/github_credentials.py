@@ -123,32 +123,3 @@ async def get_pat(
             return decrypt_token(fernet, cred.encrypted_token)
 
         return fallback_pat if allow_service_default and fallback_pat is not None else None
-
-
-async def get_github_login(
-    *,
-    principal_id: uuid.UUID,
-    agent_id: uuid.UUID | None = None,
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> str | None:
-    """Display-only login resolver — the non-secret peer of `get_pat`.
-
-    Returns `github_login` for the resolved credential without decrypting (or
-    even reading) the token, so a Working repo view can show GitHub linkage
-    for the selected agent. Same cascade shape as `get_pat`:
-
-    agent_id given -> overlay-only -> None (no principal-default bleed).
-    agent_id=None -> principal-default -> None.
-    """
-    async with sessionmaker() as session:
-        if agent_id is not None:
-            binding = await binding_store.get_agent_github_binding(session, agent_id=agent_id)
-            if binding is None:
-                return None
-            return await cred_store.get_credential_login_by_principal(
-                session, principal_id=binding.principal_id
-            )
-
-        return await cred_store.get_credential_login_by_principal(
-            session, principal_id=principal_id
-        )

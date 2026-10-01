@@ -15,7 +15,7 @@ from daimon.core.stores.domain import (
     RepoAccessProof,
     RepoProofKind,
 )
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -164,21 +164,3 @@ async def get_tenant_skill_repo_proof_kind(
         if credential.proof_kind is not None:
             return credential.proof_kind
     return None
-
-
-async def delete_skill_repo_credential(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    agent_id: uuid.UUID,
-    repo_url: str,
-) -> None:
-    """Remove the credential for (tenant, agent, repo). Idempotent — no raise if absent."""
-    await session.execute(
-        delete(AgentSkillRepoCredential).where(
-            AgentSkillRepoCredential.tenant_id == tenant_id,
-            AgentSkillRepoCredential.agent_id == agent_id,
-            AgentSkillRepoCredential.repo_url == _normalize_owner_repo(repo_url),
-        )
-    )
-    await session.flush()

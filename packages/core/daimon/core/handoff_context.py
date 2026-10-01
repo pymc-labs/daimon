@@ -184,17 +184,6 @@ class SystemBlocks:
 
 
 @dataclass(frozen=True, slots=True)
-class UserPrefix:
-    """Framing text delivered as a prefix to the successor's first user message.
-
-    The shape `SystemBlocks` degrades to on a model without `system.message`
-    support; `HandoffFraming.user_prefix` carries the same text directly.
-    """
-
-    text: str
-
-
-@dataclass(frozen=True, slots=True)
 class HandoffFraming:
     """What to send with the successor's first user message.
 

@@ -25,7 +25,6 @@ __all__ = [
     "MAX_PRIVATE_METADATA_CHARS",
     "MAX_SECTION_TEXT_CHARS",
     "MAX_TITLE_CHARS",
-    "MAX_VIEW_STACK",
     "finish_modal",
     "fit_title",
 ]
@@ -39,9 +38,6 @@ MAX_TITLE_CHARS: Final = 24
 #: Characters in `private_metadata`.
 MAX_PRIVATE_METADATA_CHARS: Final = 3000
 
-#: Views one modal's stack holds. Recorded for callers that push; the panel
-#: itself uses two (a root plus one pushed view).
-MAX_VIEW_STACK: Final = 3
 
 #: Characters in a section block's `text`. Renderers clip to this themselves —
 #: a section that grows with an agent's key list is content, not a bug.
