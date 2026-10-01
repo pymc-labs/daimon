@@ -265,6 +265,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Slack bot no longer answers thread replies that don't mention it. Slack
+  can deliver an `app_mention` event for a reply in a thread the bot is in even
+  when the reply never mentions it, and each one ran a billed turn. A turn now
+  runs only when the message contains `@daimon`, as on Discord, so follow-ups
+  in a thread need the mention every time. Dropped events are logged as
+  `slack.event_dropped.no_explicit_mention`.
+- Slack answers that put a bare link in bold or italics (`**https://…**`) no
+  longer render as a dead link ending in `*`. The link is posted as an explicit
+  Markdown link, with any trailing full stop or question mark left outside it.
+  Code, existing links and table cells are left as written.
 - The checkout landing pages no longer tell every payer to return to Discord.
 - Continuity notices (workspace loss, fresh start, a failed preparation, a new
   responder, a timer that did not run) say "here" and "ask again" instead of

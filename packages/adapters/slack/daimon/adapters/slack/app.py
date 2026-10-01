@@ -69,7 +69,11 @@ from daimon.adapters.slack.feedback import (
     handle_feedback_vote,
     run_feedback_text_submission,
 )
-from daimon.adapters.slack.gating import is_external_interactive, is_slack_connect_external
+from daimon.adapters.slack.gating import (
+    is_external_interactive,
+    is_slack_connect_external,
+    mentions_bot,
+)
 from daimon.adapters.slack.help import handle_help_command
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
@@ -292,6 +296,9 @@ class SlackApp:
         self._mention_acks_pending: int = 0
         # Cancel registry: status_ts -> (cancel Event, author_id).
         self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
+        # Bot user id per workspace, resolved lazily via auth.test. The id is
+        # immutable for a given app+workspace, so the cache never invalidates.
+        self._bot_user_ids: dict[str, str] = {}
         # Tool-write confirmation cards awaiting a click (in-process, like the
         # cancel registry above).
         self._confirmations = SlackConfirmationCards()
@@ -985,9 +992,12 @@ class SlackApp:
         2. DEDUP: insert_if_new before any other work.
         3. TOKEN RESOLVE: get_slack_bot_token; drop on None.
         4. PER-EVENT CLIENT: decrypt + AsyncWebClient(token=...) — never cached.
-        5. SLACK CONNECT GATE: ephemeral rejection for external-workspace senders.
-        6. TENANT RESOLVE: derive_tenant_uuid.
-        7. Handoff to _orchestrate.
+        5. EXPLICIT MENTION GATE: drop events whose text lacks <@bot_user_id>;
+           runs before the Connect gate so un-mentioned external senders are
+           dropped silently rather than sent a rejection ephemeral.
+        6. SLACK CONNECT GATE: ephemeral rejection for external-workspace senders.
+        7. TENANT RESOLVE: derive_tenant_uuid.
+        8. Handoff to _orchestrate.
 
         The full handler body is wrapped in the listener-boundary catch
         (DaimonError | anthropic.APIError | SlackApiError).  Core helpers
@@ -1051,7 +1061,44 @@ class SlackApp:
                 token=token, retry_handlers=build_retry_handlers()
             )
 
-            # (4) SLACK CONNECT GATE — reject external-workspace senders.
+            # (4) EXPLICIT MENTION GATE — Slack has been observed delivering
+            # app_mention events for un-mentioned thread replies; require the
+            # <@bot_user_id> token in the text (Discord parity). Runs BEFORE the
+            # Slack Connect gate so external senders who never addressed the bot
+            # are dropped silently instead of receiving a rejection ephemeral.
+            # The bot user id is resolved once per workspace via auth.test and
+            # cached. A failed resolution drops the event without the boundary's
+            # error reply: whether the event addressed the bot is unknown, so
+            # nothing is posted into a thread that may never have mentioned it.
+            # Dedup already recorded the event, so a Slack retry will not
+            # re-deliver it — accepted for this once-per-process call.
+            bot_user_id = self._bot_user_ids.get(team_id)
+            if bot_user_id is None:
+                try:
+                    auth_resp = await client.auth_test()  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
+                except SlackApiError as exc:
+                    log.error(
+                        "slack.event_dropped.bot_user_id_unresolved",
+                        team_id=team_id,
+                        channel=channel,
+                        event_ts=event_ts,
+                        exc_info=exc,
+                    )
+                    capture_exception_with_scope(exc)
+                    return
+                bot_user_id = str(auth_resp.get("user_id") or "")
+                if bot_user_id:
+                    self._bot_user_ids[team_id] = bot_user_id
+            if not mentions_bot(event, bot_user_id=bot_user_id):
+                log.info(
+                    "slack.event_dropped.no_explicit_mention",
+                    team_id=team_id,
+                    channel=channel,
+                    event_ts=event_ts,
+                )
+                return
+
+            # (5) SLACK CONNECT GATE — reject external-workspace senders.
             if is_slack_connect_external(event, team_id=team_id):
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=channel,
@@ -1068,9 +1115,9 @@ class SlackApp:
                 )
                 return
 
-            # (5) TENANT RESOLVE — derived above, before the may-post check.
+            # (6) TENANT RESOLVE — derived above, before the may-post check.
 
-            # (6) Orchestration seam — turn body is delegated here.
+            # (7) Orchestration seam — turn body is delegated here.
             await self._orchestrate(
                 event,
                 team_id=team_id,
