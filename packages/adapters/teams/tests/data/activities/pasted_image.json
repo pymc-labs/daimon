@@ -1,0 +1,47 @@
+{
+  "type": "message",
+  "id": "1700000000040",
+  "timestamp": "2017-02-01T21:10:07.437Z",
+  "localTimestamp": "2017-02-01T14:10:07.437-07:00",
+  "serviceUrl": "https://smba.trafficmanager.net/amer/00000000-0000-0000-0000-000000000001/",
+  "channelId": "msteams",
+  "from": {
+    "id": "29:1synthetic-user-mri",
+    "name": "Ada Lovelace",
+    "aadObjectId": "00000000-0000-0000-0000-000000000002"
+  },
+  "conversation": {
+    "conversationType": "personal",
+    "tenantId": "00000000-0000-0000-0000-000000000001",
+    "id": "a:conversation-1"
+  },
+  "recipient": {
+    "id": "28:bot-client-id",
+    "name": "daimon"
+  },
+  "attachments": [
+    {
+      "contentType": "image/*",
+      "contentUrl": "https://smba.trafficmanager.net/amer/v3/attachments/0-eus-d1-synthetic/views/original"
+    },
+    {
+      "contentType": "text/html",
+      "content": "<p><img src=\"https://us-api.asm.skype.com/v1/objects/0-eus-d1-synthetic/views/imgo\" width=\"250\" height=\"250\" itemscope=\"png\"></p>"
+    }
+  ],
+  "entities": [
+    {
+      "locale": "en-US",
+      "country": "US",
+      "platform": "Windows",
+      "timezone": "America/Los_Angeles",
+      "type": "clientInfo"
+    }
+  ],
+  "channelData": {
+    "tenant": {
+      "id": "00000000-0000-0000-0000-000000000001"
+    }
+  },
+  "locale": "en-US"
+}

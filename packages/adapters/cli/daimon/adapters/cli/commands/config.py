@@ -67,12 +67,13 @@ def _validate_key(key: str) -> ConfigField:
 # Chat platforms addressable in a scope string. "cli" is deliberately absent:
 # the local CLI tenant is what the bare `tenant` / `channel:<id>` forms already
 # target, so a `tenant:cli/local` spelling would be a second name for it.
-_SCOPE_PLATFORMS: dict[str, Platform] = {"discord": "discord", "slack": "slack"}
+_SCOPE_PLATFORMS: dict[str, Platform] = {"discord": "discord", "slack": "slack", "teams": "teams"}
 
 _SCOPE_HELP = (
     "user, tenant, tenant:<platform>/<workspace_id>, channel:<channel_id>, "
-    "channel:<platform>/<workspace_id>/<channel_id> (platform: discord|slack; "
-    "a Discord workspace id is the guild id, a Slack one the team id), "
+    "channel:<platform>/<workspace_id>/<channel_id> (platform: discord|slack|teams; "
+    "a Discord workspace id is the guild id, a Slack one the team id, a Teams one "
+    "the Entra tenant id), "
     "deployment (read-only)"
 )
 

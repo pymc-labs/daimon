@@ -1,272 +1,25 @@
-"""Tests for billing_panel: state, read, views.
+"""Tests for the Slack billing_panel views and command handler.
 
 Covers:
-- _fmt_usd pure formatter
-- estimate_turns pure formula
-- load_billing_snapshot member path (is_admin=False) — real DB, no member rows
-- load_billing_snapshot admin path (is_admin=True) — real DB, rows sorted by
-  (-cost, platform_user_id) capped at 25
 - build_billing_container renders top-up static_select ONLY when is_admin
 - empty-period clean render (zero usage produces a no-usage line, not an error)
+- a failed snapshot load replaces the Loading… modal
 
-Real Postgres via the db_session / db_session_factory fixtures. No method-level
-AsyncMock, no module-level singletons.
+The shared figures and the snapshot read are covered in core's test_billing_panel.py.
 """
 
 from __future__ import annotations
 
-import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-import pytest
-import pytest_asyncio
-from daimon.core.stores import usage_events
-from daimon.testing import ma_model_usage
+from daimon.core.billing_panel import BillingPanelState, MemberRow, load_billing_snapshot
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-_TEAM_ID = "T_BILLING_TEST"
-_CALLER_ID = "U_CALLER"
-_OTHER_ID = "U_OTHER"
 _SINCE = datetime(2025, 1, 1, tzinfo=UTC)
 _NOW = datetime(2025, 1, 15, tzinfo=UTC)
-
-
-@pytest_asyncio.fixture
-async def tenant_id(db_session: AsyncSession) -> uuid.UUID:
-    """Slack tenant with two usage-event seeded users."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id=_TEAM_ID)
-
-    # Seed usage for caller (1000 input + 1000 output tokens on claude-opus-4-7)
-    usage_caller = ma_model_usage(input_tokens=1000, output_tokens=1000)
-    await usage_events.record(
-        db_session,
-        tenant_id=tenant.id,
-        platform_user_id=_CALLER_ID,
-        managed_session_id="sess-caller-1",
-        model="claude-opus-4-7",
-        model_usage=usage_caller,
-        event_id="evt-billing-caller-1",
-    )
-
-    # Seed usage for the other user (larger spend so they appear above caller)
-    usage_other = ma_model_usage(input_tokens=10_000, output_tokens=5_000)
-    await usage_events.record(
-        db_session,
-        tenant_id=tenant.id,
-        platform_user_id=_OTHER_ID,
-        managed_session_id="sess-other-1",
-        model="claude-opus-4-7",
-        model_usage=usage_other,
-        event_id="evt-billing-other-1",
-    )
-    await db_session.commit()
-    return tenant.id
-
-
-@pytest_asyncio.fixture
-async def empty_tenant_id(db_session: AsyncSession) -> uuid.UUID:
-    """Slack tenant with no usage events (empty period)."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_BILLING_EMPTY")
-    await db_session.commit()
-    return tenant.id
-
-
-# ---------------------------------------------------------------------------
-# Pure formatter: _fmt_usd
-# ---------------------------------------------------------------------------
-
-
-def test_fmt_usd_formats_small_amount() -> None:
-    from daimon.adapters.slack.billing_panel.views import _fmt_usd
-
-    assert _fmt_usd(12.5) == "$12.50", "_fmt_usd should format 12.5 as $12.50"
-
-
-def test_fmt_usd_formats_zero() -> None:
-    from daimon.adapters.slack.billing_panel.views import _fmt_usd
-
-    assert _fmt_usd(0.0) == "$0.00", "_fmt_usd should format 0.0 as $0.00"
-
-
-def test_fmt_usd_formats_large_decimal_with_comma() -> None:
-    from daimon.adapters.slack.billing_panel.views import _fmt_usd
-
-    assert _fmt_usd(Decimal("1000")) == "$1,000.00", (
-        "_fmt_usd should use comma-separated thousands for Decimal('1000')"
-    )
-
-
-def test_fmt_usd_formats_float_large_with_comma() -> None:
-    from daimon.adapters.slack.billing_panel.views import _fmt_usd
-
-    assert _fmt_usd(2500.75) == "$2,500.75", (
-        "_fmt_usd should format large floats with comma separator"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Pure formula: estimate_turns
-# ---------------------------------------------------------------------------
-
-
-def test_estimate_turns_uses_fallback_when_no_history() -> None:
-    from daimon.adapters.slack.billing_panel.views import estimate_turns
-
-    turns = estimate_turns(10.0, guild_spend=0.0, guild_turns=0)
-    assert turns == 100, (
-        "estimate_turns with no history should use $0.10/turn fallback → $10 = 100 turns"
-    )
-
-
-def test_estimate_turns_uses_guild_average_when_history_exists() -> None:
-    from daimon.adapters.slack.billing_panel.views import estimate_turns
-
-    # $20 total spend, 4 turns → $5/turn. $10 / $5 = 2 turns.
-    turns = estimate_turns(10.0, guild_spend=20.0, guild_turns=4)
-    assert turns == 2, "estimate_turns should use guild average cost per turn when history exists"
-
-
-def test_estimate_turns_falls_back_when_spend_is_zero_but_turns_nonzero() -> None:
-    """Edge case: guild_spend=0 but guild_turns>0 → use fallback."""
-    from daimon.adapters.slack.billing_panel.views import estimate_turns
-
-    turns = estimate_turns(10.0, guild_spend=0.0, guild_turns=5)
-    assert turns == 100, "estimate_turns should fall back to $0.10/turn when guild_spend == 0"
-
-
-# ---------------------------------------------------------------------------
-# DB: load_billing_snapshot — member path (is_admin=False)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_load_billing_snapshot_member_returns_only_caller_data(
-    db_session: AsyncSession,
-    tenant_id: uuid.UUID,
-) -> None:
-    """Member path: returns caller spend/turns/cap, no member rows."""
-    from daimon.adapters.slack.billing_panel.read import load_billing_snapshot
-
-    state = await load_billing_snapshot(
-        db_session,
-        team_id=_TEAM_ID,
-        platform_user_id=_CALLER_ID,
-        is_admin=False,
-        since=_SINCE,
-        now=_NOW,
-    )
-
-    assert state.is_admin is False, "is_admin must be False for member path"
-    assert state.caller_user_id == _CALLER_ID, "caller_user_id must match the caller"
-    assert state.caller_spend > 0.0, "caller_spend must be positive (seeded usage event)"
-    assert state.caller_turns == 1, "caller_turns must be 1 (one seeded session)"
-    assert len(state.member_rows) == 0, "member path must return no member rows (self-only)"
-    assert state.guild_spend == 0.0, "member path must return zero guild_spend"
-    assert state.guild_turns == 0, "member path must return zero guild_turns"
-    assert state.guild_distinct_members == 0, "member path must return zero guild_distinct_members"
-
-
-# ---------------------------------------------------------------------------
-# DB: load_billing_snapshot — admin path (is_admin=True)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_load_billing_snapshot_admin_returns_sorted_member_rows(
-    db_session: AsyncSession,
-    tenant_id: uuid.UUID,
-) -> None:
-    """Admin path: returns per-member rows sorted by (-cost, platform_user_id)."""
-    from daimon.adapters.slack.billing_panel.read import load_billing_snapshot
-
-    state = await load_billing_snapshot(
-        db_session,
-        team_id=_TEAM_ID,
-        platform_user_id=_CALLER_ID,
-        is_admin=True,
-        since=_SINCE,
-        now=_NOW,
-    )
-
-    assert state.is_admin is True, "is_admin must be True for admin path"
-    assert len(state.member_rows) == 2, "admin path must return 2 member rows"
-
-    # Other user has more spend → must appear first (D-SORT-01)
-    first = state.member_rows[0]
-    second = state.member_rows[1]
-    assert first.platform_user_id == _OTHER_ID, (
-        "member rows must be sorted by cost_usd DESC; other user has more spend"
-    )
-    assert first.cost_usd >= second.cost_usd, "member rows must be sorted descending by cost_usd"
-
-
-@pytest.mark.asyncio
-async def test_load_billing_snapshot_admin_caps_at_25_members(
-    db_session: AsyncSession,
-) -> None:
-    """Admin path caps member rows at 25 even when more users exist."""
-    workspace_id = f"T_BILLING_MANY_{uuid.uuid4().hex[:8]}"
-    tenant = await make_tenant(db_session, platform="slack", workspace_id=workspace_id)
-
-    for i in range(30):
-        await usage_events.record(
-            db_session,
-            tenant_id=tenant.id,
-            platform_user_id=f"U_MANY_{i:03d}",
-            managed_session_id=f"sess-many-{i}",
-            model="claude-opus-4-7",
-            model_usage=ma_model_usage(input_tokens=100 * (i + 1), output_tokens=50 * (i + 1)),
-            event_id=f"evt-many-{i}",
-        )
-    await db_session.commit()
-
-    from daimon.adapters.slack.billing_panel.read import load_billing_snapshot
-
-    state = await load_billing_snapshot(
-        db_session,
-        team_id=workspace_id,
-        platform_user_id="U_MANY_000",
-        is_admin=True,
-        since=_SINCE,
-        now=_NOW,
-    )
-
-    assert len(state.member_rows) == 25, "admin path must cap member rows at 25"
-    assert state.over_cap_count == 5, "over_cap_count must reflect rows beyond the 25 cap"
-
-
-# ---------------------------------------------------------------------------
-# DB: load_billing_snapshot — empty period
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_load_billing_snapshot_member_empty_period(
-    db_session: AsyncSession,
-    empty_tenant_id: uuid.UUID,
-) -> None:
-    """Empty period: caller spend and turns are both 0; state is well-formed."""
-    from daimon.adapters.slack.billing_panel.read import load_billing_snapshot
-
-    state = await load_billing_snapshot(
-        db_session,
-        team_id="T_BILLING_EMPTY",
-        platform_user_id="U_EMPTY",
-        is_admin=False,
-        since=_SINCE,
-        now=_NOW,
-    )
-
-    assert state.caller_spend == 0.0, "empty period should have 0 caller_spend"
-    assert state.caller_turns == 0, "empty period should have 0 caller_turns"
-    assert state.member_rows == (), "empty period should have no member rows"
 
 
 # ---------------------------------------------------------------------------
@@ -288,8 +41,6 @@ def _find_topup_select(blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def _make_admin_state() -> Any:
-    from daimon.adapters.slack.billing_panel.state import BillingPanelState, MemberRow
-
     return BillingPanelState(
         is_admin=True,
         caller_user_id="U_ADMIN",
@@ -321,8 +72,6 @@ def _make_admin_state() -> Any:
 
 
 def _make_member_state() -> Any:
-    from daimon.adapters.slack.billing_panel.state import BillingPanelState
-
     return BillingPanelState(
         is_admin=False,
         caller_user_id="U_MEMBER",
@@ -372,7 +121,6 @@ def test_build_billing_container_omits_topup_select_for_member() -> None:
 async def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one(
     db_session: AsyncSession,
 ) -> None:
-    from daimon.adapters.slack.billing_panel.read import load_billing_snapshot
     from daimon.adapters.slack.billing_panel.views import build_billing_container
 
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_BUDGET")
@@ -386,12 +134,13 @@ async def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one
         for channel_id in ("C1", "C2"):
             state = await load_billing_snapshot(
                 db_session,
-                team_id="T_BUDGET",
-                platform_user_id=_CALLER_ID,
+                tenant_id=tenant.id,
+                platform_user_id="U_CALLER",
                 is_admin=is_admin,
                 since=_SINCE,
-                channel_id=channel_id,
                 now=_NOW,
+                platform="slack",
+                channel_id=channel_id,
             )
             blocks = build_billing_container(state, now=_NOW, since=_SINCE)
             texts[channel_id] = str(blocks)
@@ -401,7 +150,6 @@ async def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one
 
 def test_build_billing_container_empty_period_renders_cleanly() -> None:
     """Zero usage renders a clean 'no usage' line — no crash, no KeyError."""
-    from daimon.adapters.slack.billing_panel.state import BillingPanelState
     from daimon.adapters.slack.billing_panel.views import build_billing_container
 
     state = BillingPanelState(
@@ -432,7 +180,6 @@ def test_build_billing_container_empty_period_renders_cleanly() -> None:
 
 def test_build_billing_container_admin_empty_period_renders_cleanly() -> None:
     """Admin view with zero member rows renders cleanly."""
-    from daimon.adapters.slack.billing_panel.state import BillingPanelState
     from daimon.adapters.slack.billing_panel.views import build_billing_container
 
     state = BillingPanelState(

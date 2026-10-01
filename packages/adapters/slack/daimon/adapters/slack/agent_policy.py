@@ -66,7 +66,8 @@ log = structlog.get_logger()
 #: admins included: a panel edit never stamps the reconciler's spec hash, so
 #: the drift would survive every later reconcile with no way back.
 MANAGED_AGENT_MESSAGE: Final[str] = (
-    "This is a starting agent and can't be changed directly. Ask me to fork it and change the fork."
+    "This is a starting agent and can't be changed directly. Ask an admin to copy it, "
+    "or ask me to make you a new agent."
 )
 
 #: A spec edit by a member against an agent the workspace currently depends on.
@@ -82,7 +83,7 @@ NEEDS_ADMIN_SPEC_MESSAGE: Final[str] = (
 SHARED_AGENT_MESSAGE: Final[str] = (
     "This agent answers for other people here, so changing its repo or its keys "
     f"needs {ADMIN_NOUN}. Ask me and I'll write the request for them, or ask me "
-    "to fork it; the fork starts with no keys of its own."
+    "to make you a new agent of your own."
 )
 
 AGENT_GONE_MESSAGE: Final[str] = (

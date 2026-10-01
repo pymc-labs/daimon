@@ -16,6 +16,7 @@ from typing import Any
 from daimon.adapters.slack.agent_setup.state import encode_private_metadata
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.routines_panel.state import RoutineEntry, RoutinesPanelState
+from daimon.core.routines import PANEL_CAP
 
 __all__ = [
     "build_content_view",
@@ -117,7 +118,7 @@ def build_content_view(state: RoutinesPanelState, *, channel_id: str = "") -> di
                         "type": "mrkdwn",
                         "text": (
                             f"_+{state.over_cap_count} more routine(s) not shown "
-                            f"(cap: {_PICKER_CAP})_"
+                            f"(cap: {PANEL_CAP})_"
                         ),
                     }
                 ],
@@ -303,7 +304,3 @@ def build_delete_confirm_modal(
             }
         ],
     }
-
-
-# Module-level constant for context note so import-linter grep can find it
-_PICKER_CAP = 25

@@ -20,6 +20,7 @@ flowchart TB
         direction LR
         Discord
         Slack
+        Teams
         MCP
         Scheduler
         CLI
@@ -50,6 +51,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.core` | `packages/core/daimon/core/` | Schema and migrations, stores, MA helpers, the turn pipeline. Imports no adapter. |
 | `daimon.adapters.discord` | `packages/adapters/discord/` | Discord I/O, rendering, permissions, slash commands. |
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
+| `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text commands and panels, file consent delivery. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
@@ -64,7 +66,7 @@ and CI:
 | Contract | Forbids |
 | --- | --- |
 | Core must not import adapters | `daimon.core` → `daimon.adapters` |
-| Adapters must not import each other | any of cli, mcp, discord, scheduler, slack → another |
+| Adapters must not import each other | any of cli, mcp, discord, scheduler, slack, teams → another |
 | ORM module is private to stores and defaults | anything but `daimon.core.stores.**` / `daimon.core.defaults.**` → `daimon.core._models` |
 | Core must not import testing | `daimon.core` → `daimon.testing` |
 | CLI admin commands and run must not import each other | `daimon.adapters.cli.commands` ⟂ `daimon.adapters.cli.run` |
@@ -88,7 +90,7 @@ credential, whatever a future contributor is tempted to do inside it.
 
 ## How a message becomes a turn
 
-Discord and Slack run the same two-stage chokepoint in `daimon.core.turn`.
+Discord, Slack and Teams run the same two-stage chokepoint in `daimon.core.turn`.
 The staging is deliberate — neither stage returns a boolean, both raise typed
 errors, so an adapter cannot forget a gate.
 
@@ -140,11 +142,11 @@ Unprompted replies follow their existing silent-refusal policy. Continuation
 wakes retain their existing admission path. The limit is unset by default and
 applies only to this Discord process.
 
-Discord and Slack also limit simultaneous chat turns per tenant before admission.
+Discord, Slack and Teams also limit simultaneous chat turns per tenant before admission.
 `daimon tenants turn-cap PLATFORM WORKSPACE_ID N` stores a tenant override;
 `default` clears it and restores the adapter's deployment setting (3 by default).
 The check covers Discord mentions, thread participation and wizard submits,
-and Slack mentions. It does not limit MCP or routine turns.
+Slack mentions, and Teams messages and wakes. It does not limit MCP or routine turns.
 
 A protected channel hears nothing from the agent, not even a refusal or an
 error. Each turn entry decides FIRST, before tenant liveness, provisioning or
@@ -160,11 +162,12 @@ with only a log line, and the entries' error boundaries post only when the
 state is `unprotected`. The entries are Discord `on_message`, organic thread
 participation, wizard submit and continuation turns, and Slack
 `_handle_app_mention` (with a second check in `_orchestrate` after it claims
-the thread, and on its ephemeral shed notice). The continuation dispatchers on
-both platforms, which can post skip or responder-changed copy outside any
-turn (from the wake poller or a credential submission), ask the same decision
-right before each post and settle the row skipped without posting when it
-isn't `unprotected`.
+the thread, and on its ephemeral shed notice), and Teams `_handle` (plus the
+refusals `handle_message` posts). The continuation dispatchers (Teams uses
+core `continuity/dispatch.py`), which can post skip or responder-changed copy
+outside any turn (from the wake poller or a credential submission), ask the
+same decision right before each post and settle the row skipped without
+posting when it isn't `unprotected`.
 
 **Tenant access policy — `packages/core/daimon/core/access_policy.py`.** One
 `TenantAccessPolicy` per tenant, stored as JSON in `tenant_access_policies`
@@ -181,12 +184,13 @@ adapter passes; no role means non-admin. The MCP turn tools (`ask`,
 and routine fires have no live platform role, so they use the account's
 stored role (and role ids, for channel admins), refreshed on every chat turn. The operator path
 (`platform_user_id` unset: CLI and internal tokens) is not a platform member
-and skips the policy, as it skips billing. Ids are the platform's own (Discord snowflakes, Slack ids):
+and skips the policy, as it skips billing. Ids are the platform's own (Discord snowflakes, Slack ids, Teams Entra object and
+conversation ids):
 
 | Field | Empty means | Enforced by |
 | --- | --- | --- |
 | `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
-| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord and Slack write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
+| `protected_channel_ids`, `protected_category_ids` | nothing is write-protected | `admit()` (the turn's own reply, on every path: mention, follow-up, wizard submit, continuation) and every Discord, Slack and Teams write tool, via `require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py` |
 | `sealed_channel_ids` | nothing is sealed | the channel read tools (`read_channel`, `read_thread`, `get_message`, `list_threads`, `search_messages`) via `ChannelReadPolicy`, which the dispatcher in `tools/channels.py` loads per call; `admit()` also sets `Admission.memory_read_only` for a turn from a sealed channel or a thread under one |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
 | `agent_channel_pins` | every agent runs wherever the cascade sends it | `admit()` after the agent is retrieved (every turn path: mention, follow-up, wizard submit, continuation, handoff thread, DM), the MCP and hub turn tools (`_admit` in `tools/_ctx.py`: `start_turn`, `ask`, `continue_turn`, new or resumed), `hand_off_task` via `decide_handoff`, `fork_agent` (a pinned agent can't be copied), and routines at save (`_check_agent_pin`) and at every fire (scheduler) |
@@ -383,7 +387,7 @@ however the agent was written); reads then run, a write in a routine is
 refused unless the operator allowed it there, and a write in chat waits for
 the requester to press Approve on a confirmation card. The card is a platform
 hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
-(`packages/core/daimon/core/confirmation.py`), Discord and Slack each draw the
+(`packages/core/daimon/core/confirmation.py`), Discord, Slack and Teams each draw the
 shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
 and an adapter that passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
@@ -423,13 +427,14 @@ string.
 and how much had finished, what survived, the next step, and a request id. The
 copy lives in core; Discord and Slack draw it in `on_terminal_failure` as the
 body of the red card, with the headline as the footer reason, and log the
-request id with the underlying error so it is the handle for the detail. No
+request id with the underlying error so it is the handle for the detail;
+Teams draws it as plain text on the ❌ card. No
 lifecycle hook carries it -- the reason rides on the state every lifecycle
 already receives -- so the CLI, headless routines and any new adapter keep
 their existing failure path, and `TerminationNotice.plain_text()` is the
 fallback wording for a surface without markup.
 Anthropic's monthly spend-cap response stops SDK retries at the HTTP transport.
-If Anthropic reports that cap or a user-set spend limit, Discord and Slack
+If Anthropic reports that cap or a user-set spend limit, Discord, Slack and Teams
 show a model usage limit notice and log `anthropic.spend_limit_reached` with
 the tenant and limit type.
 
@@ -454,7 +459,7 @@ paragraph covers them by name ("whatever a tool returns").
 
 ## Tenancy and isolation
 
-One Discord guild or one Slack workspace is one tenant. The tenant UUID is
+One Discord guild, Slack workspace or Teams (Entra) organisation is one tenant. The tenant UUID is
 derived, not allocated: `derive_tenant_uuid(platform, workspace_id)` in
 `packages/core/daimon/core/ma_identity.py` is a UUID5 under a frozen
 namespace, so the same workspace maps to the same tenant across database
@@ -482,6 +487,19 @@ file (`packages/core/daimon/core/credential_env.py`) or brokered per call
 (`packages/core/daimon/core/broker/`), and the MCP server the sandbox calls
 back into authenticates a JWT whose `agent_id` claim is the derived agent
 UUID from `packages/core/daimon/core/ma_identity.py`.
+
+Because that env file is `source`d in the sandbox, `credential_env.py`
+serializes every value so bash cannot expand or execute it, and
+`packages/core/daimon/core/env_file.py` decides which key *names* may be
+stored. Names that control an interpreter, archiver, loader, locale, package
+manager, git, an HTTP client or a CA bundle, or that redirect an SDK's own
+endpoint (`TAR_OPTIONS`, `BASH_ENV`, `LD_PRELOAD`, `GIT_SSH_COMMAND`,
+`*_BASE_URL`, …) are hard-denied for everyone and dropped from the mount even
+if stored earlier; a non-admin member may additionally add only a secret
+name (ending in `_KEY`, `_KEY_ID`, `_TOKEN`, `_SECRET`, `_PASSWORD`,
+`_PASSPHRASE` or `_PAT` — never an identity, region or `*_URL`/`*_HOST`
+name, which only an admin may add). This keeps one tenant member from handing another client's
+agent code execution or a redirected connector through a key value or name.
 
 ## Sessions and Managed Agents
 
@@ -529,8 +547,8 @@ against.
   bot: a handoff's first turn for the new agent, work unblocked by a private
   form, a one-shot timer (`daimon.core.continuity.timers`, the `create_timer`
   tool), and anything else queued through `daimon.core.continuity.wakes`. A wake is
-  a `task_continuations` row. The Discord and Slack adapters each run a wake
-  poller (`run_wake_poller`) that opens threads with due rows and hands them
+  a `task_continuations` row. The Discord, Slack and Teams adapters each run
+  a wake poller (`run_wake_poller`) that opens threads with due rows and hands them
   to the adapter's continuation dispatch. That dispatch takes the thread's
   turn guard and goes through `admit()`, `bind_session()` and
   `run_prepared_turn()` like a mention, so the balance, cap and channel
@@ -865,11 +883,25 @@ new selection resets the scope, so a physical Discord DM shared across servers
 never contributes the previous server's private history. The live membership check
 is bound to that scope to prevent a concurrent selection from changing its authority.
 The context is escaped with the existing handoff builder and includes a source link.
+`/dm` refuses in a sealed channel or a Discord thread that is sealed or sits
+under a sealed channel, before any history is read: the DM sits outside the seal
+and can reach unsealed channels. Admission reports this as `source_sealed`, and
+`start_dm` refuses it too. Slack's slash command carries no thread, so a Slack
+thread sealed on its own (`channel:thread_ts`) is not refused; instead its root
+and broadcast replies are dropped from the copied channel history, as the read
+tools do. Discord system notices (thread created, pins) are never copied. The DM
+row records its source channel and thread and, on Slack, the `channel:thread_ts`
+of every copied message. Every private turn re-checks them against the current
+seal list. Once any of them is sealed the DM is quarantined: the turn is refused,
+the conversation row (copied context and private history) is deleted, and the
+scope's provider sessions are retired and archived, so a fresh `/dm` is needed.
+Rows from before provenance was recorded cannot prove their source unsealed and
+are quarantined as soon as the tenant seals anything.
 
 Turns use the shared billing/session/recovery pipeline. Row claims prevent overlapping
 or duplicate DM deliveries. The route retains bounded source context and private
-history; privacy preview and deletion include it. Memory restrictions inherited from
-a sealed source remain attached to its DM conversation, and current DM policy is
+history; privacy preview and deletion include it. Memory restrictions inherited
+from the source remain attached to its DM conversation, and current DM policy is
 checked on each admission. Session preparation enforces the selected memory mount access.
 Slack private turns register their physical DM destination under a random execution
 ID carried in a signed JWT in an isolated MA vault. The read guard resolves only

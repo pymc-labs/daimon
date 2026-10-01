@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0034_channel_admins"
-down_revision: str | None = "0033_channel_budgets"
+revision: str = "0035_channel_admins"
+down_revision: str | None = "0034_channel_budgets"
 branch_labels: str | None = None
 depends_on: str | None = None
 

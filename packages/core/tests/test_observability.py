@@ -4,6 +4,7 @@ Tests cover:
   - init_sentry no-ops when dsn is None
   - _scrub_event redacts secret-keyed tag values
   - _scrub_event drops request.data and extra fields
+  - the event scrubber redacts secrets nested in frame locals
   - capture_exception_with_scope tags from contextvars, omits unbound, never raises
 """
 
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 import sentry_sdk
@@ -191,3 +193,29 @@ def test_scrub_event_drops_message_body_when_request_data_present() -> None:
     assert "extra" not in result, (
         "extra field must be removed to prevent arbitrary payload from leaving the process"
     )
+
+
+def test_event_scrubber_redacts_a_token_nested_in_a_frame_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bearer token inside a dict local (e.g. request headers) is redacted, not only top-level keys."""
+    init = MagicMock()
+    monkeypatch.setattr(sentry_sdk, "init", init)
+    monkeypatch.setattr(sentry_sdk, "set_tag", MagicMock())
+    init_sentry(
+        dsn="https://k@sentry.invalid/1",
+        environment="test",
+        process="teams",
+        release=None,
+        traces_sample_rate=0.0,
+        integrations=[],
+    )
+    frame_vars: dict[str, object] = {"request": {"headers": {"authorization": "Bearer abc"}}}
+    event: dict[str, object] = {
+        "exception": {"values": [{"stacktrace": {"frames": [{"vars": frame_vars}]}}]}
+    }
+
+    init.call_args.kwargs["event_scrubber"].scrub_event(event)
+
+    headers = frame_vars["request"]["headers"]  # type: ignore[index]
+    assert headers["authorization"] != "Bearer abc", "a nested secret must not ship to Sentry"

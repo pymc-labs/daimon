@@ -1,8 +1,6 @@
-"""Tests for billing_panel/checkout.py and billing_panel/actions.py (top-up select).
+"""Tests for billing_panel/actions.py (top-up select).
 
-Covers:
-- create_checkout POSTs to /billing/checkout with {"amount": N} body and
-  "Authorization: Bearer <token>" header; returns the URL (transport-level fake).
+Covers (create_checkout itself is covered in core's test_billing_panel.py):
 - handle_topup_select with an admin user + amount=25: asserts checkout POST and
   ephemeral chat.postEphemeral with the mrkdwn <url|...> link.
 - handle_topup_select with a non-admin user: asserts NO checkout POST.
@@ -19,12 +17,10 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
 from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
-import pytest
 import pytest_asyncio
 import yarl
 from aioresponses import aioresponses as AioResponsesMock
@@ -138,78 +134,6 @@ def _make_checkout_transport(
         return httpx.Response(200, json={"url": _CHECKOUT_RESPONSE_URL})
 
     return httpx.MockTransport(handler)
-
-
-# ---------------------------------------------------------------------------
-# Unit: create_checkout
-# ---------------------------------------------------------------------------
-
-
-async def test_create_checkout_posts_with_amount_and_bearer_token() -> None:
-    """create_checkout POSTs {"amount": N} with Authorization: Bearer header."""
-    from daimon.adapters.slack.billing_panel.checkout import create_checkout
-
-    captured: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        return httpx.Response(200, json={"url": _CHECKOUT_RESPONSE_URL})
-
-    settings = MagicMock()
-    settings.app_root_url = "https://mcp.example.com"
-    settings.jwt_secret = SecretStr("test-jwt-secret-at-least-32-chars-long!!")
-
-    account_id = uuid.uuid4()
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        url = await create_checkout(
-            client,
-            settings=settings,
-            account_id=account_id,
-            amount=25,
-        )
-
-    assert url == _CHECKOUT_RESPONSE_URL, "create_checkout must return the URL from the response"
-    assert len(captured) == 1, "create_checkout must make exactly one POST request"
-
-    req = captured[0]
-    assert req.method == "POST", "create_checkout must use POST"
-    assert "/billing/checkout" in str(req.url), "create_checkout must POST to /billing/checkout"
-
-    # Verify body has amount only (no tenant_id — OQ-1)
-    body = json.loads(req.content)
-    assert body == {"amount": 25}, (
-        "request body must be {'amount': 25} — no tenant_id/guild_id in body (OQ-1)"
-    )
-
-    # Verify Authorization header
-    auth_header = req.headers.get("authorization", "")
-    assert auth_header.startswith("Bearer "), (
-        "request must have Authorization: Bearer <token> header"
-    )
-    token = auth_header[len("Bearer ") :]
-    assert len(token) > 10, "Bearer token must be a non-trivial JWT"
-
-
-async def test_create_checkout_raises_on_non_2xx_response() -> None:
-    """create_checkout raises httpx.HTTPStatusError on non-2xx."""
-    from daimon.adapters.slack.billing_panel.checkout import create_checkout
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(422, json={"error": "invalid amount"})
-
-    settings = MagicMock()
-    settings.app_root_url = "https://mcp.example.com"
-    settings.jwt_secret = SecretStr("test-jwt-secret-at-least-32-chars-long!!")
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(httpx.HTTPStatusError):
-            await create_checkout(
-                client,
-                settings=settings,
-                account_id=uuid.uuid4(),
-                amount=999,
-            )
 
 
 # ---------------------------------------------------------------------------

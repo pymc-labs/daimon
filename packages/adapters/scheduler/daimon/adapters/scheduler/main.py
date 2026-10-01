@@ -558,7 +558,9 @@ async def run(
 
     engine = _engine_override or build_engine(str(settings.database.url))
     sm = build_session_factory(
-        engine, crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys)
+        engine,
+        crypto_keys=tuple(k.get_secret_value() for k in settings.crypto.keys),
+        allow_plaintext=settings.crypto.allow_plaintext,
     )
 
     client = (

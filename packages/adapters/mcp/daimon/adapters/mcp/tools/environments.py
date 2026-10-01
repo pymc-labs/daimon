@@ -93,7 +93,8 @@ async def _create_environment_impl(
     # onto a channel or the workspace via set_agent_default, which is gated. So
     # the gate here bought no isolation while blocking the ordinary onboarding
     # ask -- "make me an agent that can run pymc" -- for every non-admin.
-    # Matches create_agent / fork_agent, which are ungated for the same reason.
+    # Matches create_agent, which is ungated for the same reason (fork_agent is
+    # admin-only: a fork would copy a live agent's prompt and connectors).
     await _reject_environment_name_collision(runtime, auth, spec.name)
     payload = spec.model_dump(exclude_none=True)
     payload["metadata"] = build_metadata(tenant_id=auth.tenant_id, name=spec.name)

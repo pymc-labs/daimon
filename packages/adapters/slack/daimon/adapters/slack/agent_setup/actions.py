@@ -30,8 +30,8 @@ agent:
     submit.py. Creating an unscoped agent has no tenant-wide blast radius, so
     it is open to every member.
   - Use from your coding tools mints a scoped bearer token behind a live admin
-    check resolved post-ack, server-side (hiding ≠ gating). Token values are
-    never logged — presence and last4 only.
+    check resolved post-ack, server-side (hiding ≠ gating). Token values
+    are never logged, not even in part.
   - Channel admins, on Who answers where, pushes the form naming this
     channel's admins, submitted in channel_admins.py. Workspace admins only,
     re-checked live on the click and on the submission.
@@ -92,7 +92,7 @@ from daimon.adapters.slack.setup_conversations import (
     setup_link,
     setup_reply_button,
 )
-from daimon.core.answering_map import AnsweringMap
+from daimon.core.answering_map import AnsweringMap, routed_agent_names
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -195,7 +195,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
                 is_admin=is_admin,
                 attributions=attributions,
                 channel_id=channel_id,
-                routed_agent_names=_routed_agent_names(answering_map),
+                routed_agent_names=routed_agent_names(answering_map),
             ),
         )
 
@@ -305,22 +305,6 @@ def _with_stale_notice(view: dict[str, Any], *, agent_name: str) -> dict[str, An
     return {**view, "blocks": blocks}
 
 
-def _routed_agent_names(answering_map: AnsweringMap) -> frozenset[str]:
-    """Every agent some tier currently routes to, anywhere in the install.
-
-    A row that does not answer where the reader is standing may still be a
-    channel's responder elsewhere, and saying "Not answering in any channel
-    yet" about it would be wrong. The deployment default counts only while no
-    workspace default has taken the fall-through away from it.
-    """
-    names = {answer.agent_name for answer in answering_map.channel_overrides}
-    if answering_map.tenant_default is not None:
-        names.add(answering_map.tenant_default.agent_name)
-    if answering_map.deployment_default and not answering_map.tenant_consumes_fallthrough:
-        names.add(answering_map.deployment_default)
-    return frozenset(names)
-
-
 async def load_agents_view(
     runtime: SlackRuntime,
     *,
@@ -356,7 +340,7 @@ async def load_agents_view(
         is_admin=is_admin,
         attributions=attributions,
         channel_id=meta.channel_id,
-        routed_agent_names=_routed_agent_names(answering_map),
+        routed_agent_names=routed_agent_names(answering_map),
     )
 
 

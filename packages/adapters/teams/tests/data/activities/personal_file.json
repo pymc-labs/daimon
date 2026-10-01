@@ -1,0 +1,53 @@
+{
+  "type": "message",
+  "id": "1700000000030",
+  "timestamp": "2017-02-01T21:10:07.437Z",
+  "localTimestamp": "2017-02-01T14:10:07.437-07:00",
+  "serviceUrl": "https://smba.trafficmanager.net/amer/00000000-0000-0000-0000-000000000001/",
+  "channelId": "msteams",
+  "from": {
+    "id": "29:1synthetic-user-mri",
+    "name": "Ada Lovelace",
+    "aadObjectId": "00000000-0000-0000-0000-000000000002"
+  },
+  "conversation": {
+    "conversationType": "personal",
+    "tenantId": "00000000-0000-0000-0000-000000000001",
+    "id": "a:conversation-1"
+  },
+  "recipient": {
+    "id": "28:bot-client-id",
+    "name": "daimon"
+  },
+  "attachments": [
+    {
+      "contentType": "application/vnd.microsoft.teams.file.download.info",
+      "contentUrl": "https://example.sharepoint.com/personal/synthetic_user_example_com/Documents/Microsoft%20Teams%20Chat%20Files/quarterly%20report.pdf",
+      "name": "quarterly report.pdf",
+      "content": {
+        "downloadUrl": "https://example.sharepoint.com/personal/synthetic_user_example_com/_layouts/15/download.aspx?UniqueId=00000000-0000-4000-8000-00000000f11e&Translate=false&tempauth=synthetic-not-a-real-token&ApiVersion=2.1",
+        "uniqueId": "00000000-0000-4000-8000-00000000f11e",
+        "fileType": "pdf"
+      }
+    },
+    {
+      "contentType": "text/html",
+      "content": ""
+    }
+  ],
+  "entities": [
+    {
+      "locale": "en-US",
+      "country": "US",
+      "platform": "Windows",
+      "timezone": "America/Los_Angeles",
+      "type": "clientInfo"
+    }
+  ],
+  "channelData": {
+    "tenant": {
+      "id": "00000000-0000-0000-0000-000000000001"
+    }
+  },
+  "locale": "en-US"
+}

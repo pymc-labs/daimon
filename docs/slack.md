@@ -78,6 +78,8 @@ Workspace admins opt in with `/dm enable` (and disable with `/dm disable`). Then
 `/dm` in a channel to continue privately with its recent text context and a back-link.
 Send later messages directly to the app. Run `/dm` again to reset the private scope.
 Only current workspace members allowed by the tenant access policy can invoke it.
+`/dm` refuses in a sealed channel and leaves threads sealed on their own out of the copied
+history, so sealed content never moves into a DM.
 
 Update the app from `docs/slack-app-manifest.yaml` and reinstall it to grant the new
 bot scopes `im:history` and `im:write`, subscribe to `message.im`, and enable the App

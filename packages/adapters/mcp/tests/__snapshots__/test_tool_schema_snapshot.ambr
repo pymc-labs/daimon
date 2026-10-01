@@ -479,7 +479,8 @@
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
         never the current thread's id. Slack: use the id from
-        ``<channel platform="slack" id="...">``. Clearing a thread id is a
+        ``<channel platform="slack" id="...">``. Teams: use
+        ``parent_channel_id`` from turn_controls. Clearing a thread id is a
         silent no-op that leaves the channel's real default in place.
       ''',
       'parameters': dict({
@@ -1623,14 +1624,14 @@
       'description': '''
         Create a new thread and post content as its first message.
         
-        ``content`` is required on both platforms and becomes the thread's
+        ``content`` is required on every platform and becomes the thread's
         first message — Slack cannot open a thread without a root message,
         and a Discord forum post is rejected by the API without a starter
         message.
         
         Discord: ``name`` is the thread's title (1-100 characters). On a text
         channel this creates a PUBLIC thread; on a forum channel it creates a
-        post. ``name`` is ignored on Slack — Slack threads have no title.
+        post. ``name`` is ignored on Slack and Teams.
         
         Slack: posts ``content`` as a channel-root message and returns its
         ``ts``. Combine that ``ts`` with ``channel_id`` to address the new
@@ -1638,6 +1639,11 @@
         composite ``channel_id:ts`` form (e.g. if this call returns
         ``ts="1717171717.123456"`` for channel ``C0123456789``, reply with
         ``send_message(channel_id="C0123456789:1717171717.123456", ...)``).
+        
+        Teams: ``channel_id`` is the channel (``parent_channel_id`` in
+        turn_controls, no ``;messageid=``); this starts a new post and returns
+        its ``conversation_id``, which ``send_message`` takes to reply in it.
+        Text only, and you must be a member of the channel.
         
         Only create a thread when the user asked for one. Refused in channels
         the workspace marked protected.
@@ -1881,7 +1887,8 @@
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
         never the current thread's id. Slack: use the id from
-        ``<channel platform="slack" id="...">``. Asking about a thread id
+        ``<channel platform="slack" id="...">``. Teams: ``parent_channel_id``
+        from turn_controls, with its ``thread_id``. Asking about a thread id
         reports that thread's own (almost always empty) scope, which reads
         as a confident answer about the channel and is not one — and if the
         same wrong id was just passed to ``set_agent_default``, this tool
@@ -3818,7 +3825,7 @@
       }),
     }),
     'self_list_files': dict({
-      'description': 'List all keys + metadata for files in your private agent_files namespace.',
+      'description': 'List all keys + metadata (no values) in your private agent_files namespace.',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3827,7 +3834,12 @@
       }),
     }),
     'self_read_file': dict({
-      'description': 'Read a per-agent file by `key`. Returns null if no file exists at that key.',
+      'description': '''
+        Check a per-agent file by `key`. Returns null if no file exists at that key.
+        
+        The value is always redacted: use it from the session `.env` without
+        echoing it. The result shows when it was last set.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3846,6 +3858,11 @@
         Write or overwrite a per-agent file under `key`.
         
         Stored in your private agent_files namespace; isolated from other agents.
+        Every entry is exported into your sandbox's `.env`, so `key` must be a
+        credential name: upper-case, ending in `_KEY`, `_TOKEN`, `_SECRET`,
+        `_PASSWORD` or similar (or `GH_TOKEN`/`GITHUB_TOKEN`). Tool-control and
+        endpoint names (`PATH`, `LD_PRELOAD`, `TAR_OPTIONS`, `*_BASE_URL`,
+        `*_URL` …) are refused.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3920,7 +3937,7 @@
         returns — never base64 a file into a tool argument. Combined
         cap of 10 attachments per message. Both FILES paragraphs are
         Discord-only for now — Slack file posting needs a scope this
-        install does not have.
+        install does not have, and Teams file posting is not built yet.
         
         Slack: ``channel_id`` may be ``channel_id:thread_ts`` (e.g.
         ``C0123456789:1717171717.123456``) to post into a thread. Content is
@@ -3928,6 +3945,10 @@
         capped at 12,000 characters. daimon must already be in the channel
         (a member can run ``/invite @daimon``).
         
+        Teams: ``channel_id`` is a conversation id — ``thread_id`` from
+        turn_controls replies here; a 1:1 chat is ``a:…``, a channel thread
+        ``19:…@thread.tacv2;messageid=…``. Text only (markdown), capped at
+        6,000 characters, and you must be a member of that conversation.
         Channels the workspace marked protected, and threads under them,
         refuse every post — tell the caller rather than retrying elsewhere
         unasked.
@@ -3999,7 +4020,8 @@
         ``<channel platform="discord" id="..." role="parent_channel">``.
         Never pass the current thread's id here. Slack: use the id from
         ``<channel platform="slack" id="...">`` — Slack's context always
-        names the parent channel. A channel default is resolved from the parent;
+        names the parent channel. Teams: use ``parent_channel_id`` from
+        turn_controls. A channel default is resolved from the parent;
         setup threads keep their bound responder. A default
         written against a thread id is a scope nothing ever reads: the write
         succeeds, this tool reports success, and the channel keeps answering

@@ -97,7 +97,7 @@ def _deps(
     )
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_admit_over_balance_tenant_raises_admission_denied_balance_depleted(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -148,7 +148,7 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
     assert outcomes[0].account_id is not None
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("funding_mode", ["prepaid", "operator_funded"])
 async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
     db_session: AsyncSession,
@@ -1299,3 +1299,86 @@ async def test_admit_admits_a_pinned_agent_in_its_channels_and_leaves_others_alo
     )
 
     assert isinstance(admission, Admission)
+
+
+@pytest.mark.parametrize(
+    ("policy", "channel_id", "thread_id", "is_dm", "expected"),
+    [
+        (TenantAccessPolicy(sealed_channel_ids=("C1",)), "C1", None, True, True),
+        (TenantAccessPolicy(sealed_channel_ids=("C1",)), "C1", "T1", True, True),
+        (
+            TenantAccessPolicy(sealed_channel_ids=("C1:1700000000.000100",)),
+            "C1",
+            "1700000000.000100",
+            True,
+            True,
+        ),
+        (TenantAccessPolicy(sealed_channel_ids=("C1",)), "C2", None, True, False),
+        (TenantAccessPolicy(dm_memory_read_only=True), "C1", None, True, False),
+    ],
+    ids=["sealed", "thread-under-sealed", "slack-thread-sealed", "unsealed", "dm-read-only"],
+)
+async def test_admit_flags_a_sealed_source_apart_from_dm_memory_policy(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    policy: TenantAccessPolicy,
+    channel_id: str,
+    thread_id: str | None,
+    is_dm: bool,
+    expected: bool,
+) -> None:
+    """/dm needs to know the source itself is sealed, not only that memory is read-only."""
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="anyone",
+        channel_id=channel_id,
+        thread_id=thread_id,
+        now=_NOW,
+        role=Role.USER,
+        is_dm=is_dm,
+    )
+
+    assert admission.source_sealed is expected
+
+
+async def test_start_dm_refuses_a_sealed_source_admission() -> None:
+    """Backstop for any /dm caller: no DM row is written for a sealed source."""
+    from unittest.mock import MagicMock
+
+    from daimon.core.direct_messages import SEALED_SOURCE_MESSAGE, start_dm
+    from daimon.core.errors import DaimonError
+    from daimon.core.turn.admission import Admission
+
+    admission = Admission(
+        account_id=uuid.uuid4(),
+        agent=MagicMock(),
+        environment=MagicMock(),
+        config=MagicMock(),
+        source_sealed=True,
+    )
+    deps = MagicMock()
+    with pytest.raises(DaimonError, match="sealed"):
+        await start_dm(
+            deps,
+            admission,
+            tenant_id=uuid.uuid4(),
+            platform="discord",
+            workspace_id="1",
+            route_key="2",
+            channel_id="2",
+            external_user_id="3",
+            source_url="https://example.invalid",
+            source_channel_id="source",
+            source_thread_id=None,
+            context=[],
+        )
+    deps.sessionmaker.assert_not_called()
+    assert "sealed" in SEALED_SOURCE_MESSAGE

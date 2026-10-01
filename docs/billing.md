@@ -206,7 +206,8 @@ An admin can cap what one channel may spend with `set_channel_budget` (MCP)
 or `daimon channels budget set PLATFORM WORKSPACE_ID CHANNEL_ID USD`. A
 budget is one row in `channel_budgets` per `(tenant, platform, channel)`;
 with no row there is no limit, and nothing is created by default. It works
-the same with or without Stripe and for either funding mode.
+the same with or without Stripe and for either funding mode. Budgets exist on
+Discord and Slack only; Teams has none.
 
 - **Spend** is the channel's debits in `tenant_ledger` inside the window,
   markup included: what the tenant was charged for turns there, not the
@@ -263,7 +264,7 @@ then balance-gated on its first message.
 The product flow is Stripe Checkout, one-time payments rather than a
 subscription:
 
-1. `/billing` on Discord or Slack offers fixed amounts, each labelled with an
+1. `/billing` on Discord or Slack (`billing` on Teams) offers fixed amounts, each labelled with an
    estimated number of turns derived from that tenant's own history. Admin
    status is verified at click time, not at render.
 2. The chat adapters never import `stripe`. They mint a token and POST to
@@ -352,13 +353,20 @@ many tenants may redeem it. Each tenant redeems a code at most once.
   still counts as spend inside it. Fifteen minutes after the close a
   `promo_expiry_refund` entry, keyed
   `promo_expiry_refund:{code_id}:{tenant_id}`, credits back that late spend,
-  never more than the expiry removed. Spend recorded later counts as ordinary
-  spend.
+  never more than the expiry removed. Until then late spend is debited twice,
+  once itself and once inside the expiry, so for up to about fifteen minutes
+  the balance can read low or negative, or hit the balance gate, until the
+  refund lands. Spend recorded later counts as ordinary spend: after a grant's
+  reconcile, spend recorded inside its window is still charged to that grant
+  first, as far as it had credit left, even where it overlaps a later grant
+  that is still open. That part is paid from ordinary credit and never
+  credited twice.
 
 The balance is still `SUM(delta_usd)` and the gates never read promo state:
 timed credit only changes what the ledger holds. `/billing` shows live timed
 credit and when it ends. Admins redeem from `/billing` on Discord or Slack, or
-with the admin-only MCP tool `redeem_promo_code`. Refusals are one of
+with the admin-only MCP tool `redeem_promo_code`, which is the only way on
+Teams: its `billing` card shows no promo codes. Refusals are one of
 `invalid`, `revoked`, `not_started`, `expired`, `exhausted`,
 `already_redeemed` and `throttled`; five refusals in 15 minutes pause a
 tenant's attempts, which are serialized per tenant so parallel guesses
@@ -375,7 +383,7 @@ including timed credit not yet started, stays.
 | `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
 | `promo_codes` | deployment-wide codes, by hash, with their amount, windows and redemption limit. |
-| `promo_redemptions` | one row per code and tenant, with when a timed grant was made and expired. |
+| `promo_redemptions` | one row per code and tenant, with when a timed grant was made, expired (`expired_usd`) and reconciled (`reconciled_at`). |
 | `promo_redeem_failures` | refused redemption attempts per tenant, for the throttle. |
 | `channel_budgets` | per-channel spend limits and their windows; no row means no limit. |
 
@@ -450,13 +458,13 @@ Self-service top-ups additionally need `DAIMON_MCP__PUBLIC_URL` and
 `DAIMON_MCP__JWT_SECRET` for the adapter-to-MCP hop, and the image must carry
 the optional `billing` extra, which is what pulls in `stripe`.
 
-The Discord and Slack terminal reply footers show the remaining ledger balance
+The Discord, Slack and Teams terminal reply footers show the remaining ledger balance
 for prepaid tenants after the turn's debit. Operator-funded tenants and turns
 without a tenant omit it.
 
 ## What you can see
 
-`/billing` on Discord and Slack is the reporting surface, always over the
+`/billing` on Discord and Slack, and `billing` on Teams, is the reporting surface, always over the
 current calendar month, built from
 `packages/core/daimon/core/stores/usage_events.py`. A member sees their own
 spend, turn count and cap plus the tenant balance; an admin additionally sees

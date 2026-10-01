@@ -21,7 +21,7 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import build_turn_router
-from .drivers.protocol import PlatformDriver
+from .drivers.protocol import PlatformDriver, platform_ids
 
 
 async def test_turn_billed_when_unblocked_writes_usage_event_and_ledger_debit(
@@ -29,10 +29,9 @@ async def test_turn_billed_when_unblocked_writes_usage_event_and_ledger_debit(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # Numeric-looking: Discord's driver treats it as a real guild id (int());
-    # Slack accepts any string team_id, so one value works for both drivers.
-    workspace_id = "900001001"
-    user_id = "555000111"
+    workspace_id, user_id, channel_id = platform_ids(
+        driver.param_id, workspace=900001001, user=555000111, channel=100000
+    )
 
     tenant = await make_tenant(
         db_session, platform=cast(Platform, driver.param_id), workspace_id=workspace_id
@@ -52,7 +51,7 @@ async def test_turn_billed_when_unblocked_writes_usage_event_and_ledger_debit(
         router=router,
         tenant_id=tenant.id,
         workspace_id=workspace_id,
-        channel_id="100000",
+        channel_id=channel_id,
         user_id=user_id,
         text="hello",
     )

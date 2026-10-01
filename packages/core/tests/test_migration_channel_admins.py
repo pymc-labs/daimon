@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _load_migration():
-    path = Path(__file__).parents[1] / "alembic/versions/0034_channel_admins.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0035_channel_admins.py"
     spec = importlib.util.spec_from_file_location("migration_channel_admins", path)
     assert spec and spec.loader, "the migration file loads"
     migration = importlib.util.module_from_spec(spec)

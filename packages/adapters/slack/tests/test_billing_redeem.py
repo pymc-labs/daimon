@@ -11,22 +11,19 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-from daimon.adapters.slack.billing_panel.read import load_billing_snapshot
 from daimon.adapters.slack.billing_panel.redeem import (
     evaluate_redeem_submission,
     handle_redeem_open,
     redeem_result_text,
     run_redeem_submission,
 )
-from daimon.adapters.slack.billing_panel.state import BillingPanelState
 from daimon.adapters.slack.billing_panel.views import build_billing_container
+from daimon.core.billing_panel import BillingPanelState
 from daimon.core.promo_codes import build_promo_code_terms, hash_promo_code, normalize_promo_code
 from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed, PromoRedeemRefused
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores import tenant_ledger
 from daimon.testing.factories import make_channel_budget, make_tenant
-from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
@@ -259,58 +256,6 @@ async def test_submission_keeps_the_success_reply_when_the_panel_refresh_fails(
     ), "the form should keep confirming the credit"
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("10"), (
         "the credit should stay in the workspace ledger"
-    )
-
-
-async def test_snapshot_offers_redemption_only_while_a_code_is_redeemable(
-    db_session: AsyncSession,
-) -> None:
-    """The admin snapshot flags a redeemable code only once one exists."""
-    now = datetime.now(UTC)
-    await make_tenant(db_session, platform="slack", workspace_id=_TEAM)
-    before = await load_billing_snapshot(
-        db_session, team_id=_TEAM, platform_user_id=_USER, is_admin=True, since=_SINCE, now=now
-    )
-    assert not before.has_redeemable_promo_code, "no code should mean no redeem button"
-
-    terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False)
-    await promo_store.insert_promo_code(db_session, code_hash="h", terms=terms)
-    after = await load_billing_snapshot(
-        db_session, team_id=_TEAM, platform_user_id=_USER, is_admin=True, since=_SINCE, now=now
-    )
-    assert after.has_redeemable_promo_code, "a redeemable code should show the redeem button"
-    assert "billing_redeem_open" in _action_ids(
-        build_billing_container(after, now=now, since=_SINCE)
-    ), "the admin panel should render the button"
-
-
-async def test_snapshot_hides_redemption_when_the_lookup_fails(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A failed promo lookup hides the button and leaves the rest of the read working."""
-
-    async def failing_lookup(session: AsyncSession, *, now: datetime) -> bool:
-        await session.execute(text("SELECT 1/0"))  # aborts the surrounding transaction
-        return True
-
-    monkeypatch.setattr(
-        "daimon.adapters.slack.billing_panel.read.has_redeemable_promo_code", failing_lookup
-    )
-    await make_tenant(db_session, platform="slack", workspace_id=_TEAM)
-    terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False)
-    await promo_store.insert_promo_code(db_session, code_hash="h", terms=terms)
-
-    state = await load_billing_snapshot(
-        db_session,
-        team_id=_TEAM,
-        platform_user_id=_USER,
-        is_admin=True,
-        since=_SINCE,
-        now=datetime.now(UTC),
-    )
-
-    assert state.is_admin and not state.has_redeemable_promo_code, (
-        "a failed lookup should still load the admin panel, without the redeem button"
     )
 
 

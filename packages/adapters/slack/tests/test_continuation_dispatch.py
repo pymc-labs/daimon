@@ -446,7 +446,7 @@ async def test_a_timer_refused_for_a_changed_responder_posts_why_and_settles_ski
     texts = [
         str((p.kwargs.get("json") or p.kwargs.get("data") or {}).get("text") or "") for p in posts
     ]
-    assert any("other-agent answers in this thread now" in text for text in texts), texts
+    assert any("other-agent answers here now" in text for text in texts), texts
 
 
 @pytest.mark.parametrize("path", ["responder_changed", "turn_running"])

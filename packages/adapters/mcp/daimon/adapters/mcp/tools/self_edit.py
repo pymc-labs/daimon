@@ -31,6 +31,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.broker import dispatch_mint_token
 from daimon.core.broker.errors import NoBindingError, ProviderConfigError
+from daimon.core.env_file import MEMBER_SECRET_SUFFIX_HINT, env_name_problem
 from daimon.core.errors import StoreError
 from daimon.core.github_visibility import pat_can_access_repo
 from daimon.core.stores.agent_files import (
@@ -141,6 +142,25 @@ async def _self_write_file_impl(
     content: str,
 ) -> AgentFileRow:
     agent_id = _require_agent_id(auth)
+    # An agent key is always a member here, so the value's name must be one a
+    # member may write: a credential name, never a tool-control or redirect
+    # name. The store enforces the hard-deny layer again under this.
+    # Empty key: let the store speak ("key must not be empty"); the name policy
+    # only has something to say about a non-empty name.
+    name_problem = env_name_problem(key, is_admin=False) if key else None
+    if name_problem == "bad_name":
+        raise ToolError(
+            "key must match [A-Za-z_][A-Za-z0-9_]* "
+            "(letters, digits, underscores; must not start with a digit)"
+        )
+    if name_problem == "reserved_name":
+        raise ToolError(f"{key} is a reserved name: it changes how the agent's tools run.")
+    if name_problem == "not_credential_name":
+        raise ToolError(
+            f"{key} is not a secret name an agent can store. Use a name ending in "
+            f"{MEMBER_SECRET_SUFFIX_HINT}; identity, account, region and URL names "
+            "need an admin to add them through a form."
+        )
     try:
         async with runtime.session_factory.begin() as session:
             row = await put_agent_file(
@@ -160,6 +180,22 @@ async def _self_write_file_impl(
         raise ToolError(str(e)) from e
     logger.info("self_write_file outcome=success agent=%s key=%s", agent_id, key)
     return row
+
+
+REDACTED_VALUE = "[redacted: values are available in the session .env, never in tool output]"
+LISTED_VALUE = "[not listed: values are available in the session .env]"
+
+
+def _withhold_value(row: AgentFileRow) -> AgentFileRow:
+    """Keep every value out of tool output.
+
+    Nothing records whether a person submitted a value through a credential
+    form or the agent wrote it itself: both carry the requester's account id.
+    So no value comes back. The sandbox already mounts them in the session
+    `.env`, and a tool result would put a credential in the model's context
+    and transcript.
+    """
+    return row.model_copy(update={"content": REDACTED_VALUE})
 
 
 async def _self_read_file_impl(
@@ -182,7 +218,7 @@ async def _self_read_file_impl(
         agent_id,
         key,
     )
-    return row
+    return None if row is None else _withhold_value(row)
 
 
 async def _self_list_files_impl(
@@ -197,7 +233,8 @@ async def _self_list_files_impl(
             agent_id=agent_id,
         )
     logger.info("self_list_files outcome=success agent=%s count=%d", agent_id, len(rows))
-    return rows
+    # Keys and metadata only: no value, however it was written.
+    return [row.model_copy(update={"content": LISTED_VALUE}) for row in rows]
 
 
 async def _self_delete_file_impl(
@@ -529,6 +566,11 @@ def register_self_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Write or overwrite a per-agent file under `key`.
 
         Stored in your private agent_files namespace; isolated from other agents.
+        Every entry is exported into your sandbox's `.env`, so `key` must be a
+        credential name: upper-case, ending in `_KEY`, `_TOKEN`, `_SECRET`,
+        `_PASSWORD` or similar (or `GH_TOKEN`/`GITHUB_TOKEN`). Tool-control and
+        endpoint names (`PATH`, `LD_PRELOAD`, `TAR_OPTIONS`, `*_BASE_URL`,
+        `*_URL` …) are refused.
         """
         return await _self_write_file_impl(runtime, await _auth(ctx), key=key, content=content)
 
@@ -537,14 +579,18 @@ def register_self_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         key: str,
     ) -> AgentFileRow | None:
-        """Read a per-agent file by `key`. Returns null if no file exists at that key."""
+        """Check a per-agent file by `key`. Returns null if no file exists at that key.
+
+        The value is always redacted: use it from the session `.env` without
+        echoing it. The result shows when it was last set.
+        """
         return await _self_read_file_impl(runtime, await _auth(ctx), key=key)
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def self_list_files(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
     ) -> list[AgentFileRow]:
-        """List all keys + metadata for files in your private agent_files namespace."""
+        """List all keys + metadata (no values) in your private agent_files namespace."""
         return await _self_list_files_impl(runtime, await _auth(ctx))
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]

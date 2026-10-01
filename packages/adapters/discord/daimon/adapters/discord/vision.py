@@ -10,66 +10,20 @@ single routing predicate for that split.
 
 from __future__ import annotations
 
-import base64
-
 import structlog
-from anthropic.types.beta.sessions import (
-    BetaManagedAgentsBase64ImageSourceParam,
-    BetaManagedAgentsImageBlockParam,
+from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.core.media.vision import (
+    MAX_VISION_IMAGE_BYTES,
+    MAX_VISION_IMAGE_DIMENSION,
+    MAX_VISION_IMAGES,
+    VISION_MEDIA_TYPES,
+    build_image_block,
+    sniff_image_media_type,
 )
 
 import discord
 
 log = structlog.get_logger()
-
-# Media types the Anthropic API accepts as image content blocks. Anything
-# else (image/svg+xml, image/avif, ...) is rejected by the API and would
-# fail the whole user.message event if sent.
-VISION_MEDIA_TYPES: frozenset[str] = frozenset(
-    {"image/png", "image/jpeg", "image/gif", "image/webp"}
-)
-
-# Per-image API cap (5MB decoded). Larger images are routed to the notebook
-# path instead of failing the whole user.message event.
-MAX_VISION_IMAGE_BYTES: int = 5 * 1024 * 1024
-
-
-def sniff_image_media_type(data: bytes) -> str | None:
-    """Media type from the image's magic bytes, or None if unrecognized.
-
-    Discord's ``attachment.content_type`` can disagree with the actual bytes
-    (e.g. a PNG labeled ``image/webp``). The Anthropic API validates the
-    declared media type against the bytes and rejects mismatches — and since
-    MA replays every image block on every later turn, one mislabeled image
-    permanently terminates the session. The bytes are the truth; sniff them.
-    """
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if data.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    return None
-
-
-# Per-image pixel cap. The Anthropic API rejects the whole request with
-# "image dimensions exceed" when any image edge is larger than 8000px. (That
-# ceiling drops to 2000px once a request carries more than 20 images — which
-# MAX_VISION_IMAGES below keeps us under, so 8000px is the only limit in play.)
-# A compressed PNG/WebP can sit well under the byte cap yet still blow past
-# this, so dimensions are a separate gate from MAX_VISION_IMAGE_BYTES.
-MAX_VISION_IMAGE_DIMENSION: int = 8000
-
-# Per-turn image cap. The API tightens the per-image dimension limit from
-# 8000px to 2000px once a request carries more than 20 images. MA persists and
-# replays every image block across turns, so the bot only inlines the trigger
-# message's images (history images go to the agent as curl-able URLs, not blocks)
-# — which keeps a single message's contribution small. This cap is a belt-and-
-# suspenders bound on a single trigger message; overflow images are reported as
-# skipped (with their URL surfaced) rather than silently dropped.
-MAX_VISION_IMAGES: int = 20
 
 
 def _exceeds_dimension_cap(attachment: discord.Attachment) -> bool:
@@ -265,14 +219,5 @@ async def download_as_image_blocks(
                 declared_media_type=media_type,
                 sniffed_media_type=sniffed_media_type,
             )
-        blocks.append(
-            BetaManagedAgentsImageBlockParam(
-                type="image",
-                source=BetaManagedAgentsBase64ImageSourceParam(
-                    type="base64",
-                    media_type=sniffed_media_type,
-                    data=base64.standard_b64encode(data).decode(),
-                ),
-            )
-        )
+        blocks.append(build_image_block(data, sniffed_media_type))
     return blocks, skipped

@@ -204,6 +204,42 @@ jobs:
       - name: pytest (slack)
         run: uv run pytest packages/adapters/slack -n auto
 
+  pytest-teams:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - name: Create daimon_test database
+        env:
+          PGPASSWORD: daimon
+        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
+      - name: alembic upgrade (test DB)
+        env:
+          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
+        run: uv run alembic upgrade head
+      - name: pytest (teams)
+        run: uv run pytest packages/adapters/teams -n auto
+
   pytest-parity:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -286,7 +322,7 @@ jobs:
 
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, pytest-core, pytest-mcp, pytest-discord, pytest-slack, pytest-parity, pytest-notebook-host, pytest-report-host, pytest-mux, docker-build]
+    needs: [lint, pytest-core, pytest-mcp, pytest-discord, pytest-slack, pytest-teams, pytest-parity, pytest-notebook-host, pytest-report-host, pytest-mux, docker-build]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators

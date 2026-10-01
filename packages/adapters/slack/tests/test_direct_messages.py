@@ -29,7 +29,7 @@ async def test_dm_admits_and_records_the_channel_it_ran_in(
         admitted.append(kwargs)
         if over_budget:
             raise AdmissionDenied(reason="channel_budget_exceeded")
-        return MagicMock()
+        return MagicMock(source_sealed=False)
 
     client = MagicMock()
     client.conversations_history = AsyncMock(return_value={"messages": []})
@@ -39,6 +39,7 @@ async def test_dm_admits_and_records_the_channel_it_ran_in(
     monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
     monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=Role.USER))
     monkeypatch.setattr(dm_module, "require_dm_enabled", AsyncMock())
+    monkeypatch.setattr(dm_module, "sealed_channel_ids", AsyncMock(return_value=frozenset()))
     monkeypatch.setattr(dm_module, "admit", admit)
     start_dm = AsyncMock()
     monkeypatch.setattr(dm_module, "start_dm", start_dm)

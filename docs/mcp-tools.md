@@ -19,10 +19,11 @@ tool is hidden by default and restored only for a matching caller.
 - **channel admins too** — carries the `channel-admin` tag.
 - **Discord callers** — carries the `discord` tag.
 - **Slack callers** — carries the `slack` tag.
+- **Teams callers** — carries the `teams` tag.
 
-A CLI token matches no platform tag, so it sees neither the Discord nor the Slack tools.
-An agent token is narrowed to the agent-chat tools alone — everything else is disabled
-for it, admin tools included.
+A CLI token matches no platform tag, so it sees none of the Discord, Slack or Teams
+tools. An agent token is narrowed to the agent-chat tools alone — everything else is
+disabled for it, admin tools included.
 
 A caller does not necessarily receive this list in one response: the server applies a
 BM25 search transform, so an ordinary session discovers tools by searching the catalogue
@@ -99,7 +100,7 @@ Shared channel MCP tools with per-platform dispatch.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_thread` | Discord callers, Slack callers | Create a new thread and post content as its first message. |
+| `create_thread` | Discord callers, Slack callers, Teams callers | Create a new thread and post content as its first message. |
 | `get_message` | Discord callers, Slack callers | Fetch a single message by channel and message id (Slack: the message ts). |
 | `list_channels` | Discord callers, Slack callers | List channels in this server/workspace that you can view. |
 | `list_threads` | Discord callers | List active and archived public threads for a channel. |
@@ -109,7 +110,7 @@ Shared channel MCP tools with per-platform dispatch.
 | `rename_thread` | Discord callers | Rename a Discord thread; ``name`` is the new title (1-100 characters). |
 | `search_messages` | Discord callers, Slack callers | Search messages with server-side filters. |
 | `send_direct_message` | Discord callers, Slack callers | Privately message one human member of the current server/workspace. |
-| `send_message` | Discord callers, Slack callers | Post a message to a channel. |
+| `send_message` | Discord callers, Slack callers, Teams callers | Post a message to a channel. |
 | `set_display_identity` | Discord callers | Change how daimon appears in this Discord server: its display name, its avatar, or both. |
 
 ## `cli_token`
@@ -126,9 +127,9 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `request_agent_key` | Discord callers, Slack callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
-| `request_mcp_oauth` | Discord callers, Slack callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion, Slack or Atlassian. |
-| `request_mcp_token` | Discord callers, Slack callers | Connect an agent such as research-bot to Linear or GitHub through an MCP endpoint with a bearer token, not browser OAuth. |
+| `request_agent_key` | Discord callers, Slack callers, Teams callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
+| `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion, Slack or Atlassian. |
+| `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear or GitHub through an MCP endpoint with a bearer token, not browser OAuth. |
 | `request_repo_binding` | Discord callers, Slack callers | Let an agent read a GitHub working repo or repository, public or private. |
 | `request_skill_repo_token` | Discord callers, Slack callers | The skills repo is private: collect a GitHub token to import its skills. |
 
@@ -150,7 +151,7 @@ GitHub App install-link tool: post_github_app_install_link.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `post_github_app_install_link` | Discord callers, Slack callers | Install the GitHub App: post a link inviting the user to grant repository access. |
+| `post_github_app_install_link` | Discord callers, Slack callers, Teams callers | Install the GitHub App: post a link inviting the user to grant repository access. |
 
 ## `media`
 
@@ -205,7 +206,7 @@ Bind an agent to a public GitHub repo from inside an ordinary chat turn.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `bind_public_repo` | Discord callers, Slack callers | Have an agent work in a public GitHub repo: "work in github.com/owner/project", "point it at our open-source repository". |
+| `bind_public_repo` | Discord callers, Slack callers, Teams callers | Have an agent work in a public GitHub repo: "work in github.com/owner/project", "point it at our open-source repository". |
 
 ## `routines`
 
@@ -229,8 +230,8 @@ MCP tools for an agent to edit its own ``agent_files`` and manage its
 | `clear_repo_binding` | agent tokens only | Remove the repo binding for your agent. |
 | `get_repo_binding` | agent tokens only | Return the current repo binding for your agent, or null if unbound. |
 | `self_delete_file` | agent tokens only | Delete a per-agent file by `key`. |
-| `self_list_files` | agent tokens only | List all keys + metadata for files in your private agent_files namespace. |
-| `self_read_file` | agent tokens only | Read a per-agent file by `key`. |
+| `self_list_files` | agent tokens only | List all keys + metadata (no values) in your private agent_files namespace. |
+| `self_read_file` | agent tokens only | Check a per-agent file by `key`. |
 | `self_write_file` | agent tokens only | Write or overwrite a per-agent file under `key`. |
 | `set_repo_binding` | agent tokens only | Bind your agent to a git repo. |
 
