@@ -170,14 +170,16 @@ async def test_reuse_after_real_preparation_lock_wait(
         await asyncio.wait_for(entered.wait(), 5)
         await policy(change)
         assert not task.done()
-    with pytest.raises(AdmissionDenied if change == "pin" else SessionBusyError):
-        await task
-    if change == "seal":
-        retried = await bind(admitted())
-        assert retried.admission.memory_read_only
-        assert (
-            transport.state.sessions[retried.ma_session_id].metadata.get("daimon_sealed") == "vault"
-        )
+    if change == "pin":
+        with pytest.raises(AdmissionDenied):
+            await task
+        return
+    # Decided again inside the lock: the writable session is not reused, and the
+    # turn gets a read-only, sealed replacement.
+    bound = await task
+    assert bound.admission.memory_read_only
+    assert not bound.reused
+    assert transport.state.sessions[bound.ma_session_id].metadata.get("daimon_sealed") == "vault"
 
 
 @pytest.mark.parametrize("change", ["pin", "seal"])

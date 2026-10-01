@@ -399,6 +399,7 @@ async def run_turn(
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     system_blocks: Sequence[BetaManagedAgentsSystemContentBlockParam] = (),
     deadline: datetime | None = None,
+    before_send: Callable[[], Awaitable[None]] | None = None,
 ) -> TurnState:
     """Open the SSE stream, post the user message, and pump to terminal idle.
 
@@ -473,6 +474,9 @@ async def run_turn(
                 "content": list(system_blocks),
             }
             batch.append(system_event)
+        if before_send is not None:
+            # A last check by the caller, after the stream is open (`run_prepared_turn`).
+            await before_send()
         await anthropic.beta.sessions.events.send(session_id, events=batch)
         await acknowledge(lifecycle, "accepted")
 

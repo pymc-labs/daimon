@@ -1657,6 +1657,7 @@ async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_hel
         image_blocks: object,
         system_blocks: object = (),
         tool_confirmation: object = None,
+        before_send: object = None,
     ) -> TurnState:
         nonlocal call_count
         call_count += 1
@@ -1759,6 +1760,7 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
         image_blocks: object,
         system_blocks: object = (),
         tool_confirmation: object = None,
+        before_send: object = None,
     ) -> TurnState:
         nonlocal call_count
         call_count += 1
