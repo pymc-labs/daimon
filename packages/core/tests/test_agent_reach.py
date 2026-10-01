@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from daimon.core.agent_reach import (
     is_agent_local_to_caller,
     load_agent_reach,
@@ -20,9 +21,14 @@ from daimon.core.stores.direct_messages import (
     delete_conversations_for_account,
     start_conversation,
 )
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import ContinuationReason, Role
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.core.stores.task_continuations import cancel_wake_row, record_continuation
+from daimon.core.stores.task_continuations import (
+    cancel_wake_row,
+    claim_continuation,
+    record_continuation,
+    settle_continuation,
+)
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import (
     make_account,
@@ -299,6 +305,35 @@ async def test_only_a_stronger_requesters_timer_keeps_an_agent_from_a_channel_ad
         "the pending timer cancels"
     )
     assert await _is_local(db_session, tenant.id), "a cancelled timer no longer runs"
+
+
+@pytest.mark.parametrize("reason", ["task_handoff", "private_input_applied"])
+async def test_a_stronger_requesters_claimed_wake_counts_until_it_settles(
+    db_session: AsyncSession, reason: ContinuationReason
+) -> None:
+    tenant = await make_tenant(db_session)
+    await _admin_of_c1(db_session, tenant.id)
+    account = await _member(db_session, tenant, "u9", admin=True)
+    key = uuid.uuid4()
+    await record_continuation(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id="c1",
+        thread_id="t1",
+        requester_account_id=account.id,
+        requester_external_user_id="u9",
+        target_ma_agent_id="agent_1",
+        target_name="helper",
+        reason=reason,
+        idempotency_key=key,
+    )
+    assert not await _is_local(db_session, tenant.id), f"a pending {reason} runs with admin rights"
+    now = datetime.now(UTC)
+    assert await claim_continuation(db_session, idempotency_key=key, now=now), "the wake claims"
+    assert not await _is_local(db_session, tenant.id), f"a claimed {reason} still runs"
+    await settle_continuation(db_session, idempotency_key=key, status="delivered", now=now)
+    assert await _is_local(db_session, tenant.id), f"a delivered {reason} no longer runs"
 
 
 async def _dm_from(
