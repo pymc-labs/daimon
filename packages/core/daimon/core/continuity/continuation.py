@@ -36,6 +36,7 @@ from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_timer_seed,
     render_timer_target_changed,
+    render_wake_target_changed,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.setup_conversations import get_setup_agent
@@ -149,15 +150,18 @@ class ContinuationDecision(BaseModel):
 
 
 class ResponderChanged(DaimonError):
-    """A timer is due, but a different agent answers its thread now.
+    """A wake is due, but a different agent answers its thread now.
 
     Raised by an adapter after `admit()` and before anything is posted or
-    bound, so the timer never runs under an agent it was not set with.
+    bound, so a wake never runs under an agent it was not queued for.
     `message` is the person-facing notice to post in the thread.
     """
 
-    def __init__(self, *, target_name: str, current_name: str) -> None:
-        self.message = render_timer_target_changed(target_name, current_name)
+    def __init__(
+        self, *, target_name: str, current_name: str, reason: ContinuationReason = "timer"
+    ) -> None:
+        render = render_timer_target_changed if reason == "timer" else render_wake_target_changed
+        self.message = render(target_name, current_name)
         super().__init__(self.message)
 
 
@@ -168,17 +172,24 @@ def check_wake_responder(
     target_name: str,
     admitted_ma_agent_id: str,
     admitted_name: str,
+    asking_ma_agent_id: str | None = None,
 ) -> None:
-    """Refuse a timer whose thread is now answered by a different agent.
+    """Refuse a wake whose thread is now answered by an agent it was not queued for.
 
     A timer can wait up to 90 days while a thread's routing changes, and its
     note is the old agent's own brief; running it as whoever answers now
-    would hand one agent another's work. Handoffs and private-input
-    continuations are not checked here: they run moments after they are
-    queued, against the agent their own flow just bound.
+    would hand one agent another's work. Agent reach also counts a wake
+    against the agent it names, so a handoff runs only as its destination.
+    A private input resumes the agent that asked, which in a setup
+    conversation or for another agent's key is not the key's agent, so it
+    may also run as `asking_ma_agent_id`: the agent of the requester's live
+    session in the thread.
     """
-    if reason == "timer" and admitted_ma_agent_id != target_ma_agent_id:
-        raise ResponderChanged(target_name=target_name, current_name=admitted_name)
+    if admitted_ma_agent_id == target_ma_agent_id:
+        return
+    if reason == "private_input_applied" and admitted_ma_agent_id == asking_ma_agent_id:
+        return
+    raise ResponderChanged(target_name=target_name, current_name=admitted_name, reason=reason)
 
 
 def build_input_continuation(
