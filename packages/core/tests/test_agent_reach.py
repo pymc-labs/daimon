@@ -13,6 +13,7 @@ from daimon.core.agent_reach import (
     may_bind_as_channel_default,
 )
 from daimon.core.channel_admins import ChannelAdminCaller
+from daimon.core.operation_policy import OperationKind
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef, UserScopeRef
 from daimon.core.stores import accounts
 from daimon.core.stores.channel_admins import set_channel_admins
@@ -767,3 +768,69 @@ async def test_a_key_change_without_a_stable_id_is_local_to_nobody(
     )
     spec = await _key_facts(db_session, tenant.id, operation="agent_spec_edit", ma_agent_id=None)
     assert spec.is_local_to_caller_channels, "a spec edit reads the cascade and stays local"
+
+
+@pytest.mark.parametrize("reach", ["personal_default", "thread_binding", "routine", "live_session"])
+async def test_a_skill_repo_connect_reads_sharing_as_wide_as_a_key_change(
+    db_session: AsyncSession, reach: str
+) -> None:
+    """Skills reach every place keys do, so another member's use makes the agent shared."""
+    tenant = await make_tenant(db_session)
+    other = await _member(db_session, tenant, "u7")
+    if reach == "personal_default":
+        await set_fields(
+            db_session,
+            scope=UserScopeRef(account_id=other.id),
+            tenant_id=tenant.id,
+            agent_name="unrouted",
+        )
+    elif reach == "thread_binding":
+        await create_binding(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="c2",
+            thread_id="t1",
+            responder_ma_agent_id="agent_x",
+            responder_name="unrouted",
+            kind="handoff",
+        )
+    elif reach == "routine":
+        await make_routine(
+            db_session,
+            tenant=tenant,
+            created_by_user_id="u7",
+            agent_id="agent_x",
+            agent_name="unrouted",
+            channel_id="c2",
+        )
+    else:
+        await make_thread_session(
+            db_session,
+            tenant=tenant,
+            account=other,
+            thread_id="t1",
+            ma_agent_id="agent_x",
+            channel_id="c2",
+        )
+    me = await _member(db_session, tenant, "u5")
+
+    async def shared(operation: OperationKind) -> bool:
+        facts = await load_target_facts(
+            db_session,
+            operation,
+            tenant_id=tenant.id,
+            platform="discord",
+            agent_names=("unrouted",),
+            ma_agent_id="agent_x",
+            default=DEFAULT,
+            caller=ChannelAdminCaller(platform_user_id="u5"),
+            is_daimon_managed=False,
+            caller_account_id=me.id,
+            caller_platform_user_id="u5",
+        )
+        return facts.is_reachable_in_tenant
+
+    assert await shared("skill_repo_connect") and await shared("key_replace"), reach
+    if reach in ("routine", "live_session"):
+        assert not await shared("repo_bind"), "a repo bind keeps the cascade-only read"

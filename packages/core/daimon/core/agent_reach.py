@@ -63,11 +63,11 @@ from daimon.core.stores.thread_sessions import list_live_session_channel_ids
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
-KEY_CHANGE_OPERATIONS: Final[frozenset[OperationKind]] = frozenset(
-    {"key_replace", "key_remove", "mcp_replace", "mcp_remove"}
+WIDE_SHARING_OPERATIONS: Final[frozenset[OperationKind]] = frozenset(
+    {"key_replace", "key_remove", "mcp_replace", "mcp_remove", "skill_repo_connect"}
 )
-"""Read as shared by `is_agent_shared_for_key_changes`: the keys and servers also
-reach routines and live sessions. Spec edits and repo binds read the cascade only."""
+"""Read as shared by `is_agent_shared_for_key_changes`: the keys, servers and skills
+also reach routines and live sessions. Spec edits and repo binds read the cascade only."""
 
 
 class UnattendedRights(BaseModel):
@@ -430,7 +430,7 @@ async def _is_shared(
     """The reachability fact, read as wide as the operation needs. No name fails closed."""
     if not agent_names:
         return True
-    if operation in KEY_CHANGE_OPERATIONS:
+    if operation in WIDE_SHARING_OPERATIONS:
         # No stable id to look routines, sessions and bindings up by: fail closed.
         return ma_agent_id is None or await is_agent_shared_for_key_changes(
             session,
@@ -467,10 +467,11 @@ async def load_target_facts(
     A server admin, a posted-token write or a managed target reads nothing; an
     agent nobody reaches skips the channel admin read. `agent_names` is every
     name the agent carries (`daimon.core.agent_pins.agent_pin_names`). The
-    caller ids leave the caller's own routines and sessions out of a key
-    change's sharing and of locality alike; None counts them all. Locality
-    counts everything the sharing read does, so it can only narrow it: a key
-    change on an agent with no stable id is shared and local to nobody.
+    caller ids leave the caller's own routines and sessions out of a wide
+    sharing read (`WIDE_SHARING_OPERATIONS`) and of locality alike; None counts
+    them all. Locality counts everything the sharing read does, so it can only
+    narrow it: a wide read on an agent with no stable id is shared and local
+    to nobody.
     """
     if not needs_reachability_read(
         operation, is_admin=caller.is_server_admin, is_daimon_managed=is_daimon_managed
@@ -487,7 +488,7 @@ async def load_target_facts(
         caller_account_id=caller_account_id,
         caller_platform_user_id=caller_platform_user_id,
     )
-    unplaceable = operation in KEY_CHANGE_OPERATIONS and ma_agent_id is None
+    unplaceable = operation in WIDE_SHARING_OPERATIONS and ma_agent_id is None
     locality = (
         await _caller_locality(
             session,
@@ -513,7 +514,7 @@ async def load_target_facts(
 
 
 __all__ = [
-    "KEY_CHANGE_OPERATIONS",
+    "WIDE_SHARING_OPERATIONS",
     "AgentReach",
     "UnattendedRights",
     "build_agent_reach",
