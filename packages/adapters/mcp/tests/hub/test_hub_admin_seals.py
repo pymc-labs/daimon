@@ -222,3 +222,68 @@ async def test_a_demoted_admin_loses_hub_access_when_their_stored_role_changes(
     await _as(hub, Role.USER)
     events = await hub.call("list_events", handle="ses_sealed")
     assert events.get("isError") and _TOPIC not in str(events)
+
+
+async def _map_thread(hub: _Hub, session_id: str, thread_id: str) -> None:
+    from daimon.core.stores import thread_sessions
+
+    await thread_sessions.create_thread_session(
+        hub.db,
+        tenant_id=hub.tenant_id,
+        platform="discord",
+        thread_id=thread_id,
+        account_id=hub.account_id,
+        ma_session_id=session_id,
+        ma_agent_id=_AGENT,
+    )
+    await hub.db.commit()
+
+
+async def test_an_admin_reads_another_members_legacy_sealed_conversation(hub: _Hub) -> None:
+    """A session from before the channel stamp is found by its thread mapping."""
+    hub.add_session("ses_legacy", account=uuid.uuid4())
+    await _map_thread(hub, "ses_legacy", "thr-legacy")
+    await _as(hub, Role.ADMIN)
+
+    listed = await hub.call("list_my_sessions")
+    assert not listed.get("isError") and "ses_legacy" in str(listed), listed
+    session = await hub.call("get_session", handle="ses_legacy")
+    assert not session.get("isError"), session
+    events = await hub.call("list_events", handle="ses_legacy")
+    assert not events.get("isError") and _TOPIC in str(events), events
+    assert hub.sent == []
+
+
+@pytest.mark.parametrize("tool", ["continue_turn", "ask"])
+async def test_an_admin_never_continues_another_members_legacy_conversation(
+    hub: _Hub, tool: str
+) -> None:
+    hub.add_session("ses_legacy", account=uuid.uuid4())
+    await _map_thread(hub, "ses_legacy", "thr-legacy")
+    await _as(hub, Role.ADMIN)
+
+    result = await hub.call(tool, handle="ses_legacy", message="private personnel note")
+
+    assert result.get("isError"), result
+    assert hub.sent == []
+
+
+async def test_a_member_never_reads_another_members_legacy_conversation(hub: _Hub) -> None:
+    hub.add_session("ses_legacy", account=uuid.uuid4())
+    await _map_thread(hub, "ses_legacy", "thr-legacy")
+
+    listed = await hub.call("list_my_sessions")
+    assert "ses_legacy" not in str(listed)
+    events = await hub.call("list_events", handle="ses_legacy")
+    assert events.get("isError") and _TOPIC not in str(events)
+
+
+async def test_an_admin_never_reads_another_members_legacy_dm_scope(hub: _Hub) -> None:
+    hub.add_session("ses_dm", account=uuid.uuid4())
+    await _map_thread(hub, "ses_dm", "dm:00000000-0000-0000-0000-000000000001")
+    await _as(hub, Role.ADMIN)
+
+    listed = await hub.call("list_my_sessions")
+    assert "ses_dm" not in str(listed)
+    events = await hub.call("list_events", handle="ses_dm")
+    assert events.get("isError") and _TOPIC not in str(events)

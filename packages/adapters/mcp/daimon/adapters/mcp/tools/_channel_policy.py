@@ -24,7 +24,6 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
-    is_outside_agent_pin,
     is_write_protected,
 )
 from daimon.core.agent_pins import agent_pin_names
@@ -93,6 +92,40 @@ async def require_channel_writable(
         )
 
 
+def _is_requesters_own_dm(channel_id: str) -> bool:
+    """A 1:1 conversation with the bot: a Slack ``D…`` IM or a Teams ``a:…`` chat.
+
+    Every send path checks the requester is in the target before the write
+    guard runs, so such a conversation is the requester's own DM with daimon
+    -- the place an admin's exempt turn answers.
+    """
+    return channel_id.startswith("D") or channel_id.startswith("a:")
+
+
+async def _executing_agent_pinned(
+    runtime: McpRuntime, auth: AuthIdentity, policy: TenantAccessPolicy
+) -> tuple[str, ...] | None:
+    """The executing agent's pinned channels, or None when it isn't pinned.
+
+    The executing agent is the turn's (``chat_agent_id``) or the agent key's
+    (``agent_id``); an identity with neither is the operator, which no pin
+    binds. An agent that can't be resolved while pins exist fails closed.
+    """
+    executing = auth.chat_agent_id or auth.agent_id
+    if executing is None or not policy.agent_channel_pins:
+        return None
+    agent = await find_agent_by_derived_uuid(
+        runtime.client, tenant_id=auth.tenant_id, agent_id=executing
+    )
+    if agent is None:
+        raise ToolError(_PINNED_SEND_MSG)
+    pinned: list[str] = []
+    for name in agent_pin_names(agent.name, agent.metadata):
+        if name is not None and name in policy.agent_channel_pins:
+            pinned.extend(policy.agent_channel_pins[name])
+    return tuple(pinned) if pinned else None
+
+
 async def _require_send_inside_pin(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -103,25 +136,36 @@ async def _require_send_inside_pin(
 ) -> None:
     """Refuse a pinned executing agent's post outside its pinned channels.
 
-    The executing agent is the turn's (``chat_agent_id``) or the agent key's
-    (``agent_id``). An identity with neither is the operator, which no pin
-    binds. An agent that can't be resolved while pins exist fails closed.
+    The requester's own 1:1 DM with daimon is allowed: only they see it.
     """
-    executing = auth.chat_agent_id or auth.agent_id
-    if executing is None:
+    if _is_requesters_own_dm(channel_id):
         return
-    agent = await find_agent_by_derived_uuid(
-        runtime.client, tenant_id=auth.tenant_id, agent_id=executing
-    )
-    if agent is None:
-        raise ToolError(_PINNED_SEND_MSG)
-    if is_outside_agent_pin(
-        policy,
-        agent_names=agent_pin_names(agent.name, agent.metadata),
-        channel_id=channel_id,
-        parent_channel_id=parent_channel_id,
-    ):
-        raise ToolError(_PINNED_SEND_MSG)
+    pinned = await _executing_agent_pinned(runtime, auth, policy)
+    if pinned is None:
+        return
+    if channel_id in pinned or (parent_channel_id is not None and parent_channel_id in pinned):
+        return
+    raise ToolError(_PINNED_SEND_MSG)
+
+
+async def require_dm_recipient_allowed(
+    runtime: McpRuntime, auth: AuthIdentity, *, recipient_id: str
+) -> None:
+    """A pinned agent may DM only the person it is answering.
+
+    Keeps a pinned agent admitted in an admin's DM or hub turn from carrying
+    its context to any other workspace member through a direct message.
+    """
+    if auth.chat_agent_id is None and auth.agent_id is None:
+        return
+    policy = await load_channel_policy(runtime, auth)
+    if await _executing_agent_pinned(runtime, auth, policy) is None:
+        return
+    if recipient_id != auth.platform_user_id:
+        raise ToolError(
+            "this agent is pinned to its own channels, so it can only send a direct "
+            "message to the person it is answering. Tell the caller. Do not retry."
+        )
 
 
 class SealedChannelError(ToolError):

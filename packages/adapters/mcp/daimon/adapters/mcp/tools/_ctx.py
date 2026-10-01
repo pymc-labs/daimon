@@ -68,8 +68,8 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       CLI-only/internal operator tokens run with no balance/cap checks, no
       usage row, no debit. This is intentional, not an oversight — never add
       a fallback that bills this path.
-      The tenant access policy does not apply to it either: it is the
-      operator, not a platform member.
+      It skips billing only: when ``agent_names`` is given its turn is still
+      held to an agent pin (below), with no admin exemption.
     - Otherwise checks the tenant's invoker allowlist first, exempting an
       account whose stored role is admin (the hub pins ``is_admin=False``, so
       the stored role is the only admin signal every caller has). A refusal,
@@ -79,9 +79,10 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       outside every pin, exactly as a DM is in ``admit()``. The pin is a
       security gate, not a billing one: it is enforced for no-platform bearer
       and agent-key identities too, before the unbilled return below, with no
-      admin exemption. Only the hub passes ``pin_exempt``, after verifying
-      the caller is a workspace admin right now
-      (`daimon.adapters.mcp.tools._live_admin`); its reply reaches only them.
+      admin exemption. Only the hub passes ``pin_exempt``, for a caller
+      whose stored role is admin (`_session_access.hub_caller_is_admin`;
+      refreshed by the person's next platform turn); its reply reaches only
+      them.
       ``agent_names`` is called only when a pin exists, so the agent lookup it
       may need costs nothing on unpinned tenants.
     - Then runs ``is_over_balance`` then ``is_over_cap``; either denial

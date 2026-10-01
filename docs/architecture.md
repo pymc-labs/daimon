@@ -516,7 +516,10 @@ Who counts as an admin:
 
 - In admission (DMs), the live role the adapter passes for this turn.
 - For credential and configuration tools, a chat turn's credential, whose
-  role that turn's admission recorded from the platform.
+  `is_admin` reads the account's stored role -- recorded from the platform by
+  that turn's admission, and as current as the person's last platform turn
+  when the same vault token is reused by their hub or routine sessions. The
+  operator's own internal token is trusted too; an agent-scoped key never.
 - In the hub, the account's stored role. The hub has no live platform role,
   so a demotion or promotion takes effect on the person's next Discord, Slack
   or Teams turn in that workspace, which records the platform's current role.

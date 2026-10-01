@@ -15,7 +15,10 @@ from unittest.mock import MagicMock
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
+from daimon.adapters.mcp.tools._channel_policy import (
+    require_channel_writable,
+    require_dm_recipient_allowed,
+)
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
@@ -147,3 +150,68 @@ async def test_unpinned_agents_and_the_operator_post_anywhere_unknown_agents_fai
     with pytest.raises(ToolError, match="pinned to its own channels"):
         # An agent that can't be resolved while pins exist fails closed.
         await require_channel_writable(runtime, other_agent, channel_id="999")
+
+
+@pytest.mark.parametrize(
+    ("platform", "dm"), [("slack", "D0ADMIN1"), ("teams", "a:1adminpersonalchat")]
+)
+async def test_a_pinned_agent_answers_in_the_requesters_own_dm(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    platform: str,
+    dm: str,
+) -> None:
+    """An admin's exempt DM turn can post there -- credential cards included."""
+    pin = "C111" if platform == "slack" else "19:acme@thread.tacv2"
+    runtime, tenant_id = await _runtime(db_session, db_session_factory, platform=platform, pin=pin)
+
+    await require_channel_writable(runtime, _turn(tenant_id, platform), channel_id=dm)
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack"])
+async def test_a_pinned_agent_direct_messages_only_the_requester(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    platform: str,
+) -> None:
+    import dataclasses
+
+    from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
+
+    pin, me, other = (
+        ("111", "1001", "1002") if platform == "discord" else ("C111", "U1001", "U1002")
+    )
+    runtime, tenant_id = await _runtime(db_session, db_session_factory, platform=platform, pin=pin)
+    auth = dataclasses.replace(_turn(tenant_id, platform), platform_user_id=me)
+
+    with pytest.raises(ToolError, match="only send a direct message to the person"):
+        await send_direct_message_impl(runtime, auth, recipient_id=other, content="acme terms")
+    await require_dm_recipient_allowed(runtime, auth, recipient_id=me)
+
+
+async def test_direct_messages_from_unpinned_agents_pass_and_unknown_agents_fail_closed(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    runtime, tenant_id = await _runtime(
+        db_session, db_session_factory, platform="slack", pin="C111"
+    )
+    unpinned = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.USER,
+        platform="slack",
+        platform_user_id="u1",
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_other"),
+    )
+    await require_dm_recipient_allowed(runtime, unpinned, recipient_id="u2")
+
+    unknown = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.USER,
+        platform="slack",
+        platform_user_id="u1",
+        chat_agent_id=uuid.uuid4(),
+    )
+    with pytest.raises(ToolError, match="pinned to its own channels"):
+        await require_dm_recipient_allowed(runtime, unknown, recipient_id="u2")

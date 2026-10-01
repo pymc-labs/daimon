@@ -760,6 +760,8 @@ async def test_a_signed_bearer_runs_an_unpinned_agent(world: _World) -> None:
 
 
 async def test_a_signed_bearer_is_refused_when_the_policy_cannot_be_read(world: _World) -> None:
+    from unittest.mock import AsyncMock, patch
+
     from sqlalchemy import text
 
     token = await _bearer(world, Role.USER)
@@ -773,12 +775,13 @@ async def test_a_signed_bearer_is_refused_when_the_policy_cannot_be_read(world: 
     )
     await world.db.commit()
 
-    result = await call_mcp_tool(
-        _bearer_app(world),
-        token=token,
-        name="continue_turn",
-        arguments={"handle": "ses_headless", "message": "go"},
-    )
+    create = AsyncMock(side_effect=AssertionError("an unreadable policy must not start"))
+    with patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create):
+        result = await call_mcp_tool(
+            _bearer_app(world), token=token, name="start_turn", arguments={"message": "go"}
+        )
 
     assert result["result"].get("isError"), result
+    assert "access settings can't be read" in str(result), result
+    create.assert_not_awaited()
     assert world.sent == []

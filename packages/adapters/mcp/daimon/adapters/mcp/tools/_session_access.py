@@ -71,12 +71,41 @@ async def hub_caller_is_admin(runtime: McpRuntime, auth: AuthIdentity) -> bool:
 
 @contextmanager
 def admin_sealed_access(mode: Literal["read", "continue"] | None) -> Iterator[None]:
-    """Run the enclosed hub call with a live admin's sealed-session access."""
+    """Run the enclosed hub call with an admin's sealed-session access (stored role)."""
     token = _ADMIN_SEALED_MODE.set(mode)
     try:
         yield
     finally:
         _ADMIN_SEALED_MODE.reset(token)
+
+
+async def admin_readable_legacy_sessions(
+    runtime: McpRuntime, auth: AuthIdentity, sessions: Sequence[BetaManagedAgentsSession]
+) -> set[str]:
+    """Other members' pre-stamp channel sessions an admin's hub read may open.
+
+    Only inside `admin_sealed_access("read")`. A session from before the
+    channel stamp carries no ``daimon_channel``; a durable thread mapping in
+    the caller's tenant (`thread_ids_for_sessions`) shows it is a channel
+    conversation all the same. Never a private DM, never a headless session.
+    """
+    if _ADMIN_SEALED_MODE.get() != "read":
+        return set()
+    candidates = [
+        s.id
+        for s in sessions
+        if (s.metadata or {}).get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id)
+        and MA_METADATA_KEY_CHANNEL not in (s.metadata or {})
+        and MA_METADATA_KEY_PRIVATE_DM not in (s.metadata or {})
+    ]
+    if not candidates:
+        return set()
+    async with runtime.session_factory() as db:
+        mapped = await thread_ids_for_sessions(
+            db, tenant_id=auth.tenant_id, ma_session_ids=candidates
+        )
+    # A DM scope ("dm:<uuid>") is a private conversation, never a channel one.
+    return {sid for sid, thread in mapped.items() if not thread.startswith("dm:")}
 
 
 def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:
@@ -162,7 +191,7 @@ async def sessions_outside_seals(
     ``origin_context_id`` is the calling turn's origin, checked as the channel
     read tools check it (`load_read_policy`); without one every sealed
     conversation is dropped -- except inside `admin_sealed_access("read")`,
-    where a live admin's hub read keeps their own sealed sessions (ownership
+    where an admin's hub read keeps sealed channel sessions, anyone's (ownership
     is still checked by the caller first). Only a chat turn's own credential can claim one:
     an agent key (``agent_id``) runs outside every channel. Call after the
     ownership filter.

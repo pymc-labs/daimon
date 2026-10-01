@@ -20,7 +20,10 @@ handle is only usable by the account that created the session: the
 compared to the caller's account before any read or continuation, and
 ``list_my_sessions`` filters on it. Channel threads driven by the chat
 adapters carry the thread starter's account, so they are invisible to
-everyone else through the hub.
+everyone else through the hub -- except to a workspace admin (stored role,
+refreshed by their next platform turn), who may list and read every channel
+conversation of the daimon, sealed ones included, but continue none that is
+sealed (docs/architecture.md, "Trust model").
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import (
+    admin_readable_legacy_sessions,
     admin_sealed_access,
     hub_caller_is_admin,
     session_belongs_to_caller,
@@ -183,7 +187,9 @@ async def _verify_account_owns_session(
     to other members of the workspace.
     """
     session = await _verify_agent_owns_session(runtime, auth, handle)
-    if not _owned_by(session, auth):
+    if not _owned_by(session, auth) and session.id not in await admin_readable_legacy_sessions(
+        runtime, auth, [session]
+    ):
         raise ToolError(_SESSION_NOT_FOUND)
 
 
@@ -191,11 +197,14 @@ async def _list_my_sessions_impl(
     runtime: McpRuntime, auth: AuthIdentity, agent: BetaManagedAgentsAgent
 ) -> list[SessionInfo]:
     owned: list[BetaManagedAgentsSession] = []
+    others: list[BetaManagedAgentsSession] = []
     async for session in runtime.client.beta.sessions.list(agent_id=str(agent.id)):
-        if _owned_by(session, auth):
-            owned.append(session)
+        (owned if _owned_by(session, auth) else others).append(session)
+    legacy = await admin_readable_legacy_sessions(runtime, auth, others)
+    owned.extend(s for s in others if s.id in legacy)
     # The hub runs outside every channel: sealed conversations stay hidden,
-    # except a live admin's own when the hub reads them (`admin_sealed_access`).
+    # except to an admin's hub read (`admin_sealed_access`), which also opens
+    # other members' channel conversations, legacy ones included.
     return [SessionInfo.from_ma(s) for s in await sessions_outside_seals(runtime, auth, owned)]
 
 
