@@ -92,6 +92,7 @@ def refusal_text(
     *,
     state: CardState,
     refusal: RefusalReason | None = None,
+    replaces: str | None = None,
 ) -> str:
     """The ephemeral copy for a refused submission: the card's own words.
 
@@ -99,7 +100,7 @@ def refusal_text(
     the reason `expired_refusal` is: the ephemeral and the card it sits next
     to must not describe one refusal two different ways.
     """
-    return card_text(card_for_request(row, state=state, refusal=refusal))
+    return card_text(card_for_request(row, state=state, refusal=refusal, replaces=replaces))
 
 
 def _modal_title(kind: CredentialRequestKind, target: str) -> str:

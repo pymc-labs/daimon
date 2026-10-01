@@ -3717,7 +3717,13 @@
       }),
     }),
     'self_delete_file': dict({
-      'description': 'Delete a per-agent file by `key`. Idempotent — succeeds whether or not a file existed.',
+      'description': '''
+        Delete a per-agent key by `key`. Idempotent — succeeds whether or not it existed.
+        
+        Refused on the built-in agent and on any agent that answers somewhere in
+        the workspace: removing a key there takes it from everyone, so a person
+        with admin rights removes it with `remove_agent_key`.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3762,9 +3768,12 @@
     }),
     'self_write_file': dict({
       'description': '''
-        Write or overwrite a per-agent file under `key`.
+        Add a per-agent key under `key`. Add-only: never replaces a stored key.
         
         Stored in your private agent_files namespace; isolated from other agents.
+        A key that is already set, or a name your tools read as the same
+        credential as one already set (`GITHUB_TOKEN` beside `GH_TOKEN`), is
+        refused; a person replaces those through a form.
         Every entry is exported into your sandbox's `.env`, so `key` must be a
         credential name: upper-case, ending in `_KEY`, `_TOKEN`, `_SECRET`,
         `_PASSWORD` or similar (or `GH_TOKEN`/`GITHUB_TOKEN`). Tool-control and

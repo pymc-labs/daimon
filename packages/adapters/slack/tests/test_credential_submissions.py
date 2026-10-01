@@ -1896,3 +1896,269 @@ async def test_mcp_submission_admin_token_written_after_the_members_decision_is_
     assert fernet.decrypt(stored).decode() == "admin-token"
     assert not [c for c in ma_calls if c.startswith("POST /v1/vaults")], "no vault write"
     assert any("admin" in t for t in _ephemeral_texts(fake_slack_web_client))
+
+
+async def test_env_submission_alias_of_a_held_key_needs_the_replacement_gate(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """ANTHROPIC_AUTH_TOKEN beside a held ANTHROPIC_API_KEY is refused for a member on a live agent."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(
+        id="agent_credentials",
+        name="specialist",
+        tenant_id=tenant_id,
+        metadata={MA_METADATA_KEY_MANAGED: "true"},
+    )
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
+    await put_agent_file(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_uuid,
+        key="ANTHROPIC_API_KEY",
+        content="the-value-in-use",
+        set_by_account_id=None,
+    )
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="env",
+        target="ANTHROPIC_AUTH_TOKEN",
+        agent_id=agent_uuid,
+        origin_thread_id=_ORIGIN_THREAD,
+        target_ma_agent_id=live_agent.id,
+    )
+    await db_session.commit()
+
+    await _run_env(
+        _build_runtime(
+            fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+        ),
+        token,
+    )
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        request_row = await peek_credential_request(s, token=token)
+    assert [r["key"] for r in rows] == ["ANTHROPIC_API_KEY"], "the alias must not be stored"
+    assert request_row is not None and request_row.outcome == "write_failed"
+    edit = _chat_updates(fake_slack_web_client)[-1]
+    assert "Adding ANTHROPIC_AUTH_TOKEN would replace ANTHROPIC_API_KEY" in json.dumps(edit), (
+        "the card names both keys"
+    )
+
+
+@pytest.mark.asyncio
+async def test_env_file_submission_refuses_an_alias_of_a_held_key_and_names_both(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_env_file", name="specialist", tenant_id=tenant_id)
+    token = await _seed_env_file_request(db_session, tenant_id=tenant_id, live_agent=live_agent)
+    await put_agent_file(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
+        key="GH_TOKEN",
+        content="the-value-in-use",
+        set_by_account_id=None,
+    )
+    await db_session.commit()
+    _patch_file_download(monkeypatch, b"OPENAI_API_KEY=a\nGITHUB_TOKEN=secret-b\n")
+    runtime = _build_runtime(
+        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+    )
+
+    await _run_env_file_submission(runtime, token)
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+    assert [r["key"] for r in rows] == ["GH_TOKEN"], (
+        "an import that shadows a held key writes nothing"
+    )
+    edit = json.dumps(_chat_updates(fake_slack_web_client)[-1])
+    assert "GITHUB_TOKEN would replace GH_TOKEN" in edit, "the refusal names both keys"
+    assert "secret-b" not in edit, "no value on the card"
+
+
+async def test_env_submission_alias_that_appears_after_the_gate_is_caught_under_the_write(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The alias read before the gate is repeated inside the write transaction."""
+    import daimon.adapters.slack.credential_submissions as submissions_mod
+
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="env",
+        target="GITHUB_TOKEN",
+        agent_id=agent_uuid,
+        origin_thread_id=_ORIGIN_THREAD,
+        target_ma_agent_id=live_agent.id,
+    )
+    await db_session.commit()
+
+    real = submissions_mod.list_turn_key_names
+    calls = 0
+
+    async def first_read_misses_the_alias(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ()
+        await put_agent_file(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+        return await real(session, **kw)
+
+    monkeypatch.setattr(submissions_mod, "list_turn_key_names", first_read_misses_the_alias)
+
+    await _run_env(
+        _build_runtime(
+            fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+        ),
+        token,
+    )
+
+    assert calls == 2, "the alias must be re-read under the write"
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        request_row = await peek_credential_request(s, token=token)
+    assert [r["key"] for r in rows] == ["GH_TOKEN"], "the late alias blocks the write"
+    assert request_row is not None and request_row.outcome == "stale_replacement"
+
+
+async def _aws_pair_and_secret_token(
+    db_session: AsyncSession, tenant_id: uuid.UUID, live_agent: Any
+) -> str:
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
+    await put_agent_file(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        key="AWS_ACCESS_KEY_ID",
+        content="AKIAEXAMPLE",
+        set_by_account_id=None,
+    )
+    secret = await put_agent_file(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        key="AWS_SECRET_ACCESS_KEY",
+        content="old-secret",
+        set_by_account_id=None,
+    )
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="env",
+        target="AWS_SECRET_ACCESS_KEY",
+        agent_id=agent_id,
+        origin_thread_id=_ORIGIN_THREAD,
+        target_ma_agent_id=live_agent.id,
+        replaces_updated_at=secret.updated_at,
+    )
+    await db_session.commit()
+    return token
+
+
+async def _stored_secret(db_session_factory: async_sessionmaker[AsyncSession]) -> str:
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+    return next(r["content"] for r in rows if r["key"] == "AWS_SECRET_ACCESS_KEY")
+
+
+async def test_an_admin_can_rotate_one_key_of_a_stored_aws_family(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The stored AWS_ACCESS_KEY_ID is a family member, not a newly appeared conflict."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(
+        id="agent_credentials",
+        name="specialist",
+        tenant_id=tenant_id,
+        metadata={MA_METADATA_KEY_MANAGED: "true"},
+    )
+    token = await _aws_pair_and_secret_token(db_session, tenant_id, live_agent)
+    _override_users_info_admin(fake_slack_web_client.mock)
+
+    await _run_env(
+        _build_runtime(
+            fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+        ),
+        token,
+        value="new-secret",
+    )
+
+    assert await _stored_secret(db_session_factory) == "new-secret", "the rotation lands"
+    async with db_session_factory() as s:
+        request_row = await peek_credential_request(s, token=token)
+    assert request_row is not None and request_row.outcome == "applied"
+
+
+async def test_a_family_change_during_an_admin_rotation_is_still_refused(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import daimon.adapters.slack.credential_submissions as submissions_mod
+
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(
+        id="agent_credentials",
+        name="specialist",
+        tenant_id=tenant_id,
+        metadata={MA_METADATA_KEY_MANAGED: "true"},
+    )
+    token = await _aws_pair_and_secret_token(db_session, tenant_id, live_agent)
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
+    _override_users_info_admin(fake_slack_web_client.mock)
+    real = submissions_mod.list_turn_key_names
+    calls = 0
+
+    async def family_changes_after_the_gate(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            await put_agent_file(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                key="AWS_SESSION_TOKEN",
+                content="grafted",
+                set_by_account_id=None,
+            )
+        return await real(session, **kw)
+
+    monkeypatch.setattr(submissions_mod, "list_turn_key_names", family_changes_after_the_gate)
+
+    await _run_env(
+        _build_runtime(
+            fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+        ),
+        token,
+        value="new-secret",
+    )
+
+    assert await _stored_secret(db_session_factory) == "old-secret"
+    async with db_session_factory() as s:
+        request_row = await peek_credential_request(s, token=token)
+    assert request_row is not None and request_row.outcome == "stale_replacement"

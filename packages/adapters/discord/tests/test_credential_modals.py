@@ -2655,3 +2655,222 @@ async def test_mcp_modal_admin_token_written_after_the_members_decision_is_not_o
     assert creds_created == [], "refused before the personal vault write"
     # The attach of a brand-new server name comes first and stays, token-less.
     assert "admin" in interaction.followup.send.call_args.args[0]
+
+
+async def test_adding_an_alias_of_a_held_key_is_a_replacement_for_the_gate(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """GITHUB_TOKEN beside a held GH_TOKEN retargets `gh`: a member on a shared agent is refused."""
+    async with db_session_factory() as session, session.begin():
+        tenant = await _ensure_tenant(session)
+        await put_agent_file(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+    row = await _seed_env_request(db_session_factory, target="GITHUB_TOKEN", with_origin=True)
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(_GUILD_ID))
+    agent = _make_agent(ma_agent_id=_MA_AGENT_ID, tenant_id=tenant_id, name="daimon", managed=True)
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(_list_agents_handler([agent])),
+    )
+    modal = EnvCredentialModal(runtime=runtime, request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _as_card_interaction(_member_interaction())
+    await modal.on_submit(interaction)
+
+    assert await _stored_key(db_session_factory, row, "GITHUB_TOKEN") is None, (
+        "an alias that would retarget a held credential is refused like an overwrite"
+    )
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "write_failed"
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "GITHUB_TOKEN was not added" in card, "the card says the new key was not added"
+    assert "Adding GITHUB_TOKEN would replace GH_TOKEN" in card, "and names both keys"
+    assert "GH_TOKEN was not replaced" not in card
+    assert "Adding GITHUB_TOKEN would replace GH_TOKEN" in _sent_message(interaction)
+
+
+async def test_an_alias_that_appears_after_the_gate_is_caught_under_the_write(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The alias read before the gate is repeated inside the write transaction."""
+    import daimon.adapters.discord.credential_modals as modals_mod
+
+    row = await _seed_env_request(db_session_factory, target="GITHUB_TOKEN", with_origin=True)
+    real = modals_mod.list_turn_key_names
+    calls = 0
+
+    async def first_read_misses_the_alias(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # The pre-transaction read: nothing held yet.
+            return ()
+        # Someone stored GH_TOKEN in between; the second read is the real one.
+        await put_agent_file(
+            session,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+        return await real(session, **kw)
+
+    monkeypatch.setattr(modals_mod, "list_turn_key_names", first_read_misses_the_alias)
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+
+    await modal.on_submit(_card_interaction())
+
+    assert calls == 2, "the alias must be re-read under the write"
+    assert await _stored_key(db_session_factory, row, "GITHUB_TOKEN") is None
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "stale_replacement"
+
+
+async def test_env_file_import_refuses_an_alias_of_a_held_key_and_names_both(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    async with db_session_factory() as session, session.begin():
+        await put_agent_file(
+            session,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            key="GH_TOKEN",
+            content="the-value-in-use",
+            set_by_account_id=None,
+        )
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory),
+        row=row,
+        attachment=_uploaded(b"OPENAI_API_KEY=a\nGITHUB_TOKEN=secret-b\n"),
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert [f.key for f in files] == ["GH_TOKEN"], (
+        "an import that shadows a held key writes nothing"
+    )
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "GITHUB_TOKEN would replace GH_TOKEN" in card, "the refusal names both keys"
+    assert "secret-b" not in card, "no value on the card"
+
+
+async def test_env_file_with_both_names_of_an_alias_pair_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory),
+        row=row,
+        attachment=_uploaded(b"GH_TOKEN=secret-b\nGITHUB_TOKEN=secret-c\n"),
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert files == [], "an ambiguous file writes nothing"
+    assert persisted is not None and persisted.used_at is None, "a parse refusal spends nothing"
+    sent = _sent_message(interaction)
+    assert "same tool" in sent and "secret-" not in sent
+
+
+async def _aws_pair_and_secret_request(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> CredentialRequestRow:
+    async with db_session_factory() as session, session.begin():
+        tenant = await _ensure_tenant(session)
+        agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID)
+        await put_agent_file(
+            session,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            key="AWS_ACCESS_KEY_ID",
+            content="AKIAEXAMPLE",
+            set_by_account_id=None,
+        )
+        secret = await put_agent_file(
+            session,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            key="AWS_SECRET_ACCESS_KEY",
+            content="old-secret",
+            set_by_account_id=None,
+        )
+    return await _seed_env_request(
+        db_session_factory,
+        target="AWS_SECRET_ACCESS_KEY",
+        with_origin=True,
+        replaces_updated_at=secret.updated_at,
+    )
+
+
+async def test_an_admin_can_rotate_one_key_of_a_stored_aws_family(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The stored AWS_ACCESS_KEY_ID is a family member, not a newly appeared conflict."""
+    row = await _aws_pair_and_secret_request(db_session_factory)
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = "new-secret"  # pyright: ignore[reportPrivateUsage]
+
+    await modal.on_submit(_as_card_interaction(_admin_interaction()))
+
+    current = await _stored_key(db_session_factory, row, "AWS_SECRET_ACCESS_KEY")
+    assert current is not None and current.content == "new-secret", "the rotation lands"
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "applied"
+
+
+async def test_a_family_change_during_an_admin_rotation_is_still_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import daimon.adapters.discord.credential_modals as modals_mod
+
+    row = await _aws_pair_and_secret_request(db_session_factory)
+    real = modals_mod.list_turn_key_names
+    calls = 0
+
+    async def family_changes_after_the_gate(session: AsyncSession, **kw: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            await put_agent_file(
+                session,
+                tenant_id=row.tenant_id,
+                agent_id=row.agent_id,
+                key="AWS_SESSION_TOKEN",
+                content="grafted",
+                set_by_account_id=None,
+            )
+        return await real(session, **kw)
+
+    monkeypatch.setattr(modals_mod, "list_turn_key_names", family_changes_after_the_gate)
+    modal = EnvCredentialModal(runtime=_runtime(sessionmaker=db_session_factory), request_row=row)
+    modal.value_input._value = "new-secret"  # pyright: ignore[reportPrivateUsage]
+
+    await modal.on_submit(_as_card_interaction(_admin_interaction()))
+
+    current = await _stored_key(db_session_factory, row, "AWS_SECRET_ACCESS_KEY")
+    assert current is not None and current.content == "old-secret"
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+    assert persisted is not None and persisted.outcome == "stale_replacement"

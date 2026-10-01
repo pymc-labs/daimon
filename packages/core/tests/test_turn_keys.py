@@ -229,3 +229,35 @@ async def test_list_mounted_key_names_never_leaks_a_stored_value(
     assert sentinel_value not in render_keys_element(names), (
         "a stored value must not be reachable from the rendered <keys> element"
     )
+
+
+async def test_list_mounted_key_names_leaves_out_rows_the_mount_skipped(
+    db_session: AsyncSession,
+) -> None:
+    """A legacy hard-denied row is not in the mounted .env, so it is never named."""
+    from sqlalchemy import text
+
+    tenant = await make_tenant(db_session)
+    await put_agent_file(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=tenant.id,
+        key="ALPHA_TOKEN",
+        content="secret-value",
+        set_by_account_id=None,
+    )
+    # Written the way pre-policy code did, bypassing the store's name check.
+    await db_session.execute(
+        text(
+            "INSERT INTO agent_files (tenant_id, agent_id, key, content)"
+            " VALUES (:t, :a, 'TAR_OPTIONS', 'legacy')"
+        ),
+        {"t": tenant.id, "a": tenant.id},
+    )
+    env_sha256 = await _mounted_hash(db_session, tenant_id=tenant.id)
+
+    names = await list_mounted_key_names(
+        db_session, tenant_id=tenant.id, agent_id=tenant.id, env_sha256=env_sha256
+    )
+
+    assert names == ("ALPHA_TOKEN",), "a key the mount left out must not be promised"

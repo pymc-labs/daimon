@@ -87,7 +87,7 @@ opened.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
 from typing import Final, cast
 
@@ -121,7 +121,7 @@ from daimon.core.credential_requests import (
     split_skill_repo_target,
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
@@ -130,7 +130,11 @@ from daimon.core.env_file import (
     EnvEntry,
     EnvFileRejected,
     decode_env_bytes,
+    env_alias_shadowed,
+    env_collision_line,
+    env_import_collisions,
     env_name_problem,
+    env_related_held,
     parse_env_file,
 )
 from daimon.core.errors import DaimonError
@@ -167,12 +171,14 @@ from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
     list_agent_files,
+    lock_agent_keys,
     put_agent_file_if_unchanged,
 )
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import CredentialRequestRow
-from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
+from daimon.core.turn_keys import list_turn_key_names
 
 import discord
 
@@ -228,7 +234,11 @@ def _text_input_of[ModalT: discord.ui.Modal](
 
 
 def _env_card_text(
-    row: CredentialRequestRow, *, state: CardState, refusal: RefusalReason | None = None
+    row: CredentialRequestRow,
+    *,
+    state: CardState,
+    refusal: RefusalReason | None = None,
+    replaces: str | None = None,
 ) -> str:
     """The words the env card itself now carries, for the ephemeral to repeat.
 
@@ -247,6 +257,7 @@ def _env_card_text(
             expires_at=row.expires_at,
             token=row.token,
             refusal=refusal,
+            replaces=replaces,
         )
     )
 
@@ -395,11 +406,14 @@ async def _decide_key_replacement(
     reachable = False
     if needs_reachability_read("key_replace", is_admin=False, is_daimon_managed=is_daimon_managed):
         async with runtime.sessionmaker() as session:
-            reachable = await is_agent_reachable_in_tenant(
+            reachable = await is_agent_shared_for_key_changes(
                 session,
                 tenant_id=row.tenant_id,
-                agent_name=agent.name,
+                agent_names=(agent.name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
+                ma_agent_id=str(agent.id),
                 default=runtime.deployment_default,
+                caller_account_id=row.account_id,
+                caller_platform_user_id=row.requester_platform_user_id,
             )
     return decide_operation(
         "key_replace",
@@ -499,9 +513,28 @@ class EnvCredentialModal(discord.ui.Modal):
         # A replacement's gate is decided BEFORE the transaction opens: the
         # decision costs an MA listing and a config read, and neither may be
         # paid for while holding the request row's lock.
+        # A new name that a tool reads as a key already held (GH_TOKEN beside
+        # GITHUB_TOKEN) retargets it like an overwrite, so it takes the same
+        # gate, decided for this submitter.
+        #
+        # Snapshot the related credentials (aliases and family members) before the
+        # transaction, for every submit. Under the lock the write proceeds only if
+        # that set is unchanged: a related key added or removed after the gate was
+        # decided was never put to it. An unchanged set — rotating
+        # AWS_SECRET_ACCESS_KEY beside a stored AWS_ACCESS_KEY_ID — is fine.
+        async with self._runtime.sessionmaker() as session:
+            held_names = await list_turn_key_names(
+                session, tenant_id=self._row.tenant_id, agent_id=self._row.agent_id
+            )
+        related_before = env_related_held(self._row.target, held_names)
+        shadowed = (
+            env_alias_shadowed(self._row.target, held_names)
+            if self._row.replaces_updated_at is None
+            else None
+        )
         replacement = (
             await _decide_key_replacement(interaction, runtime=self._runtime, row=self._row)
-            if self._row.replaces_updated_at is not None
+            if self._row.replaces_updated_at is not None or shadowed is not None
             else "allow"
         )
 
@@ -517,11 +550,31 @@ class EnvCredentialModal(discord.ui.Modal):
                     await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
                     return
                 outcome: CredentialRequestOutcome = "applied"
+                # Re-read under the write, holding the agent's key-set lock: an
+                # alias that appeared after the gate above was decided was
+                # never put to it, and one a concurrent writer is adding waits.
+                await lock_agent_keys(
+                    session, tenant_id=consumed_row.tenant_id, agent_id=consumed_row.agent_id
+                )
+                appeared = (
+                    env_related_held(
+                        consumed_row.target,
+                        await list_turn_key_names(
+                            session,
+                            tenant_id=consumed_row.tenant_id,
+                            agent_id=consumed_row.agent_id,
+                        ),
+                    )
+                    != related_before
+                )
                 if replacement != "allow":
                     # The card promised a replacement this person may no
                     # longer make. Spend the request, write nothing.
                     state = "refused"
                     outcome = "write_failed"
+                elif appeared:
+                    state = "superseded"
+                    outcome = "stale_replacement"
                 else:
                     # The precondition IS the card's promise: `None` for a
                     # key the card said was unset, the exact `updated_at` for
@@ -574,9 +627,15 @@ class EnvCredentialModal(discord.ui.Modal):
                 row=consumed_row,
                 state="refused",
                 refusal="replacement_admin_required",
+                replaces=shadowed,
             )
             await interaction.followup.send(
-                _env_card_text(consumed_row, state="refused", refusal="replacement_admin_required"),
+                _env_card_text(
+                    consumed_row,
+                    state="refused",
+                    refusal="replacement_admin_required",
+                    replaces=shadowed,
+                ),
                 ephemeral=True,
             )
             return
@@ -614,14 +673,14 @@ class _KeyAlreadySet(Exception):
         self.entry = entry
 
 
-def _collision_lines(collisions: Sequence[EnvEntry]) -> tuple[str, ...]:
+def _collision_lines(collisions: Sequence[EnvEntry], held: Collection[str]) -> tuple[str, ...]:
     """Name the keys the file would have overwritten, by name and line only.
 
     A value never reaches this copy: the card these lines land on is public
     to the channel, so the only facts it may carry are the ones already on
     the uploader's screen.
     """
-    lines = [f"line {entry.line}: {entry.name} is already set." for entry in collisions]
+    lines = [env_collision_line(entry, held) for entry in collisions]
     shown = lines[:_COLLISIONS_SHOWN]
     remaining = len(lines) - _COLLISIONS_SHOWN
     if remaining > 0:
@@ -715,6 +774,7 @@ class EnvFileModal(discord.ui.Modal):
 
         now = datetime.now(UTC)
         collisions: tuple[EnvEntry, ...] = ()
+        held: set[str] = set()
         is_continuation_queued = False
         try:
             async with self._runtime.sessionmaker() as session, session.begin():
@@ -724,6 +784,11 @@ class EnvFileModal(discord.ui.Modal):
                 if consumed_row is None:
                     await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
                     return
+                # Held across the read below and the writes after it, so a
+                # concurrent writer of another alias name cannot interleave.
+                await lock_agent_keys(
+                    session, tenant_id=consumed_row.tenant_id, agent_id=consumed_row.agent_id
+                )
                 held = {
                     row.key
                     for row in await list_agent_files(
@@ -732,7 +797,7 @@ class EnvFileModal(discord.ui.Modal):
                         agent_id=consumed_row.agent_id,
                     )
                 }
-                collisions = tuple(entry for entry in entries if entry.name in held)
+                collisions = env_import_collisions(entries, held)
                 if not collisions:
                     try:
                         # A savepoint, not the outer transaction: a key that
@@ -753,6 +818,7 @@ class EnvFileModal(discord.ui.Modal):
                                     raise _KeyAlreadySet(entry)
                     except _KeyAlreadySet as appeared:
                         collisions = (appeared.entry,)
+                        held.add(appeared.entry.name)
                 if not collisions:
                     is_continuation_queued = await record_input_continuation(
                         session, consumed_row, platform="discord"
@@ -782,7 +848,7 @@ class EnvFileModal(discord.ui.Modal):
             collision_count=len(collisions),
         )
         if collisions:
-            refusal_lines = _collision_lines(collisions)
+            refusal_lines = _collision_lines(collisions, held)
             await edit_posted_card(
                 interaction.client,
                 row=self._row,
