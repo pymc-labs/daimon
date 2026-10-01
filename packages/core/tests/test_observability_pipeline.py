@@ -233,6 +233,9 @@ _ADVERSARIAL = {
     "sk-dashes": "sk--" * 16384,
     "xox-dashes": "xoxb-" * 13000,
     "fernet-runs": "gAAAAA" * 10900,
+    "capability-paths": "/uploads/" * 7200,
+    "path-segments": "/aB3" * 16000,
+    "long-segment": "/" + "aB3" * 21000 + "x",
 }
 
 
@@ -502,3 +505,22 @@ def test_percent_encoded_text_never_leaks_later_params(
 
     assert capturing_sentry.payloads
     assert canary not in capturing_sentry.rendered()
+
+
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        ("GET https://h/uploads/{token} -> https://h/uploads/" + "Zx9" * 10, "/uploads/"),
+        ("see https://h/slack/file/eyJ0ZWFtIjoiVDEifQ.c2lnbmF0dXJlLXZhbHVl ok", "/slack/file/"),
+        ("open /r/quarterly-review/2026/f47ac10b-58cc-4372-a567-0e02b2c3d479", "f47ac10b-58cc"),
+    ],
+    ids=["upload-path", "signed-file-token", "uuid-and-slug-kept"],
+)
+def test_path_capability_tokens_are_redacted_in_text(text: str, kept: str) -> None:
+    from daimon.core.observability import _redact_secret_text  # pyright: ignore[reportPrivateUsage]
+
+    out = _redact_secret_text(text)
+
+    assert kept in out
+    assert "Zx9Zx9" not in out
+    assert "c2lnbmF0dXJl" not in out

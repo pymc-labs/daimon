@@ -9,14 +9,17 @@ Adapters call init_sentry once at their entrypoint (Plan 02).
 
 What the scrubber does to every error and transaction event: no frame
 locals, breadcrumbs, user, cookies, request bodies or environ; request URLs
-reduced to scheme/host/path and every query value redacted; credential
-headers redacted and other header values text-scrubbed; and secrets in free
-text (exception values, messages, tags, contexts, spans) redacted by name or
-by shape, in time linear in the text.
+reduced to scheme/host/path, capability tokens in paths replaced, and every
+query value redacted; credential headers redacted and other header values
+text-scrubbed; and secrets in free text (exception values, messages, tags,
+contexts, spans) redacted by name or by shape, in time linear in the text.
 
 Known limitations, so error text at credential boundaries should still
 prefer fixed messages over provider bodies:
 
+- Path tokens are found by route (`_CAPABILITY_PATHS`) and by shape (long
+  mixed-case segments, dot-joined signed tokens); a new token route that is
+  neither listed nor credential-shaped (e.g. all-lowercase hex) is not.
 - Free-text redaction is heuristic. It finds values after a secret-looking
   name (`*TOKEN*`, `*SECRET*`, `*PASSW*`, `*KEY`/`*KEYS`, `auth*` …) and a few
   known shapes (Slack, GitHub, `sk-`, JWT, Fernet, Discord webhook paths). A
@@ -458,6 +461,7 @@ def _redact_secret_text(text: str) -> str:
         text = _FORM_ENCODED.sub(lambda m: "&" if m.group(0)[-2:] == "26" else "=", text)
     for pattern, keep in _FREE_TEXT_PATTERNS:
         text = pattern.sub(keep + _REDACTED, text)
+    text = _redact_path_tokens(text)
     oauth = _OAUTH_CONTEXT.search(text) is not None
     return _redact_spans(text, _secret_value_spans(text, oauth=oauth))
 
@@ -471,8 +475,47 @@ def _redact_secret_keys(mapping: dict[str, object], *, oauth: bool = False) -> N
             mapping[key] = _redact_value(mapping[key], oauth=oauth)
 
 
+# Routes whose path carries a bearer capability, as (prefix, segment) pairs:
+# the segment after the prefix is the token. Keep in step with the servers
+# that report to Sentry (MCP uploads and Slack file proxy, Discord webhooks)
+# and the hosts' token routes.
+_CAPABILITY_PATHS = re.compile(
+    r"(/(?:uploads|upload|publish|slack/file|recipients)/|/api/webhooks/\d{1,25}/)"
+    r"([^/?#\s'\"<>]{1,4096})"
+)
+# Defence in depth for routes not listed: a long path segment that looks like
+# a random credential (mixed letter cases and digits, or dot-joined base64url
+# runs as in a signed token).
+_PATH_SEGMENT = re.compile(r"(?<=/)[A-Za-z0-9_.~=-]{20,4096}(?=[/?#\s'\"<>]|$)")
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_SIGNED_TOKEN = re.compile(r"^[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_=-]{8,})+$")
+
+
+def _looks_like_credential(segment: str) -> bool:
+    if _UUID.match(segment):
+        return False
+    if _SIGNED_TOKEN.match(segment):
+        return True
+    return (
+        any(c.islower() for c in segment)
+        and any(c.isupper() for c in segment)
+        and any(c.isdigit() for c in segment)
+    )
+
+
+def _redact_path_tokens(text: str) -> str:
+    """Replace capability path segments with a marker (route-aware, then by shape)."""
+    if "/" not in text:
+        return text
+    text = _CAPABILITY_PATHS.sub(lambda m: m.group(1) + _REDACTED, text)
+    return _PATH_SEGMENT.sub(
+        lambda m: _REDACTED if _looks_like_credential(m.group(0)) else m.group(0), text
+    )
+
+
 def _redact_url(url: str) -> str:
-    """Keep scheme, host and path; drop userinfo, query and fragment."""
+    """Keep scheme, host and path; drop userinfo, query and fragment; redact
+    capability tokens in the path."""
     try:
         parts = urlsplit(url)
     except ValueError:
@@ -480,7 +523,7 @@ def _redact_url(url: str) -> str:
     host = parts.hostname or ""
     if parts.port is not None:
         host = f"{host}:{parts.port}"
-    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+    return urlunsplit((parts.scheme, host, _redact_path_tokens(parts.path), "", ""))
 
 
 def _redact_query(query: str) -> str:
